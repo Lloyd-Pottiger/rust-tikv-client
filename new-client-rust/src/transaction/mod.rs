@@ -16,6 +16,7 @@ pub use snapshot::Snapshot;
 pub use transaction::CheckLevel;
 #[doc(hidden)]
 pub use transaction::HeartbeatOption;
+pub use transaction::LockOptions;
 pub use transaction::Mutation;
 pub use transaction::PipelinedTxnOptions;
 pub use transaction::Transaction;

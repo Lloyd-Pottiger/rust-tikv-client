@@ -12,6 +12,7 @@ use crate::timestamp::TimestampExt;
 /// types (i.e., the types from the client crate) and converts these to the types used in the
 /// generated protobuf code, then calls the low-level ctor functions in the requests module.
 use crate::transaction::requests;
+use crate::transaction::LockOptions;
 /// This module provides constructor functions for requests which take arguments as high-level
 /// types (i.e., the types from the client crate) and converts these to the types used in the
 /// generated protobuf code, then calls the low-level ctor functions in the requests module.
@@ -143,7 +144,8 @@ pub fn new_pessimistic_lock_request(
     start_version: Timestamp,
     lock_ttl: u64,
     for_update_ts: Timestamp,
-    need_value: bool,
+    is_first_lock: bool,
+    options: LockOptions,
 ) -> kvrpcpb::PessimisticLockRequest {
     requests::new_pessimistic_lock_request(
         locks
@@ -159,7 +161,8 @@ pub fn new_pessimistic_lock_request(
         start_version.version(),
         lock_ttl,
         for_update_ts.version(),
-        need_value,
+        is_first_lock,
+        options,
     )
 }
 

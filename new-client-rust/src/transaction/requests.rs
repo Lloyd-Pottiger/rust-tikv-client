@@ -4,7 +4,6 @@ use std::cmp;
 use std::iter;
 use std::sync::Arc;
 
-use either::Either;
 use futures::stream::BoxStream;
 use futures::stream::{self};
 use futures::StreamExt;
@@ -44,6 +43,7 @@ use crate::store::{region_stream_for_keys, region_stream_for_range};
 use crate::timestamp::TimestampExt;
 use crate::transaction::requests::kvrpcpb::prewrite_request::PessimisticAction;
 use crate::transaction::HasLocks;
+use crate::transaction::LockOptions;
 use crate::util::iter::FlatMapOkIterExt;
 use crate::KvPair;
 use crate::Result;
@@ -490,7 +490,8 @@ pub fn new_pessimistic_lock_request(
     start_version: u64,
     lock_ttl: u64,
     for_update_ts: u64,
-    need_value: bool,
+    is_first_lock: bool,
+    options: LockOptions,
 ) -> kvrpcpb::PessimisticLockRequest {
     let mut req = kvrpcpb::PessimisticLockRequest::default();
     req.mutations = mutations;
@@ -498,12 +499,14 @@ pub fn new_pessimistic_lock_request(
     req.start_version = start_version;
     req.lock_ttl = lock_ttl;
     req.for_update_ts = for_update_ts;
-    // FIXME: make them configurable
-    req.is_first_lock = false;
-    req.wait_timeout = 0;
-    req.return_values = need_value;
-    // FIXME: support large transaction
-    req.min_commit_ts = 0;
+    req.is_first_lock = is_first_lock;
+    req.wait_timeout = options.wait_timeout_ms_value();
+    req.return_values = options.return_values_value();
+    req.check_existence = options.check_existence_value();
+    req.lock_only_if_exists = options.lock_only_if_exists_value();
+    req.wake_up_mode = options.wake_up_mode_value().into();
+    // Match client-go: ensure commit_ts > for_update_ts for pessimistic lock requests.
+    req.min_commit_ts = for_update_ts.saturating_add(1);
 
     req
 }
@@ -562,36 +565,84 @@ impl Merge<ResponseWithShard<kvrpcpb::PessimisticLockResponse, Vec<kvrpcpb::Muta
                 success_keys,
             })
         } else {
-            Ok(input
-                .into_iter()
-                .map(Result::unwrap)
-                .flat_map(|ResponseWithShard(resp, mutations)| {
-                    let values: Vec<Vec<u8>> = resp.values;
-                    let values_len = values.len();
-                    let not_founds = resp.not_founds;
-                    let kvpairs = mutations
-                        .into_iter()
-                        .map(|m| m.key)
-                        .zip(values)
-                        .map(KvPair::from);
-                    assert_eq!(kvpairs.len(), values_len);
-                    if not_founds.is_empty() {
-                        // Legacy TiKV does not distinguish not existing key and existing key
-                        // that with empty value. We assume that key does not exist if value
-                        // is empty.
-                        Either::Left(kvpairs.filter(|kvpair| !kvpair.value().is_empty()))
-                    } else {
-                        assert_eq!(kvpairs.len(), not_founds.len());
-                        Either::Right(kvpairs.zip(not_founds).filter_map(|(kvpair, not_found)| {
-                            if not_found {
-                                None
-                            } else {
-                                Some(kvpair)
-                            }
-                        }))
+            let mut out = Vec::new();
+            for ResponseWithShard(resp, mutations) in input.into_iter().map(Result::unwrap) {
+                if !resp.results.is_empty() {
+                    if resp.results.len() != mutations.len() {
+                        return Err(crate::Error::InternalError {
+                            message: format!(
+                                "PessimisticLockResponse.results length mismatch: mutations={}, results={}",
+                                mutations.len(),
+                                resp.results.len()
+                            ),
+                        });
                     }
-                })
-                .collect())
+                    for (mutation, result) in mutations.into_iter().zip(resp.results.into_iter()) {
+                        let result_type =
+                            kvrpcpb::PessimisticLockKeyResultType::try_from(result.r#type)
+                                .unwrap_or(kvrpcpb::PessimisticLockKeyResultType::LockResultFailed);
+                        match result_type {
+                            kvrpcpb::PessimisticLockKeyResultType::LockResultNormal
+                            | kvrpcpb::PessimisticLockKeyResultType::LockResultLockedWithConflict => {
+                                if result.existence {
+                                    out.push(KvPair::new(mutation.key, result.value));
+                                }
+                            }
+                            kvrpcpb::PessimisticLockKeyResultType::LockResultFailed => {}
+                        }
+                    }
+                    continue;
+                }
+
+                let mut values = resp.values;
+                let not_founds = resp.not_founds;
+
+                // When `return_values` is false, TiKV may return an empty `values` list even if
+                // `check_existence` is true (in which case `not_founds` is populated). To keep
+                // merging logic uniform and avoid panics, treat missing values as empty bytes.
+                if values.is_empty() && !mutations.is_empty() {
+                    values = iter::repeat_with(Vec::new).take(mutations.len()).collect();
+                }
+                if values.len() != mutations.len() {
+                    return Err(crate::Error::InternalError {
+                        message: format!(
+                            "PessimisticLockResponse.values length mismatch: mutations={}, values={}",
+                            mutations.len(),
+                            values.len()
+                        ),
+                    });
+                }
+                if !not_founds.is_empty() && not_founds.len() != mutations.len() {
+                    return Err(crate::Error::InternalError {
+                        message: format!(
+                            "PessimisticLockResponse.not_founds length mismatch: mutations={}, not_founds={}",
+                            mutations.len(),
+                            not_founds.len()
+                        ),
+                    });
+                }
+
+                if not_founds.is_empty() {
+                    // Legacy TiKV does not distinguish not existing key and existing key with an
+                    // empty value. We assume that key does not exist if the returned value is
+                    // empty.
+                    for (mutation, value) in mutations.into_iter().zip(values) {
+                        if !value.is_empty() {
+                            out.push(KvPair::new(mutation.key, value));
+                        }
+                    }
+                } else {
+                    for ((mutation, value), not_found) in
+                        mutations.into_iter().zip(values).zip(not_founds)
+                    {
+                        if !not_found {
+                            out.push(KvPair::new(mutation.key, value));
+                        }
+                    }
+                }
+            }
+
+            Ok(out)
         }
     }
 }

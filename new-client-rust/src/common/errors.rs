@@ -294,6 +294,9 @@ pub enum Error {
     /// Pipelined transaction options are invalid or unsupported.
     #[error("Invalid pipelined transaction: {message}")]
     InvalidPipelinedTransaction { message: String },
+    /// Invalid pessimistic lock options (client-side validation failure).
+    #[error("Invalid pessimistic lock options: {message}")]
+    InvalidPessimisticLockOptions { message: String },
     /// For raw client, operation is not supported in atomic/non-atomic mode.
     #[error(
         "The operation is not supported in current mode, please consider using RawClient with or without atomic mode"

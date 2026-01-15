@@ -126,6 +126,101 @@ impl PipelinedTxnOptions {
     }
 }
 
+/// Options for `PessimisticLockRequest` (used by locking APIs such as `lock_keys` and
+/// `get_for_update` in pessimistic transactions).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LockOptions {
+    wait_timeout_ms: i64,
+    return_values: bool,
+    check_existence: bool,
+    lock_only_if_exists: bool,
+    wake_up_mode: kvrpcpb::PessimisticLockWakeUpMode,
+}
+
+impl Default for LockOptions {
+    fn default() -> Self {
+        Self {
+            wait_timeout_ms: 0,
+            return_values: false,
+            check_existence: false,
+            lock_only_if_exists: false,
+            wake_up_mode: kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeNormal,
+        }
+    }
+}
+
+impl LockOptions {
+    /// Create default lock options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Time to wait (milliseconds) when encountering locks on TiKV side.
+    ///
+    /// This sets `kvrpcpb::PessimisticLockRequest.wait_timeout`.
+    #[must_use]
+    pub fn wait_timeout_ms(mut self, timeout_ms: i64) -> Self {
+        self.wait_timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Whether TiKV should return values for locked keys.
+    ///
+    /// This sets `kvrpcpb::PessimisticLockRequest.return_values`.
+    #[must_use]
+    pub fn return_values(mut self, return_values: bool) -> Self {
+        self.return_values = return_values;
+        self
+    }
+
+    /// Whether TiKV should return existence information for locked keys.
+    ///
+    /// This sets `kvrpcpb::PessimisticLockRequest.check_existence`.
+    #[must_use]
+    pub fn check_existence(mut self, check_existence: bool) -> Self {
+        self.check_existence = check_existence;
+        self
+    }
+
+    /// Only acquire lock when the record exists.
+    ///
+    /// This sets `kvrpcpb::PessimisticLockRequest.lock_only_if_exists`.
+    #[must_use]
+    pub fn lock_only_if_exists(mut self, lock_only_if_exists: bool) -> Self {
+        self.lock_only_if_exists = lock_only_if_exists;
+        self
+    }
+
+    /// Configure wake-up mode when waiting for another lock.
+    ///
+    /// This sets `kvrpcpb::PessimisticLockRequest.wake_up_mode`.
+    #[must_use]
+    pub fn wake_up_mode(mut self, wake_up_mode: kvrpcpb::PessimisticLockWakeUpMode) -> Self {
+        self.wake_up_mode = wake_up_mode;
+        self
+    }
+
+    pub(crate) fn wait_timeout_ms_value(&self) -> i64 {
+        self.wait_timeout_ms
+    }
+
+    pub(crate) fn return_values_value(&self) -> bool {
+        self.return_values
+    }
+
+    pub(crate) fn check_existence_value(&self) -> bool {
+        self.check_existence
+    }
+
+    pub(crate) fn lock_only_if_exists_value(&self) -> bool {
+        self.lock_only_if_exists
+    }
+
+    pub(crate) fn wake_up_mode_value(&self) -> kvrpcpb::PessimisticLockWakeUpMode {
+        self.wake_up_mode
+    }
+}
+
 /// An undo-able set of actions on the dataset.
 ///
 /// Create a transaction using a [`TransactionClient`](crate::TransactionClient), then run actions
@@ -175,6 +270,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     txn_latches: Option<Arc<super::LatchesScheduler>>,
     pipelined: Option<super::pipelined::PipelinedTxnState>,
     is_heartbeat_started: bool,
+    has_pessimistic_lock: bool,
     start_instant: Instant,
 }
 
@@ -207,6 +303,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             txn_latches,
             pipelined,
             is_heartbeat_started: false,
+            has_pessimistic_lock: false,
             start_instant: std::time::Instant::now(),
         }
     }
@@ -392,6 +489,17 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # });
     /// ```
     pub async fn get_for_update(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
+        self.get_for_update_with_options(key, LockOptions::new())
+            .await
+    }
+
+    /// Same as [`get_for_update`](Transaction::get_for_update), but allows configuring the
+    /// underlying pessimistic lock request.
+    pub async fn get_for_update_with_options(
+        &mut self,
+        key: impl Into<Key>,
+        options: LockOptions,
+    ) -> Result<Option<Value>> {
         debug!("invoking transactional get_for_update request");
         self.check_allow_operation().await?;
         if !self.is_pessimistic() {
@@ -399,8 +507,9 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.lock_keys(iter::once(key.clone())).await?;
             self.get(key).await
         } else {
+            let options = options.return_values(true);
             let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
-            let mut pairs = self.pessimistic_lock(iter::once(key), true).await?;
+            let mut pairs = self.pessimistic_lock(iter::once(key), options).await?;
             debug_assert!(pairs.len() <= 1);
             match pairs.pop() {
                 Some(pair) => Ok(Some(pair.1)),
@@ -523,6 +632,17 @@ impl<PdC: PdClient> Transaction<PdC> {
         &mut self,
         keys: impl IntoIterator<Item = impl Into<Key>>,
     ) -> Result<Vec<KvPair>> {
+        self.batch_get_for_update_with_options(keys, LockOptions::new())
+            .await
+    }
+
+    /// Same as [`batch_get_for_update`](Transaction::batch_get_for_update), but allows configuring
+    /// the underlying pessimistic lock request.
+    pub async fn batch_get_for_update_with_options(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+        options: LockOptions,
+    ) -> Result<Vec<KvPair>> {
         debug!("invoking transactional batch_get_for_update request");
         self.check_allow_operation().await?;
         if !self.is_pessimistic() {
@@ -530,12 +650,13 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.lock_keys(keys.clone()).await?;
             Ok(self.batch_get(keys).await?.collect())
         } else {
+            let options = options.return_values(true);
             let keyspace = self.keyspace;
             let keys = keys
                 .into_iter()
                 .map(move |k| k.into().encode_keyspace(keyspace, KeyMode::Txn));
             let pairs = self
-                .pessimistic_lock(keys, true)
+                .pessimistic_lock(keys, options)
                 .await?
                 .truncate_keyspace(keyspace);
             Ok(pairs)
@@ -667,7 +788,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let pipelined_key = key.clone();
         if self.is_pessimistic() {
-            self.pessimistic_lock(iter::once(key.clone()), false)
+            self.pessimistic_lock(iter::once(key.clone()), LockOptions::new())
                 .await?;
         }
         self.buffer.put(key, value.into());
@@ -706,7 +827,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         if self.is_pessimistic() {
             self.pessimistic_lock(
                 iter::once((key.clone(), kvrpcpb::Assertion::NotExist)),
-                false,
+                LockOptions::new(),
             )
             .await?;
         }
@@ -739,7 +860,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let pipelined_key = key.clone();
         if self.is_pessimistic() {
-            self.pessimistic_lock(iter::once(key.clone()), false)
+            self.pessimistic_lock(iter::once(key.clone()), LockOptions::new())
                 .await?;
         }
         self.buffer.delete(key);
@@ -779,8 +900,11 @@ impl<PdC: PdClient> Transaction<PdC> {
             .map(|mutation| mutation.encode_keyspace(self.keyspace, KeyMode::Txn))
             .collect();
         if self.is_pessimistic() {
-            self.pessimistic_lock(mutations.iter().map(|m| m.key().clone()), false)
-                .await?;
+            self.pessimistic_lock(
+                mutations.iter().map(|m| m.key().clone()),
+                LockOptions::new(),
+            )
+            .await?;
             for m in mutations {
                 let key = m.key().clone();
                 self.buffer.mutate(m);
@@ -824,6 +948,16 @@ impl<PdC: PdClient> Transaction<PdC> {
         &mut self,
         keys: impl IntoIterator<Item = impl Into<Key>>,
     ) -> Result<()> {
+        self.lock_keys_with_options(keys, LockOptions::new()).await
+    }
+
+    /// Same as [`lock_keys`](Transaction::lock_keys), but allows configuring the underlying
+    /// pessimistic lock request.
+    pub async fn lock_keys_with_options(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+        options: LockOptions,
+    ) -> Result<()> {
         debug!("invoking transactional lock_keys request");
         self.check_allow_operation().await?;
         let keyspace = self.keyspace;
@@ -839,7 +973,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 }
             }
             TransactionKind::Pessimistic(_) => {
-                self.pessimistic_lock(keys, false).await?;
+                self.pessimistic_lock(keys, options).await?;
             }
         }
         self.pipelined_maybe_flush().await?;
@@ -1091,7 +1225,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     async fn pessimistic_lock(
         &mut self,
         keys: impl IntoIterator<Item = impl PessimisticLock>,
-        need_value: bool,
+        options: LockOptions,
     ) -> Result<Vec<KvPair>> {
         debug!("acquiring pessimistic lock");
         assert!(
@@ -1104,6 +1238,14 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Ok(vec![]);
         }
 
+        if options.wake_up_mode == kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock
+            && keys.len() != 1
+        {
+            return Err(Error::InvalidPessimisticLockOptions {
+                message: "WakeUpModeForceLock only supports a single key per request".to_owned(),
+            });
+        }
+
         let first_key = keys[0].clone().key();
         // we do not set the primary key here, because pessimistic lock request
         // can fail, in which case the keys may not be part of the transaction.
@@ -1113,13 +1255,15 @@ impl<PdC: PdClient> Transaction<PdC> {
             .unwrap_or_else(|| first_key.clone());
         let for_update_ts = self.rpc.clone().get_timestamp().await?;
         self.options.push_for_update_ts(for_update_ts.clone());
+        let is_first_lock = !self.has_pessimistic_lock && keys.len() == 1;
         let request = new_pessimistic_lock_request(
             keys.clone().into_iter(),
             primary_lock,
             self.timestamp.clone(),
             MAX_TTL,
             for_update_ts.clone(),
-            need_value,
+            is_first_lock,
+            options,
         );
         let request = self.request_context.apply_to(request);
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
@@ -1139,17 +1283,27 @@ impl<PdC: PdClient> Transaction<PdC> {
                 Error::PessimisticLockError {
                     inner,
                     success_keys,
-                } if !success_keys.is_empty() => {
-                    let keys = success_keys.into_iter().map(Key::from);
-                    self.pessimistic_lock_rollback(keys, self.timestamp.clone(), for_update_ts)
-                        .await?;
-                    Err(*inner)
+                } => {
+                    if !success_keys.is_empty() {
+                        let keys = success_keys.into_iter().map(Key::from);
+                        self.pessimistic_lock_rollback(keys, self.timestamp.clone(), for_update_ts)
+                            .await?;
+                    }
+                    let err = *inner;
+                    if let Error::MultipleKeyErrors(mut errors) = err {
+                        if errors.len() == 1 {
+                            return Err(errors.pop().expect("len checked"));
+                        }
+                        return Err(Error::MultipleKeyErrors(errors));
+                    }
+                    Err(err)
                 }
                 _ => Err(err),
             }
         } else {
             // primary key will be set here if needed
             self.buffer.primary_key_or(&first_key);
+            self.has_pessimistic_lock = true;
 
             self.start_auto_heartbeat().await;
 
@@ -2193,6 +2347,7 @@ mod tests {
     use crate::store::{RegionStore, Store};
     use crate::timestamp::TimestampExt;
     use crate::transaction::HeartbeatOption;
+    use crate::transaction::LockOptions;
     use crate::CommandPriority;
     use crate::ReplicaReadType;
     use crate::RequestContext;
@@ -2286,6 +2441,207 @@ mod tests {
         });
         heartbeat_txn_handle.await.unwrap();
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_request_propagates_lock_options_and_is_first_lock() {
+        let lock_calls = Arc::new(AtomicUsize::new(0));
+        let lock_calls_cloned = lock_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() else {
+                    unreachable!("unexpected request type in lock options test");
+                };
+                let call = lock_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.wait_timeout, 123);
+                assert_eq!(req.check_existence, true);
+                assert_eq!(req.lock_only_if_exists, true);
+                assert_eq!(
+                    req.wake_up_mode,
+                    kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeNormal as i32
+                );
+                assert_eq!(req.return_values, false);
+                assert_eq!(req.min_commit_ts, req.for_update_ts.saturating_add(1));
+                if call == 0 {
+                    assert!(req.is_first_lock);
+                } else {
+                    assert!(!req.is_first_lock);
+                }
+                Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        let options = LockOptions::new()
+            .wait_timeout_ms(123)
+            .check_existence(true)
+            .lock_only_if_exists(true)
+            .wake_up_mode(kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeNormal);
+
+        txn.lock_keys_with_options(vec![vec![1u8]], options.clone())
+            .await
+            .unwrap();
+        txn.lock_keys_with_options(vec![vec![2u8]], options)
+            .await
+            .unwrap();
+        assert_eq!(lock_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_rolls_back_success_keys_on_partial_failure() {
+        let rollback_reqs: Arc<Mutex<Vec<kvrpcpb::PessimisticRollbackRequest>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let rollback_reqs_cloned = rollback_reqs.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                    let region_id = req
+                        .context
+                        .as_ref()
+                        .map(|ctx| ctx.region_id)
+                        .unwrap_or_default();
+                    match region_id {
+                        1 => Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>),
+                        2 => {
+                            let mut key_error = kvrpcpb::KeyError::default();
+                            key_error.conflict = Some(kvrpcpb::WriteConflict {
+                                start_ts: req.start_version,
+                                conflict_ts: 0,
+                                conflict_commit_ts: 0,
+                                key: req.mutations[0].key.clone(),
+                                primary: req.primary_lock.clone(),
+                                reason: 0,
+                            });
+
+                            let mut resp = kvrpcpb::PessimisticLockResponse::default();
+                            resp.errors.push(key_error);
+                            Ok(Box::new(resp) as Box<dyn Any>)
+                        }
+                        _ => unreachable!("unexpected region id in partial rollback test"),
+                    }
+                } else if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>()
+                {
+                    rollback_reqs_cloned.lock().unwrap().push(req.clone());
+                    Ok(Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type in partial rollback test");
+                }
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        let err = txn
+            .lock_keys_with_options(vec![vec![1u8], vec![20u8]], LockOptions::new())
+            .await
+            .expect_err("lock must fail");
+        assert!(matches!(err, crate::Error::WriteConflict(_)), "{err:?}");
+
+        let rollback_reqs = rollback_reqs.lock().unwrap().clone();
+        assert_eq!(rollback_reqs.len(), 1);
+        let rollback = &rollback_reqs[0];
+        assert_eq!(rollback.start_version, 10);
+        assert_eq!(rollback.for_update_ts, 0);
+        assert_eq!(rollback.keys, vec![vec![1u8]]);
+    }
+
+    #[tokio::test]
+    async fn test_get_for_update_force_lock_mode_reads_value_from_results() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() else {
+                    unreachable!("unexpected request type in force-lock test");
+                };
+                assert_eq!(
+                    req.wake_up_mode,
+                    kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock as i32
+                );
+
+                let mut resp = kvrpcpb::PessimisticLockResponse::default();
+                resp.results.push(kvrpcpb::PessimisticLockKeyResult {
+                    r#type: kvrpcpb::PessimisticLockKeyResultType::LockResultNormal as i32,
+                    value: b"v1".to_vec(),
+                    existence: true,
+                    locked_with_conflict_ts: 0,
+                    skip_resolving_lock: false,
+                });
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        let value = txn
+            .get_for_update_with_options(
+                vec![1u8],
+                LockOptions::new()
+                    .wake_up_mode(kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, b"v1".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_force_lock_mode_rejects_multi_key_requests() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            unreachable!("force-lock validation must happen before RPC dispatch")
+        })));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        let err = txn
+            .lock_keys_with_options(
+                vec![vec![1u8], vec![2u8]],
+                LockOptions::new()
+                    .wake_up_mode(kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock),
+            )
+            .await
+            .expect_err("force-lock must reject multi-key lock requests");
+        assert!(
+            matches!(err, crate::Error::InvalidPessimisticLockOptions { .. }),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

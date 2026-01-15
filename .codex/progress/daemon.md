@@ -9,21 +9,21 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- Pessimistic lock ctx/options：补齐 lock request 关键字段与对外配置（对齐 client-go v2）
-  - 计划：
-    - 对齐 `PessimisticLockRequest`：`min_commit_ts/check_existence/lock_only_if_exists/wake_up_mode/return_values/is_first_lock` 等
-    - Rust：补齐 `Transaction::{lock_keys,get_for_update,batch_get_for_update}` 可配置项（可能新增 `LockOptions`/`LockCtx` 风格 builder）
-    - UT：构造 mock server 检查请求字段 + error 透传（含部分成功 keys + rollback）
-
-# 待做工作
-
 - Txn buffer flags：补齐 `KeyFlags/FlagsOp` 风格的 per-key 元数据（含 assertion/presumeKNE/locked 等），并与 mutation lowering 对齐
   - 计划：
     - 设计 Rust 侧 key-flag 存储结构（避免额外 clone；保证可扩展）
     - 对齐 client-go flags 语义（至少覆盖 assertion + presumeKNE + prewrite-only）
     - UT：状态机测试 + prewrite/lock request 字段透传
 
+# 待做工作
+
 # 已完成工作
+
+- Pessimistic lock ctx/options：补齐 lock request 关键字段与对外配置（对齐 client-go v2）
+  - 完成：新增 `LockOptions` 并贯穿 `Transaction::{lock_keys,get_for_update,batch_get_for_update}`（新增 `*_with_options`）；`PessimisticLockRequest` 写入 `wait_timeout/return_values/check_existence/lock_only_if_exists/wake_up_mode/is_first_lock/min_commit_ts`；ForceLock 模式从 `PessimisticLockResponse.results` 解析结果
+  - 关键决策：`is_first_lock` 由 txn 内部状态（首次且单 key）计算；ForceLock 多 key 直接 client-side 拒绝（`Error::InvalidPessimisticLockOptions`）；pessimistic lock 返回 inner error（部分成功时先 rollback success keys），并解包单元素 `MultipleKeyErrors`
+  - 测试：新增 UT 覆盖请求字段透传、ForceLock 结果解析、部分成功 rollback 与错误透传；`cd new-client-rust && cargo test` 通过
+  - 改动文件：`new-client-rust/src/transaction/{transaction.rs,requests.rs,lowering.rs,mod.rs}`、`new-client-rust/src/common/errors.rs`、`.codex/progress/daemon.md`
 
 - 维护追踪：回填 `.codex/progress/parity-checklist.md` 已完成项（Rust path + Tests）
   - 完成：为 error 模型 / RequestContext setters / Txn assertions / pipelined txn / replica read / interceptor 等条目补齐 Rust 映射与测试索引，便于后续按清单推进
