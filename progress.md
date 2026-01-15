@@ -15,6 +15,7 @@
   - Bootstrapped `new-client-rust/` by copying `client-rust/` (excluding `.git`) as a starting point.
   - Verified baseline builds/tests: `cargo test` in `new-client-rust/` passed.
   - Implemented RawKV checksum parity in `new-client-rust/` (`RawClient::checksum` + `RawChecksum`) and added unit tests.
+  - Documented `new-client-rust` public surface + parity roadmap (`new-client-rust/doc/client-go-v2-parity-roadmap.md`), and updated README/crate docs to reference it.
 - Files created/modified:
   - `task_plan.md` (created)
   - `findings.md` (created)
@@ -30,6 +31,8 @@
   - `new-client-rust/src/store/request.rs` (modified)
   - `new-client-rust/src/store/errors.rs` (modified)
   - `new-client-rust/src/lib.rs` (modified)
+  - `new-client-rust/doc/client-go-v2-parity-roadmap.md` (moved+rewritten)
+  - `new-client-rust/README.md` (modified)
 
 ## Test Results
 | Test | Input | Expected | Actual | Status |

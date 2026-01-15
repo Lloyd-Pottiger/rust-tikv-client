@@ -6,6 +6,11 @@
 //! This crate lets you connect to a TiKV cluster and use either a transactional or raw (simple
 //! get/put style without transactional consistency guarantees) API to access and update your data.
 //!
+//! ## Project status (this repo)
+//!
+//! This crate is developed under `./new-client-rust` and targets parity with `client-go` v2.
+//! See `doc/client-go-v2-parity-roadmap.md` for the staged plan.
+//!
 //! The TiKV Rust client supports several levels of abstraction. The most convenient way to use the
 //! client is via [`RawClient`] and [`TransactionClient`]. This gives a very high-level API which
 //! mostly abstracts over the distributed nature of the store and has sensible defaults for all

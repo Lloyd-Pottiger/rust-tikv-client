@@ -1,15 +1,18 @@
-# TiKV Client (Rust)
+# TiKV Client (Rust) — new-client-rust
 
-[![Docs](https://img.shields.io/docsrs/tikv-client/latest)](https://docs.rs/tikv-client)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/tikv/client-rust/ci.yml)](https://github.com/tikv/client-rust/actions/workflows/ci.yml)
+This is the new Rust TiKV client implementation in this repo.
 
-This crate provides an easy-to-use client for [TiKV](https://github.com/tikv/tikv), a distributed, transactional key-value database written in Rust.
+**Target:** feature + public-API parity with `client-go` v2 (Rust-idiomatic surface).
 
-This crate lets you connect to a TiKV(>= `v5.0.0`) cluster and use either a transactional or raw (simple get/put style without transactional consistency guarantees) API to access and update your data.
+**Roadmap:** `doc/client-go-v2-parity-roadmap.md`.
 
-The TiKV Rust client is an open source (Apache 2) project maintained by the TiKV Authors. We welcome contributions, see below for more info.
+This crate provides an easy-to-use client for [TiKV](https://github.com/tikv/tikv), a distributed,
+transactional key-value database written in Rust.
 
-Note that the current release is not suitable for production use - APIs are not yet stable and the crate has not been thoroughly tested in real-life use.
+This crate lets you connect to a TiKV cluster and use either a transactional or raw (simple get/put
+style without transactional consistency guarantees) API to access and update your data.
+
+Status: parity work is in progress; APIs may change until parity work stabilizes.
 
 ## Getting started
 
@@ -17,7 +20,7 @@ The TiKV client is a Rust library (crate). To use this crate in your project, ad
 
 ```toml
 [dependencies]
-tikv-client = "0.3"
+tikv-client = { path = "/path/to/new-client-rust" }
 ```
 
 ### Prerequisites

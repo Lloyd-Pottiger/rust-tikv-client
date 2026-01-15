@@ -11,10 +11,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- 明确 new-client-rust 的对外 API 规划（按 parity-map 分阶段落地）
-  - 先给出“最小 public surface”（Raw/Txn/Config/Key types）并补充 rustdoc
-  - 再逐步补齐 client-go 的 `tikvrpc`/interceptor/replica read/resource control 等能力
-
 # 已完成工作
 
 - 梳理 client-go(v2) Public API + 功能清单（以代码为准）
@@ -38,3 +34,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 增补：`RawChecksum{Request,Response}` 的 dispatch、region/key error 抽取、`HasLocks` 空实现、merge 逻辑
   - 测试：新增单测覆盖聚合；`cargo test` 通过
   - 改动文件：`new-client-rust/src/raw/client.rs`、`new-client-rust/src/raw/mod.rs`、`new-client-rust/src/raw/requests.rs`、`new-client-rust/src/raw/lowering.rs`、`new-client-rust/src/store/request.rs`、`new-client-rust/src/store/errors.rs`、`new-client-rust/src/lib.rs`、`.codex/progress/daemon.md`
+
+- 明确 new-client-rust 的对外 API 规划（按 parity-map 分阶段落地）
+  - 约定：维持“最小 public surface”（Raw/Txn/Config/Key types），其余能力先作为实现细节，按 parity 逐步对外暴露
+  - 产物：`new-client-rust/doc/client-go-v2-parity-roadmap.md` + 更新 `new-client-rust/README.md`/crate docs 指向 roadmap
+  - 改动文件：`new-client-rust/doc/client-go-v2-parity-roadmap.md`、`new-client-rust/README.md`、`new-client-rust/src/lib.rs`、`.codex/progress/daemon.md`
