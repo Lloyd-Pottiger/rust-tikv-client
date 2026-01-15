@@ -214,6 +214,7 @@ where
                 pd_client: self.pd_client,
                 backoff,
                 preserve_region_results,
+                request_context: self.request_context.clone(),
                 read_routing: self.read_routing.clone(),
             },
             request_context: self.request_context,
@@ -301,9 +302,7 @@ fn set_single_region_store<PdC: PdClient, R: KvRequest>(
     request_context: RequestContext,
     read_routing: ReadRouting,
 ) -> Result<PlanBuilder<PdC, Dispatch<R>, Targetted>> {
-    plan.request.set_leader(&store.region_with_leader)?;
-    plan.request.set_replica_read(store.replica_read);
-    plan.request.set_stale_read(store.stale_read);
+    store.apply_to_request(&mut plan.request)?;
     plan.kv_client = Some(store.client);
     Ok(PlanBuilder {
         plan,

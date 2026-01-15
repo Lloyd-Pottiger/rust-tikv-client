@@ -8,8 +8,10 @@ use tonic::transport::Channel;
 use tonic::IntoRequest;
 
 use crate::proto::kvrpcpb;
+use crate::proto::resource_manager;
 use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::store::RegionWithLeader;
+use crate::CommandPriority;
 use crate::Error;
 use crate::Result;
 
@@ -22,6 +24,7 @@ pub trait Request: Any + Sync + Send + 'static {
     ) -> Result<Box<dyn Any>>;
     fn label(&self) -> &'static str;
     fn as_any(&self) -> &dyn Any;
+    fn context_mut(&mut self) -> &mut kvrpcpb::Context;
     fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()>;
     fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion);
 
@@ -30,6 +33,12 @@ pub trait Request: Any + Sync + Send + 'static {
     fn set_resource_group_tag(&mut self, _tag: &[u8]) {}
 
     fn set_resource_group_name(&mut self, _name: &str) {}
+
+    fn set_priority(&mut self, _priority: CommandPriority) {}
+
+    fn set_resource_control_override_priority(&mut self, _override_priority: u64) {}
+
+    fn set_resource_control_penalty(&mut self, _penalty: &resource_manager::Consumption) {}
 
     fn set_replica_read(&mut self, _replica_read: bool) {}
 
@@ -63,8 +72,12 @@ macro_rules! impl_request {
                 self
             }
 
+            fn context_mut(&mut self) -> &mut kvrpcpb::Context {
+                self.context.get_or_insert(kvrpcpb::Context::default())
+            }
+
             fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()> {
-                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                let ctx = self.context_mut();
                 let leader_peer = leader.leader.as_ref().ok_or(Error::LeaderNotFound {
                     region: leader.ver_id(),
                 })?;
@@ -75,35 +88,56 @@ macro_rules! impl_request {
             }
 
             fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion) {
-                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                let ctx = self.context_mut();
                 ctx.api_version = api_version.into();
             }
 
             fn set_request_source(&mut self, source: &str) {
-                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                let ctx = self.context_mut();
                 ctx.request_source = source.to_owned();
             }
 
             fn set_resource_group_tag(&mut self, tag: &[u8]) {
-                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                let ctx = self.context_mut();
                 ctx.resource_group_tag = tag.to_vec();
             }
 
             fn set_resource_group_name(&mut self, name: &str) {
-                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                let ctx = self.context_mut();
                 let resource_ctl_ctx = ctx
                     .resource_control_context
                     .get_or_insert(kvrpcpb::ResourceControlContext::default());
                 resource_ctl_ctx.resource_group_name = name.to_owned();
             }
 
+            fn set_priority(&mut self, priority: CommandPriority) {
+                let ctx = self.context_mut();
+                ctx.priority = priority.into();
+            }
+
+            fn set_resource_control_override_priority(&mut self, override_priority: u64) {
+                let ctx = self.context_mut();
+                let resource_ctl_ctx = ctx
+                    .resource_control_context
+                    .get_or_insert(kvrpcpb::ResourceControlContext::default());
+                resource_ctl_ctx.override_priority = override_priority;
+            }
+
+            fn set_resource_control_penalty(&mut self, penalty: &resource_manager::Consumption) {
+                let ctx = self.context_mut();
+                let resource_ctl_ctx = ctx
+                    .resource_control_context
+                    .get_or_insert(kvrpcpb::ResourceControlContext::default());
+                resource_ctl_ctx.penalty = Some(penalty.clone());
+            }
+
             fn set_replica_read(&mut self, replica_read: bool) {
-                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                let ctx = self.context_mut();
                 ctx.replica_read = replica_read;
             }
 
             fn set_stale_read(&mut self, stale_read: bool) {
-                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                let ctx = self.context_mut();
                 ctx.stale_read = stale_read;
             }
         }

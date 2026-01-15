@@ -15,6 +15,9 @@ use tokio::time::Duration;
 
 use crate::backoff::Backoff;
 use crate::backoff::DEFAULT_REGION_BACKOFF;
+use crate::interceptor::RpcContextInfo;
+use crate::interceptor::RpcInterceptor;
+use crate::interceptor::RpcInterceptorChain;
 use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
 use crate::proto::kvrpcpb;
@@ -35,6 +38,7 @@ use crate::timestamp::TimestampExt;
 use crate::transaction::buffer::Buffer;
 use crate::transaction::lowering::*;
 use crate::BoundRange;
+use crate::CommandPriority;
 use crate::Error;
 use crate::Key;
 use crate::KvPair;
@@ -119,6 +123,68 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
     }
 
+    /// Set `kvrpcpb::Context.request_source` for all requests sent by this transaction.
+    pub fn set_request_source(&mut self, source: impl Into<String>) {
+        self.request_context = self.request_context.with_request_source(source);
+    }
+
+    /// Set `kvrpcpb::Context.resource_group_tag` for all requests sent by this transaction.
+    pub fn set_resource_group_tag(&mut self, tag: impl Into<Vec<u8>>) {
+        self.request_context = self.request_context.with_resource_group_tag(tag);
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.resource_group_name` for all requests sent by this transaction.
+    pub fn set_resource_group_name(&mut self, name: impl Into<String>) {
+        self.request_context = self.request_context.with_resource_group_name(name);
+    }
+
+    /// Set `kvrpcpb::Context.priority` for all requests sent by this transaction.
+    pub fn set_priority(&mut self, priority: CommandPriority) {
+        self.request_context = self.request_context.with_priority(priority);
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.override_priority` for all requests sent by this transaction.
+    pub fn set_resource_control_override_priority(&mut self, override_priority: u64) {
+        self.request_context = self
+            .request_context
+            .with_resource_control_override_priority(override_priority);
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.penalty` for all requests sent by this transaction.
+    pub fn set_resource_control_penalty(
+        &mut self,
+        penalty: impl Into<crate::resource_manager::Consumption>,
+    ) {
+        self.request_context = self.request_context.with_resource_control_penalty(penalty);
+    }
+
+    /// Set a resource group tagger for all requests sent by this transaction.
+    ///
+    /// If a fixed resource group tag is set via [`set_resource_group_tag`](Self::set_resource_group_tag),
+    /// it takes precedence over this tagger.
+    pub fn set_resource_group_tagger(
+        &mut self,
+        tagger: impl Fn(&RpcContextInfo, &crate::kvrpcpb::Context) -> Vec<u8> + Send + Sync + 'static,
+    ) {
+        self.request_context = self
+            .request_context
+            .with_resource_group_tagger(Arc::new(tagger));
+    }
+
+    /// Replace the RPC interceptor chain for all requests sent by this transaction.
+    pub fn set_rpc_interceptor(&mut self, interceptor: Arc<dyn RpcInterceptor>) {
+        let mut chain = RpcInterceptorChain::new();
+        chain.link(interceptor);
+        self.request_context = self.request_context.with_rpc_interceptors(chain);
+    }
+
+    /// Add an RPC interceptor for all requests sent by this transaction.
+    ///
+    /// If another interceptor with the same name exists, it is replaced.
+    pub fn add_rpc_interceptor(&mut self, interceptor: Arc<dyn RpcInterceptor>) {
+        self.request_context = self.request_context.add_rpc_interceptor(interceptor);
+    }
+
     /// Create a new 'get' request
     ///
     /// Once resolved this request will result in the fetching of the value associated with the
@@ -147,7 +213,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         let keyspace = self.keyspace;
         let request_context = self.request_context.clone();
         let read_routing = ReadRouting::new(self.options.replica_read, self.options.stale_read)
-            .with_seed(timestamp.version() as u32);
+            .with_seed(timestamp.version() as u32)
+            .with_request_source(request_context.request_source());
 
         self.buffer
             .get_or_else(key, |key| async move {
@@ -287,7 +354,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         let retry_options = self.options.retry_options.clone();
         let request_context = self.request_context.clone();
         let read_routing = ReadRouting::new(self.options.replica_read, self.options.stale_read)
-            .with_seed(timestamp.version() as u32);
+            .with_seed(timestamp.version() as u32)
+            .with_request_source(request_context.request_source());
 
         self.buffer
             .batch_get_or_else(keys, move |keys| async move {
@@ -807,7 +875,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let request_context = self.request_context.clone();
         let read_routing = ReadRouting::new(self.options.replica_read, self.options.stale_read)
-            .with_seed(timestamp.version() as u32);
+            .with_seed(timestamp.version() as u32)
+            .with_request_source(request_context.request_source());
 
         self.buffer
             .scan_and_fetch(
@@ -1674,6 +1743,8 @@ mod tests {
     use fail::FailScenario;
     use serial_test::serial;
 
+    use crate::interceptor::override_priority_if_unset;
+    use crate::interceptor::rpc_interceptor;
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::pd::PdClient;
@@ -1683,9 +1754,11 @@ mod tests {
     use crate::proto::pdpb::Timestamp;
     use crate::region::{RegionId, RegionVerId, RegionWithLeader, StoreId};
     use crate::request::Keyspace;
+    use crate::resource_manager;
     use crate::store::{RegionStore, Store};
     use crate::timestamp::TimestampExt;
     use crate::transaction::HeartbeatOption;
+    use crate::CommandPriority;
     use crate::ReplicaReadType;
     use crate::RequestContext;
     use crate::Transaction;
@@ -1897,7 +1970,12 @@ mod tests {
         expected_tag: &[u8],
         expected_group_name: &str,
     ) {
-        assert_eq!(ctx.request_source, expected_source);
+        assert!(
+            ctx.request_source.ends_with(expected_source),
+            "unexpected request_source: got={}, expected suffix={}",
+            ctx.request_source,
+            expected_source
+        );
         assert_eq!(ctx.resource_group_tag, expected_tag);
         assert_eq!(
             ctx.resource_control_context
@@ -2045,6 +2123,269 @@ mod tests {
         assert!(got.is_none());
         assert_eq!(get_calls.load(Ordering::SeqCst), 2);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_resource_group_tagger_sees_patched_request_source_on_retry(
+    ) -> Result<(), io::Error> {
+        let input_request_source = "unit-test-source";
+
+        let calls: Arc<Mutex<Vec<(bool, String, Vec<u8>, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_cloned = calls.clone();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_cloned = call_count.clone();
+
+        let pd_client = Arc::new(ReplicaReadPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    unreachable!("unexpected request type in tagger retry test");
+                };
+                let ctx = req.context.as_ref().expect("missing context on GetRequest");
+                let store_id = ctx.peer.as_ref().map(|p| p.store_id).unwrap_or(0);
+                calls_cloned.lock().unwrap().push((
+                    ctx.is_retry_request,
+                    ctx.request_source.clone(),
+                    ctx.resource_group_tag.clone(),
+                    store_id,
+                ));
+
+                let call = call_count_cloned.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    resp.region_error = Some(crate::proto::errorpb::Error::default());
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = true;
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let request_context = RequestContext::default()
+            .with_request_source(input_request_source)
+            .with_resource_group_name("rg");
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Follower)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            request_context,
+        );
+
+        txn.set_resource_group_tagger(|info, ctx| {
+            format!("{}:{}", info.attempt, ctx.request_source).into_bytes()
+        });
+
+        let got = txn.get("k".to_owned()).await.unwrap();
+        assert!(got.is_none());
+
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            (
+                false,
+                format!("follower_{input_request_source}"),
+                format!("0:follower_{input_request_source}").into_bytes(),
+                2,
+            )
+        );
+        assert_eq!(
+            calls[1],
+            (
+                true,
+                format!("retry_follower_leader_{input_request_source}"),
+                format!("1:retry_follower_leader_{input_request_source}").into_bytes(),
+                1,
+            )
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_resource_control_override_priority_if_unset_respects_explicit_override(
+    ) -> Result<(), io::Error> {
+        let ctxs: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctxs_cloned = ctxs.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    unreachable!("unexpected request type in override priority test");
+                };
+                let ctx = req.context.as_ref().expect("missing context on GetRequest");
+                let override_priority = ctx
+                    .resource_control_context
+                    .as_ref()
+                    .expect("missing resource_control_context")
+                    .override_priority;
+                ctxs_cloned.lock().unwrap().push(override_priority);
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = true;
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let base_request_context = RequestContext::default().with_resource_group_name("rg");
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            base_request_context.clone().with_rpc_interceptors({
+                let mut chain = crate::interceptor::RpcInterceptorChain::new();
+                chain.link(override_priority_if_unset(7));
+                chain
+            }),
+        );
+        let _ = txn.get("k".to_owned()).await.unwrap();
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            base_request_context
+                .with_resource_control_override_priority(99)
+                .with_rpc_interceptors({
+                    let mut chain = crate::interceptor::RpcInterceptorChain::new();
+                    chain.link(override_priority_if_unset(7));
+                    chain
+                }),
+        );
+        let _ = txn.get("k".to_owned()).await.unwrap();
+
+        let ctxs = ctxs.lock().unwrap().clone();
+        assert_eq!(ctxs, vec![7, 99]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fixed_resource_group_tag_takes_precedence_over_tagger() -> Result<(), io::Error> {
+        let expected_tag = b"fixed-tag".to_vec();
+        let expected_tag_for_hook = expected_tag.clone();
+        let tagger_calls = Arc::new(AtomicUsize::new(0));
+        let tagger_calls_cloned = tagger_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    unreachable!("unexpected request type in fixed tag test");
+                };
+                let ctx = req.context.as_ref().expect("missing context on GetRequest");
+                assert_eq!(ctx.resource_group_tag, expected_tag_for_hook);
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = true;
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let request_context = RequestContext::default()
+            .with_resource_group_name("rg")
+            .with_resource_group_tag(expected_tag.clone());
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            request_context,
+        );
+
+        txn.set_resource_group_tagger(move |_, _| {
+            tagger_calls_cloned.fetch_add(1, Ordering::SeqCst);
+            b"tagger-tag".to_vec()
+        });
+
+        let _ = txn.get("k".to_owned()).await.unwrap();
+        assert_eq!(tagger_calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_rpc_interceptor_can_override_priority_penalty_and_tag() -> Result<(), io::Error> {
+        let expected_penalty = resource_manager::Consumption {
+            r_r_u: 1.0,
+            w_r_u: 2.0,
+            ..Default::default()
+        };
+        let expected_penalty_for_hook = expected_penalty.clone();
+        let expected_penalty_for_interceptor = expected_penalty.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    unreachable!("unexpected request type in interceptor test");
+                };
+                let ctx = req.context.as_ref().expect("missing context on GetRequest");
+                assert_eq!(ctx.priority, i32::from(CommandPriority::High));
+                assert_eq!(ctx.resource_group_tag, b"it".to_vec());
+                let resource_ctl_ctx = ctx
+                    .resource_control_context
+                    .as_ref()
+                    .expect("missing resource_control_context");
+                assert_eq!(resource_ctl_ctx.resource_group_name, "rg");
+                assert_eq!(resource_ctl_ctx.override_priority, 99);
+                assert_eq!(
+                    resource_ctl_ctx.penalty.as_ref(),
+                    Some(&expected_penalty_for_hook)
+                );
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = true;
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let request_context = RequestContext::default()
+            .with_resource_group_name("rg")
+            .with_priority(CommandPriority::Low)
+            .with_resource_control_override_priority(99)
+            .with_resource_control_penalty(resource_manager::Consumption {
+                r_r_u: 0.0,
+                w_r_u: 0.0,
+                ..Default::default()
+            })
+            .with_resource_group_tagger(Arc::new(|_, _| b"tagger".to_vec()))
+            .add_rpc_interceptor(override_priority_if_unset(7))
+            .add_rpc_interceptor(rpc_interceptor("ut", move |_, ctx| {
+                ctx.priority = CommandPriority::High.into();
+                ctx.resource_group_tag = b"it".to_vec();
+                let resource_ctl_ctx = ctx
+                    .resource_control_context
+                    .get_or_insert(kvrpcpb::ResourceControlContext::default());
+                resource_ctl_ctx.penalty = Some(expected_penalty_for_interceptor.clone());
+            }));
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            request_context,
+        );
+
+        let _ = txn.get("k".to_owned()).await.unwrap();
         Ok(())
     }
 

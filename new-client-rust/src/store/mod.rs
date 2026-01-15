@@ -20,11 +20,14 @@ pub use self::errors::HasRegionError;
 pub use self::errors::HasRegionErrors;
 pub use self::errors::SetRegionError;
 pub use self::request::Request;
+use crate::interceptor::ReplicaKind;
+use crate::interceptor::RpcContextInfo;
 use crate::pd::PdClient;
 use crate::proto::kvrpcpb;
 use crate::region::RegionWithLeader;
 use crate::BoundRange;
 use crate::Key;
+use crate::RequestContext;
 use crate::Result;
 
 #[derive(new, Clone)]
@@ -35,6 +38,47 @@ pub struct RegionStore {
     pub(crate) replica_read: bool,
     #[new(default)]
     pub(crate) stale_read: bool,
+    #[new(default)]
+    pub(crate) attempt: usize,
+    #[new(default)]
+    pub(crate) patched_request_source: Option<String>,
+    #[new(default)]
+    pub(crate) request_context: RequestContext,
+    #[new(default)]
+    pub(crate) replica_kind: Option<ReplicaKind>,
+}
+
+impl RegionStore {
+    pub(crate) fn apply_to_request<R: Request>(&self, request: &mut R) -> Result<()> {
+        request.set_leader(&self.region_with_leader)?;
+        request.set_replica_read(self.replica_read);
+        request.set_stale_read(self.stale_read);
+
+        let rpc_context = RpcContextInfo {
+            label: request.label(),
+            attempt: self.attempt,
+            region_id: Some(self.region_with_leader.region.id),
+            store_id: self.region_with_leader.get_store_id().ok(),
+            replica_kind: self.replica_kind,
+            replica_read: self.replica_read,
+            stale_read: self.stale_read,
+        };
+        let ctx = request.context_mut();
+        ctx.is_retry_request = self.attempt > 0;
+        if let Some(source) = &self.patched_request_source {
+            ctx.request_source = source.clone();
+        }
+        if !self.request_context.has_resource_group_tag() {
+            if let Some(tagger) = self.request_context.resource_group_tagger() {
+                let tag = (tagger)(&rpc_context, ctx);
+                ctx.resource_group_tag = tag;
+            }
+        }
+        self.request_context
+            .rpc_interceptors()
+            .apply(&rpc_context, ctx);
+        Ok(())
+    }
 }
 
 #[derive(new, Clone)]

@@ -39,7 +39,6 @@ use crate::shardable_key;
 use crate::shardable_keys;
 use crate::shardable_range;
 use crate::store::RegionStore;
-use crate::store::Request;
 use crate::store::Store;
 use crate::store::{region_stream_for_keys, region_stream_for_range};
 use crate::timestamp::TimestampExt;
@@ -316,7 +315,7 @@ impl Shardable for kvrpcpb::PrewriteRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)
+        store.apply_to_request(self)
     }
 }
 
@@ -374,7 +373,7 @@ impl Shardable for kvrpcpb::CommitRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)
+        store.apply_to_request(self)
     }
 }
 
@@ -467,7 +466,7 @@ impl Shardable for kvrpcpb::PessimisticLockRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)
+        store.apply_to_request(self)
     }
 }
 
@@ -570,7 +569,7 @@ impl Shardable for kvrpcpb::ScanLockRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)
+        store.apply_to_request(self)
     }
 }
 
@@ -634,7 +633,7 @@ impl Shardable for kvrpcpb::TxnHeartBeatRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)
+        store.apply_to_request(self)
     }
 }
 
@@ -694,7 +693,7 @@ impl Shardable for kvrpcpb::CheckTxnStatusRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)
+        store.apply_to_request(self)
     }
 }
 

@@ -17,6 +17,7 @@ use crate::pd::PdClient;
 use crate::proto::errorpb;
 use crate::proto::errorpb::EpochNotMatch;
 use crate::proto::kvrpcpb;
+use crate::proto::metapb;
 use crate::region::StoreId;
 use crate::region::{RegionVerId, RegionWithLeader};
 use crate::request::shard::HasNextBatch;
@@ -40,6 +41,27 @@ use crate::RequestContext;
 use crate::Result;
 
 use super::keyspace::Keyspace;
+
+fn replica_kind_for_peer(
+    leader: &metapb::Peer,
+    peer: &metapb::Peer,
+) -> crate::interceptor::ReplicaKind {
+    if peer.store_id == leader.store_id {
+        return crate::interceptor::ReplicaKind::Leader;
+    }
+    match metapb::PeerRole::try_from(peer.role).unwrap_or(metapb::PeerRole::Voter) {
+        metapb::PeerRole::Learner => crate::interceptor::ReplicaKind::Learner,
+        _ => crate::interceptor::ReplicaKind::Follower,
+    }
+}
+
+fn replica_kind_str(kind: crate::interceptor::ReplicaKind) -> &'static str {
+    match kind {
+        crate::interceptor::ReplicaKind::Leader => "leader",
+        crate::interceptor::ReplicaKind::Follower => "follower",
+        crate::interceptor::ReplicaKind::Learner => "learner",
+    }
+}
 
 /// A plan for how to execute a request. A user builds up a plan with various
 /// options, then exectutes it.
@@ -103,6 +125,7 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     /// Otherwise, return the first Err if there is any.
     pub preserve_region_results: bool,
 
+    pub(crate) request_context: RequestContext,
     pub(crate) read_routing: ReadRouting,
 }
 
@@ -118,6 +141,7 @@ where
         backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        request_context: RequestContext,
         read_routing: ReadRouting,
         attempt: usize,
     ) -> Result<<Self as Plan>::Result> {
@@ -134,6 +158,7 @@ where
                 backoff.clone(),
                 permits.clone(),
                 preserve_region_results,
+                request_context.clone(),
                 read_routing.clone(),
                 attempt,
             ));
@@ -168,6 +193,7 @@ where
         mut backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        request_context: RequestContext,
         read_routing: ReadRouting,
         attempt: usize,
     ) -> Result<<Self as Plan>::Result> {
@@ -187,6 +213,7 @@ where
                     backoff,
                     permits,
                     preserve_region_results,
+                    request_context.clone(),
                     read_routing,
                     attempt + 1,
                     Error::LeaderNotFound { region },
@@ -194,6 +221,34 @@ where
                 .await;
             }
             Err(err) => return Err(err),
+        };
+
+        let leader_peer = region
+            .leader
+            .as_ref()
+            .expect("ReadRouting::select_peer validated leader exists");
+        let current_replica_kind = replica_kind_for_peer(leader_peer, &read_peer.target_peer);
+        let request_source_override = match read_routing.request_source() {
+            None => None,
+            Some(input) if input.is_empty() => None,
+            Some(input) => {
+                let base_peer = read_routing.select_peer_for_request_source(&region)?;
+                let base_replica_kind = replica_kind_for_peer(leader_peer, &base_peer.target_peer);
+                let base_read_type = if base_peer.stale_read {
+                    format!("stale_{}", replica_kind_str(base_replica_kind))
+                } else {
+                    replica_kind_str(base_replica_kind).to_owned()
+                };
+                if attempt == 0 {
+                    Some(format!("{base_read_type}_{input}"))
+                } else {
+                    Some(format!(
+                        "retry_{base_read_type}_{}_{}",
+                        replica_kind_str(current_replica_kind),
+                        input
+                    ))
+                }
+            }
         };
         let mut target_region = region.clone();
         // `map_region_to_store` is keyed by `RegionWithLeader::leader.store_id`, so we overwrite it
@@ -208,6 +263,10 @@ where
                 let mut region_store = region_store;
                 region_store.replica_read = read_peer.replica_read;
                 region_store.stale_read = read_peer.stale_read;
+                region_store.attempt = attempt;
+                region_store.request_context = request_context.clone();
+                region_store.replica_kind = Some(current_replica_kind);
+                region_store.patched_request_source = request_source_override.clone();
                 plan.apply_store(&region_store)?;
                 Ok(region_store)
             }) {
@@ -225,6 +284,7 @@ where
                     backoff,
                     permits,
                     preserve_region_results,
+                    request_context.clone(),
                     read_routing,
                     attempt + 1,
                     Error::LeaderNotFound { region },
@@ -254,6 +314,7 @@ where
                     backoff,
                     permits,
                     preserve_region_results,
+                    request_context.clone(),
                     read_routing,
                     attempt + 1,
                     e,
@@ -285,6 +346,7 @@ where
                         backoff,
                         permits,
                         preserve_region_results,
+                        request_context.clone(),
                         read_routing,
                         attempt + 1,
                     )
@@ -306,6 +368,7 @@ where
         mut backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        request_context: RequestContext,
         read_routing: ReadRouting,
         attempt: usize,
         e: Error,
@@ -326,6 +389,7 @@ where
                     backoff,
                     permits,
                     preserve_region_results,
+                    request_context,
                     read_routing,
                     attempt + 1,
                 )
@@ -442,6 +506,7 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
             preserve_region_results: self.preserve_region_results,
+            request_context: self.request_context.clone(),
             read_routing: self.read_routing.clone(),
         }
     }
@@ -465,6 +530,7 @@ where
             self.backoff.clone(),
             concurrency_permits.clone(),
             self.preserve_region_results,
+            self.request_context.clone(),
             self.read_routing.clone(),
             0,
         )
@@ -1061,6 +1127,7 @@ mod test {
             pd_client: Arc::new(MockPdClient::default()),
             backoff: Backoff::no_backoff(),
             preserve_region_results: false,
+            request_context: RequestContext::default(),
             read_routing: ReadRouting::default(),
         };
         assert!(plan.execute().await.is_err())

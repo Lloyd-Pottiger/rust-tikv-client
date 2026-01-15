@@ -17,6 +17,7 @@ pub(crate) struct ReadRouting {
     stale_read: bool,
     seed: u32,
     force_leader: Arc<AtomicBool>,
+    input_request_source: Option<Arc<str>>,
 }
 
 impl Default for ReadRouting {
@@ -26,6 +27,7 @@ impl Default for ReadRouting {
             stale_read: false,
             seed: 0,
             force_leader: Arc::new(AtomicBool::new(false)),
+            input_request_source: None,
         }
     }
 }
@@ -39,9 +41,18 @@ impl ReadRouting {
         }
     }
 
+    pub(crate) fn with_request_source(mut self, request_source: Option<Arc<str>>) -> Self {
+        self.input_request_source = request_source;
+        self
+    }
+
     pub(crate) fn with_seed(mut self, seed: u32) -> Self {
         self.seed = seed;
         self
+    }
+
+    pub(crate) fn request_source(&self) -> Option<&str> {
+        self.input_request_source.as_deref()
     }
 
     pub(crate) fn is_stale_read(&self) -> bool {
@@ -60,6 +71,22 @@ impl ReadRouting {
         &self,
         region: &RegionWithLeader,
         attempt: usize,
+    ) -> Result<ReadPeer> {
+        self.select_peer_inner(region, attempt, true)
+    }
+
+    pub(crate) fn select_peer_for_request_source(
+        &self,
+        region: &RegionWithLeader,
+    ) -> Result<ReadPeer> {
+        self.select_peer_inner(region, 0, false)
+    }
+
+    fn select_peer_inner(
+        &self,
+        region: &RegionWithLeader,
+        attempt: usize,
+        respect_overrides: bool,
     ) -> Result<ReadPeer> {
         let leader = region.leader.as_ref().ok_or(Error::LeaderNotFound {
             region: region.ver_id(),
@@ -83,7 +110,7 @@ impl ReadRouting {
         }
 
         // Overrides (e.g. stale-read meeting locks, forcing leader re-read).
-        if self.is_forced_leader() {
+        if respect_overrides && self.is_forced_leader() {
             return Ok(ReadPeer::leader(leader.clone()));
         }
 

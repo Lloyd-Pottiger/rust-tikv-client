@@ -1,9 +1,14 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::sync::Arc;
+
 use derive_new::new;
 use log::{debug, trace};
 
+use crate::interceptor::RpcContextInfo;
+use crate::interceptor::RpcInterceptor;
 use crate::BoundRange;
+use crate::CommandPriority;
 use crate::Key;
 use crate::KvPair;
 use crate::Result;
@@ -23,6 +28,63 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Set `kvrpcpb::Context.request_source` for all requests sent by this snapshot.
+    pub fn set_request_source(&mut self, source: impl Into<String>) {
+        self.transaction.set_request_source(source);
+    }
+
+    /// Set `kvrpcpb::Context.resource_group_tag` for all requests sent by this snapshot.
+    pub fn set_resource_group_tag(&mut self, tag: impl Into<Vec<u8>>) {
+        self.transaction.set_resource_group_tag(tag);
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.resource_group_name` for all requests sent by this snapshot.
+    pub fn set_resource_group_name(&mut self, name: impl Into<String>) {
+        self.transaction.set_resource_group_name(name);
+    }
+
+    /// Set `kvrpcpb::Context.priority` for all requests sent by this snapshot.
+    pub fn set_priority(&mut self, priority: CommandPriority) {
+        self.transaction.set_priority(priority);
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.override_priority` for all requests sent by this snapshot.
+    pub fn set_resource_control_override_priority(&mut self, override_priority: u64) {
+        self.transaction
+            .set_resource_control_override_priority(override_priority);
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.penalty` for all requests sent by this snapshot.
+    pub fn set_resource_control_penalty(
+        &mut self,
+        penalty: impl Into<crate::resource_manager::Consumption>,
+    ) {
+        self.transaction.set_resource_control_penalty(penalty);
+    }
+
+    /// Set a resource group tagger for all requests sent by this snapshot.
+    ///
+    /// If a fixed resource group tag is set via [`set_resource_group_tag`](Self::set_resource_group_tag),
+    /// it takes precedence over this tagger.
+    pub fn set_resource_group_tagger(
+        &mut self,
+        tagger: impl Fn(&RpcContextInfo, &crate::kvrpcpb::Context) -> Vec<u8> + Send + Sync + 'static,
+    ) {
+        self.transaction.set_resource_group_tagger(tagger);
+    }
+
+    /// Replace the RPC interceptor chain for all requests sent by this snapshot.
+    pub fn set_rpc_interceptor(&mut self, interceptor: Arc<dyn RpcInterceptor>) {
+        self.transaction.set_rpc_interceptor(interceptor);
+    }
+
+    /// Add an RPC interceptor for all requests sent by this snapshot.
+    ///
+    /// If another interceptor with the same name exists, it is replaced.
+    pub fn add_rpc_interceptor(&mut self, interceptor: Arc<dyn RpcInterceptor>) {
+        self.transaction.add_rpc_interceptor(interceptor);
+    }
+
     /// Get the value associated with the given key.
     pub async fn get(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         trace!("invoking get request on snapshot");

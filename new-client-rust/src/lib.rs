@@ -98,6 +98,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 pub mod backoff;
+pub mod interceptor;
 #[doc(hidden)]
 pub mod raw;
 pub mod request;
@@ -107,8 +108,13 @@ pub mod transaction;
 mod common;
 mod compat;
 mod config;
+#[doc(hidden)]
+pub mod kvrpcpb {
+    pub use crate::proto::kvrpcpb::*;
+}
 mod kv;
 mod pd;
+mod priority;
 mod proto;
 mod region;
 mod region_cache;
@@ -118,6 +124,10 @@ mod stats;
 mod store;
 mod timestamp;
 mod util;
+#[doc(hidden)]
+pub mod resource_manager {
+    pub use crate::proto::resource_manager::*;
+}
 
 #[cfg(test)]
 mod mock;
@@ -171,6 +181,8 @@ pub use crate::transaction::Snapshot;
 pub use crate::transaction::Transaction;
 #[doc(inline)]
 pub use crate::transaction::TransactionOptions;
+#[doc(inline)]
+pub use priority::CommandPriority;
 #[doc(inline)]
 pub use replica_read::ReplicaReadType;
 

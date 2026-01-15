@@ -11,6 +11,9 @@ use super::RawChecksum;
 use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF};
 use crate::common::Error;
 use crate::config::Config;
+use crate::interceptor::RpcContextInfo;
+use crate::interceptor::RpcInterceptor;
+use crate::interceptor::RpcInterceptorChain;
 use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
 use crate::proto::kvrpcpb::{RawScanRequest, RawScanResponse};
@@ -27,6 +30,7 @@ use crate::store::{HasRegionError, RegionStore};
 use crate::Backoff;
 use crate::BoundRange;
 use crate::ColumnFamily;
+use crate::CommandPriority;
 use crate::Error::RegionError;
 use crate::Key;
 use crate::KvPair;
@@ -49,9 +53,7 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
     /// Whether to use the [`atomic mode`](Client::with_atomic_for_cas).
     atomic: bool,
     keyspace: Keyspace,
-    request_source: Option<Arc<str>>,
-    resource_group_tag: Option<Arc<[u8]>>,
-    resource_group_name: Option<Arc<str>>,
+    request_context: crate::RequestContext,
 }
 
 impl<PdC: PdClient> Clone for Client<PdC> {
@@ -62,9 +64,7 @@ impl<PdC: PdClient> Clone for Client<PdC> {
             backoff: self.backoff.clone(),
             atomic: self.atomic,
             keyspace: self.keyspace,
-            request_source: self.request_source.clone(),
-            resource_group_tag: self.resource_group_tag.clone(),
-            resource_group_name: self.resource_group_name.clone(),
+            request_context: self.request_context.clone(),
         }
     }
 }
@@ -133,9 +133,7 @@ impl Client<PdRpcClient> {
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
             keyspace,
-            request_source: None,
-            resource_group_tag: None,
-            resource_group_name: None,
+            request_context: crate::RequestContext::default(),
         })
     }
 
@@ -171,9 +169,7 @@ impl Client<PdRpcClient> {
             backoff: self.backoff.clone(),
             atomic: self.atomic,
             keyspace: self.keyspace,
-            request_source: self.request_source.clone(),
-            resource_group_tag: self.resource_group_tag.clone(),
-            resource_group_name: self.resource_group_name.clone(),
+            request_context: self.request_context.clone(),
         }
     }
 
@@ -203,9 +199,7 @@ impl Client<PdRpcClient> {
             backoff,
             atomic: self.atomic,
             keyspace: self.keyspace,
-            request_source: self.request_source.clone(),
-            resource_group_tag: self.resource_group_tag.clone(),
-            resource_group_name: self.resource_group_name.clone(),
+            request_context: self.request_context.clone(),
         }
     }
 
@@ -224,9 +218,7 @@ impl Client<PdRpcClient> {
             backoff: self.backoff.clone(),
             atomic: true,
             keyspace: self.keyspace,
-            request_source: self.request_source.clone(),
-            resource_group_tag: self.resource_group_tag.clone(),
-            resource_group_name: self.resource_group_name.clone(),
+            request_context: self.request_context.clone(),
         }
     }
 }
@@ -236,7 +228,7 @@ impl<PdC: PdClient> Client<PdC> {
     #[must_use]
     pub fn with_request_source(&self, source: impl Into<String>) -> Self {
         let mut cloned = self.clone();
-        cloned.request_source = Some(Arc::<str>::from(source.into()));
+        cloned.request_context = cloned.request_context.with_request_source(source);
         cloned
     }
 
@@ -244,7 +236,7 @@ impl<PdC: PdClient> Client<PdC> {
     #[must_use]
     pub fn with_resource_group_tag(&self, tag: impl Into<Vec<u8>>) -> Self {
         let mut cloned = self.clone();
-        cloned.resource_group_tag = Some(Arc::<[u8]>::from(tag.into()));
+        cloned.request_context = cloned.request_context.with_resource_group_tag(tag);
         cloned
     }
 
@@ -253,21 +245,79 @@ impl<PdC: PdClient> Client<PdC> {
     #[must_use]
     pub fn with_resource_group_name(&self, name: impl Into<String>) -> Self {
         let mut cloned = self.clone();
-        cloned.resource_group_name = Some(Arc::<str>::from(name.into()));
+        cloned.request_context = cloned.request_context.with_resource_group_name(name);
         cloned
     }
 
-    fn with_request_context<R: crate::store::Request>(&self, mut request: R) -> R {
-        if let Some(source) = &self.request_source {
-            request.set_request_source(source);
-        }
-        if let Some(tag) = &self.resource_group_tag {
-            request.set_resource_group_tag(tag);
-        }
-        if let Some(name) = &self.resource_group_name {
-            request.set_resource_group_name(name);
-        }
-        request
+    /// Set `kvrpcpb::Context.priority` for all requests created by this client.
+    #[must_use]
+    pub fn with_priority(&self, priority: CommandPriority) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_priority(priority);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.override_priority` for all requests created by this client.
+    #[must_use]
+    pub fn with_resource_control_override_priority(&self, override_priority: u64) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned
+            .request_context
+            .with_resource_control_override_priority(override_priority);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.penalty` for all requests created by this client.
+    #[must_use]
+    pub fn with_resource_control_penalty(
+        &self,
+        penalty: impl Into<crate::resource_manager::Consumption>,
+    ) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned
+            .request_context
+            .with_resource_control_penalty(penalty);
+        cloned
+    }
+
+    /// Set a resource group tagger for all requests created by this client.
+    ///
+    /// If a fixed resource group tag is set via [`with_resource_group_tag`](Self::with_resource_group_tag),
+    /// it takes precedence over this tagger.
+    #[must_use]
+    pub fn with_resource_group_tagger(
+        &self,
+        tagger: impl Fn(&RpcContextInfo, &crate::kvrpcpb::Context) -> Vec<u8> + Send + Sync + 'static,
+    ) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned
+            .request_context
+            .with_resource_group_tagger(Arc::new(tagger));
+        cloned
+    }
+
+    /// Replace the RPC interceptor chain for all requests created by this client.
+    #[must_use]
+    pub fn with_rpc_interceptor(&self, interceptor: Arc<dyn RpcInterceptor>) -> Self {
+        let mut chain = RpcInterceptorChain::new();
+        chain.link(interceptor);
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_rpc_interceptors(chain);
+        cloned
+    }
+
+    /// Add an RPC interceptor for all requests created by this client.
+    ///
+    /// If another interceptor with the same name exists, it is replaced.
+    #[must_use]
+    pub fn with_added_rpc_interceptor(&self, interceptor: Arc<dyn RpcInterceptor>) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.add_rpc_interceptor(interceptor);
+        cloned
+    }
+
+    fn with_request_context<R: crate::store::Request>(&self, request: R) -> R {
+        self.request_context.apply_to(request)
     }
 
     /// Create a new 'get' request.
@@ -293,6 +343,7 @@ impl<PdC: PdClient> Client<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let request = self.with_request_context(new_raw_get_request(key, self.cf.clone()));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
             .post_process_default()
@@ -328,6 +379,7 @@ impl<PdC: PdClient> Client<PdC> {
             .map(|k| k.into().encode_keyspace(self.keyspace, KeyMode::Raw));
         let request = self.with_request_context(new_raw_batch_get_request(keys, self.cf.clone()));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .merge(Collect)
             .plan();
@@ -359,6 +411,7 @@ impl<PdC: PdClient> Client<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let request = self.with_request_context(new_raw_get_key_ttl_request(key, self.cf.clone()));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
             .post_process_default()
@@ -402,6 +455,7 @@ impl<PdC: PdClient> Client<PdC> {
             self.atomic,
         ));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
             .extract_error()
@@ -450,6 +504,7 @@ impl<PdC: PdClient> Client<PdC> {
             self.atomic,
         ));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .extract_error()
             .plan();
@@ -480,6 +535,7 @@ impl<PdC: PdClient> Client<PdC> {
         let request =
             self.with_request_context(new_raw_delete_request(key, self.cf.clone(), self.atomic));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
             .extract_error()
@@ -514,6 +570,7 @@ impl<PdC: PdClient> Client<PdC> {
         let request =
             self.with_request_context(new_raw_batch_delete_request(keys, self.cf.clone()));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .extract_error()
             .plan();
@@ -543,6 +600,7 @@ impl<PdC: PdClient> Client<PdC> {
         let request =
             self.with_request_context(new_raw_delete_range_request(range, self.cf.clone()));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .extract_error()
             .plan();
@@ -575,6 +633,7 @@ impl<PdC: PdClient> Client<PdC> {
 
         let request = self.with_request_context(new_raw_checksum_request(range));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .merge(Collect)
             .plan();
@@ -798,6 +857,7 @@ impl<PdC: PdClient> Client<PdC> {
         );
         let req = self.with_request_context(req);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
             .post_process_default()
@@ -835,6 +895,7 @@ impl<PdC: PdClient> Client<PdC> {
         );
         let req = self.with_request_context(req);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
+            .with_request_context(self.request_context.clone())
             .preserve_shard()
             .retry_multi_region(self.backoff.clone())
             .post_process_default()
@@ -945,10 +1006,11 @@ impl<PdC: PdClient> Client<PdC> {
 
     async fn do_store_scan(
         &self,
-        store: RegionStore,
+        mut store: RegionStore,
         scan_request: RawScanRequest,
     ) -> Result<RawScanResponse> {
         let scan_request = self.with_request_context(scan_request);
+        store.request_context = self.request_context.clone();
         crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, scan_request)
             .single_region_with_store(store.clone())
             .await?
@@ -981,6 +1043,7 @@ impl<PdC: PdClient> Client<PdC> {
             self.cf.clone(),
         ));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .retry_multi_region(self.backoff.clone())
             .merge(Collect)
             .plan();
@@ -1049,9 +1112,7 @@ mod tests {
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
             keyspace: Keyspace::Enable { keyspace_id: 0 },
-            request_source: None,
-            resource_group_tag: None,
-            resource_group_name: None,
+            request_context: crate::RequestContext::default(),
         };
         let pairs = vec![
             KvPair(vec![11].into(), vec![12]),
@@ -1085,9 +1146,7 @@ mod tests {
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
             keyspace: Keyspace::Enable { keyspace_id: 0 },
-            request_source: None,
-            resource_group_tag: None,
-            resource_group_name: None,
+            request_context: crate::RequestContext::default(),
         };
         let resps = client
             .coprocessor(
@@ -1152,9 +1211,7 @@ mod tests {
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
             keyspace: Keyspace::Disable,
-            request_source: None,
-            resource_group_tag: None,
-            resource_group_name: None,
+            request_context: crate::RequestContext::default(),
         }
         .with_request_source(expected_source)
         .with_resource_group_tag(expected_tag)

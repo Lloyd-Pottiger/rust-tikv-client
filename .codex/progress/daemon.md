@@ -9,13 +9,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- Resource Control（扩展项：penalty/override_priority + tagger/interceptor）
-  - 计划：
-    - 对齐 `client-go/tikvrpc.ResourceGroupTagger` 与 TiDB 侧 tagger 逻辑（含 retry 的 request_source 拼接规则）
-    - Rust 侧提供可插拔 hook：发送前可改写 `kvrpcpb::Context`（priority/override_priority/penalty/tag），默认关闭
-    - UT：hook 覆盖 + 优先级/override 规则
-  - 验证：`cd new-client-rust && cargo test`
-
 # 待做工作
 
 - 事务协议补齐：pipelined txn / txn local latches（按 client-go v2 行为）
@@ -38,3 +31,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 实现：新增 `ReplicaReadType` + `TransactionOptions::{replica_read,stale_read}`；计划层按 policy 选择 region peer/store 写入 `kvrpcpb::Context.{peer,replica_read,stale_read}`；stale-read meet-lock 后强制 leader reread
   - 测试：新增 UT 覆盖 leader/follower/learner/mixed/prefer-leader 与 stale-read fallback；`cd new-client-rust && cargo test` 通过
   - 改动文件：`new-client-rust/src/{replica_read.rs,request/{read_routing,plan,plan_builder,mod,shard}.rs,store/{mod,errors,request}.rs,transaction/transaction.rs,lib.rs}`、`.codex/progress/daemon.md`
+
+- Resource Control（扩展项：penalty/override_priority + tagger/interceptor）
+  - 完成：`ResourceGroupTagger` 对齐 TiDB 逻辑（tagger 可读取最终 `Context.request_source`，含 retry 拼接）；新增 `RpcInterceptor` hook（发送前可改写 `Context` 字段：priority/override_priority/penalty/tag），默认不启用
+  - 关键决策：tagger 签名带 `&kvrpcpb::Context`，避免额外拷贝并保证能读到 replica-read/stale-read 的 request_source 补丁；提供 `override_priority_if_unset` helper 对齐 client-go “仅在未设置时注入”语义
+  - 测试：新增 UT 覆盖 tagger 优先级（fixed tag > tagger）、retry request_source 拼接、interceptor 覆盖 priority/penalty/tag、override_priority 规则；`cd new-client-rust && cargo test` 通过
+  - 改动文件：`new-client-rust/src/{interceptor.rs,priority.rs,request_context.rs,store/{mod,request}.rs,raw/client.rs,raw/requests.rs,transaction/{client,transaction,snapshot,requests}.rs,request/{plan,plan_builder,read_routing,shard,mod}.rs,lib.rs}`

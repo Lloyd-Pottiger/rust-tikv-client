@@ -7,6 +7,9 @@ use log::info;
 
 use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF};
 use crate::config::Config;
+use crate::interceptor::RpcContextInfo;
+use crate::interceptor::RpcInterceptor;
+use crate::interceptor::RpcInterceptorChain;
 use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
 use crate::proto::pdpb::Timestamp;
@@ -25,6 +28,7 @@ use crate::transaction::Transaction;
 use crate::transaction::TransactionOptions;
 use crate::Backoff;
 use crate::BoundRange;
+use crate::CommandPriority;
 use crate::RequestContext;
 use crate::Result;
 
@@ -150,6 +154,73 @@ impl Client {
     pub fn with_resource_group_name(&self, name: impl Into<String>) -> Self {
         let mut cloned = self.clone();
         cloned.request_context = cloned.request_context.with_resource_group_name(name);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.priority` for all requests created by this client.
+    #[must_use]
+    pub fn with_priority(&self, priority: CommandPriority) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_priority(priority);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.override_priority` for all requests created by this client.
+    #[must_use]
+    pub fn with_resource_control_override_priority(&self, override_priority: u64) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned
+            .request_context
+            .with_resource_control_override_priority(override_priority);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.penalty` for all requests created by this client.
+    #[must_use]
+    pub fn with_resource_control_penalty(
+        &self,
+        penalty: impl Into<crate::resource_manager::Consumption>,
+    ) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned
+            .request_context
+            .with_resource_control_penalty(penalty);
+        cloned
+    }
+
+    /// Set a resource group tagger for all requests created by this client.
+    ///
+    /// If a fixed resource group tag is set via [`with_resource_group_tag`](Self::with_resource_group_tag),
+    /// it takes precedence over this tagger.
+    #[must_use]
+    pub fn with_resource_group_tagger(
+        &self,
+        tagger: impl Fn(&RpcContextInfo, &crate::kvrpcpb::Context) -> Vec<u8> + Send + Sync + 'static,
+    ) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned
+            .request_context
+            .with_resource_group_tagger(Arc::new(tagger));
+        cloned
+    }
+
+    /// Replace the RPC interceptor chain for all requests created by this client.
+    #[must_use]
+    pub fn with_rpc_interceptor(&self, interceptor: Arc<dyn RpcInterceptor>) -> Self {
+        let mut chain = RpcInterceptorChain::new();
+        chain.link(interceptor);
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_rpc_interceptors(chain);
+        cloned
+    }
+
+    /// Add an RPC interceptor for all requests created by this client.
+    ///
+    /// If another interceptor with the same name exists, it is replaced.
+    #[must_use]
+    pub fn with_added_rpc_interceptor(&self, interceptor: Arc<dyn RpcInterceptor>) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.add_rpc_interceptor(interceptor);
         cloned
     }
 

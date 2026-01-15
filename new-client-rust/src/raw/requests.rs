@@ -7,6 +7,7 @@ use crate::kv::KvPairTTL;
 use crate::pd::PdClient;
 use crate::proto::kvrpcpb;
 use crate::proto::metapb;
+use crate::proto::resource_manager;
 use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::range_request;
 use crate::region::RegionWithLeader;
@@ -31,6 +32,7 @@ use crate::store::Request;
 use crate::transaction::HasLocks;
 use crate::util::iter::FlatMapOkIterExt;
 use crate::ColumnFamily;
+use crate::CommandPriority;
 use crate::Key;
 use crate::KvPair;
 use crate::Result;
@@ -248,7 +250,7 @@ impl Shardable for kvrpcpb::RawBatchPutRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)
+        store.apply_to_request(self)
     }
 }
 
@@ -339,7 +341,7 @@ impl Shardable for kvrpcpb::RawBatchDeleteRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)
+        store.apply_to_request(self)
     }
 }
 
@@ -439,7 +441,7 @@ impl Shardable for kvrpcpb::RawBatchScanRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)
+        store.apply_to_request(self)
     }
 }
 
@@ -489,7 +491,7 @@ impl Shardable for kvrpcpb::RawChecksumRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)
+        store.apply_to_request(self)
     }
 }
 
@@ -593,6 +595,10 @@ impl Request for RawCoprocessorRequest {
         self.inner.as_any()
     }
 
+    fn context_mut(&mut self) -> &mut kvrpcpb::Context {
+        self.inner.context_mut()
+    }
+
     fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()> {
         self.inner.set_leader(leader)
     }
@@ -611,6 +617,27 @@ impl Request for RawCoprocessorRequest {
 
     fn set_resource_group_name(&mut self, name: &str) {
         self.inner.set_resource_group_name(name);
+    }
+
+    fn set_priority(&mut self, priority: CommandPriority) {
+        self.inner.set_priority(priority);
+    }
+
+    fn set_resource_control_override_priority(&mut self, override_priority: u64) {
+        self.inner
+            .set_resource_control_override_priority(override_priority);
+    }
+
+    fn set_resource_control_penalty(&mut self, penalty: &resource_manager::Consumption) {
+        self.inner.set_resource_control_penalty(penalty);
+    }
+
+    fn set_replica_read(&mut self, replica_read: bool) {
+        self.inner.set_replica_read(replica_read);
+    }
+
+    fn set_stale_read(&mut self, stale_read: bool) {
+        self.inner.set_stale_read(stale_read);
     }
 }
 
@@ -633,7 +660,7 @@ impl Shardable for RawCoprocessorRequest {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        self.set_leader(&store.region_with_leader)?;
+        store.apply_to_request(self)?;
         self.inner.data = (self.data_builder)(
             store.region_with_leader.region.clone(),
             self.inner.ranges.clone(),

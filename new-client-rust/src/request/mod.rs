@@ -138,6 +138,7 @@ mod test {
         #[derive(Clone)]
         struct MockKvRequest {
             test_invoking_count: Arc<AtomicUsize>,
+            context: Option<kvrpcpb::Context>,
         }
 
         #[async_trait]
@@ -152,6 +153,10 @@ mod test {
 
             fn as_any(&self) -> &dyn Any {
                 self
+            }
+
+            fn context_mut(&mut self) -> &mut kvrpcpb::Context {
+                self.context.get_or_insert(kvrpcpb::Context::default())
             }
 
             fn set_leader(&mut self, _: &RegionWithLeader) -> Result<()> {
@@ -196,6 +201,7 @@ mod test {
 
         let request = MockKvRequest {
             test_invoking_count: invoking_count.clone(),
+            context: None,
         };
 
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
