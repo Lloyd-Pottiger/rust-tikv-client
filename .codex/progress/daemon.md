@@ -9,12 +9,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- `client-go` Public API 对齐迭代到“签名级” parity（自动化产物）
-  - 计划：
-    - 在 `.codex/progress/client-go-api-inventory.md` 基础上补齐 receiver+signature（用于 Rust 侧 API 设计与验收）
-    - 生成 parity checklist（Go symbol → Rust item + 状态 + 测试覆盖）
-  - 验证：产物可重复生成（脚本化），且不依赖手工编辑
-
 # 待做工作
 
 - Replica Read / Stale Read / Follower Read（读路径对齐到 client-go v2）
@@ -77,3 +71,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 测试：新增 UT 覆盖 async commit 成功/ fallback；补齐 failpoint 相关 UT 的 `#[serial]`，避免并发 teardown 互相干扰；`cargo test` 通过
   - 关键决策：`max_commit_ts` safe window 暂按 client-go 默认 2s（常量），后续需要做成可配置项
   - 改动文件：`new-client-rust/src/transaction/transaction.rs`、`.codex/progress/daemon.md`
+
+- `client-go` Public API 对齐迭代到“签名级” parity（自动化产物）
+  - 关键产物：
+    - `.codex/progress/client-go-api-inventory.md`：按 package 输出 `type/func/var/const/method` 的签名级清单（含 receiver）
+    - `.codex/progress/parity-checklist.md`：Go→Rust parity checklist 骨架（可逐项填充 Rust path + Tests）
+  - 实现：新增可重复生成的本地工具 `tools/client-go-api-inventory/`（用 `go list -json` + AST 提取，避免手工漏项）
+  - 验证：`go run ./tools/client-go-api-inventory` 可重复生成（重复运行内容稳定）
+  - 改动文件：`tools/client-go-api-inventory/main.go`、`go.mod`、`.codex/progress/client-go-api-inventory.md`、`.codex/progress/parity-checklist.md`、`.codex/progress/daemon.md`
