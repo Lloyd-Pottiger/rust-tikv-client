@@ -9,7 +9,31 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
+- `client-go` Public API 对齐迭代到“签名级” parity（自动化产物）
+  - 计划：
+    - 在 `.codex/progress/client-go-api-inventory.md` 基础上补齐 receiver+signature（用于 Rust 侧 API 设计与验收）
+    - 生成 parity checklist（Go symbol → Rust item + 状态 + 测试覆盖）
+  - 验证：产物可重复生成（脚本化），且不依赖手工编辑
+
 # 待做工作
+
+- Replica Read / Stale Read / Follower Read（读路径对齐到 client-go v2）
+  - 计划：
+    - 梳理 `client-go/kv.ReplicaReadType` + `stale_read` / `replica_read` 在 `kvrpcpb.Context` 的写入点
+    - 设计 Rust 侧 public API（尽量小的 surface）并实现 region peer 选择/回退策略
+    - UT 覆盖：leader/follower/learner/mixed/prefer-leader 的 peer 选择与 context 字段写入
+
+- Resource Control（resource group tag + ResourceControlContext）
+  - 计划：
+    - 对齐 `client-go/tikvrpc.ResourceGroupTagger` + `kvrpcpb::Context.resource_control_context`
+    - Rust 侧提供可组合的 request context builder（Raw/Txn 复用），并在发送前写入 context
+    - UT：校验所有关键 RPC 的 context 字段已写入且可覆盖
+
+- 事务协议补齐：pipelined txn / txn local latches（按 client-go v2 行为）
+  - 计划：
+    - 对齐 `client-go/txnkv/transaction` 下 pipelined 相关实现与公开选项
+    - 评估 Rust 侧实现方式（lock table/latch 抽象 + 任务驱动），并先做最小可用版本
+    - UT：并发冲突/写冲突/回滚路径
 
 # 已完成工作
 
@@ -45,3 +69,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 实现：通过 `store::Request` trait 在请求发送前写入 `kvrpcpb::Context.{request_source,resource_group_tag}`
   - 测试：新增 UT 校验 dispatch 时 context 字段已设置；`cargo test` 通过
   - 改动文件：`new-client-rust/src/store/request.rs`、`new-client-rust/src/raw/client.rs`、`new-client-rust/src/raw/requests.rs`、`.codex/progress/daemon.md`
+
+- 对齐事务 async commit/1PC 的 `min_commit_ts`/`max_commit_ts` 语义 + `min_commit_ts==0` fallback
+  - 实现：
+    - `Committer::prewrite` 写入 `PrewriteRequest.{min_commit_ts,max_commit_ts}`；pessimistic async commit 额外修正 `lock_ttl`（参照 TiDB #33641）
+    - `Committer::commit` 在 prewrite 返回 `min_commit_ts==0` 时自动 fallback 到普通 2PC（从 PD 获取 commit ts）
+  - 测试：新增 UT 覆盖 async commit 成功/ fallback；补齐 failpoint 相关 UT 的 `#[serial]`，避免并发 teardown 互相干扰；`cargo test` 通过
+  - 关键决策：`max_commit_ts` safe window 暂按 client-go 默认 2s（常量），后续需要做成可配置项
+  - 改动文件：`new-client-rust/src/transaction/transaction.rs`、`.codex/progress/daemon.md`

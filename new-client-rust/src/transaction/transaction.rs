@@ -1060,6 +1060,16 @@ const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(MAX_TTL / 2);
 /// each request below 16KB.
 pub const TXN_COMMIT_BATCH_SIZE: u64 = 16 * 1024;
 const TTL_FACTOR: f64 = 6000.0;
+/// The number of logical bits in a PD timestamp (used in its `u64` encoding).
+///
+/// This must match `TimestampExt`'s encoding in `src/timestamp.rs`.
+const PD_TS_LOGICAL_BITS: u64 = 18;
+/// The default safe window for async commit / 1PC max commit TS.
+///
+/// This is aligned with `client-go`'s default `tikv-client.async-commit.safe-window` (2s).
+///
+/// TODO: make it configurable (either via `Config` or `TransactionOptions`), matching client-go.
+const ASYNC_COMMIT_SAFE_WINDOW: Duration = Duration::from_secs(2);
 
 /// Optimistic or pessimistic transaction.
 #[derive(Clone, PartialEq, Debug)]
@@ -1265,6 +1275,42 @@ struct Committer<PdC: PdClient = PdRpcClient> {
 }
 
 impl<PdC: PdClient> Committer<PdC> {
+    fn add_physical_ms(version: u64, delta_ms: u64) -> u64 {
+        version.saturating_add(delta_ms.saturating_mul(1_u64 << PD_TS_LOGICAL_BITS))
+    }
+
+    fn extract_physical_ms(version: u64) -> u64 {
+        version >> PD_TS_LOGICAL_BITS
+    }
+
+    fn min_commit_ts(&self) -> u64 {
+        let start_ts = self.start_version.version();
+        let mut min_commit_ts = start_ts.saturating_add(1);
+        if let TransactionKind::Pessimistic(for_update_ts) = &self.options.kind {
+            min_commit_ts = min_commit_ts.max(for_update_ts.version().saturating_add(1));
+        }
+        min_commit_ts
+    }
+
+    fn max_commit_ts(&self, elapsed_ms: u64) -> u64 {
+        let current_ts = Self::add_physical_ms(self.start_version.version(), elapsed_ms);
+        let safe_window_ms = ASYNC_COMMIT_SAFE_WINDOW.as_millis() as u64;
+        Self::add_physical_ms(current_ts, safe_window_ms)
+    }
+
+    async fn commit_primary_checked(&mut self) -> Result<Timestamp> {
+        match self.commit_primary().await {
+            Ok(commit_ts) => Ok(commit_ts),
+            Err(e) => {
+                if self.undetermined {
+                    Err(Error::UndeterminedError(Box::new(e)))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
     async fn commit(mut self) -> Result<Option<Timestamp>> {
         debug!("committing");
 
@@ -1282,19 +1328,17 @@ impl<PdC: PdClient> Committer<PdC> {
         }
 
         let commit_ts = if self.options.async_commit {
-            // FIXME: min_commit_ts == 0 => fallback to normal 2PC
-            min_commit_ts.unwrap()
-        } else {
-            match self.commit_primary().await {
-                Ok(commit_ts) => commit_ts,
-                Err(e) => {
-                    return if self.undetermined {
-                        Err(Error::UndeterminedError(Box::new(e)))
-                    } else {
-                        Err(e)
-                    };
+            match min_commit_ts {
+                Some(min_commit_ts) => min_commit_ts,
+                None => {
+                    // TiKV returns `min_commit_ts = 0` when async commit can't proceed.
+                    // Fall back to normal 2PC and acquire commit TS from PD.
+                    self.options.async_commit = false;
+                    self.commit_primary_checked().await?
                 }
             }
+        } else {
+            self.commit_primary_checked().await?
         };
         tokio::spawn(self.commit_secondary(commit_ts.clone()).map(|res| {
             if let Err(e) = res {
@@ -1307,33 +1351,47 @@ impl<PdC: PdClient> Committer<PdC> {
     async fn prewrite(&mut self) -> Result<Option<Timestamp>> {
         debug!("prewriting");
         let primary_lock = self.primary_key.clone().unwrap();
-        let elapsed = self.start_instant.elapsed().as_millis() as u64;
-        let lock_ttl = self.calc_txn_lock_ttl();
+        let elapsed_ms = self.start_instant.elapsed().as_millis() as u64;
+        let lock_ttl = self.calc_txn_lock_ttl().saturating_add(elapsed_ms);
         let mut request = match &self.options.kind {
             TransactionKind::Optimistic => new_prewrite_request(
                 self.mutations.clone(),
                 primary_lock,
                 self.start_version.clone(),
-                lock_ttl + elapsed,
+                lock_ttl,
             ),
             TransactionKind::Pessimistic(for_update_ts) => new_pessimistic_prewrite_request(
                 self.mutations.clone(),
                 primary_lock,
                 self.start_version.clone(),
-                lock_ttl + elapsed,
+                lock_ttl,
                 for_update_ts.clone(),
             ),
         };
 
         request.use_async_commit = self.options.async_commit;
         request.try_one_pc = self.options.try_one_pc;
+        request.min_commit_ts = self.min_commit_ts();
         request.secondaries = self
             .mutations
             .iter()
             .filter(|m| self.primary_key.as_ref().unwrap() != m.key.as_ref())
             .map(|m| m.key.clone())
             .collect();
-        // FIXME set max_commit_ts and min_commit_ts
+        if self.options.async_commit || self.options.try_one_pc {
+            request.max_commit_ts = self.max_commit_ts(elapsed_ms);
+
+            // ref: https://github.com/pingcap/tidb/issues/33641
+            // Make sure the TTL satisfies:
+            // `max_commit_ts.physical < start_ts.physical + ttl`.
+            if self.options.async_commit && self.options.is_pessimistic() {
+                let safe_ttl_ms =
+                    Self::extract_physical_ms(request.max_commit_ts)
+                        .saturating_sub(Self::extract_physical_ms(self.start_version.version()))
+                        .saturating_add(1);
+                request.lock_ttl = request.lock_ttl.max(safe_ttl_ms);
+            }
+        }
 
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .resolve_lock(
@@ -1363,7 +1421,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 r.min_commit_ts
             })
             .max()
-            .map(Timestamp::from_version);
+            .and_then(Timestamp::try_from_version);
 
         Ok(min_commit_ts)
     }
@@ -1537,16 +1595,19 @@ mod tests {
     use std::io;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
     use std::sync::Arc;
     use std::time::Duration;
 
     use fail::FailScenario;
+    use serial_test::serial;
 
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb;
     use crate::proto::pdpb::Timestamp;
     use crate::request::Keyspace;
+    use crate::timestamp::TimestampExt;
     use crate::transaction::HeartbeatOption;
     use crate::Transaction;
     use crate::TransactionOptions;
@@ -1555,6 +1616,7 @@ mod tests {
     #[case(Keyspace::Disable)]
     #[case(Keyspace::Enable { keyspace_id: 0 })]
     #[tokio::test]
+    #[serial]
     async fn test_optimistic_heartbeat(#[case] keyspace: Keyspace) -> Result<(), io::Error> {
         let scenario = FailScenario::setup();
         fail::cfg("after-prewrite", "sleep(1500)").unwrap();
@@ -1595,6 +1657,7 @@ mod tests {
     #[case(Keyspace::Disable)]
     #[case(Keyspace::Enable { keyspace_id: 0 })]
     #[tokio::test]
+    #[serial]
     async fn test_pessimistic_heartbeat(#[case] keyspace: Keyspace) -> Result<(), io::Error> {
         let heartbeats = Arc::new(AtomicUsize::new(0));
         let heartbeats_cloned = heartbeats.clone();
@@ -1631,6 +1694,118 @@ mod tests {
             assert!(heartbeat_txn.commit().await.is_ok());
         });
         heartbeat_txn_handle.await.unwrap();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_async_commit_fallback_to_2pc_when_min_commit_ts_is_zero() -> Result<(), io::Error> {
+        let commit_reqs: Arc<Mutex<Vec<Vec<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
+        let prewrite_fields: Arc<Mutex<Option<(u64, u64)>>> = Arc::new(Mutex::new(None));
+
+        let commit_reqs_cloned = commit_reqs.clone();
+        let prewrite_fields_cloned = prewrite_fields.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    *prewrite_fields_cloned.lock().unwrap() =
+                        Some((req.min_commit_ts, req.max_commit_ts));
+                    let mut resp = kvrpcpb::PrewriteResponse::default();
+                    resp.min_commit_ts = 0;
+                    Ok(Box::new(resp) as Box<dyn Any>)
+                } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    commit_reqs_cloned.lock().unwrap().push(req.keys.clone());
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type in async commit fallback test");
+                }
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic().use_async_commit(),
+            Keyspace::Disable,
+        );
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+        txn.put("k2".to_owned(), "v2").await.unwrap();
+        txn.commit().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if commit_reqs.lock().unwrap().len() >= 2 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let commit_reqs = commit_reqs.lock().unwrap().clone();
+        assert_eq!(commit_reqs.len(), 2);
+        assert_eq!(commit_reqs[0].len(), 1);
+        assert_eq!(commit_reqs[1].len(), 1);
+        assert_ne!(commit_reqs[0][0], commit_reqs[1][0]);
+
+        let (min_commit_ts, max_commit_ts) = prewrite_fields.lock().unwrap().unwrap();
+        assert!(min_commit_ts > Timestamp::default().version());
+        assert!(max_commit_ts > 0);
+        let max_commit_ts_physical_ms = max_commit_ts >> super::PD_TS_LOGICAL_BITS;
+        assert!(
+            max_commit_ts_physical_ms >= super::ASYNC_COMMIT_SAFE_WINDOW.as_millis() as u64
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_async_commit_uses_min_commit_ts_when_available() -> Result<(), io::Error> {
+        let expected_min_commit_ts = 42_u64;
+
+        let commit_reqs: Arc<Mutex<Vec<Vec<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
+        let commit_reqs_cloned = commit_reqs.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                    let mut resp = kvrpcpb::PrewriteResponse::default();
+                    resp.min_commit_ts = expected_min_commit_ts;
+                    Ok(Box::new(resp) as Box<dyn Any>)
+                } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    commit_reqs_cloned.lock().unwrap().push(req.keys.clone());
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type in async commit success test");
+                }
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic().use_async_commit(),
+            Keyspace::Disable,
+        );
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+        txn.put("k2".to_owned(), "v2").await.unwrap();
+        let commit_ts = txn.commit().await.unwrap().unwrap();
+        assert_eq!(commit_ts.version(), expected_min_commit_ts);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !commit_reqs.lock().unwrap().is_empty() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let commit_reqs = commit_reqs.lock().unwrap().clone();
+        assert_eq!(commit_reqs.len(), 1);
+        assert_eq!(commit_reqs[0].len(), 2);
+
         Ok(())
     }
 }
