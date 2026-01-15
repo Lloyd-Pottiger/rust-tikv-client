@@ -241,6 +241,25 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.request_context = self.request_context.with_txn_source(txn_source);
     }
 
+    /// Set the assertion level for this transaction.
+    ///
+    /// Assertion level controls whether TiKV enforces `kvrpcpb::Mutation.assertion` checks and
+    /// how strict those checks are.
+    pub fn set_assertion_level(&mut self, assertion_level: kvrpcpb::AssertionLevel) {
+        self.options.assertion_level = assertion_level;
+    }
+
+    /// Set `kvrpcpb::Mutation.assertion` for a key.
+    ///
+    /// The assertion is sent on `PrewriteRequest` and `FlushRequest` mutations (depending on the
+    /// transaction protocol). It takes effect only when the transaction's assertion level is not
+    /// `Off`.
+    pub fn set_key_assertion(&mut self, key: impl Into<Key>, assertion: kvrpcpb::Assertion) {
+        let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
+        self.buffer.set_assertion(key.clone(), assertion);
+        self.pipelined_record_key_change(&key);
+    }
+
     /// Set `kvrpcpb::Context.resource_control_context.override_priority` for all requests sent by this transaction.
     pub fn set_resource_control_override_priority(&mut self, override_priority: u64) {
         self.request_context = self
@@ -857,7 +876,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
 
         let primary_key = self.buffer.get_primary_key();
-        let mutations = self.buffer.to_proto_mutations();
+        let mutations = self.buffer.to_proto_mutations(self.options.assertion_level);
         if mutations.is_empty() {
             assert!(primary_key.is_none());
             return Ok(None);
@@ -959,7 +978,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
 
         let primary_key = self.buffer.get_primary_key();
-        let mutations = self.buffer.to_proto_mutations();
+        let mutations = self.buffer.to_proto_mutations(self.options.assertion_level);
         let mut committer = Committer::new(
             primary_key,
             mutations,
@@ -1199,7 +1218,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let Some(pipelined) = &mut self.pipelined else {
             return;
         };
-        let mutation = self.buffer.mutation_for_key(key);
+        let mutation = self
+            .buffer
+            .mutation_for_key(key, self.options.assertion_level);
         pipelined.record_mutation(key.clone(), mutation);
     }
 
@@ -1216,6 +1237,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 self.keyspace,
                 self.timestamp.version(),
                 primary_key.into(),
+                self.options.assertion_level,
                 &self.request_context,
                 &self.options.retry_options,
             )
@@ -1236,6 +1258,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 self.keyspace,
                 self.timestamp.version(),
                 primary_key_bytes,
+                self.options.assertion_level,
                 &self.request_context,
                 &self.options.retry_options,
             )
@@ -1519,6 +1542,8 @@ pub struct TransactionOptions {
     retry_options: RetryOptions,
     /// What to do if the transaction is dropped without an attempt to commit or rollback
     check_level: CheckLevel,
+    /// Controls TiKV assertion enforcement (`kvrpcpb::Mutation.assertion`).
+    assertion_level: kvrpcpb::AssertionLevel,
     #[doc(hidden)]
     heartbeat_option: HeartbeatOption,
     pipelined: Option<PipelinedTxnOptions>,
@@ -1592,6 +1617,7 @@ impl TransactionOptions {
             stale_read: false,
             retry_options: RetryOptions::default_optimistic(),
             check_level: CheckLevel::Panic,
+            assertion_level: kvrpcpb::AssertionLevel::Off,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
             pipelined: None,
         }
@@ -1608,9 +1634,20 @@ impl TransactionOptions {
             stale_read: false,
             retry_options: RetryOptions::default_pessimistic(),
             check_level: CheckLevel::Panic,
+            assertion_level: kvrpcpb::AssertionLevel::Off,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
             pipelined: None,
         }
+    }
+
+    /// Configure TiKV assertion enforcement for this transaction.
+    #[must_use]
+    pub fn assertion_level(
+        mut self,
+        assertion_level: kvrpcpb::AssertionLevel,
+    ) -> TransactionOptions {
+        self.assertion_level = assertion_level;
+        self
     }
 
     /// Try to use async commit.
@@ -1908,6 +1945,8 @@ impl<PdC: PdClient> Committer<PdC> {
             }
         }
 
+        request.assertion_level = self.options.assertion_level.into();
+
         let request = self.request_context.apply_to(request);
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .with_request_context(self.request_context.clone())
@@ -1919,7 +1958,18 @@ impl<PdC: PdClient> Committer<PdC> {
             .merge(CollectError)
             .extract_error()
             .plan();
-        let response = plan.execute().await?;
+        let response = match plan.execute().await {
+            Ok(response) => response,
+            Err(Error::MultipleKeyErrors(mut errors)) if errors.len() == 1 => {
+                return Err(errors.pop().expect("len checked"));
+            }
+            Err(Error::MultipleKeyErrors(errors)) => return Err(Error::MultipleKeyErrors(errors)),
+            Err(Error::ExtractedErrors(mut errors)) if errors.len() == 1 => {
+                return Err(errors.pop().expect("len checked"));
+            }
+            Err(Error::ExtractedErrors(errors)) => return Err(Error::MultipleKeyErrors(errors)),
+            Err(err) => return Err(err),
+        };
 
         if self.options.try_one_pc && response.len() == 1 {
             if response[0].one_pc_commit_ts == 0 {
@@ -3243,6 +3293,179 @@ mod tests {
         .expect("resolve lock task did not run");
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prewrite_propagates_assertion_level_and_mutation_assertions() {
+        let prewrite_calls = Arc::new(AtomicUsize::new(0));
+        let prewrite_calls_cloned = prewrite_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    prewrite_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.assertion_level, kvrpcpb::AssertionLevel::Strict as i32);
+                    assert_eq!(req.mutations.len(), 1);
+                    assert_eq!(
+                        req.mutations[0].assertion,
+                        kvrpcpb::Assertion::NotExist as i32
+                    );
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                } else if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type in assertion propagation test");
+                }
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .assertion_level(kvrpcpb::AssertionLevel::Strict)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+        txn.set_key_assertion("k1".to_owned(), kvrpcpb::Assertion::NotExist);
+
+        txn.commit().await.unwrap();
+        assert_eq!(prewrite_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_flush_propagates_assertion_level_and_mutation_assertions() {
+        let flush_calls = Arc::new(AtomicUsize::new(0));
+        let flush_calls_cloned = flush_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::FlushRequest>() {
+                    flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.assertion_level, kvrpcpb::AssertionLevel::Strict as i32);
+                    assert_eq!(req.mutations.len(), 1);
+                    assert_eq!(req.mutations[0].assertion, kvrpcpb::Assertion::Exist as i32);
+                    Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>)
+                } else if req.downcast_ref::<kvrpcpb::ResolveLockRequest>().is_some() {
+                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type in pipelined assertion test");
+                }
+            },
+        )));
+
+        let pipelined = crate::transaction::PipelinedTxnOptions::new()
+            .flush_concurrency(1)
+            .resolve_lock_concurrency(1)
+            .min_flush_keys_for_test(1);
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .assertion_level(kvrpcpb::AssertionLevel::Strict)
+                .use_pipelined_txn(pipelined)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        txn.set_key_assertion("k1".to_owned(), kvrpcpb::Assertion::Exist);
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while flush_calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("flush did not run");
+        txn.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_commit_returns_assertion_failed_error_from_prewrite() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() else {
+                    unreachable!("unexpected request type in assertion error test");
+                };
+                assert_eq!(req.assertion_level, kvrpcpb::AssertionLevel::Strict as i32);
+
+                let mut key_error = kvrpcpb::KeyError::default();
+                key_error.assertion_failed = Some(kvrpcpb::AssertionFailed {
+                    start_ts: req.start_version,
+                    key: req.mutations[0].key.clone(),
+                    assertion: kvrpcpb::Assertion::Exist as i32,
+                    existing_start_ts: 0,
+                    existing_commit_ts: 0,
+                });
+
+                let mut resp = kvrpcpb::PrewriteResponse::default();
+                resp.errors.push(key_error);
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .assertion_level(kvrpcpb::AssertionLevel::Strict)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+        txn.set_key_assertion("k1".to_owned(), kvrpcpb::Assertion::Exist);
+
+        let err = txn.commit().await.expect_err("commit must fail");
+        assert!(matches!(err, crate::Error::AssertionFailed(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_commit_returns_key_exists_error_from_prewrite() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() else {
+                    unreachable!("unexpected request type in key-exists error test");
+                };
+                assert_eq!(req.mutations.len(), 1);
+                assert_eq!(req.mutations[0].op, kvrpcpb::Op::Insert as i32);
+
+                let mut key_error = kvrpcpb::KeyError::default();
+                key_error.already_exist = Some(kvrpcpb::AlreadyExist {
+                    key: req.mutations[0].key.clone(),
+                });
+
+                let mut resp = kvrpcpb::PrewriteResponse::default();
+                resp.errors.push(key_error);
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+        txn.insert("k1".to_owned(), "v1").await.unwrap();
+
+        let err = txn.commit().await.expect_err("commit must fail");
+        assert!(matches!(err, crate::Error::KeyExists(_)), "{err:?}");
     }
 
     #[test]

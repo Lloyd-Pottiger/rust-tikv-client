@@ -9,22 +9,31 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- (none)
+- Pessimistic lock ctx/options：补齐 lock request 关键字段与对外配置（对齐 client-go v2）
+  - 计划：
+    - 对齐 `PessimisticLockRequest`：`min_commit_ts/check_existence/lock_only_if_exists/wake_up_mode/return_values/is_first_lock` 等
+    - Rust：补齐 `Transaction::{lock_keys,get_for_update,batch_get_for_update}` 可配置项（可能新增 `LockOptions`/`LockCtx` 风格 builder）
+    - UT：构造 mock server 检查请求字段 + error 透传（含部分成功 keys + rollback）
 
 # 待做工作
 
-- Txn assertions：补齐 `AssertionLevel` 对外 API，并贯穿 prewrite/flush/pessimistic lock
+- Txn buffer flags：补齐 `KeyFlags/FlagsOp` 风格的 per-key 元数据（含 assertion/presumeKNE/locked 等），并与 mutation lowering 对齐
   - 计划：
-    - 对齐 client-go `KVTxn.SetAssertionLevel` 与请求字段（Prewrite/Flush/PessimisticLock）
-    - Rust：新增 Transaction/TransactionOptions assertion 配置；mutation 标记（assert exist/not-exist）与请求透传
-    - UT：构造 assertion failed/insert conflict 等用例，覆盖 error 映射与请求字段
-
-- 维护追踪：回填 `.codex/progress/parity-checklist.md` 已完成项（Rust path + Tests）
-  - 计划：
-    - 从 completed work 反推对应 client-go 导出符号，补 Rust 映射与测试链接
-    - 形成下一批高优先级待做项（按协议/集成点拆分）
+    - 设计 Rust 侧 key-flag 存储结构（避免额外 clone；保证可扩展）
+    - 对齐 client-go flags 语义（至少覆盖 assertion + presumeKNE + prewrite-only）
+    - UT：状态机测试 + prewrite/lock request 字段透传
 
 # 已完成工作
+
+- 维护追踪：回填 `.codex/progress/parity-checklist.md` 已完成项（Rust path + Tests）
+  - 完成：为 error 模型 / RequestContext setters / Txn assertions / pipelined txn / replica read / interceptor 等条目补齐 Rust 映射与测试索引，便于后续按清单推进
+  - 改动文件：`.codex/progress/parity-checklist.md`、`.codex/progress/daemon.md`
+
+- Txn assertions：补齐 `AssertionLevel` 对外 API，并贯穿 prewrite/flush/pessimistic lock
+  - 完成：新增 `TransactionOptions::assertion_level` + `Transaction::set_assertion_level`；新增 `Transaction::set_key_assertion` 并在 Buffer 里持久化 per-key assertion；Prewrite/Flush request 写入 `assertion_level` 且 mutation 透传 assertion（assertion_level=Off 时不发送）
+  - 关键决策：commit/prewrite 返回单个 KeyError 时解包 `MultipleKeyErrors`，避免把“单个 assertion failed/insert conflict”包装成 Vec 影响上层判断
+  - 测试：新增 UT 覆盖 Prewrite/Flush request 字段与 `AssertionFailed/KeyExists` 错误透传；`cd new-client-rust && cargo test` 通过
+  - 改动文件：`new-client-rust/src/transaction/{transaction.rs,buffer.rs,pipelined.rs}`、`.codex/progress/daemon.md`
 
 - 错误模型对齐：`kvrpcpb::KeyError` → 结构化 Rust `Error`
   - 完成：新增 `Error::{WriteConflict,Deadlock,KeyExists,AssertionFailed,Retryable,TxnAborted,CommitTsTooLarge,TxnNotFound}` + `Error::{is_write_conflict,is_deadlock,is_key_exists,is_assertion_failed}`；保留 `Error::KeyError` 作为兜底

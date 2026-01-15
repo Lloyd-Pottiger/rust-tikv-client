@@ -133,6 +133,7 @@ impl PipelinedTxnState {
         keyspace: Keyspace,
         start_ts: u64,
         primary_key: Vec<u8>,
+        assertion_level: kvrpcpb::AssertionLevel,
         request_context: &RequestContext,
         retry_options: &RetryOptions,
     ) -> Result<()> {
@@ -147,6 +148,7 @@ impl PipelinedTxnState {
             keyspace,
             start_ts,
             primary_key,
+            assertion_level,
             request_context,
             retry_options,
         )
@@ -159,6 +161,7 @@ impl PipelinedTxnState {
         keyspace: Keyspace,
         start_ts: u64,
         primary_key: Vec<u8>,
+        assertion_level: kvrpcpb::AssertionLevel,
         request_context: &RequestContext,
         retry_options: &RetryOptions,
     ) -> Result<()> {
@@ -172,6 +175,7 @@ impl PipelinedTxnState {
                 keyspace,
                 start_ts,
                 primary_key.clone(),
+                assertion_level,
                 request_context,
                 retry_options,
             )
@@ -198,6 +202,7 @@ impl PipelinedTxnState {
         keyspace: Keyspace,
         start_ts: u64,
         primary_key: Vec<u8>,
+        assertion_level: kvrpcpb::AssertionLevel,
         request_context: &RequestContext,
         retry_options: &RetryOptions,
     ) -> Result<()> {
@@ -234,19 +239,21 @@ impl PipelinedTxnState {
         let lock_backoff = retry_options.lock_backoff.clone();
         let region_backoff = retry_options.region_backoff.clone();
         let flush_concurrency = self.opts.flush_concurrency_limit();
+        let assertion_level = assertion_level;
 
         let handle = tokio::spawn(async move {
             if cancelled.load(Ordering::Acquire) {
                 return Ok(());
             }
 
-            let request = new_flush_request(
+            let mut request = new_flush_request(
                 mutations,
                 primary_key,
                 start_ts,
                 generation,
                 PIPELINED_LOCK_TTL_MS,
             );
+            request.assertion_level = assertion_level.into();
             let request = pipelined_ctx.apply_to(request);
             let plan = PlanBuilder::new(pd_client, keyspace, request)
                 .with_request_context(pipelined_ctx.clone())

@@ -18,6 +18,7 @@ use super::transaction::Mutation;
 pub struct Buffer {
     primary_key: Option<Key>,
     entry_map: BTreeMap<Key, BufferEntry>,
+    assertions: HashMap<Key, kvrpcpb::Assertion>,
     is_pessimistic: bool,
 }
 
@@ -26,6 +27,7 @@ impl Buffer {
         Buffer {
             primary_key: None,
             entry_map: BTreeMap::new(),
+            assertions: HashMap::new(),
             is_pessimistic,
         }
     }
@@ -256,18 +258,50 @@ impl Buffer {
         };
     }
 
+    pub(crate) fn set_assertion(&mut self, key: Key, assertion: kvrpcpb::Assertion) {
+        if assertion == kvrpcpb::Assertion::None {
+            self.assertions.remove(&key);
+            return;
+        }
+        self.assertions.insert(key, assertion);
+    }
+
+    fn assertion_for_key(&self, key: &Key) -> kvrpcpb::Assertion {
+        self.assertions
+            .get(key)
+            .copied()
+            .unwrap_or(kvrpcpb::Assertion::None)
+    }
+
     /// Converts the buffered mutations to the proto buffer version
-    pub fn to_proto_mutations(&self) -> Vec<kvrpcpb::Mutation> {
+    pub fn to_proto_mutations(
+        &self,
+        assertion_level: kvrpcpb::AssertionLevel,
+    ) -> Vec<kvrpcpb::Mutation> {
         self.entry_map
             .iter()
-            .filter_map(|(key, mutation)| mutation.to_proto_with_key(key))
+            .filter_map(|(key, mutation)| {
+                let mut pb = mutation.to_proto_with_key(key)?;
+                if assertion_level != kvrpcpb::AssertionLevel::Off {
+                    pb.assertion = self.assertion_for_key(key).into();
+                }
+                Some(pb)
+            })
             .collect()
     }
 
-    pub(crate) fn mutation_for_key(&self, key: &Key) -> Option<kvrpcpb::Mutation> {
-        self.entry_map
-            .get(key)
-            .and_then(|entry| entry.to_proto_with_key(key))
+    pub(crate) fn mutation_for_key(
+        &self,
+        key: &Key,
+        assertion_level: kvrpcpb::AssertionLevel,
+    ) -> Option<kvrpcpb::Mutation> {
+        self.entry_map.get(key).and_then(|entry| {
+            let mut pb = entry.to_proto_with_key(key)?;
+            if assertion_level != kvrpcpb::AssertionLevel::Off {
+                pb.assertion = self.assertion_for_key(key).into();
+            }
+            Some(pb)
+        })
     }
 
     pub fn get_write_size(&self) -> usize {

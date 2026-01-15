@@ -126,30 +126,30 @@ Conventions:
 ## error (package error)
 
 ### Types
-- [ ] `type ErrAssertionFailed struct` | Rust:  | Tests:
-- [ ] `type ErrDeadlock struct` | Rust:  | Tests:
+- [x] `type ErrAssertionFailed struct` | Rust: `new-client-rust/src/common/errors.rs (AssertionFailedError, Error::AssertionFailed)` | Tests: `new-client-rust/src/common/errors.rs (key_error_assertion_failed_maps_to_assertion_failed)`
+- [x] `type ErrDeadlock struct` | Rust: `new-client-rust/src/common/errors.rs (DeadlockError, Error::Deadlock)` | Tests: `new-client-rust/src/common/errors.rs (key_error_deadlock_maps_to_deadlock)`
 - [ ] `type ErrEntryTooLarge struct` | Rust:  | Tests:
 - [ ] `type ErrGCTooEarly struct` | Rust:  | Tests:
-- [ ] `type ErrKeyExist struct` | Rust:  | Tests:
+- [x] `type ErrKeyExist struct` | Rust: `new-client-rust/src/common/errors.rs (KeyExistsError, Error::KeyExists)` | Tests: `new-client-rust/src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
 - [ ] `type ErrKeyTooLarge struct` | Rust:  | Tests:
 - [ ] `type ErrLockOnlyIfExistsNoPrimaryKey struct` | Rust:  | Tests:
 - [ ] `type ErrLockOnlyIfExistsNoReturnValue struct` | Rust:  | Tests:
 - [ ] `type ErrPDServerTimeout struct` | Rust:  | Tests:
 - [ ] `type ErrQueryInterruptedWithSignal struct` | Rust:  | Tests:
-- [ ] `type ErrRetryable struct` | Rust:  | Tests:
+- [x] `type ErrRetryable struct` | Rust: `new-client-rust/src/common/errors.rs (Error::Retryable)` | Tests: `new-client-rust/src/common/errors.rs (key_error_retryable_maps_to_retryable)`
 - [ ] `type ErrTokenLimit struct` | Rust:  | Tests:
-- [ ] `type ErrTxnAbortedByGC struct` | Rust:  | Tests:
+- [x] `type ErrTxnAbortedByGC struct` | Rust: `new-client-rust/src/common/errors.rs (Error::TxnAborted)` | Tests: `new-client-rust/src/common/errors.rs (key_error_abort_maps_to_txn_aborted)`
 - [ ] `type ErrTxnTooLarge struct` | Rust:  | Tests:
-- [ ] `type ErrWriteConflict struct` | Rust:  | Tests:
-- [ ] `type ErrWriteConflictInLatch struct` | Rust:  | Tests:
+- [x] `type ErrWriteConflict struct` | Rust: `new-client-rust/src/common/errors.rs (WriteConflictError, Error::WriteConflict)` | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
+- [x] `type ErrWriteConflictInLatch struct` | Rust: `new-client-rust/src/common/errors.rs (Error::WriteConflictInLatch)` | Tests: `new-client-rust/src/transaction/transaction.rs (latch tests)`
 - [ ] `type PDError struct` | Rust:  | Tests:
 
 ### Functions
 - [ ] `func ExtractDebugInfoStrFromKeyErr(keyErr *kvrpcpb.KeyError) string` | Rust:  | Tests:
 - [ ] `func ExtractKeyErr(keyErr *kvrpcpb.KeyError) error` | Rust:  | Tests:
-- [ ] `func IsErrKeyExist(err error) bool` | Rust:  | Tests:
+- [x] `func IsErrKeyExist(err error) bool` | Rust: `new-client-rust/src/common/errors.rs (Error::is_key_exists)` | Tests: `new-client-rust/src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
 - [ ] `func IsErrNotFound(err error) bool` | Rust:  | Tests:
-- [ ] `func IsErrWriteConflict(err error) bool` | Rust:  | Tests:
+- [x] `func IsErrWriteConflict(err error) bool` | Rust: `new-client-rust/src/common/errors.rs (Error::is_write_conflict)` | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
 - [ ] `func IsErrorCommitTSLag(err error) bool` | Rust:  | Tests:
 - [ ] `func IsErrorUndetermined(err error) bool` | Rust:  | Tests:
 - [ ] `func Log(err error)` | Rust:  | Tests:
@@ -189,9 +189,9 @@ Conventions:
 - [ ] `ErrUnknown` | Rust:  | Tests:
 
 ### Methods
-- [ ] `func (d *ErrDeadlock) Error() string` | Rust:  | Tests:
+- [x] `func (d *ErrDeadlock) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for DeadlockError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_deadlock_maps_to_deadlock)`
 - [ ] `func (d *PDError) Error() string` | Rust:  | Tests:
-- [ ] `func (e *ErrAssertionFailed) Error() string` | Rust:  | Tests:
+- [x] `func (e *ErrAssertionFailed) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for AssertionFailedError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_assertion_failed_maps_to_assertion_failed)`
 - [ ] `func (e *ErrEntryTooLarge) Error() string` | Rust:  | Tests:
 - [ ] `func (e *ErrGCTooEarly) Error() string` | Rust:  | Tests:
 - [ ] `func (e *ErrKeyTooLarge) Error() string` | Rust:  | Tests:
@@ -199,13 +199,13 @@ Conventions:
 - [ ] `func (e *ErrLockOnlyIfExistsNoReturnValue) Error() string` | Rust:  | Tests:
 - [ ] `func (e *ErrPDServerTimeout) Error() string` | Rust:  | Tests:
 - [ ] `func (e *ErrTokenLimit) Error() string` | Rust:  | Tests:
-- [ ] `func (e *ErrTxnAbortedByGC) Error() string` | Rust:  | Tests:
+- [x] `func (e *ErrTxnAbortedByGC) Error() string` | Rust: `new-client-rust/src/common/errors.rs (Error::TxnAborted Display)` | Tests: `new-client-rust/src/common/errors.rs (key_error_abort_maps_to_txn_aborted)`
 - [ ] `func (e *ErrTxnTooLarge) Error() string` | Rust:  | Tests:
-- [ ] `func (e *ErrWriteConflictInLatch) Error() string` | Rust:  | Tests:
+- [x] `func (e *ErrWriteConflictInLatch) Error() string` | Rust: `new-client-rust/src/common/errors.rs (Error::WriteConflictInLatch Display)` | Tests: `new-client-rust/src/transaction/latch.rs (tests)`
 - [ ] `func (e ErrQueryInterruptedWithSignal) Error() string` | Rust:  | Tests:
-- [ ] `func (k *ErrKeyExist) Error() string` | Rust:  | Tests:
-- [ ] `func (k *ErrRetryable) Error() string` | Rust:  | Tests:
-- [ ] `func (k *ErrWriteConflict) Error() string` | Rust:  | Tests:
+- [x] `func (k *ErrKeyExist) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for KeyExistsError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
+- [x] `func (k *ErrRetryable) Error() string` | Rust: `new-client-rust/src/common/errors.rs (Error::Retryable Display)` | Tests: `new-client-rust/src/common/errors.rs (key_error_retryable_maps_to_retryable)`
+- [x] `func (k *ErrWriteConflict) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for WriteConflictError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
 
 ## kv (package kv)
 
@@ -222,7 +222,7 @@ Conventions:
 - [ ] `type KeyFlags uint16` | Rust:  | Tests:
 - [ ] `type KeyRange struct` | Rust:  | Tests:
 - [ ] `type LockCtx struct` | Rust:  | Tests:
-- [ ] `type ReplicaReadType byte` | Rust:  | Tests:
+- [x] `type ReplicaReadType byte` | Rust: `new-client-rust/src/replica_read.rs (ReplicaReadType)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_replica_read_peer_selection_and_context_fields)`
 - [ ] `type ReturnedValue struct` | Rust:  | Tests:
 - [ ] `type ValueEntry struct` | Rust:  | Tests:
 - [ ] `type Variables struct` | Rust:  | Tests:
@@ -1285,7 +1285,7 @@ Conventions:
 - [ ] `type KVTxn struct` | Rust:  | Tests:
 - [ ] `type LifecycleHooks struct` | Rust:  | Tests:
 - [ ] `type MemBufferMutationsProbe struct` | Rust:  | Tests:
-- [ ] `type PipelinedTxnOptions struct` | Rust:  | Tests:
+- [x] `type PipelinedTxnOptions struct` | Rust: `new-client-rust/src/transaction/transaction.rs (PipelinedTxnOptions)` | Tests: `new-client-rust/src/transaction/transaction.rs (pipelined tests)`
 - [ ] `type PlainMutation struct` | Rust:  | Tests:
 - [ ] `type PlainMutations struct` | Rust:  | Tests:
 - [ ] `type PrewriteEncounterLockPolicy int` | Rust:  | Tests:
@@ -1314,7 +1314,7 @@ Conventions:
 - [ ] `MutationFlagIsPessimisticLock` | Rust:  | Tests:
 - [ ] `MutationFlagNeedConstraintCheckInPrewrite` | Rust:  | Tests:
 - [ ] `NoResolvePolicy` | Rust:  | Tests:
-- [ ] `PipelinedRequestSource` | Rust:  | Tests:
+- [x] `PipelinedRequestSource` | Rust: `new-client-rust/src/transaction/pipelined.rs (PIPELINED_REQUEST_SOURCE)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_pipelined_flush_commit_and_resolve_locks)`
 - [ ] `TryResolvePolicy` | Rust:  | Tests:
 - [ ] `TsoMaxBackoff` | Rust:  | Tests:
 
@@ -1322,7 +1322,7 @@ Conventions:
 - [ ] `CommitMaxBackoff` | Rust:  | Tests:
 - [ ] `CtxInGetTimestampForCommitKey` | Rust:  | Tests:
 - [ ] `ManagedLockTTL` | Rust:  | Tests:
-- [ ] `MaxPipelinedTxnTTL` | Rust:  | Tests:
+- [x] `MaxPipelinedTxnTTL` | Rust: `new-client-rust/src/transaction/pipelined.rs (PIPELINED_LOCK_TTL_MS)` | Tests: `new-client-rust/src/transaction/transaction.rs (pipelined tests)`
 - [ ] `PrewriteMaxBackoff` | Rust:  | Tests:
 - [ ] `SetSuccess` | Rust:  | Tests:
 
@@ -1401,7 +1401,7 @@ Conventions:
 - [ ] `func (i *AggressiveLockedKeyInfo) Key() []byte` | Rust:  | Tests:
 - [ ] `func (i *AggressiveLockedKeyInfo) Value() kv.ReturnedValue` | Rust:  | Tests:
 - [ ] `func (p PrewriteEncounterLockPolicy) String() string` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) AddRPCInterceptor(it interceptor.RPCInterceptor)` | Rust:  | Tests:
+- [x] `func (txn *KVTxn) AddRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::add_rpc_interceptor)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
 - [ ] `func (txn *KVTxn) BatchGet(ctx context.Context, keys [][]byte, options ...tikv.BatchGetOption) (map[string]tikv.ValueEntry, error)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) CancelAggressiveLocking(ctx context.Context)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) ClearDiskFullOpt()` | Rust:  | Tests:
@@ -1421,7 +1421,7 @@ Conventions:
 - [ ] `func (txn *KVTxn) GetTimestampForCommit(bo *retry.Backoffer, scope string) (_ uint64, err error)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) GetUnionStore() *unionstore.KVUnionStore` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) GetVars() *tikv.Variables` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) InitPipelinedMemDB() error` | Rust:  | Tests:
+- [x] `func (txn *KVTxn) InitPipelinedMemDB() error` | Rust: `new-client-rust/src/transaction/transaction.rs (TransactionOptions::use_pipelined_txn)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_pipelined_flush_commit_and_resolve_locks)`
 - [ ] `func (txn *KVTxn) IsCasualConsistency() bool` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) IsInAggressiveLockingMode() bool` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) IsInAggressiveLockingStage(key []byte) bool` | Rust:  | Tests:
@@ -1439,7 +1439,7 @@ Conventions:
 - [ ] `func (txn *KVTxn) RetryAggressiveLocking(ctx context.Context)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) Rollback() error` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) Set(k []byte, v []byte) error` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) SetAssertionLevel(assertionLevel kvrpcpb.AssertionLevel)` | Rust:  | Tests:
+- [x] `func (txn *KVTxn) SetAssertionLevel(assertionLevel kvrpcpb.AssertionLevel)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_assertion_level, TransactionOptions::assertion_level)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_prewrite_propagates_assertion_level_and_mutation_assertions)`
 - [ ] `func (txn *KVTxn) SetBackgroundGoroutineLifecycleHooks(hooks LifecycleHooks)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetBinlogExecutor(binlog BinlogExecutor)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetCausalConsistency(b bool)` | Rust:  | Tests:
@@ -1447,7 +1447,7 @@ Conventions:
 - [ ] `func (txn *KVTxn) SetCommitTSUpperBoundCheck(f func(commitTS uint64) bool)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetCommitWaitUntilTSO(commitWaitUntilTSO uint64)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetCommitWaitUntilTSOTimeout(val time.Duration)` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) SetDiskFullOpt(level kvrpcpb.DiskFullOpt)` | Rust:  | Tests:
+- [x] `func (txn *KVTxn) SetDiskFullOpt(level kvrpcpb.DiskFullOpt)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_disk_full_opt)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
 - [ ] `func (txn *KVTxn) SetEnable1PC(b bool)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetEnableAsyncCommit(b bool)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetExplicitRequestSourceType(tp string)` | Rust:  | Tests:
@@ -1455,18 +1455,18 @@ Conventions:
 - [ ] `func (txn *KVTxn) SetMemoryFootprintChangeHook(hook func(uint64))` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetPessimistic(b bool)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetPrewriteEncounterLockPolicy(policy PrewriteEncounterLockPolicy)` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) SetPriority(pri txnutil.Priority)` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) SetRPCInterceptor(it interceptor.RPCInterceptor)` | Rust:  | Tests:
+- [x] `func (txn *KVTxn) SetPriority(pri txnutil.Priority)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_priority)` | Tests: `new-client-rust/src/transaction/transaction.rs (request_context tests)`
+- [x] `func (txn *KVTxn) SetRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_rpc_interceptor)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
 - [ ] `func (txn *KVTxn) SetRequestSourceInternal(internal bool)` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) SetRequestSourceType(tp string)` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) SetResourceGroupName(name string)` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) SetResourceGroupTag(tag []byte)` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger)` | Rust:  | Tests:
+- [x] `func (txn *KVTxn) SetRequestSourceType(tp string)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_request_source)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (txn *KVTxn) SetResourceGroupName(name string)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_resource_group_name)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (txn *KVTxn) SetResourceGroupTag(tag []byte)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_resource_group_tag)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (txn *KVTxn) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_resource_group_tagger)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_fixed_resource_group_tag_takes_precedence_over_tagger)`
 - [ ] `func (txn *KVTxn) SetSchemaLeaseChecker(checker SchemaLeaseChecker)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetSchemaVer(schemaVer SchemaVer)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetScope(scope string)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) SetSessionID(sessionID uint64)` | Rust:  | Tests:
-- [ ] `func (txn *KVTxn) SetTxnSource(txnSource uint64)` | Rust:  | Tests:
+- [x] `func (txn *KVTxn) SetTxnSource(txnSource uint64)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_txn_source)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
 - [ ] `func (txn *KVTxn) SetVars(vars *tikv.Variables)` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) Size() int` | Rust:  | Tests:
 - [ ] `func (txn *KVTxn) StartAggressiveLocking()` | Rust:  | Tests:
@@ -1608,14 +1608,14 @@ Conventions:
 - [ ] `func (s *KVSnapshot) SetMatchStoreLabels(labels []*metapb.StoreLabel)` | Rust:  | Tests:
 - [ ] `func (s *KVSnapshot) SetNotFillCache(b bool)` | Rust:  | Tests:
 - [ ] `func (s *KVSnapshot) SetPipelined(ts uint64)` | Rust:  | Tests:
-- [ ] `func (s *KVSnapshot) SetPriority(pri txnutil.Priority)` | Rust:  | Tests:
-- [ ] `func (s *KVSnapshot) SetRPCInterceptor(it interceptor.RPCInterceptor)` | Rust:  | Tests:
+- [x] `func (s *KVSnapshot) SetPriority(pri txnutil.Priority)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_priority)` | Tests: `new-client-rust/src/transaction/transaction.rs (request_context tests)`
+- [x] `func (s *KVSnapshot) SetRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_rpc_interceptor)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
 - [ ] `func (s *KVSnapshot) SetReadReplicaScope(scope string)` | Rust:  | Tests:
 - [ ] `func (s *KVSnapshot) SetReplicaRead(readType kv.ReplicaReadType)` | Rust:  | Tests:
 - [ ] `func (s *KVSnapshot) SetReplicaReadAdjuster(f ReplicaReadAdjuster)` | Rust:  | Tests:
-- [ ] `func (s *KVSnapshot) SetResourceGroupName(name string)` | Rust:  | Tests:
-- [ ] `func (s *KVSnapshot) SetResourceGroupTag(tag []byte)` | Rust:  | Tests:
-- [ ] `func (s *KVSnapshot) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger)` | Rust:  | Tests:
+- [x] `func (s *KVSnapshot) SetResourceGroupName(name string)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_resource_group_name)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (s *KVSnapshot) SetResourceGroupTag(tag []byte)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_resource_group_tag)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (s *KVSnapshot) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_resource_group_tagger)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_fixed_resource_group_tag_takes_precedence_over_tagger)`
 - [ ] `func (s *KVSnapshot) SetRuntimeStats(stats *SnapshotRuntimeStats)` | Rust:  | Tests:
 - [ ] `func (s *KVSnapshot) SetSampleStep(step uint32)` | Rust:  | Tests:
 - [ ] `func (s *KVSnapshot) SetScanBatchSize(batchSize int)` | Rust:  | Tests:
@@ -1902,4 +1902,3 @@ Conventions:
 
 ### Methods
 - (none)
-
