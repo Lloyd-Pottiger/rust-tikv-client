@@ -9,15 +9,21 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- Txn buffer flags：补齐 `KeyFlags/FlagsOp` 风格的 per-key 元数据（含 assertion/presumeKNE/locked 等），并与 mutation lowering 对齐
-  - 计划：
-    - 设计 Rust 侧 key-flag 存储结构（避免额外 clone；保证可扩展）
-    - 对齐 client-go flags 语义（至少覆盖 assertion + presumeKNE + prewrite-only）
-    - UT：状态机测试 + prewrite/lock request 字段透传
-
 # 待做工作
 
+- 整体目标复审：按最新 `client-go/` 代码重新刷新 parity 状态并列出剩余 gap（只保留仍 relevant 的 public API/能力点）
+  - 计划：
+    - 运行/核对 `.codex/progress/client-go-api-inventory.md` 与 `.codex/progress/parity-checklist.md`（必要时重新生成 inventory）
+    - 结合 `new-client-rust` 现状，筛掉已废弃/不需要的项（本仓库“只为最新 tikv”）
+    - 将剩余 gap 拆成可落地的小任务，补齐到本文件「待做工作」，并开始最高优先级项
+
 # 已完成工作
+
+- Txn buffer flags：补齐 `KeyFlags/FlagsOp` per-key 元数据（assertion/presumeKNE/prewrite-only），并与 2PC lowering/commit 对齐
+  - 完成：新增 `KeyFlags(u16)` + `FlagsOp`，Buffer 持久化 flags；`presumeKNE` 影响 Put→Insert 与 pessimistic lock 默认 NotExist；`prewrite-only` 用于 `Op_CheckNotExists` 跳过 commit/rollback
+  - 关键决策：commit-phase keys 仅来自“需 commit 的 keys”（排除 prewrite-only），primary key 在 commit 时按 commit keys 重新选择，避免 prewrite-only key 误当 primary；auto-heartbeat 绑定 commit primary key
+  - 测试：新增 UT 覆盖 Put→Insert、delete-your-writes→CheckNotExists 且不发 CommitRequest、primary 重新选择、pessimistic lock assertion 推断；`cd new-client-rust && cargo test` 通过
+  - 改动文件：`new-client-rust/src/transaction/{key_flags.rs,buffer.rs,transaction.rs,mod.rs}`、`.codex/progress/daemon.md`
 
 - Pessimistic lock ctx/options：补齐 lock request 关键字段与对外配置（对齐 client-go v2）
   - 完成：新增 `LockOptions` 并贯穿 `Transaction::{lock_keys,get_for_update,batch_get_for_update}`（新增 `*_with_options`）；`PessimisticLockRequest` 写入 `wait_timeout/return_values/check_existence/lock_only_if_exists/wake_up_mode/is_first_lock/min_commit_ts`；ForceLock 模式从 `PessimisticLockResponse.results` 解析结果

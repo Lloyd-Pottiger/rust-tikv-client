@@ -37,6 +37,8 @@ use crate::request::TruncateKeyspace;
 use crate::timestamp::TimestampExt;
 use crate::transaction::buffer::Buffer;
 use crate::transaction::lowering::*;
+use crate::transaction::FlagsOp;
+use crate::transaction::KeyFlags;
 use crate::BoundRange;
 use crate::CommandPriority;
 use crate::DiskFullOpt;
@@ -355,6 +357,26 @@ impl<PdC: PdClient> Transaction<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         self.buffer.set_assertion(key.clone(), assertion);
         self.pipelined_record_key_change(&key);
+    }
+
+    /// Apply per-key flag operations.
+    ///
+    /// The flags influence how mutations/requests are lowered (e.g. assertions, insert semantics,
+    /// prewrite-only keys).
+    pub fn update_key_flags(
+        &mut self,
+        key: impl Into<Key>,
+        ops: impl IntoIterator<Item = FlagsOp>,
+    ) {
+        let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
+        self.buffer.update_key_flags(key.clone(), ops);
+        self.pipelined_record_key_change(&key);
+    }
+
+    /// Returns the current flags for a key in this transaction.
+    pub fn key_flags(&self, key: impl Into<Key>) -> KeyFlags {
+        let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
+        self.buffer.key_flags(&key)
     }
 
     /// Set `kvrpcpb::Context.resource_control_context.override_priority` for all requests sent by this transaction.
@@ -1010,19 +1032,85 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
 
         let primary_key = self.buffer.get_primary_key();
-        let mutations = self.buffer.to_proto_mutations(self.options.assertion_level);
-        if mutations.is_empty() {
+        let prewrite_mutations = self.buffer.to_proto_mutations(self.options.assertion_level);
+        if prewrite_mutations.is_empty() {
             assert!(primary_key.is_none());
             return Ok(None);
         }
+        let commit_keys: Vec<Vec<u8>> = prewrite_mutations
+            .iter()
+            .filter(|mutation| {
+                if mutation.op == kvrpcpb::Op::CheckNotExists as i32 {
+                    return false;
+                }
+                let key: &Key = (&mutation.key).into();
+                !self.buffer.key_flags(key).has_prewrite_only()
+            })
+            .map(|mutation| mutation.key.clone())
+            .collect();
+        let primary_key = if commit_keys.is_empty() {
+            primary_key
+        } else {
+            let primary_key =
+                primary_key.filter(|pk| commit_keys.iter().any(|k| pk == <&Key>::from(k)));
+            primary_key.or_else(|| commit_keys.first().map(|k| Key::from(k.clone())))
+        };
 
         if self.options.is_pipelined() {
-            let primary_key = primary_key.expect("primary key should exist for non-empty txn");
+            let primary_key = primary_key.clone().unwrap_or_else(|| {
+                Key::from(
+                    prewrite_mutations
+                        .first()
+                        .expect("checked above")
+                        .key
+                        .clone(),
+                )
+            });
+            if commit_keys.is_empty() {
+                let Some(pipelined) = &mut self.pipelined else {
+                    return Err(Error::InvalidPipelinedTransaction {
+                        message: "pipelined transaction state is missing".to_owned(),
+                    });
+                };
+                pipelined
+                    .flush_all(
+                        self.rpc.clone(),
+                        self.keyspace,
+                        self.timestamp.version(),
+                        Vec::<u8>::from(primary_key),
+                        self.options.assertion_level,
+                        &self.request_context,
+                        &self.options.retry_options,
+                    )
+                    .await?;
+                self.set_status(TransactionStatus::Committed);
+                return Ok(None);
+            }
             let res = self.commit_pipelined(primary_key).await;
             if res.is_ok() {
                 self.set_status(TransactionStatus::Committed);
             }
             return res;
+        }
+
+        if commit_keys.is_empty() {
+            let primary_key = primary_key
+                .or_else(|| prewrite_mutations.first().map(|m| Key::from(m.key.clone())));
+            let mut committer = Committer::new(
+                primary_key,
+                prewrite_mutations,
+                commit_keys,
+                self.timestamp.clone(),
+                self.rpc.clone(),
+                self.options.clone(),
+                self.keyspace,
+                self.buffer.get_write_size() as u64,
+                self.start_instant,
+            );
+            committer.request_context = self.request_context.clone();
+            let _ = committer.prewrite().await?;
+            self.set_status(TransactionStatus::Committed);
+            return Ok(None);
         }
 
         // Match client-go behavior:
@@ -1033,8 +1121,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             match self.txn_latches.clone() {
                 Some(latches) => {
                     let start_ts = self.timestamp.version();
-                    let keys = mutations.iter().map(|m| m.key.clone()).collect::<Vec<_>>();
-                    let guard = latches.lock(start_ts, keys).await;
+                    let guard = latches.lock(start_ts, commit_keys.clone()).await;
                     if guard.is_stale() {
                         return Err(Error::WriteConflictInLatch { start_ts });
                     }
@@ -1046,11 +1133,17 @@ impl<PdC: PdClient> Transaction<PdC> {
             None
         };
 
-        self.start_auto_heartbeat().await;
+        self.start_auto_heartbeat(
+            primary_key
+                .clone()
+                .expect("primary key must exist when committing"),
+        )
+        .await;
 
         let mut committer = Committer::new(
             primary_key,
-            mutations,
+            prewrite_mutations,
+            commit_keys,
             self.timestamp.clone(),
             self.rpc.clone(),
             self.options.clone(),
@@ -1112,10 +1205,26 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
 
         let primary_key = self.buffer.get_primary_key();
-        let mutations = self.buffer.to_proto_mutations(self.options.assertion_level);
+        let prewrite_mutations = self.buffer.to_proto_mutations(self.options.assertion_level);
+        let commit_keys: Vec<Vec<u8>> = prewrite_mutations
+            .iter()
+            .filter(|mutation| {
+                if mutation.op == kvrpcpb::Op::CheckNotExists as i32 {
+                    return false;
+                }
+                let key: &Key = (&mutation.key).into();
+                !self.buffer.key_flags(key).has_prewrite_only()
+            })
+            .map(|mutation| mutation.key.clone())
+            .collect();
+        if commit_keys.is_empty() {
+            self.set_status(TransactionStatus::Rolledback);
+            return Ok(());
+        }
         let mut committer = Committer::new(
             primary_key,
-            mutations,
+            prewrite_mutations,
+            commit_keys,
             self.timestamp.clone(),
             self.rpc.clone(),
             self.options.clone(),
@@ -1233,20 +1342,35 @@ impl<PdC: PdClient> Transaction<PdC> {
             "`pessimistic_lock` is only valid to use with pessimistic transactions"
         );
 
-        let keys: Vec<_> = keys.into_iter().collect();
-        if keys.is_empty() {
+        let mut locks: Vec<(Key, kvrpcpb::Assertion)> = keys
+            .into_iter()
+            .map(|lock| {
+                let assertion = lock.assertion();
+                let key = lock.key();
+                (key, assertion)
+            })
+            .collect();
+        if locks.is_empty() {
             return Ok(vec![]);
         }
 
         if options.wake_up_mode == kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock
-            && keys.len() != 1
+            && locks.len() != 1
         {
             return Err(Error::InvalidPessimisticLockOptions {
                 message: "WakeUpModeForceLock only supports a single key per request".to_owned(),
             });
         }
 
-        let first_key = keys[0].clone().key();
+        for (key, assertion) in &mut locks {
+            if *assertion == kvrpcpb::Assertion::None
+                && self.buffer.key_flags(key).has_presume_key_not_exists()
+            {
+                *assertion = kvrpcpb::Assertion::NotExist;
+            }
+        }
+
+        let first_key = locks[0].0.clone();
         // we do not set the primary key here, because pessimistic lock request
         // can fail, in which case the keys may not be part of the transaction.
         let primary_lock = self
@@ -1255,9 +1379,9 @@ impl<PdC: PdClient> Transaction<PdC> {
             .unwrap_or_else(|| first_key.clone());
         let for_update_ts = self.rpc.clone().get_timestamp().await?;
         self.options.push_for_update_ts(for_update_ts.clone());
-        let is_first_lock = !self.has_pessimistic_lock && keys.len() == 1;
+        let is_first_lock = !self.has_pessimistic_lock && locks.len() == 1;
         let request = new_pessimistic_lock_request(
-            keys.clone().into_iter(),
+            locks.clone().into_iter(),
             primary_lock,
             self.timestamp.clone(),
             MAX_TTL,
@@ -1305,10 +1429,15 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.buffer.primary_key_or(&first_key);
             self.has_pessimistic_lock = true;
 
-            self.start_auto_heartbeat().await;
+            self.start_auto_heartbeat(
+                self.buffer
+                    .get_primary_key()
+                    .expect("Primary key should exist"),
+            )
+            .await;
 
-            for key in keys {
-                self.buffer.lock(key.key());
+            for (key, _) in locks {
+                self.buffer.lock(key);
             }
 
             pairs
@@ -1531,7 +1660,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         Ok(())
     }
 
-    async fn start_auto_heartbeat(&mut self) {
+    async fn start_auto_heartbeat(&mut self, primary_key: Key) {
         debug!("starting auto_heartbeat");
         if !self.options.heartbeat_option.is_auto_heartbeat() || self.is_heartbeat_started {
             return;
@@ -1539,10 +1668,6 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.is_heartbeat_started = true;
 
         let status = self.status.clone();
-        let primary_key = self
-            .buffer
-            .get_primary_key()
-            .expect("Primary key should exist");
         let start_ts = self.timestamp.clone();
         let region_backoff = self.options.retry_options.region_backoff.clone();
         let rpc = self.rpc.clone();
@@ -1968,7 +2093,8 @@ impl Mutation {
 #[derive(new)]
 struct Committer<PdC: PdClient = PdRpcClient> {
     primary_key: Option<Key>,
-    mutations: Vec<kvrpcpb::Mutation>,
+    prewrite_mutations: Vec<kvrpcpb::Mutation>,
+    commit_keys: Vec<Vec<u8>>,
     start_version: Timestamp,
     rpc: Arc<PdC>,
     options: TransactionOptions,
@@ -2062,13 +2188,13 @@ impl<PdC: PdClient> Committer<PdC> {
         let lock_ttl = self.calc_txn_lock_ttl().saturating_add(elapsed_ms);
         let mut request = match &self.options.kind {
             TransactionKind::Optimistic => new_prewrite_request(
-                self.mutations.clone(),
+                self.prewrite_mutations.clone(),
                 primary_lock,
                 self.start_version.clone(),
                 lock_ttl,
             ),
             TransactionKind::Pessimistic(for_update_ts) => new_pessimistic_prewrite_request(
-                self.mutations.clone(),
+                self.prewrite_mutations.clone(),
                 primary_lock,
                 self.start_version.clone(),
                 lock_ttl,
@@ -2079,11 +2205,15 @@ impl<PdC: PdClient> Committer<PdC> {
         request.use_async_commit = self.options.async_commit;
         request.try_one_pc = self.options.try_one_pc;
         request.min_commit_ts = self.min_commit_ts();
+        let primary_key = self
+            .primary_key
+            .as_ref()
+            .expect("prewrite requires primary key");
         request.secondaries = self
-            .mutations
+            .commit_keys
             .iter()
-            .filter(|m| self.primary_key.as_ref().unwrap() != m.key.as_ref())
-            .map(|m| m.key.clone())
+            .filter(|key| primary_key != <&Key>::from(*key))
+            .cloned()
             .collect();
         if self.options.async_commit || self.options.try_one_pc {
             request.max_commit_ts = self.max_commit_ts(elapsed_ms);
@@ -2126,11 +2256,16 @@ impl<PdC: PdClient> Committer<PdC> {
         };
 
         if self.options.try_one_pc && response.len() == 1 {
-            if response[0].one_pc_commit_ts == 0 {
-                return Err(Error::OnePcFailure);
+            if response[0].one_pc_commit_ts != 0 {
+                return Ok(Timestamp::try_from_version(response[0].one_pc_commit_ts));
             }
-
-            return Ok(Timestamp::try_from_version(response[0].one_pc_commit_ts));
+            if response[0].min_commit_ts != 0 {
+                return Err(Error::StringError(
+                    "invalid PrewriteResponse: min_commit_ts must be 0 when 1PC falls back to 2PC"
+                        .to_owned(),
+                ));
+            }
+            self.options.async_commit = false;
         }
 
         self.options.try_one_pc = false;
@@ -2183,20 +2318,20 @@ impl<PdC: PdClient> Committer<PdC> {
 
     async fn commit_secondary(self, commit_version: Timestamp) -> Result<()> {
         debug!("committing secondary");
-        let mutations_len = self.mutations.len();
-        let primary_only = mutations_len == 1;
+        let keys_len = self.commit_keys.len();
+        let primary_only = keys_len == 1;
         #[cfg(not(feature = "integration-tests"))]
-        let mutations = self.mutations.into_iter();
+        let keys = self.commit_keys.into_iter();
 
         #[cfg(feature = "integration-tests")]
-        let mutations = self.mutations.into_iter().take({
+        let keys = self.commit_keys.into_iter().take({
             // Truncate mutation to a new length as `percent/100`.
             // Return error when truncate to zero.
             let fp = || -> Result<usize> {
-                let mut new_len = mutations_len;
+                let mut new_len = keys_len;
                 fail_point!("before-commit-secondary", |percent| {
                     let percent = percent.unwrap().parse::<usize>().unwrap();
-                    new_len = mutations_len * percent / 100;
+                    new_len = keys_len * percent / 100;
                     if new_len == 0 {
                         Err(Error::StringError(
                             "failpoint: before-commit-secondary return error".to_owned(),
@@ -2204,7 +2339,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     } else {
                         debug!(
                             "failpoint: before-commit-secondary truncate mutation {} -> {}",
-                            mutations_len, new_len
+                            keys_len, new_len
                         );
                         Ok(new_len)
                     }
@@ -2215,15 +2350,13 @@ impl<PdC: PdClient> Committer<PdC> {
         });
 
         let req = if self.options.async_commit {
-            let keys = mutations.map(|m| m.key.into());
+            let keys = keys.map(Key::from);
             new_commit_request(keys, self.start_version, commit_version)
         } else if primary_only {
             return Ok(());
         } else {
             let primary_key = self.primary_key.unwrap();
-            let keys = mutations
-                .map(|m| m.key.into())
-                .filter(|key| &primary_key != key);
+            let keys = keys.map(Key::from).filter(|key| &primary_key != key);
             new_commit_request(keys, self.start_version, commit_version)
         };
         let req = self.request_context.apply_to(req);
@@ -2239,13 +2372,10 @@ impl<PdC: PdClient> Committer<PdC> {
 
     async fn rollback(self) -> Result<()> {
         debug!("rolling back");
-        if self.options.kind == TransactionKind::Optimistic && self.mutations.is_empty() {
+        if self.commit_keys.is_empty() {
             return Ok(());
         }
-        let keys = self
-            .mutations
-            .into_iter()
-            .map(|mutation| mutation.key.into());
+        let keys = self.commit_keys.into_iter().map(Key::from);
         match self.options.kind {
             TransactionKind::Optimistic => {
                 let req = new_batch_rollback_request(keys, self.start_version);
@@ -2346,6 +2476,7 @@ mod tests {
     use crate::resource_manager;
     use crate::store::{RegionStore, Store};
     use crate::timestamp::TimestampExt;
+    use crate::transaction::FlagsOp;
     use crate::transaction::HeartbeatOption;
     use crate::transaction::LockOptions;
     use crate::CommandPriority;
@@ -2496,6 +2627,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(lock_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_infers_not_exist_assertion_from_presume_key_not_exists() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() else {
+                    unreachable!("unexpected request type in presumeKNE lock test");
+                };
+                assert_eq!(req.mutations.len(), 1);
+                assert_eq!(
+                    req.mutations[0].assertion,
+                    kvrpcpb::Assertion::NotExist as i32
+                );
+                Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        txn.update_key_flags(vec![1u8], [FlagsOp::SetPresumeKeyNotExists]);
+        txn.lock_keys_with_options(vec![vec![1u8]], LockOptions::new())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3691,6 +3855,129 @@ mod tests {
 
         txn.commit().await.unwrap();
         assert_eq!(prewrite_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_prewrite_put_becomes_insert_with_presume_key_not_exists() {
+        let prewrite_calls = Arc::new(AtomicUsize::new(0));
+        let prewrite_calls_cloned = prewrite_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    prewrite_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.mutations.len(), 1);
+                    assert_eq!(req.mutations[0].op, kvrpcpb::Op::Insert as i32);
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                } else if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type in presumeKNE test");
+                }
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+        txn.update_key_flags("k1".to_owned(), [FlagsOp::SetPresumeKeyNotExists]);
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert_eq!(prewrite_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_delete_your_writes_presume_key_not_exists_is_prewrite_only_and_skips_commit() {
+        let prewrite_calls = Arc::new(AtomicUsize::new(0));
+        let prewrite_calls_cloned = prewrite_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    prewrite_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.mutations.len(), 1);
+                    assert_eq!(req.mutations[0].op, kvrpcpb::Op::CheckNotExists as i32);
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                } else if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    panic!("unexpected CommitRequest for prewrite-only transaction");
+                } else {
+                    unreachable!("unexpected request type in prewrite-only test");
+                }
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        txn.update_key_flags("k1".to_owned(), [FlagsOp::SetPresumeKeyNotExists]);
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+        txn.delete("k1".to_owned()).await.unwrap();
+
+        assert!(txn.key_flags("k1".to_owned()).has_prewrite_only());
+
+        let res = txn.commit().await.unwrap();
+        assert!(res.is_none());
+
+        assert_eq!(prewrite_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_commit_reselects_primary_key_when_first_mutation_is_prewrite_only() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    assert_eq!(req.primary_lock, b"k2".to_vec());
+                    assert_eq!(req.mutations.len(), 2);
+                    assert!(req.mutations.iter().any(|m| {
+                        m.key == b"k1".to_vec() && m.op == kvrpcpb::Op::CheckNotExists as i32
+                    }));
+                    assert!(req
+                        .mutations
+                        .iter()
+                        .any(|m| m.key == b"k2".to_vec() && m.op == kvrpcpb::Op::Put as i32));
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    assert_eq!(req.keys, vec![b"k2".to_vec()]);
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type in primary reselect test");
+                }
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        txn.update_key_flags("k1".to_owned(), [FlagsOp::SetPresumeKeyNotExists]);
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+        txn.delete("k1".to_owned()).await.unwrap();
+        txn.put("k2".to_owned(), "v2").await.unwrap();
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]

@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use crate::proto::kvrpcpb;
+use crate::transaction::FlagsOp;
+use crate::transaction::KeyFlags;
 use crate::BoundRange;
 use crate::Key;
 use crate::KvPair;
@@ -18,7 +20,7 @@ use super::transaction::Mutation;
 pub struct Buffer {
     primary_key: Option<Key>,
     entry_map: BTreeMap<Key, BufferEntry>,
-    assertions: HashMap<Key, kvrpcpb::Assertion>,
+    key_flags: HashMap<Key, KeyFlags>,
     is_pessimistic: bool,
 }
 
@@ -27,7 +29,7 @@ impl Buffer {
         Buffer {
             primary_key: None,
             entry_map: BTreeMap::new(),
-            assertions: HashMap::new(),
+            key_flags: HashMap::new(),
             is_pessimistic,
         }
     }
@@ -237,15 +239,18 @@ impl Buffer {
     /// Mark a value as deleted.
     pub fn delete(&mut self, key: Key) {
         let is_pessimistic = self.is_pessimistic;
+        let presume_key_not_exists = self.key_flags(&key).has_presume_key_not_exists();
         let mut entry = self.entry_map.entry(key.clone());
 
         match entry {
             Entry::Occupied(ref mut o)
                 if !is_pessimistic
                     && (matches!(o.get(), BufferEntry::Insert(_))
-                        || matches!(o.get(), BufferEntry::CheckNotExist)) =>
+                        || matches!(o.get(), BufferEntry::CheckNotExist)
+                        || (matches!(o.get(), BufferEntry::Put(_)) && presume_key_not_exists)) =>
             {
                 o.insert(BufferEntry::CheckNotExist);
+                self.update_key_flags(key, [FlagsOp::SetPrewriteOnly]);
             }
             _ => self.insert_entry(key, BufferEntry::Del),
         }
@@ -258,19 +263,38 @@ impl Buffer {
         };
     }
 
-    pub(crate) fn set_assertion(&mut self, key: Key, assertion: kvrpcpb::Assertion) {
-        if assertion == kvrpcpb::Assertion::None {
-            self.assertions.remove(&key);
-            return;
+    pub(crate) fn update_key_flags(&mut self, key: Key, ops: impl IntoIterator<Item = FlagsOp>) {
+        let origin = self.key_flags.get(&key).copied().unwrap_or_default();
+        let next = ops.into_iter().fold(origin, KeyFlags::apply);
+        if next == KeyFlags::default() {
+            self.key_flags.remove(&key);
+        } else {
+            self.key_flags.insert(key, next);
         }
-        self.assertions.insert(key, assertion);
+    }
+
+    pub(crate) fn key_flags(&self, key: &Key) -> KeyFlags {
+        self.key_flags.get(key).copied().unwrap_or_default()
+    }
+
+    pub(crate) fn set_assertion(&mut self, key: Key, assertion: kvrpcpb::Assertion) {
+        let op = match assertion {
+            kvrpcpb::Assertion::Exist => FlagsOp::SetAssertExist,
+            kvrpcpb::Assertion::NotExist => FlagsOp::SetAssertNotExist,
+            _ => FlagsOp::SetAssertNone,
+        };
+        self.update_key_flags(key, [op]);
     }
 
     fn assertion_for_key(&self, key: &Key) -> kvrpcpb::Assertion {
-        self.assertions
-            .get(key)
-            .copied()
-            .unwrap_or(kvrpcpb::Assertion::None)
+        let flags = self.key_flags(key);
+        if flags.has_assert_exist() {
+            return kvrpcpb::Assertion::Exist;
+        }
+        if flags.has_assert_not_exist() {
+            return kvrpcpb::Assertion::NotExist;
+        }
+        kvrpcpb::Assertion::None
     }
 
     /// Converts the buffered mutations to the proto buffer version
@@ -282,6 +306,10 @@ impl Buffer {
             .iter()
             .filter_map(|(key, mutation)| {
                 let mut pb = mutation.to_proto_with_key(key)?;
+                let flags = self.key_flags(key);
+                if pb.op == kvrpcpb::Op::Put as i32 && flags.has_presume_key_not_exists() {
+                    pb.op = kvrpcpb::Op::Insert as i32;
+                }
                 if assertion_level != kvrpcpb::AssertionLevel::Off {
                     pb.assertion = self.assertion_for_key(key).into();
                 }
@@ -297,6 +325,10 @@ impl Buffer {
     ) -> Option<kvrpcpb::Mutation> {
         self.entry_map.get(key).and_then(|entry| {
             let mut pb = entry.to_proto_with_key(key)?;
+            let flags = self.key_flags(key);
+            if pb.op == kvrpcpb::Op::Put as i32 && flags.has_presume_key_not_exists() {
+                pb.op = kvrpcpb::Op::Insert as i32;
+            }
             if assertion_level != kvrpcpb::AssertionLevel::Off {
                 pb.assertion = self.assertion_for_key(key).into();
             }
@@ -348,6 +380,12 @@ impl Buffer {
         let key = key.into();
         if !matches!(entry, BufferEntry::Cached(_) | BufferEntry::CheckNotExist) {
             self.primary_key.get_or_insert_with(|| key.clone());
+        }
+        if matches!(
+            entry,
+            BufferEntry::Put(_) | BufferEntry::Del | BufferEntry::Insert(_)
+        ) {
+            self.update_key_flags(key.clone(), [FlagsOp::DelPrewriteOnly]);
         }
         self.entry_map.insert(key, entry);
     }

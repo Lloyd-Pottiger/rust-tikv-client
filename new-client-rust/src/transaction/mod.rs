@@ -9,6 +9,8 @@
 //! **Warning:** It is not advisable to use both raw and transactional functionality in the same keyspace.
 
 pub use client::Client;
+pub use key_flags::FlagsOp;
+pub use key_flags::KeyFlags;
 pub(crate) use latch::LatchesScheduler;
 pub(crate) use lock::resolve_locks;
 pub(crate) use lock::HasLocks;
@@ -24,6 +26,7 @@ pub use transaction::TransactionOptions;
 
 mod buffer;
 mod client;
+mod key_flags;
 mod latch;
 mod lock;
 pub mod lowering;
