@@ -108,6 +108,7 @@ pub mod transaction;
 mod common;
 mod compat;
 mod config;
+mod disk_full_opt;
 #[doc(hidden)]
 pub mod kvrpcpb {
     pub use crate::proto::kvrpcpb::*;
@@ -181,6 +182,8 @@ pub use crate::transaction::Snapshot;
 pub use crate::transaction::Transaction;
 #[doc(inline)]
 pub use crate::transaction::TransactionOptions;
+#[doc(inline)]
+pub use disk_full_opt::DiskFullOpt;
 #[doc(inline)]
 pub use priority::CommandPriority;
 #[doc(inline)]

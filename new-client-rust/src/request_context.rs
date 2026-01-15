@@ -6,6 +6,7 @@ use crate::interceptor::RpcInterceptorChain;
 use crate::proto::resource_manager;
 use crate::store::Request;
 use crate::CommandPriority;
+use crate::DiskFullOpt;
 
 /// Per-request `kvrpcpb::Context` fields injected into every outgoing TiKV RPC.
 ///
@@ -17,6 +18,8 @@ pub(crate) struct RequestContext {
     resource_group_tag: Option<Arc<[u8]>>,
     resource_group_name: Option<Arc<str>>,
     priority: Option<CommandPriority>,
+    disk_full_opt: Option<DiskFullOpt>,
+    txn_source: Option<u64>,
     resource_control_penalty: Option<Arc<resource_manager::Consumption>>,
     resource_control_override_priority: Option<u64>,
     resource_group_tagger: Option<ResourceGroupTagger>,
@@ -30,6 +33,8 @@ impl Default for RequestContext {
             resource_group_tag: None,
             resource_group_name: None,
             priority: None,
+            disk_full_opt: None,
+            txn_source: None,
             resource_control_penalty: None,
             resource_control_override_priority: None,
             resource_group_tagger: None,
@@ -48,6 +53,8 @@ impl fmt::Debug for RequestContext {
             )
             .field("resource_group_name", &self.resource_group_name.as_deref())
             .field("priority", &self.priority)
+            .field("disk_full_opt", &self.disk_full_opt)
+            .field("txn_source", &self.txn_source)
             .field(
                 "resource_control_penalty",
                 &self.resource_control_penalty.is_some(),
@@ -91,6 +98,20 @@ impl RequestContext {
     pub(crate) fn with_priority(&self, priority: CommandPriority) -> Self {
         let mut cloned = self.clone();
         cloned.priority = Some(priority);
+        cloned
+    }
+
+    #[must_use]
+    pub(crate) fn with_disk_full_opt(&self, disk_full_opt: DiskFullOpt) -> Self {
+        let mut cloned = self.clone();
+        cloned.disk_full_opt = Some(disk_full_opt);
+        cloned
+    }
+
+    #[must_use]
+    pub(crate) fn with_txn_source(&self, txn_source: u64) -> Self {
+        let mut cloned = self.clone();
+        cloned.txn_source = Some(txn_source);
         cloned
     }
 
@@ -163,6 +184,12 @@ impl RequestContext {
         }
         if let Some(priority) = self.priority {
             request.set_priority(priority);
+        }
+        if let Some(disk_full_opt) = self.disk_full_opt {
+            request.set_disk_full_opt(disk_full_opt);
+        }
+        if let Some(txn_source) = self.txn_source {
+            request.set_txn_source(txn_source);
         }
         if let Some(override_priority) = self.resource_control_override_priority {
             request.set_resource_control_override_priority(override_priority);

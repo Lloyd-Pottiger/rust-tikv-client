@@ -39,6 +39,7 @@ use crate::transaction::buffer::Buffer;
 use crate::transaction::lowering::*;
 use crate::BoundRange;
 use crate::CommandPriority;
+use crate::DiskFullOpt;
 use crate::Error;
 use crate::Key;
 use crate::KvPair;
@@ -228,6 +229,16 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Set `kvrpcpb::Context.priority` for all requests sent by this transaction.
     pub fn set_priority(&mut self, priority: CommandPriority) {
         self.request_context = self.request_context.with_priority(priority);
+    }
+
+    /// Set `kvrpcpb::Context.disk_full_opt` for all requests sent by this transaction.
+    pub fn set_disk_full_opt(&mut self, disk_full_opt: DiskFullOpt) {
+        self.request_context = self.request_context.with_disk_full_opt(disk_full_opt);
+    }
+
+    /// Set `kvrpcpb::Context.txn_source` for all requests sent by this transaction.
+    pub fn set_txn_source(&mut self, txn_source: u64) {
+        self.request_context = self.request_context.with_txn_source(txn_source);
     }
 
     /// Set `kvrpcpb::Context.resource_control_context.override_priority` for all requests sent by this transaction.
@@ -2369,16 +2380,22 @@ mod tests {
         let expected_source = "txn-ut";
         let expected_tag = b"tag-ut".to_vec();
         let expected_group_name = "rg-ut";
+        let expected_disk_full_opt = crate::DiskFullOpt::AllowedOnAlreadyFull;
+        let expected_txn_source = 42_u64;
 
         let hook_source = expected_source.to_owned();
         let hook_tag = expected_tag.clone();
         let hook_group_name = expected_group_name.to_owned();
+        let hook_disk_full_opt = expected_disk_full_opt;
+        let hook_txn_source = expected_txn_source;
 
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
                     let ctx = req.context.as_ref().expect("missing context on GetRequest");
                     assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
+                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.txn_source, hook_txn_source);
                     let mut resp = kvrpcpb::GetResponse::default();
                     resp.not_found = true;
                     Ok(Box::new(resp) as Box<dyn Any>)
@@ -2388,6 +2405,8 @@ mod tests {
                         .as_ref()
                         .expect("missing context on PrewriteRequest");
                     assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
+                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.txn_source, hook_txn_source);
                     Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
                     let ctx = req
@@ -2395,6 +2414,8 @@ mod tests {
                         .as_ref()
                         .expect("missing context on CommitRequest");
                     assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
+                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.txn_source, hook_txn_source);
                     Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
                 } else {
                     unreachable!("unexpected request type in request context test");
@@ -2405,7 +2426,9 @@ mod tests {
         let request_context = RequestContext::default()
             .with_request_source(expected_source)
             .with_resource_group_tag(expected_tag)
-            .with_resource_group_name(expected_group_name);
+            .with_resource_group_name(expected_group_name)
+            .with_disk_full_opt(expected_disk_full_opt)
+            .with_txn_source(expected_txn_source);
 
         let mut txn = Transaction::new(
             Timestamp::default(),
@@ -3056,11 +3079,15 @@ mod tests {
     #[tokio::test]
     async fn test_pipelined_flush_commit_and_resolve_locks() -> Result<(), io::Error> {
         let expected_source = "external_pdml";
+        let expected_disk_full_opt = crate::DiskFullOpt::AllowedOnAlreadyFull;
+        let expected_txn_source = 42_u64;
         let flush_generations = Arc::new(Mutex::new(Vec::<u64>::new()));
         let flush_generations_cloned = flush_generations.clone();
         let resolve_calls = Arc::new(AtomicUsize::new(0));
         let resolve_calls_cloned = resolve_calls.clone();
 
+        let hook_disk_full_opt = expected_disk_full_opt;
+        let hook_txn_source = expected_txn_source;
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::FlushRequest>() {
@@ -3070,6 +3097,8 @@ mod tests {
                         .as_ref()
                         .expect("missing context on FlushRequest");
                     assert_eq!(ctx.request_source, expected_source);
+                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.txn_source, hook_txn_source);
                     flush_generations_cloned
                         .lock()
                         .unwrap()
@@ -3084,6 +3113,8 @@ mod tests {
                         .as_ref()
                         .expect("missing context on ResolveLockRequest");
                     assert_eq!(ctx.request_source, expected_source);
+                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.txn_source, hook_txn_source);
                     resolve_calls_cloned.fetch_add(1, Ordering::SeqCst);
                     Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
                 } else {
@@ -3105,7 +3136,9 @@ mod tests {
                 .heartbeat_option(HeartbeatOption::NoHeartbeat)
                 .drop_check(crate::CheckLevel::None),
             Keyspace::Disable,
-            RequestContext::default(),
+            RequestContext::default()
+                .with_disk_full_opt(expected_disk_full_opt)
+                .with_txn_source(expected_txn_source),
             None,
         );
 
@@ -3129,11 +3162,15 @@ mod tests {
     #[tokio::test]
     async fn test_pipelined_rollback_resolves_locks() -> Result<(), io::Error> {
         let expected_source = "external_pdml";
+        let expected_disk_full_opt = crate::DiskFullOpt::AllowedOnAlreadyFull;
+        let expected_txn_source = 42_u64;
         let flush_calls = Arc::new(AtomicUsize::new(0));
         let flush_calls_cloned = flush_calls.clone();
         let resolve_calls = Arc::new(AtomicUsize::new(0));
         let resolve_calls_cloned = resolve_calls.clone();
 
+        let hook_disk_full_opt = expected_disk_full_opt;
+        let hook_txn_source = expected_txn_source;
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::FlushRequest>() {
@@ -3142,6 +3179,8 @@ mod tests {
                         .as_ref()
                         .expect("missing context on FlushRequest");
                     assert_eq!(ctx.request_source, expected_source);
+                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.txn_source, hook_txn_source);
                     flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
                     Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>)
                 } else if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
@@ -3154,6 +3193,8 @@ mod tests {
                         .as_ref()
                         .expect("missing context on ResolveLockRequest");
                     assert_eq!(ctx.request_source, expected_source);
+                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.txn_source, hook_txn_source);
                     resolve_calls_cloned.fetch_add(1, Ordering::SeqCst);
                     Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
                 } else {
@@ -3175,7 +3216,9 @@ mod tests {
                 .heartbeat_option(HeartbeatOption::NoHeartbeat)
                 .drop_check(crate::CheckLevel::None),
             Keyspace::Disable,
-            RequestContext::default(),
+            RequestContext::default()
+                .with_disk_full_opt(expected_disk_full_opt)
+                .with_txn_source(expected_txn_source),
             None,
         );
 

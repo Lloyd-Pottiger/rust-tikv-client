@@ -29,6 +29,7 @@ use crate::transaction::TransactionOptions;
 use crate::Backoff;
 use crate::BoundRange;
 use crate::CommandPriority;
+use crate::DiskFullOpt;
 use crate::RequestContext;
 use crate::Result;
 
@@ -165,6 +166,22 @@ impl Client {
     pub fn with_priority(&self, priority: CommandPriority) -> Self {
         let mut cloned = self.clone();
         cloned.request_context = cloned.request_context.with_priority(priority);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.disk_full_opt` for all requests created by this client.
+    #[must_use]
+    pub fn with_disk_full_opt(&self, disk_full_opt: DiskFullOpt) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_disk_full_opt(disk_full_opt);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.txn_source` for all requests created by this client.
+    #[must_use]
+    pub fn with_txn_source(&self, txn_source: u64) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_txn_source(txn_source);
         cloned
     }
 

@@ -31,6 +31,7 @@ use crate::Backoff;
 use crate::BoundRange;
 use crate::ColumnFamily;
 use crate::CommandPriority;
+use crate::DiskFullOpt;
 use crate::Error::RegionError;
 use crate::Key;
 use crate::KvPair;
@@ -254,6 +255,22 @@ impl<PdC: PdClient> Client<PdC> {
     pub fn with_priority(&self, priority: CommandPriority) -> Self {
         let mut cloned = self.clone();
         cloned.request_context = cloned.request_context.with_priority(priority);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.disk_full_opt` for all requests created by this client.
+    #[must_use]
+    pub fn with_disk_full_opt(&self, disk_full_opt: DiskFullOpt) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_disk_full_opt(disk_full_opt);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.txn_source` for all requests created by this client.
+    #[must_use]
+    pub fn with_txn_source(&self, txn_source: u64) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_txn_source(txn_source);
         cloned
     }
 
@@ -1178,6 +1195,8 @@ mod tests {
         let expected_source = "unit-test".to_owned();
         let expected_tag = vec![1_u8, 2, 3];
         let expected_group_name = "unit-test-group".to_owned();
+        let expected_disk_full_opt = crate::DiskFullOpt::AllowedOnAlreadyFull;
+        let expected_txn_source = 42_u64;
 
         let hook_source = expected_source.clone();
         let hook_tag = expected_tag.clone();
@@ -1188,6 +1207,8 @@ mod tests {
                     let ctx = req.context.as_ref().expect("context should be set");
                     assert_eq!(ctx.request_source, hook_source);
                     assert_eq!(ctx.resource_group_tag, hook_tag);
+                    assert_eq!(ctx.disk_full_opt, expected_disk_full_opt.into());
+                    assert_eq!(ctx.txn_source, expected_txn_source);
                     let resource_ctl_ctx = ctx
                         .resource_control_context
                         .as_ref()
@@ -1215,7 +1236,9 @@ mod tests {
         }
         .with_request_source(expected_source)
         .with_resource_group_tag(expected_tag)
-        .with_resource_group_name(expected_group_name);
+        .with_resource_group_name(expected_group_name)
+        .with_disk_full_opt(expected_disk_full_opt)
+        .with_txn_source(expected_txn_source);
 
         assert_eq!(client.get(vec![1_u8]).await?, None);
         Ok(())

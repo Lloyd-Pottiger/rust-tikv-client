@@ -19,13 +19,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
     - Rust：新增/补齐 `Error` variants + `is_xxx()` helpers（尽量不泄露 proto 类型到 public API）
     - UT：构造 key-error/region-error 响应覆盖提取与显示信息
 
-- RequestContext 补齐：`disk_full_opt` / `txn_source`（并贯穿 Raw/Txn/resolve lock/flush）
-  - 计划：
-    - 对齐 client-go `KVTxn.SetDiskFullOpt/SetTxnSource` 与 Raw/Txn 请求默认值
-    - Rust：扩展 `RequestContext` + RawClient/TxnClient/Transaction setters；确保 pipelined flush/resolve-lock 也携带
-    - UT：新增 context 透传用例
-
 # 已完成工作
+
+- RequestContext 补齐：`disk_full_opt` / `txn_source`（并贯穿 Raw/Txn/resolve lock/flush）
+  - 完成：新增 crate-level `DiskFullOpt`；`RequestContext` 支持 `disk_full_opt/txn_source` 并通过 `store::Request` 透传到所有 TiKV RPC；补齐 RawClient/TxnClient/Transaction setters；pipelined flush/resolve-lock 仍能保留这两个字段（仅覆盖 request_source）
+  - 测试：扩展 Raw/TXN/Flush/ResolveLock UT 覆盖 context 透传；`cd new-client-rust && cargo test` 通过
+  - 改动文件：`new-client-rust/src/{disk_full_opt.rs,request_context.rs,store/request.rs,raw/client.rs,transaction/{client.rs,transaction.rs},lib.rs}`、`.codex/progress/daemon.md`
 
 - 事务协议补齐：pipelined txn / txn local latches（对齐 client-go v2）
   - 完成：实现 `kvrpcpb::FlushRequest` 管线（generation+min_commit_ts+TTL）与 Txn pipelined commit/rollback（commit primary + 异步 resolve-lock range；rollback cancel+flush_wait+resolve-lock）；实现进程内 local latches（murmur3 slot + stale=max_commit_ts）并接入 optimistic commit（pessimistic/pipelined bypass）

@@ -12,6 +12,7 @@ use crate::proto::resource_manager;
 use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::store::RegionWithLeader;
 use crate::CommandPriority;
+use crate::DiskFullOpt;
 use crate::Error;
 use crate::Result;
 
@@ -35,6 +36,10 @@ pub trait Request: Any + Sync + Send + 'static {
     fn set_resource_group_name(&mut self, _name: &str) {}
 
     fn set_priority(&mut self, _priority: CommandPriority) {}
+
+    fn set_disk_full_opt(&mut self, _disk_full_opt: DiskFullOpt) {}
+
+    fn set_txn_source(&mut self, _txn_source: u64) {}
 
     fn set_resource_control_override_priority(&mut self, _override_priority: u64) {}
 
@@ -113,6 +118,16 @@ macro_rules! impl_request {
             fn set_priority(&mut self, priority: CommandPriority) {
                 let ctx = self.context_mut();
                 ctx.priority = priority.into();
+            }
+
+            fn set_disk_full_opt(&mut self, disk_full_opt: DiskFullOpt) {
+                let ctx = self.context_mut();
+                ctx.disk_full_opt = disk_full_opt.into();
+            }
+
+            fn set_txn_source(&mut self, txn_source: u64) {
+                let ctx = self.context_mut();
+                ctx.txn_source = txn_source;
             }
 
             fn set_resource_control_override_priority(&mut self, override_priority: u64) {
