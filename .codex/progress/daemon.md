@@ -13,13 +13,23 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- 错误模型对齐：将 `kvrpcpb::KeyError` 映射为结构化 Rust `Error`（WriteConflict/Deadlock/KeyExist/AssertionFailed…）+ helper predicates
+- Txn assertions：补齐 `AssertionLevel` 对外 API，并贯穿 prewrite/flush/pessimistic lock
   - 计划：
-    - 盘点 `client-go/error` 的可判定错误类型与提取逻辑（从 `kvrpcpb::KeyError`/`errorpb::Error` 中提取）
-    - Rust：新增/补齐 `Error` variants + `is_xxx()` helpers（尽量不泄露 proto 类型到 public API）
-    - UT：构造 key-error/region-error 响应覆盖提取与显示信息
+    - 对齐 client-go `KVTxn.SetAssertionLevel` 与请求字段（Prewrite/Flush/PessimisticLock）
+    - Rust：新增 Transaction/TransactionOptions assertion 配置；mutation 标记（assert exist/not-exist）与请求透传
+    - UT：构造 assertion failed/insert conflict 等用例，覆盖 error 映射与请求字段
+
+- 维护追踪：回填 `.codex/progress/parity-checklist.md` 已完成项（Rust path + Tests）
+  - 计划：
+    - 从 completed work 反推对应 client-go 导出符号，补 Rust 映射与测试链接
+    - 形成下一批高优先级待做项（按协议/集成点拆分）
 
 # 已完成工作
+
+- 错误模型对齐：`kvrpcpb::KeyError` → 结构化 Rust `Error`
+  - 完成：新增 `Error::{WriteConflict,Deadlock,KeyExists,AssertionFailed,Retryable,TxnAborted,CommitTsTooLarge,TxnNotFound}` + `Error::{is_write_conflict,is_deadlock,is_key_exists,is_assertion_failed}`；保留 `Error::KeyError` 作为兜底
+  - 测试：新增 UT 覆盖 KeyError→Error 映射；`cd new-client-rust && cargo test` 通过
+  - 改动文件：`new-client-rust/src/common/errors.rs`、`.codex/progress/daemon.md`
 
 - RequestContext 补齐：`disk_full_opt` / `txn_source`（并贯穿 Raw/Txn/resolve lock/flush）
   - 完成：新增 crate-level `DiskFullOpt`；`RequestContext` 支持 `disk_full_opt/txn_source` 并通过 `store::Request` 透传到所有 TiKV RPC；补齐 RawClient/TxnClient/Transaction setters；pipelined flush/resolve-lock 仍能保留这两个字段（仅覆盖 request_source）

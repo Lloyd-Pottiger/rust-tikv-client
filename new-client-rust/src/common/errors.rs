@@ -1,12 +1,243 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::fmt;
 use std::result;
 
 use thiserror::Error;
 
 use crate::proto::kvrpcpb;
+use crate::proto::kvrpcpb::write_conflict;
 use crate::region::RegionVerId;
 use crate::BoundRange;
+
+/// Reason for a write conflict returned by TiKV.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum WriteConflictReason {
+    Unknown,
+    Optimistic,
+    PessimisticRetry,
+    SelfRolledBack,
+    RcCheckTs,
+    LazyUniquenessCheck,
+    NotLockedKeyConflict,
+}
+
+impl From<i32> for WriteConflictReason {
+    fn from(value: i32) -> Self {
+        match value {
+            x if x == write_conflict::Reason::Optimistic as i32 => WriteConflictReason::Optimistic,
+            x if x == write_conflict::Reason::PessimisticRetry as i32 => {
+                WriteConflictReason::PessimisticRetry
+            }
+            x if x == write_conflict::Reason::SelfRolledBack as i32 => {
+                WriteConflictReason::SelfRolledBack
+            }
+            x if x == write_conflict::Reason::RcCheckTs as i32 => WriteConflictReason::RcCheckTs,
+            x if x == write_conflict::Reason::LazyUniquenessCheck as i32 => {
+                WriteConflictReason::LazyUniquenessCheck
+            }
+            x if x == write_conflict::Reason::NotLockedKeyConflict as i32 => {
+                WriteConflictReason::NotLockedKeyConflict
+            }
+            _ => WriteConflictReason::Unknown,
+        }
+    }
+}
+
+impl fmt::Display for WriteConflictReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            WriteConflictReason::Unknown => "unknown",
+            WriteConflictReason::Optimistic => "optimistic",
+            WriteConflictReason::PessimisticRetry => "pessimistic_retry",
+            WriteConflictReason::SelfRolledBack => "self_rolled_back",
+            WriteConflictReason::RcCheckTs => "rc_check_ts",
+            WriteConflictReason::LazyUniquenessCheck => "lazy_uniqueness_check",
+            WriteConflictReason::NotLockedKeyConflict => "not_locked_key_conflict",
+        };
+        f.write_str(s)
+    }
+}
+
+/// A write conflict returned by TiKV.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriteConflictError {
+    pub start_ts: u64,
+    pub conflict_ts: u64,
+    pub conflict_commit_ts: u64,
+    pub key: Vec<u8>,
+    pub primary: Vec<u8>,
+    pub reason: WriteConflictReason,
+}
+
+impl From<kvrpcpb::WriteConflict> for WriteConflictError {
+    fn from(conflict: kvrpcpb::WriteConflict) -> Self {
+        Self {
+            start_ts: conflict.start_ts,
+            conflict_ts: conflict.conflict_ts,
+            conflict_commit_ts: conflict.conflict_commit_ts,
+            key: conflict.key,
+            primary: conflict.primary,
+            reason: conflict.reason.into(),
+        }
+    }
+}
+
+impl fmt::Display for WriteConflictError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "start_ts={}, conflict_ts={}, conflict_commit_ts={}, reason={}, key_len={}",
+            self.start_ts,
+            self.conflict_ts,
+            self.conflict_commit_ts,
+            self.reason,
+            self.key.len()
+        )
+    }
+}
+
+/// A duplicate key write detected by TiKV (e.g. `Insert` on an existing key).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyExistsError {
+    pub key: Vec<u8>,
+}
+
+impl From<kvrpcpb::AlreadyExist> for KeyExistsError {
+    fn from(exist: kvrpcpb::AlreadyExist) -> Self {
+        Self { key: exist.key }
+    }
+}
+
+impl fmt::Display for KeyExistsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "key_len={}", self.key.len())
+    }
+}
+
+/// Assertion kind used by TiKV's assertion mechanism.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum AssertionKind {
+    None,
+    Exist,
+    NotExist,
+}
+
+impl From<i32> for AssertionKind {
+    fn from(value: i32) -> Self {
+        match value {
+            x if x == kvrpcpb::Assertion::Exist as i32 => AssertionKind::Exist,
+            x if x == kvrpcpb::Assertion::NotExist as i32 => AssertionKind::NotExist,
+            _ => AssertionKind::None,
+        }
+    }
+}
+
+impl fmt::Display for AssertionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            AssertionKind::None => "none",
+            AssertionKind::Exist => "exist",
+            AssertionKind::NotExist => "not_exist",
+        };
+        f.write_str(s)
+    }
+}
+
+/// An assertion failure returned by TiKV.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssertionFailedError {
+    pub start_ts: u64,
+    pub key: Vec<u8>,
+    pub assertion: AssertionKind,
+    pub existing_start_ts: u64,
+    pub existing_commit_ts: u64,
+}
+
+impl From<kvrpcpb::AssertionFailed> for AssertionFailedError {
+    fn from(failed: kvrpcpb::AssertionFailed) -> Self {
+        Self {
+            start_ts: failed.start_ts,
+            key: failed.key,
+            assertion: failed.assertion.into(),
+            existing_start_ts: failed.existing_start_ts,
+            existing_commit_ts: failed.existing_commit_ts,
+        }
+    }
+}
+
+impl fmt::Display for AssertionFailedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "start_ts={}, assertion={}, key_len={}, existing_start_ts={}, existing_commit_ts={}",
+            self.start_ts,
+            self.assertion,
+            self.key.len(),
+            self.existing_start_ts,
+            self.existing_commit_ts
+        )
+    }
+}
+
+/// Wait-for entry of a deadlock.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeadlockWaitForEntry {
+    pub txn: u64,
+    pub wait_for_txn: u64,
+    pub key_hash: u64,
+    pub key: Vec<u8>,
+    pub resource_group_tag: Vec<u8>,
+    pub wait_time_ms: u64,
+}
+
+/// A deadlock error returned by TiKV.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeadlockError {
+    pub lock_ts: u64,
+    pub lock_key: Vec<u8>,
+    pub deadlock_key_hash: u64,
+    pub wait_chain: Vec<DeadlockWaitForEntry>,
+    pub deadlock_key: Vec<u8>,
+}
+
+impl From<kvrpcpb::Deadlock> for DeadlockError {
+    fn from(deadlock: kvrpcpb::Deadlock) -> Self {
+        let wait_chain = deadlock
+            .wait_chain
+            .into_iter()
+            .map(|entry| DeadlockWaitForEntry {
+                txn: entry.txn,
+                wait_for_txn: entry.wait_for_txn,
+                key_hash: entry.key_hash,
+                key: entry.key,
+                resource_group_tag: entry.resource_group_tag,
+                wait_time_ms: entry.wait_time,
+            })
+            .collect();
+
+        Self {
+            lock_ts: deadlock.lock_ts,
+            lock_key: deadlock.lock_key,
+            deadlock_key_hash: deadlock.deadlock_key_hash,
+            wait_chain,
+            deadlock_key: deadlock.deadlock_key,
+        }
+    }
+}
+
+impl fmt::Display for DeadlockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "lock_ts={}, lock_key_len={}, deadlock_key_len={}, wait_chain_len={}",
+            self.lock_ts,
+            self.lock_key.len(),
+            self.deadlock_key.len(),
+            self.wait_chain.len()
+        )
+    }
+}
 
 /// An error originating from the TiKV client or dependencies.
 #[derive(Debug, Error)]
@@ -18,6 +249,30 @@ pub enum Error {
     /// Duplicate key insertion happens.
     #[error("Duplicate key insertion")]
     DuplicateKeyInsertion,
+    /// Write conflict returned by TiKV.
+    #[error("Write conflict: {0}")]
+    WriteConflict(WriteConflictError),
+    /// Deadlock returned by TiKV.
+    #[error("Deadlock: {0}")]
+    Deadlock(DeadlockError),
+    /// Key already exists (e.g. Insert on an existing key).
+    #[error("Key already exists: {0}")]
+    KeyExists(KeyExistsError),
+    /// Assertion failed on TiKV side.
+    #[error("Assertion failed: {0}")]
+    AssertionFailed(AssertionFailedError),
+    /// Retryable error returned by TiKV.
+    #[error("Retryable error: {message}")]
+    Retryable { message: String },
+    /// TiKV aborts the transaction with a reason.
+    #[error("TiKV aborts txn: {message}")]
+    TxnAborted { message: String },
+    /// Commit TS is too large for TiKV.
+    #[error("Commit TS {commit_ts} is too large")]
+    CommitTsTooLarge { commit_ts: u64 },
+    /// The transaction is not found on TiKV.
+    #[error("Txn {start_ts} not found")]
+    TxnNotFound { start_ts: u64 },
     /// Failed to resolve a lock
     #[error("Failed to resolve lock")]
     ResolveLockError(Vec<kvrpcpb::LockInfo>),
@@ -127,13 +382,206 @@ impl From<crate::proto::errorpb::Error> for Error {
 }
 
 impl From<crate::proto::kvrpcpb::KeyError> for Error {
-    fn from(e: crate::proto::kvrpcpb::KeyError) -> Error {
+    fn from(mut e: crate::proto::kvrpcpb::KeyError) -> Error {
+        if let Some(conflict) = e.conflict.take() {
+            return Error::WriteConflict(conflict.into());
+        }
+        if !e.retryable.is_empty() {
+            return Error::Retryable {
+                message: std::mem::take(&mut e.retryable),
+            };
+        }
+        if let Some(failed) = e.assertion_failed.take() {
+            return Error::AssertionFailed(failed.into());
+        }
+        if let Some(exist) = e.already_exist.take() {
+            return Error::KeyExists(exist.into());
+        }
+        if let Some(deadlock) = e.deadlock.take() {
+            return Error::Deadlock(deadlock.into());
+        }
+        if !e.abort.is_empty() {
+            return Error::TxnAborted {
+                message: std::mem::take(&mut e.abort),
+            };
+        }
+        if let Some(commit_ts_too_large) = e.commit_ts_too_large.take() {
+            return Error::CommitTsTooLarge {
+                commit_ts: commit_ts_too_large.commit_ts,
+            };
+        }
+        if let Some(txn_not_found) = e.txn_not_found.take() {
+            return Error::TxnNotFound {
+                start_ts: txn_not_found.start_ts,
+            };
+        }
+
         Error::KeyError(Box::new(e))
     }
 }
 
 /// A result holding an [`Error`](enum@Error).
 pub type Result<T> = result::Result<T, Error>;
+
+impl Error {
+    pub fn is_write_conflict(&self) -> bool {
+        matches!(self, Error::WriteConflict(_))
+    }
+
+    pub fn is_deadlock(&self) -> bool {
+        matches!(self, Error::Deadlock(_))
+    }
+
+    pub fn is_key_exists(&self) -> bool {
+        matches!(self, Error::KeyExists(_))
+    }
+
+    pub fn is_assertion_failed(&self) -> bool {
+        matches!(self, Error::AssertionFailed(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::deadlock;
+
+    #[test]
+    fn key_error_conflict_maps_to_write_conflict() {
+        let mut key_error = kvrpcpb::KeyError::default();
+        key_error.conflict = Some(kvrpcpb::WriteConflict {
+            start_ts: 1,
+            conflict_ts: 2,
+            key: vec![0xAA],
+            primary: vec![0xBB],
+            conflict_commit_ts: 3,
+            reason: write_conflict::Reason::Optimistic as i32,
+        });
+        let err: Error = key_error.into();
+        let Error::WriteConflict(conflict) = err else {
+            panic!("expected Error::WriteConflict");
+        };
+        assert_eq!(conflict.start_ts, 1);
+        assert_eq!(conflict.conflict_ts, 2);
+        assert_eq!(conflict.conflict_commit_ts, 3);
+        assert_eq!(conflict.key, vec![0xAA]);
+        assert_eq!(conflict.primary, vec![0xBB]);
+        assert_eq!(conflict.reason, WriteConflictReason::Optimistic);
+    }
+
+    #[test]
+    fn key_error_retryable_maps_to_retryable() {
+        let mut key_error = kvrpcpb::KeyError::default();
+        key_error.retryable = "retry me".to_owned();
+        let err: Error = key_error.into();
+        let Error::Retryable { message } = err else {
+            panic!("expected Error::Retryable");
+        };
+        assert_eq!(message, "retry me");
+    }
+
+    #[test]
+    fn key_error_assertion_failed_maps_to_assertion_failed() {
+        let mut key_error = kvrpcpb::KeyError::default();
+        key_error.assertion_failed = Some(kvrpcpb::AssertionFailed {
+            start_ts: 1,
+            key: vec![0xAB],
+            assertion: kvrpcpb::Assertion::NotExist as i32,
+            existing_start_ts: 2,
+            existing_commit_ts: 3,
+        });
+        let err: Error = key_error.into();
+        let Error::AssertionFailed(failed) = err else {
+            panic!("expected Error::AssertionFailed");
+        };
+        assert_eq!(failed.start_ts, 1);
+        assert_eq!(failed.key, vec![0xAB]);
+        assert_eq!(failed.assertion, AssertionKind::NotExist);
+        assert_eq!(failed.existing_start_ts, 2);
+        assert_eq!(failed.existing_commit_ts, 3);
+    }
+
+    #[test]
+    fn key_error_already_exist_maps_to_key_exists() {
+        let mut key_error = kvrpcpb::KeyError::default();
+        key_error.already_exist = Some(kvrpcpb::AlreadyExist { key: vec![0x01] });
+        let err: Error = key_error.into();
+        let Error::KeyExists(exist) = err else {
+            panic!("expected Error::KeyExists");
+        };
+        assert_eq!(exist.key, vec![0x01]);
+    }
+
+    #[test]
+    fn key_error_deadlock_maps_to_deadlock() {
+        let mut key_error = kvrpcpb::KeyError::default();
+        key_error.deadlock = Some(kvrpcpb::Deadlock {
+            lock_ts: 10,
+            lock_key: vec![0x11, 0x22],
+            deadlock_key_hash: 42,
+            wait_chain: vec![deadlock::WaitForEntry {
+                txn: 1,
+                wait_for_txn: 2,
+                key_hash: 3,
+                key: vec![0x01],
+                resource_group_tag: vec![0x02],
+                wait_time: 7,
+            }],
+            deadlock_key: vec![0x33],
+        });
+        let err: Error = key_error.into();
+        let Error::Deadlock(deadlock) = err else {
+            panic!("expected Error::Deadlock");
+        };
+        assert_eq!(deadlock.lock_ts, 10);
+        assert_eq!(deadlock.lock_key, vec![0x11, 0x22]);
+        assert_eq!(deadlock.deadlock_key_hash, 42);
+        assert_eq!(deadlock.deadlock_key, vec![0x33]);
+        assert_eq!(deadlock.wait_chain.len(), 1);
+        assert_eq!(deadlock.wait_chain[0].txn, 1);
+        assert_eq!(deadlock.wait_chain[0].wait_for_txn, 2);
+        assert_eq!(deadlock.wait_chain[0].key_hash, 3);
+        assert_eq!(deadlock.wait_chain[0].key, vec![0x01]);
+        assert_eq!(deadlock.wait_chain[0].resource_group_tag, vec![0x02]);
+        assert_eq!(deadlock.wait_chain[0].wait_time_ms, 7);
+    }
+
+    #[test]
+    fn key_error_abort_maps_to_txn_aborted() {
+        let mut key_error = kvrpcpb::KeyError::default();
+        key_error.abort = "boom".to_owned();
+        let err: Error = key_error.into();
+        let Error::TxnAborted { message } = err else {
+            panic!("expected Error::TxnAborted");
+        };
+        assert_eq!(message, "boom");
+    }
+
+    #[test]
+    fn key_error_commit_ts_too_large_maps() {
+        let mut key_error = kvrpcpb::KeyError::default();
+        key_error.commit_ts_too_large = Some(kvrpcpb::CommitTsTooLarge { commit_ts: 123 });
+        let err: Error = key_error.into();
+        let Error::CommitTsTooLarge { commit_ts } = err else {
+            panic!("expected Error::CommitTsTooLarge");
+        };
+        assert_eq!(commit_ts, 123);
+    }
+
+    #[test]
+    fn key_error_txn_not_found_maps() {
+        let mut key_error = kvrpcpb::KeyError::default();
+        key_error.txn_not_found = Some(kvrpcpb::TxnNotFound {
+            start_ts: 7,
+            primary_key: vec![0x01],
+        });
+        let err: Error = key_error.into();
+        let Error::TxnNotFound { start_ts } = err else {
+            panic!("expected Error::TxnNotFound");
+        };
+        assert_eq!(start_ts, 7);
+    }
+}
 
 #[doc(hidden)]
 #[macro_export]
