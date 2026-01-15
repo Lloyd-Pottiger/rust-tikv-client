@@ -39,3 +39,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 约定：维持“最小 public surface”（Raw/Txn/Config/Key types），其余能力先作为实现细节，按 parity 逐步对外暴露
   - 产物：`new-client-rust/doc/client-go-v2-parity-roadmap.md` + 更新 `new-client-rust/README.md`/crate docs 指向 roadmap
   - 改动文件：`new-client-rust/doc/client-go-v2-parity-roadmap.md`、`new-client-rust/README.md`、`new-client-rust/src/lib.rs`、`.codex/progress/daemon.md`
+
+- 基于 kvrpcpb.Context 补齐基础“可观测/资源控制”字段（RawClient）
+  - 新增：`RawClient::{with_request_source,with_resource_group_tag}`（clone-style）
+  - 实现：通过 `store::Request` trait 在请求发送前写入 `kvrpcpb::Context.{request_source,resource_group_tag}`
+  - 测试：新增 UT 校验 dispatch 时 context 字段已设置；`cargo test` 通过
+  - 改动文件：`new-client-rust/src/store/request.rs`、`new-client-rust/src/raw/client.rs`、`new-client-rust/src/raw/requests.rs`、`.codex/progress/daemon.md`

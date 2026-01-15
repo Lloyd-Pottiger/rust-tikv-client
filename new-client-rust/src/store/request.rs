@@ -24,6 +24,10 @@ pub trait Request: Any + Sync + Send + 'static {
     fn as_any(&self) -> &dyn Any;
     fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()>;
     fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion);
+
+    fn set_request_source(&mut self, _source: &str) {}
+
+    fn set_resource_group_tag(&mut self, _tag: &[u8]) {}
 }
 
 macro_rules! impl_request {
@@ -67,6 +71,16 @@ macro_rules! impl_request {
             fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion) {
                 let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
                 ctx.api_version = api_version.into();
+            }
+
+            fn set_request_source(&mut self, source: &str) {
+                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                ctx.request_source = source.to_owned();
+            }
+
+            fn set_resource_group_tag(&mut self, tag: &[u8]) {
+                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                ctx.resource_group_tag = tag.to_vec();
             }
         }
     };

@@ -600,6 +600,14 @@ impl Request for RawCoprocessorRequest {
     fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion) {
         self.inner.set_api_version(api_version);
     }
+
+    fn set_request_source(&mut self, source: &str) {
+        self.inner.set_request_source(source);
+    }
+
+    fn set_resource_group_tag(&mut self, tag: &[u8]) {
+        self.inner.set_resource_group_tag(tag);
+    }
 }
 
 impl KvRequest for RawCoprocessorRequest {
