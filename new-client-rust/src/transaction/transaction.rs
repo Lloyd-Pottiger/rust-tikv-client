@@ -37,6 +37,7 @@ use crate::BoundRange;
 use crate::Error;
 use crate::Key;
 use crate::KvPair;
+use crate::RequestContext;
 use crate::Result;
 use crate::Value;
 
@@ -85,6 +86,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     rpc: Arc<PdC>,
     options: TransactionOptions,
     keyspace: Keyspace,
+    request_context: RequestContext,
     is_heartbeat_started: bool,
     start_instant: Instant,
 }
@@ -95,6 +97,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         rpc: Arc<PdC>,
         options: TransactionOptions,
         keyspace: Keyspace,
+        request_context: RequestContext,
     ) -> Transaction<PdC> {
         let status = if options.read_only {
             TransactionStatus::ReadOnly
@@ -108,6 +111,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             rpc,
             options,
             keyspace,
+            request_context,
             is_heartbeat_started: false,
             start_instant: std::time::Instant::now(),
         }
@@ -139,11 +143,13 @@ impl<PdC: PdClient> Transaction<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let retry_options = self.options.retry_options.clone();
         let keyspace = self.keyspace;
+        let request_context = self.request_context.clone();
 
         self.buffer
             .get_or_else(key, |key| async move {
-                let request = new_get_request(key, timestamp);
+                let request = request_context.apply_to(new_get_request(key, timestamp));
                 let plan = PlanBuilder::new(rpc, keyspace, request)
+                    .with_request_context(request_context)
                     .resolve_lock(retry_options.lock_backoff, keyspace)
                     .retry_multi_region(DEFAULT_REGION_BACKOFF)
                     .merge(CollectSingle)
@@ -274,11 +280,13 @@ impl<PdC: PdClient> Transaction<PdC> {
             .into_iter()
             .map(move |k| k.into().encode_keyspace(keyspace, KeyMode::Txn));
         let retry_options = self.options.retry_options.clone();
+        let request_context = self.request_context.clone();
 
         self.buffer
             .batch_get_or_else(keys, move |keys| async move {
-                let request = new_batch_get_request(keys, timestamp);
+                let request = request_context.apply_to(new_batch_get_request(keys, timestamp));
                 let plan = PlanBuilder::new(rpc, keyspace, request)
+                    .with_request_context(request_context)
                     .resolve_lock(retry_options.lock_backoff, keyspace)
                     .retry_multi_region(retry_options.region_backoff)
                     .merge(Collect)
@@ -666,7 +674,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         self.start_auto_heartbeat().await;
 
-        let res = Committer::new(
+        let mut committer = Committer::new(
             primary_key,
             mutations,
             self.timestamp.clone(),
@@ -675,9 +683,10 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.keyspace,
             self.buffer.get_write_size() as u64,
             self.start_instant,
-        )
-        .commit()
-        .await;
+        );
+        committer.request_context = self.request_context.clone();
+
+        let res = committer.commit().await;
 
         if res.is_ok() {
             self.set_status(TransactionStatus::Committed);
@@ -719,7 +728,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         let primary_key = self.buffer.get_primary_key();
         let mutations = self.buffer.to_proto_mutations();
-        let res = Committer::new(
+        let mut committer = Committer::new(
             primary_key,
             mutations,
             self.timestamp.clone(),
@@ -728,9 +737,10 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.keyspace,
             self.buffer.get_write_size() as u64,
             self.start_instant,
-        )
-        .rollback()
-        .await;
+        );
+        committer.request_context = self.request_context.clone();
+
+        let res = committer.rollback().await;
 
         if res.is_ok() {
             self.set_status(TransactionStatus::Rolledback);
@@ -759,7 +769,9 @@ impl<PdC: PdClient> Transaction<PdC> {
             primary_key,
             self.start_instant.elapsed().as_millis() as u64 + MAX_TTL,
         );
+        let request = self.request_context.apply_to(request);
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .resolve_lock(
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
@@ -785,6 +797,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let retry_options = self.options.retry_options.clone();
         let keyspace = self.keyspace;
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
+        let request_context = self.request_context.clone();
 
         self.buffer
             .scan_and_fetch(
@@ -793,9 +806,11 @@ impl<PdC: PdClient> Transaction<PdC> {
                 !key_only,
                 reverse,
                 move |new_range, new_limit| async move {
-                    let request =
-                        new_scan_request(new_range, timestamp, new_limit, key_only, reverse);
+                    let request = request_context.apply_to(new_scan_request(
+                        new_range, timestamp, new_limit, key_only, reverse,
+                    ));
                     let plan = PlanBuilder::new(rpc, keyspace, request)
+                        .with_request_context(request_context)
                         .resolve_lock(retry_options.lock_backoff, keyspace)
                         .retry_multi_region(retry_options.region_backoff)
                         .merge(Collect)
@@ -851,7 +866,9 @@ impl<PdC: PdClient> Transaction<PdC> {
             for_update_ts.clone(),
             need_value,
         );
+        let request = self.request_context.apply_to(request);
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .resolve_lock(
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
@@ -908,7 +925,9 @@ impl<PdC: PdClient> Transaction<PdC> {
             start_version,
             for_update_ts,
         );
+        let req = self.request_context.apply_to(req);
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
+            .with_request_context(self.request_context.clone())
             .resolve_lock(
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
@@ -961,6 +980,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         };
         let start_instant = self.start_instant;
         let keyspace = self.keyspace;
+        let request_context = self.request_context.clone();
 
         let heartbeat_task = async move {
             loop {
@@ -981,6 +1001,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     primary_key.clone(),
                     start_instant.elapsed().as_millis() as u64 + MAX_TTL,
                 );
+                let request = request_context.apply_to(request);
                 let plan = PlanBuilder::new(rpc.clone(), keyspace, request)
                     .retry_multi_region(region_backoff.clone())
                     .merge(CollectSingle)
@@ -1269,6 +1290,8 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     options: TransactionOptions,
     keyspace: Keyspace,
     #[new(default)]
+    request_context: RequestContext,
+    #[new(default)]
     undetermined: bool,
     write_size: u64,
     start_instant: Instant,
@@ -1385,15 +1408,16 @@ impl<PdC: PdClient> Committer<PdC> {
             // Make sure the TTL satisfies:
             // `max_commit_ts.physical < start_ts.physical + ttl`.
             if self.options.async_commit && self.options.is_pessimistic() {
-                let safe_ttl_ms =
-                    Self::extract_physical_ms(request.max_commit_ts)
-                        .saturating_sub(Self::extract_physical_ms(self.start_version.version()))
-                        .saturating_add(1);
+                let safe_ttl_ms = Self::extract_physical_ms(request.max_commit_ts)
+                    .saturating_sub(Self::extract_physical_ms(self.start_version.version()))
+                    .saturating_add(1);
                 request.lock_ttl = request.lock_ttl.max(safe_ttl_ms);
             }
         }
 
+        let request = self.request_context.apply_to(request);
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .with_request_context(self.request_context.clone())
             .resolve_lock(
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
@@ -1436,7 +1460,9 @@ impl<PdC: PdClient> Committer<PdC> {
             self.start_version.clone(),
             commit_version.clone(),
         );
+        let req = self.request_context.apply_to(req);
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
+            .with_request_context(self.request_context.clone())
             .resolve_lock(
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
@@ -1503,7 +1529,9 @@ impl<PdC: PdClient> Committer<PdC> {
                 .filter(|key| &primary_key != key);
             new_commit_request(keys, self.start_version, commit_version)
         };
+        let req = self.request_context.apply_to(req);
         let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
+            .with_request_context(self.request_context.clone())
             .resolve_lock(self.options.retry_options.lock_backoff, self.keyspace)
             .retry_multi_region(self.options.retry_options.region_backoff)
             .extract_error()
@@ -1524,7 +1552,9 @@ impl<PdC: PdClient> Committer<PdC> {
         match self.options.kind {
             TransactionKind::Optimistic => {
                 let req = new_batch_rollback_request(keys, self.start_version);
+                let req = self.request_context.apply_to(req);
                 let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
+                    .with_request_context(self.request_context.clone())
                     .resolve_lock(self.options.retry_options.lock_backoff, self.keyspace)
                     .retry_multi_region(self.options.retry_options.region_backoff)
                     .extract_error()
@@ -1533,7 +1563,9 @@ impl<PdC: PdClient> Committer<PdC> {
             }
             TransactionKind::Pessimistic(for_update_ts) => {
                 let req = new_pessimistic_rollback_request(keys, self.start_version, for_update_ts);
+                let req = self.request_context.apply_to(req);
                 let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
+                    .with_request_context(self.request_context.clone())
                     .resolve_lock(self.options.retry_options.lock_backoff, self.keyspace)
                     .retry_multi_region(self.options.retry_options.region_backoff)
                     .extract_error()
@@ -1595,8 +1627,8 @@ mod tests {
     use std::io;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
-    use std::sync::Mutex;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use fail::FailScenario;
@@ -1609,6 +1641,7 @@ mod tests {
     use crate::request::Keyspace;
     use crate::timestamp::TimestampExt;
     use crate::transaction::HeartbeatOption;
+    use crate::RequestContext;
     use crate::Transaction;
     use crate::TransactionOptions;
 
@@ -1641,6 +1674,7 @@ mod tests {
             TransactionOptions::new_optimistic()
                 .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_secs(1))),
             keyspace,
+            RequestContext::default(),
         );
         heartbeat_txn.put(key1.clone(), "foo").await.unwrap();
         let heartbeat_txn_handle = tokio::task::spawn_blocking(move || {
@@ -1685,6 +1719,7 @@ mod tests {
             TransactionOptions::new_pessimistic()
                 .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_secs(1))),
             keyspace,
+            RequestContext::default(),
         );
         heartbeat_txn.put(key1.clone(), "foo").await.unwrap();
         assert_eq!(heartbeats.load(Ordering::SeqCst), 0);
@@ -1698,7 +1733,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_async_commit_fallback_to_2pc_when_min_commit_ts_is_zero() -> Result<(), io::Error> {
+    async fn test_async_commit_fallback_to_2pc_when_min_commit_ts_is_zero() -> Result<(), io::Error>
+    {
         let commit_reqs: Arc<Mutex<Vec<Vec<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
         let prewrite_fields: Arc<Mutex<Option<(u64, u64)>>> = Arc::new(Mutex::new(None));
 
@@ -1726,6 +1762,7 @@ mod tests {
             pd_client,
             TransactionOptions::new_optimistic().use_async_commit(),
             Keyspace::Disable,
+            RequestContext::default(),
         );
         txn.put("k1".to_owned(), "v1").await.unwrap();
         txn.put("k2".to_owned(), "v2").await.unwrap();
@@ -1752,9 +1789,7 @@ mod tests {
         assert!(min_commit_ts > Timestamp::default().version());
         assert!(max_commit_ts > 0);
         let max_commit_ts_physical_ms = max_commit_ts >> super::PD_TS_LOGICAL_BITS;
-        assert!(
-            max_commit_ts_physical_ms >= super::ASYNC_COMMIT_SAFE_WINDOW.as_millis() as u64
-        );
+        assert!(max_commit_ts_physical_ms >= super::ASYNC_COMMIT_SAFE_WINDOW.as_millis() as u64);
 
         Ok(())
     }
@@ -1785,6 +1820,7 @@ mod tests {
             pd_client,
             TransactionOptions::new_optimistic().use_async_commit(),
             Keyspace::Disable,
+            RequestContext::default(),
         );
         txn.put("k1".to_owned(), "v1").await.unwrap();
         txn.put("k2".to_owned(), "v2").await.unwrap();
@@ -1805,6 +1841,163 @@ mod tests {
         let commit_reqs = commit_reqs.lock().unwrap().clone();
         assert_eq!(commit_reqs.len(), 1);
         assert_eq!(commit_reqs[0].len(), 2);
+
+        Ok(())
+    }
+
+    fn assert_request_context(
+        ctx: &kvrpcpb::Context,
+        expected_source: &str,
+        expected_tag: &[u8],
+        expected_group_name: &str,
+    ) {
+        assert_eq!(ctx.request_source, expected_source);
+        assert_eq!(ctx.resource_group_tag, expected_tag);
+        assert_eq!(
+            ctx.resource_control_context
+                .as_ref()
+                .expect("missing resource_control_context")
+                .resource_group_name,
+            expected_group_name
+        );
+    }
+
+    #[tokio::test]
+    async fn test_txn_request_context_applied_to_get_prewrite_commit() -> Result<(), io::Error> {
+        let expected_source = "txn-ut";
+        let expected_tag = b"tag-ut".to_vec();
+        let expected_group_name = "rg-ut";
+
+        let hook_source = expected_source.to_owned();
+        let hook_tag = expected_tag.clone();
+        let hook_group_name = expected_group_name.to_owned();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
+                    let ctx = req.context.as_ref().expect("missing context on GetRequest");
+                    assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    resp.not_found = true;
+                    Ok(Box::new(resp) as Box<dyn Any>)
+                } else if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    let ctx = req
+                        .context
+                        .as_ref()
+                        .expect("missing context on PrewriteRequest");
+                    assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    let ctx = req
+                        .context
+                        .as_ref()
+                        .expect("missing context on CommitRequest");
+                    assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type in request context test");
+                }
+            },
+        )));
+
+        let request_context = RequestContext::default()
+            .with_request_source(expected_source)
+            .with_resource_group_tag(expected_tag)
+            .with_resource_group_name(expected_group_name);
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            request_context,
+        );
+
+        let got = txn.get("k".to_owned()).await.unwrap();
+        assert!(got.is_none());
+
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+        txn.commit().await.unwrap();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_txn_request_context_applied_to_lock_resolution() -> Result<(), io::Error> {
+        let expected_source = "txn-ut-lock";
+        let expected_tag = b"tag-ut-lock".to_vec();
+        let expected_group_name = "rg-ut-lock";
+
+        let hook_source = expected_source.to_owned();
+        let hook_tag = expected_tag.clone();
+        let hook_group_name = expected_group_name.to_owned();
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls_cloned = get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
+                    let ctx = req.context.as_ref().expect("missing context on GetRequest");
+                    assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
+
+                    let call = get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        let mut resp = kvrpcpb::GetResponse::default();
+                        let mut key_error = kvrpcpb::KeyError::default();
+                        key_error.locked = Some(kvrpcpb::LockInfo {
+                            key: req.key.clone(),
+                            primary_lock: req.key.clone(),
+                            lock_version: 1,
+                            lock_ttl: 0,
+                            ..Default::default()
+                        });
+                        resp.error = Some(key_error);
+                        Ok(Box::new(resp) as Box<dyn Any>)
+                    } else {
+                        let mut resp = kvrpcpb::GetResponse::default();
+                        resp.not_found = true;
+                        Ok(Box::new(resp) as Box<dyn Any>)
+                    }
+                } else if let Some(req) = req.downcast_ref::<kvrpcpb::CleanupRequest>() {
+                    let ctx = req
+                        .context
+                        .as_ref()
+                        .expect("missing context on CleanupRequest");
+                    assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
+                    Ok(Box::<kvrpcpb::CleanupResponse>::default() as Box<dyn Any>)
+                } else if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    let ctx = req
+                        .context
+                        .as_ref()
+                        .expect("missing context on ResolveLockRequest");
+                    assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
+                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type in lock resolution context test");
+                }
+            },
+        )));
+
+        let request_context = RequestContext::default()
+            .with_request_source(expected_source)
+            .with_resource_group_tag(expected_tag)
+            .with_resource_group_name(expected_group_name);
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+            Keyspace::Disable,
+            request_context,
+        );
+
+        let got = txn.get(vec![1]).await.unwrap();
+        assert!(got.is_none());
+        assert_eq!(get_calls.load(Ordering::SeqCst), 2);
 
         Ok(())
     }

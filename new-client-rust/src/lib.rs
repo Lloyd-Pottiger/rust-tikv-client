@@ -112,6 +112,7 @@ mod pd;
 mod proto;
 mod region;
 mod region_cache;
+mod request_context;
 mod stats;
 mod store;
 mod timestamp;
@@ -169,3 +170,5 @@ pub use crate::transaction::Snapshot;
 pub use crate::transaction::Transaction;
 #[doc(inline)]
 pub use crate::transaction::TransactionOptions;
+
+pub(crate) use request_context::RequestContext;

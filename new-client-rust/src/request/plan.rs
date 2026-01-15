@@ -35,6 +35,7 @@ use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
 use crate::util::iter::FlatMapOkIterExt;
 use crate::Error;
+use crate::RequestContext;
 use crate::Result;
 
 use super::keyspace::Keyspace;
@@ -600,6 +601,7 @@ pub struct ResolveLock<P: Plan, PdC: PdClient> {
     pub pd_client: Arc<PdC>,
     pub backoff: Backoff,
     pub keyspace: Keyspace,
+    pub(crate) request_context: RequestContext,
 }
 
 impl<P: Plan, PdC: PdClient> Clone for ResolveLock<P, PdC> {
@@ -609,6 +611,7 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLock<P, PdC> {
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
             keyspace: self.keyspace,
+            request_context: self.request_context.clone(),
         }
     }
 }
@@ -634,7 +637,13 @@ where
             }
 
             let pd_client = self.pd_client.clone();
-            let live_locks = resolve_locks(locks, pd_client.clone(), self.keyspace).await?;
+            let live_locks = resolve_locks(
+                locks,
+                pd_client.clone(),
+                self.keyspace,
+                &self.request_context,
+            )
+            .await?;
             if live_locks.is_empty() {
                 result = self.inner.execute().await?;
             } else {
@@ -701,6 +710,7 @@ pub struct CleanupLocks<P: Plan, PdC: PdClient> {
     pub pd_client: Arc<PdC>,
     pub keyspace: Keyspace,
     pub backoff: Backoff,
+    pub(crate) request_context: RequestContext,
 }
 
 impl<P: Plan, PdC: PdClient> Clone for CleanupLocks<P, PdC> {
@@ -713,6 +723,7 @@ impl<P: Plan, PdC: PdClient> Clone for CleanupLocks<P, PdC> {
             pd_client: self.pd_client.clone(),
             keyspace: self.keyspace,
             backoff: self.backoff.clone(),
+            request_context: self.request_context.clone(),
         }
     }
 }
@@ -727,7 +738,8 @@ where
     async fn execute(&self) -> Result<Self::Result> {
         let mut result = CleanupLocksResult::default();
         let mut inner = self.inner.clone();
-        let mut lock_resolver = crate::transaction::LockResolver::new(self.ctx.clone());
+        let mut lock_resolver = crate::transaction::LockResolver::new(self.ctx.clone())
+            .with_request_context(self.request_context.clone());
         let region = &self.store.as_ref().unwrap().region_with_leader;
         let mut has_more_batch = true;
 
@@ -956,6 +968,7 @@ mod test {
                 backoff: Backoff::no_backoff(),
                 pd_client: Arc::new(MockPdClient::default()),
                 keyspace: Keyspace::Disable,
+                request_context: RequestContext::default(),
             },
             pd_client: Arc::new(MockPdClient::default()),
             backoff: Backoff::no_backoff(),

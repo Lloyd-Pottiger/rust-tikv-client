@@ -25,6 +25,7 @@ use crate::transaction::Transaction;
 use crate::transaction::TransactionOptions;
 use crate::Backoff;
 use crate::BoundRange;
+use crate::RequestContext;
 use crate::Result;
 
 // FIXME: cargo-culted value
@@ -49,6 +50,7 @@ const SCAN_LOCK_BATCH_SIZE: u32 = 1024;
 pub struct Client {
     pd: Arc<PdRpcClient>,
     keyspace: Keyspace,
+    request_context: RequestContext,
 }
 
 impl Clone for Client {
@@ -56,6 +58,7 @@ impl Clone for Client {
         Self {
             pd: self.pd.clone(),
             keyspace: self.keyspace,
+            request_context: self.request_context.clone(),
         }
     }
 }
@@ -118,7 +121,36 @@ impl Client {
             }
             None => Keyspace::Disable,
         };
-        Ok(Client { pd, keyspace })
+        Ok(Client {
+            pd,
+            keyspace,
+            request_context: RequestContext::default(),
+        })
+    }
+
+    /// Set `kvrpcpb::Context.request_source` for all requests created by this client.
+    #[must_use]
+    pub fn with_request_source(&self, source: impl Into<String>) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_request_source(source);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.resource_group_tag` for all requests created by this client.
+    #[must_use]
+    pub fn with_resource_group_tag(&self, tag: impl Into<Vec<u8>>) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_resource_group_tag(tag);
+        cloned
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.resource_group_name` for all requests created
+    /// by this client.
+    #[must_use]
+    pub fn with_resource_group_name(&self, name: impl Into<String>) -> Self {
+        let mut cloned = self.clone();
+        cloned.request_context = cloned.request_context.with_resource_group_name(name);
+        cloned
     }
 
     /// Creates a new optimistic [`Transaction`].
@@ -261,8 +293,13 @@ impl Client {
         let ctx = ResolveLocksContext::default();
         let backoff = Backoff::equal_jitter_backoff(100, 10000, 50);
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
-        let req = new_scan_lock_request(range, safepoint, options.batch_size);
+        let req = self.request_context.apply_to(new_scan_lock_request(
+            range,
+            safepoint,
+            options.batch_size,
+        ));
         let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .with_request_context(self.request_context.clone())
             .cleanup_locks(ctx.clone(), options, backoff, self.keyspace)
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .extract_error()
@@ -283,7 +320,9 @@ impl Client {
         use crate::request::TruncateKeyspace;
 
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
-        let req = new_scan_lock_request(range, safepoint, batch_size);
+        let req = self
+            .request_context
+            .apply_to(new_scan_lock_request(range, safepoint, batch_size));
         let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .merge(crate::request::Collect)
@@ -300,7 +339,9 @@ impl Client {
     /// This interface is intended for special scenarios that resemble operations like "drop table" or "drop database" in TiDB.
     pub async fn unsafe_destroy_range(&self, range: impl Into<BoundRange>) -> Result<()> {
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
-        let req = new_unsafe_destroy_range_request(range);
+        let req = self
+            .request_context
+            .apply_to(new_unsafe_destroy_range_request(range));
         let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
             .all_stores(DEFAULT_STORE_BACKOFF)
             .merge(crate::request::Collect)
@@ -309,6 +350,12 @@ impl Client {
     }
 
     fn new_transaction(&self, timestamp: Timestamp, options: TransactionOptions) -> Transaction {
-        Transaction::new(timestamp, self.pd.clone(), options, self.keyspace)
+        Transaction::new(
+            timestamp,
+            self.pd.clone(),
+            options,
+            self.keyspace,
+            self.request_context.clone(),
+        )
     }
 }

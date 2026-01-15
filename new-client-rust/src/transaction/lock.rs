@@ -31,6 +31,7 @@ use crate::transaction::requests::SecondaryLocksStatus;
 use crate::transaction::requests::TransactionStatus;
 use crate::transaction::requests::TransactionStatusKind;
 use crate::Error;
+use crate::RequestContext;
 use crate::Result;
 
 const RESOLVE_LOCK_RETRY_LIMIT: usize = 10;
@@ -46,6 +47,7 @@ pub async fn resolve_locks(
     locks: Vec<kvrpcpb::LockInfo>,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
+    request_context: &RequestContext,
 ) -> Result<Vec<kvrpcpb::LockInfo> /* live_locks */> {
     debug!("resolving locks");
     let ts = pd_client.clone().get_timestamp().await?;
@@ -77,8 +79,12 @@ pub async fn resolve_locks(
         let commit_version = match commit_versions.get(&lock.lock_version) {
             Some(&commit_version) => commit_version,
             None => {
-                let request = requests::new_cleanup_request(lock.primary_lock, lock.lock_version);
+                let request = request_context.apply_to(requests::new_cleanup_request(
+                    lock.primary_lock,
+                    lock.lock_version,
+                ));
                 let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
+                    .with_request_context(request_context.clone())
                     .resolve_lock(OPTIMISTIC_BACKOFF, keyspace)
                     .retry_multi_region(DEFAULT_REGION_BACKOFF)
                     .merge(CollectSingle)
@@ -96,6 +102,7 @@ pub async fn resolve_locks(
             commit_version,
             pd_client.clone(),
             keyspace,
+            request_context,
         )
         .await?;
         clean_regions
@@ -112,6 +119,7 @@ async fn resolve_lock_with_retry(
     commit_version: u64,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
+    request_context: &RequestContext,
 ) -> Result<RegionVerId> {
     debug!("resolving locks with retry");
     // FIXME: Add backoff
@@ -120,8 +128,12 @@ async fn resolve_lock_with_retry(
         debug!("resolving locks: attempt {}", (i + 1));
         let store = pd_client.clone().store_for_key(key.into()).await?;
         let ver_id = store.region_with_leader.ver_id();
-        let request = requests::new_resolve_lock_request(start_version, commit_version);
+        let request = request_context.apply_to(requests::new_resolve_lock_request(
+            start_version,
+            commit_version,
+        ));
         let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
+            .with_request_context(request_context.clone())
             .single_region_with_store(store)
             .await?
             .resolve_lock(Backoff::no_backoff(), keyspace)
@@ -201,11 +213,20 @@ impl ResolveLocksContext {
 
 pub struct LockResolver {
     ctx: ResolveLocksContext,
+    request_context: RequestContext,
 }
 
 impl LockResolver {
     pub fn new(ctx: ResolveLocksContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            request_context: RequestContext::default(),
+        }
+    }
+
+    pub(crate) fn with_request_context(mut self, request_context: RequestContext) -> Self {
+        self.request_context = request_context;
+        self
     }
 
     /// _Cleanup_ the given locks. Returns whether all the given locks are resolved.
@@ -361,7 +382,7 @@ impl LockResolver {
         // 2.1 Txn Committed
         // 2.2 Txn Rollbacked -- rollback itself, rollback by others, GC tomb etc.
         // 2.3 No lock -- pessimistic lock rollback, concurrence prewrite.
-        let req = new_check_txn_status_request(
+        let req = self.request_context.apply_to(new_check_txn_status_request(
             primary,
             txn_id,
             caller_start_ts,
@@ -369,7 +390,7 @@ impl LockResolver {
             rollback_if_not_exist,
             force_sync_commit,
             resolving_pessimistic_lock,
-        );
+        ));
         let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, req)
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .merge(CollectSingle)
@@ -394,7 +415,9 @@ impl LockResolver {
         keys: Vec<Vec<u8>>,
         txn_id: u64,
     ) -> Result<SecondaryLocksStatus> {
-        let req = new_check_secondary_locks_request(keys, txn_id);
+        let req = self
+            .request_context
+            .apply_to(new_check_secondary_locks_request(keys, txn_id));
         let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, req)
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .extract_error()
@@ -411,7 +434,9 @@ impl LockResolver {
         txn_infos: Vec<TxnInfo>,
     ) -> Result<RegionVerId> {
         let ver_id = store.region_with_leader.ver_id();
-        let request = requests::new_batch_resolve_lock_request(txn_infos.clone());
+        let request = self
+            .request_context
+            .apply_to(requests::new_batch_resolve_lock_request(txn_infos.clone()));
         let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
             .single_region_with_store(store.clone())
             .await?
@@ -463,15 +488,17 @@ mod tests {
 
         let key = vec![1];
         let region1 = MockPdClient::region1();
-        let resolved_region = resolve_lock_with_retry(&key, 1, 2, client.clone(), keyspace)
-            .await
-            .unwrap();
+        let request_context = RequestContext::default();
+        let resolved_region =
+            resolve_lock_with_retry(&key, 1, 2, client.clone(), keyspace, &request_context)
+                .await
+                .unwrap();
         assert_eq!(region1.ver_id(), resolved_region);
 
         // Test resolve lock over retry limit
         fail::cfg("region-error", "10*return").unwrap();
         let key = vec![100];
-        resolve_lock_with_retry(&key, 3, 4, client, keyspace)
+        resolve_lock_with_retry(&key, 3, 4, client, keyspace, &request_context)
             .await
             .expect_err("should return error");
     }

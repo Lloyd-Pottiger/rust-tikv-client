@@ -29,12 +29,14 @@ use crate::store::RegionStore;
 use crate::transaction::HasLocks;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
+use crate::RequestContext;
 use crate::Result;
 
 /// Builder type for plans (see that module for more).
 pub struct PlanBuilder<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> {
     pd_client: Arc<PdC>,
     plan: P,
+    request_context: RequestContext,
     phantom: PhantomData<Ph>,
 }
 
@@ -55,6 +57,7 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
                 request,
                 kv_client: None,
             },
+            request_context: RequestContext::default(),
             phantom: PhantomData,
         }
     }
@@ -69,6 +72,11 @@ impl<PdC: PdClient, P: Plan> PlanBuilder<PdC, P, Targetted> {
 }
 
 impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
+    pub(crate) fn with_request_context(mut self, request_context: RequestContext) -> Self {
+        self.request_context = request_context;
+        self
+    }
+
     /// If there is a lock error, then resolve the lock and retry the request.
     pub fn resolve_lock(
         self,
@@ -85,7 +93,9 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 backoff,
                 pd_client: self.pd_client,
                 keyspace,
+                request_context: self.request_context.clone(),
             },
+            request_context: self.request_context,
             phantom: PhantomData,
         }
     }
@@ -111,7 +121,9 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 backoff,
                 pd_client: self.pd_client,
                 keyspace,
+                request_context: self.request_context.clone(),
             },
+            request_context: self.request_context,
             phantom: PhantomData,
         }
     }
@@ -130,6 +142,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 merge,
                 phantom: PhantomData,
             },
+            request_context: self.request_context,
             phantom: PhantomData,
         }
     }
@@ -148,6 +161,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 inner: self.plan,
                 processor: DefaultProcessor,
             },
+            request_context: self.request_context,
             phantom: PhantomData,
         }
     }
@@ -187,6 +201,7 @@ where
                 backoff,
                 preserve_region_results,
             },
+            request_context: self.request_context,
             phantom: PhantomData,
         }
     }
@@ -198,7 +213,7 @@ impl<PdC: PdClient, R: KvRequest> PlanBuilder<PdC, Dispatch<R>, NoTarget> {
         self,
         store: RegionStore,
     ) -> Result<PlanBuilder<PdC, Dispatch<R>, Targetted>> {
-        set_single_region_store(self.plan, store, self.pd_client)
+        set_single_region_store(self.plan, store, self.pd_client, self.request_context)
     }
 }
 
@@ -217,6 +232,7 @@ where
                 pd_client: self.pd_client,
                 backoff,
             },
+            request_context: self.request_context,
             phantom: PhantomData,
         }
     }
@@ -233,6 +249,7 @@ where
                 inner: self.plan,
                 shard: None,
             },
+            request_context: self.request_context,
             phantom: PhantomData,
         }
     }
@@ -246,6 +263,7 @@ where
         PlanBuilder {
             pd_client: self.pd_client,
             plan: ExtractError { inner: self.plan },
+            request_context: self.request_context,
             phantom: self.phantom,
         }
     }
@@ -255,12 +273,14 @@ fn set_single_region_store<PdC: PdClient, R: KvRequest>(
     mut plan: Dispatch<R>,
     store: RegionStore,
     pd_client: Arc<PdC>,
+    request_context: RequestContext,
 ) -> Result<PlanBuilder<PdC, Dispatch<R>, Targetted>> {
     plan.request.set_leader(&store.region_with_leader)?;
     plan.kv_client = Some(store.client);
     Ok(PlanBuilder {
         plan,
         pd_client,
+        request_context,
         phantom: PhantomData,
     })
 }
