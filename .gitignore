@@ -1,0 +1,13 @@
+# Reference codebases (read-only; not part of the new Rust implementation)
+client-go/
+client-rust/
+
+# Rust build artifacts
+**/target/
+Cargo.lock
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
