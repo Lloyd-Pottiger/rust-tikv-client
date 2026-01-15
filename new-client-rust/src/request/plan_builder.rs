@@ -18,6 +18,7 @@ use crate::request::NextBatch;
 use crate::request::Plan;
 use crate::request::Process;
 use crate::request::ProcessResponse;
+use crate::request::ReadRouting;
 use crate::request::ResolveLock;
 use crate::request::RetryableMultiRegion;
 use crate::request::Shardable;
@@ -26,6 +27,7 @@ use crate::store::HasKeyErrors;
 use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
 use crate::store::RegionStore;
+use crate::store::SetRegionError;
 use crate::transaction::HasLocks;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
@@ -37,6 +39,7 @@ pub struct PlanBuilder<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> {
     pd_client: Arc<PdC>,
     plan: P,
     request_context: RequestContext,
+    read_routing: ReadRouting,
     phantom: PhantomData<Ph>,
 }
 
@@ -58,6 +61,7 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
                 kv_client: None,
             },
             request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
             phantom: PhantomData,
         }
     }
@@ -77,6 +81,11 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         self
     }
 
+    pub(crate) fn with_read_routing(mut self, read_routing: ReadRouting) -> Self {
+        self.read_routing = read_routing;
+        self
+    }
+
     /// If there is a lock error, then resolve the lock and retry the request.
     pub fn resolve_lock(
         self,
@@ -84,7 +93,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         keyspace: Keyspace,
     ) -> PlanBuilder<PdC, ResolveLock<P, PdC>, Ph>
     where
-        P::Result: HasLocks,
+        P::Result: HasLocks + Default + SetRegionError,
     {
         PlanBuilder {
             pd_client: self.pd_client.clone(),
@@ -94,8 +103,10 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 pd_client: self.pd_client,
                 keyspace,
                 request_context: self.request_context.clone(),
+                read_routing: self.read_routing.clone(),
             },
             request_context: self.request_context,
+            read_routing: self.read_routing,
             phantom: PhantomData,
         }
     }
@@ -124,6 +135,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 request_context: self.request_context.clone(),
             },
             request_context: self.request_context,
+            read_routing: self.read_routing,
             phantom: PhantomData,
         }
     }
@@ -143,6 +155,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 phantom: PhantomData,
             },
             request_context: self.request_context,
+            read_routing: self.read_routing,
             phantom: PhantomData,
         }
     }
@@ -162,6 +175,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 processor: DefaultProcessor,
             },
             request_context: self.request_context,
+            read_routing: self.read_routing,
             phantom: PhantomData,
         }
     }
@@ -200,8 +214,10 @@ where
                 pd_client: self.pd_client,
                 backoff,
                 preserve_region_results,
+                read_routing: self.read_routing.clone(),
             },
             request_context: self.request_context,
+            read_routing: self.read_routing,
             phantom: PhantomData,
         }
     }
@@ -213,7 +229,13 @@ impl<PdC: PdClient, R: KvRequest> PlanBuilder<PdC, Dispatch<R>, NoTarget> {
         self,
         store: RegionStore,
     ) -> Result<PlanBuilder<PdC, Dispatch<R>, Targetted>> {
-        set_single_region_store(self.plan, store, self.pd_client, self.request_context)
+        set_single_region_store(
+            self.plan,
+            store,
+            self.pd_client,
+            self.request_context,
+            self.read_routing,
+        )
     }
 }
 
@@ -233,6 +255,7 @@ where
                 backoff,
             },
             request_context: self.request_context,
+            read_routing: self.read_routing,
             phantom: PhantomData,
         }
     }
@@ -250,6 +273,7 @@ where
                 shard: None,
             },
             request_context: self.request_context,
+            read_routing: self.read_routing,
             phantom: PhantomData,
         }
     }
@@ -264,6 +288,7 @@ where
             pd_client: self.pd_client,
             plan: ExtractError { inner: self.plan },
             request_context: self.request_context,
+            read_routing: self.read_routing,
             phantom: self.phantom,
         }
     }
@@ -274,13 +299,17 @@ fn set_single_region_store<PdC: PdClient, R: KvRequest>(
     store: RegionStore,
     pd_client: Arc<PdC>,
     request_context: RequestContext,
+    read_routing: ReadRouting,
 ) -> Result<PlanBuilder<PdC, Dispatch<R>, Targetted>> {
     plan.request.set_leader(&store.region_with_leader)?;
+    plan.request.set_replica_read(store.replica_read);
+    plan.request.set_stale_read(store.stale_read);
     plan.kv_client = Some(store.client);
     Ok(PlanBuilder {
         plan,
         pd_client,
         request_context,
+        read_routing,
         phantom: PhantomData,
     })
 }

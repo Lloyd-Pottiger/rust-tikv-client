@@ -19,6 +19,14 @@ pub trait HasKeyErrors {
     fn key_errors(&mut self) -> Option<Vec<Error>>;
 }
 
+/// Allows setting a region error on a response type.
+///
+/// This is used internally to trigger a region-level retry when a request needs to be re-routed
+/// (e.g. stale-read meeting locks and falling back to leader).
+pub trait SetRegionError {
+    fn set_region_error(&mut self, error: crate::proto::errorpb::Error);
+}
+
 impl<T: HasRegionError> HasRegionErrors for T {
     fn region_errors(&mut self) -> Option<Vec<crate::proto::errorpb::Error>> {
         self.region_error().map(|e| vec![e])
@@ -66,6 +74,48 @@ has_region_error!(kvrpcpb::RawBatchScanResponse);
 has_region_error!(kvrpcpb::RawCasResponse);
 has_region_error!(kvrpcpb::RawCoprocessorResponse);
 has_region_error!(kvrpcpb::RawChecksumResponse);
+
+macro_rules! set_region_error {
+    ($type:ty) => {
+        impl SetRegionError for $type {
+            fn set_region_error(&mut self, error: crate::proto::errorpb::Error) {
+                self.region_error = Some(error);
+            }
+        }
+    };
+}
+
+set_region_error!(kvrpcpb::GetResponse);
+set_region_error!(kvrpcpb::ScanResponse);
+set_region_error!(kvrpcpb::PrewriteResponse);
+set_region_error!(kvrpcpb::CommitResponse);
+set_region_error!(kvrpcpb::PessimisticLockResponse);
+set_region_error!(kvrpcpb::ImportResponse);
+set_region_error!(kvrpcpb::BatchRollbackResponse);
+set_region_error!(kvrpcpb::PessimisticRollbackResponse);
+set_region_error!(kvrpcpb::CleanupResponse);
+set_region_error!(kvrpcpb::BatchGetResponse);
+set_region_error!(kvrpcpb::ScanLockResponse);
+set_region_error!(kvrpcpb::ResolveLockResponse);
+set_region_error!(kvrpcpb::TxnHeartBeatResponse);
+set_region_error!(kvrpcpb::CheckTxnStatusResponse);
+set_region_error!(kvrpcpb::CheckSecondaryLocksResponse);
+set_region_error!(kvrpcpb::DeleteRangeResponse);
+set_region_error!(kvrpcpb::GcResponse);
+set_region_error!(kvrpcpb::UnsafeDestroyRangeResponse);
+set_region_error!(kvrpcpb::RawGetResponse);
+set_region_error!(kvrpcpb::RawBatchGetResponse);
+set_region_error!(kvrpcpb::RawGetKeyTtlResponse);
+set_region_error!(kvrpcpb::RawPutResponse);
+set_region_error!(kvrpcpb::RawBatchPutResponse);
+set_region_error!(kvrpcpb::RawDeleteResponse);
+set_region_error!(kvrpcpb::RawBatchDeleteResponse);
+set_region_error!(kvrpcpb::RawDeleteRangeResponse);
+set_region_error!(kvrpcpb::RawScanResponse);
+set_region_error!(kvrpcpb::RawBatchScanResponse);
+set_region_error!(kvrpcpb::RawCasResponse);
+set_region_error!(kvrpcpb::RawCoprocessorResponse);
+set_region_error!(kvrpcpb::RawChecksumResponse);
 
 macro_rules! has_key_error {
     ($type:ty) => {

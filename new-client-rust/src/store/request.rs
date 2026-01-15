@@ -30,6 +30,10 @@ pub trait Request: Any + Sync + Send + 'static {
     fn set_resource_group_tag(&mut self, _tag: &[u8]) {}
 
     fn set_resource_group_name(&mut self, _name: &str) {}
+
+    fn set_replica_read(&mut self, _replica_read: bool) {}
+
+    fn set_stale_read(&mut self, _stale_read: bool) {}
 }
 
 macro_rules! impl_request {
@@ -91,6 +95,16 @@ macro_rules! impl_request {
                     .resource_control_context
                     .get_or_insert(kvrpcpb::ResourceControlContext::default());
                 resource_ctl_ctx.resource_group_name = name.to_owned();
+            }
+
+            fn set_replica_read(&mut self, replica_read: bool) {
+                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                ctx.replica_read = replica_read;
+            }
+
+            fn set_stale_read(&mut self, stale_read: bool) {
+                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                ctx.stale_read = stale_read;
             }
         }
     };

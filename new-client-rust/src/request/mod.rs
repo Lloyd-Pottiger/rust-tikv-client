@@ -24,6 +24,7 @@ pub use self::plan::ResponseWithShard;
 pub use self::plan::RetryableMultiRegion;
 pub use self::plan_builder::PlanBuilder;
 pub use self::plan_builder::SingleKey;
+pub(crate) use self::read_routing::ReadRouting;
 pub use self::shard::Batchable;
 pub use self::shard::HasNextBatch;
 pub use self::shard::NextBatch;
@@ -40,6 +41,7 @@ use crate::transaction::HasLocks;
 mod keyspace;
 pub mod plan;
 mod plan_builder;
+mod read_routing;
 mod shard;
 
 /// Abstracts any request sent to a TiKV server.
@@ -112,7 +114,7 @@ mod test {
 
     #[tokio::test]
     async fn test_region_retry() {
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, Default)]
         struct MockRpcResponse;
 
         impl HasKeyErrors for MockRpcResponse {
@@ -125,6 +127,10 @@ mod test {
             fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
                 Some(crate::proto::errorpb::Error::default())
             }
+        }
+
+        impl crate::store::SetRegionError for MockRpcResponse {
+            fn set_region_error(&mut self, _error: crate::proto::errorpb::Error) {}
         }
 
         impl HasLocks for MockRpcResponse {}

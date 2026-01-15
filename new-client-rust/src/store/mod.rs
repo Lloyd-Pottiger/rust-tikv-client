@@ -18,6 +18,7 @@ pub use self::client::TikvConnect;
 pub use self::errors::HasKeyErrors;
 pub use self::errors::HasRegionError;
 pub use self::errors::HasRegionErrors;
+pub use self::errors::SetRegionError;
 pub use self::request::Request;
 use crate::pd::PdClient;
 use crate::proto::kvrpcpb;
@@ -30,6 +31,10 @@ use crate::Result;
 pub struct RegionStore {
     pub region_with_leader: RegionWithLeader,
     pub client: Arc<dyn KvClient + Send + Sync>,
+    #[new(default)]
+    pub(crate) replica_read: bool,
+    #[new(default)]
+    pub(crate) stale_read: bool,
 }
 
 #[derive(new, Clone)]

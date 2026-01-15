@@ -205,7 +205,10 @@ macro_rules! shardable_key {
             }
 
             fn apply_store(&mut self, store: &$crate::store::RegionStore) -> $crate::Result<()> {
-                self.set_leader(&store.region_with_leader)
+                self.set_leader(&store.region_with_leader)?;
+                self.set_replica_read(store.replica_read);
+                self.set_stale_read(store.stale_read);
+                Ok(())
             }
         }
     };
@@ -235,7 +238,10 @@ macro_rules! shardable_keys {
             }
 
             fn apply_store(&mut self, store: &$crate::store::RegionStore) -> $crate::Result<()> {
-                self.set_leader(&store.region_with_leader)
+                self.set_leader(&store.region_with_leader)?;
+                self.set_replica_read(store.replica_read);
+                self.set_stale_read(store.stale_read);
+                Ok(())
             }
         }
     };
@@ -300,7 +306,10 @@ macro_rules! shardable_range {
             }
 
             fn apply_store(&mut self, store: &$crate::store::RegionStore) -> $crate::Result<()> {
-                self.set_leader(&store.region_with_leader)
+                self.set_leader(&store.region_with_leader)?;
+                self.set_replica_read(store.replica_read);
+                self.set_stale_read(store.stale_read);
+                Ok(())
             }
         }
     };

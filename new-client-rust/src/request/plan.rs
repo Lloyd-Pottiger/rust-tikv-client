@@ -21,6 +21,7 @@ use crate::region::StoreId;
 use crate::region::{RegionVerId, RegionWithLeader};
 use crate::request::shard::HasNextBatch;
 use crate::request::NextBatch;
+use crate::request::ReadRouting;
 use crate::request::Shardable;
 use crate::request::{KvRequest, StoreRequest};
 use crate::stats::tikv_stats;
@@ -28,7 +29,7 @@ use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
 use crate::store::KvClient;
 use crate::store::RegionStore;
-use crate::store::{HasKeyErrors, Store};
+use crate::store::{HasKeyErrors, SetRegionError, Store};
 use crate::transaction::resolve_locks;
 use crate::transaction::HasLocks;
 use crate::transaction::ResolveLocksContext;
@@ -101,6 +102,8 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     /// If true, return Ok and preserve all regions' results, even if some of them are Err.
     /// Otherwise, return the first Err if there is any.
     pub preserve_region_results: bool,
+
+    pub(crate) read_routing: ReadRouting,
 }
 
 impl<P: Plan + Shardable, PdC: PdClient> RetryableMultiRegion<P, PdC>
@@ -115,6 +118,8 @@ where
         backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        read_routing: ReadRouting,
+        attempt: usize,
     ) -> Result<<Self as Plan>::Result> {
         let shards = current_plan.shards(&pd_client).collect::<Vec<_>>().await;
         debug!("single_plan_handler, shards: {}", shards.len());
@@ -129,6 +134,8 @@ where
                 backoff.clone(),
                 permits.clone(),
                 preserve_region_results,
+                read_routing.clone(),
+                attempt,
             ));
             handles.push(handle);
         }
@@ -161,13 +168,46 @@ where
         mut backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        read_routing: ReadRouting,
+        attempt: usize,
     ) -> Result<<Self as Plan>::Result> {
         debug!("single_shard_handler");
+        let read_peer = match read_routing.select_peer(&region, attempt) {
+            Ok(read_peer) => read_peer,
+            Err(Error::LeaderNotFound { region }) => {
+                debug!(
+                    "single_shard_handler::select_peer: leader not found: {:?}",
+                    region
+                );
+                return Self::handle_other_error(
+                    pd_client,
+                    plan,
+                    region.clone(),
+                    None,
+                    backoff,
+                    permits,
+                    preserve_region_results,
+                    read_routing,
+                    attempt + 1,
+                    Error::LeaderNotFound { region },
+                )
+                .await;
+            }
+            Err(err) => return Err(err),
+        };
+        let mut target_region = region.clone();
+        // `map_region_to_store` is keyed by `RegionWithLeader::leader.store_id`, so we overwrite it
+        // with the selected target peer for this request.
+        target_region.leader = Some(read_peer.target_peer.clone());
+
         let region_store = match pd_client
             .clone()
-            .map_region_to_store(region)
+            .map_region_to_store(target_region)
             .await
             .and_then(|region_store| {
+                let mut region_store = region_store;
+                region_store.replica_read = read_peer.replica_read;
+                region_store.stale_read = read_peer.stale_read;
                 plan.apply_store(&region_store)?;
                 Ok(region_store)
             }) {
@@ -185,6 +225,8 @@ where
                     backoff,
                     permits,
                     preserve_region_results,
+                    read_routing,
+                    attempt + 1,
                     Error::LeaderNotFound { region },
                 )
                 .await;
@@ -212,6 +254,8 @@ where
                     backoff,
                     permits,
                     preserve_region_results,
+                    read_routing,
+                    attempt + 1,
                     e,
                 )
                 .await;
@@ -241,6 +285,8 @@ where
                         backoff,
                         permits,
                         preserve_region_results,
+                        read_routing,
+                        attempt + 1,
                     )
                     .await
                 }
@@ -260,6 +306,8 @@ where
         mut backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        read_routing: ReadRouting,
+        attempt: usize,
         e: Error,
     ) -> Result<<Self as Plan>::Result> {
         debug!("handle_other_error: {:?}", e);
@@ -278,6 +326,8 @@ where
                     backoff,
                     permits,
                     preserve_region_results,
+                    read_routing,
+                    attempt + 1,
                 )
                 .await
             }
@@ -392,6 +442,7 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
             preserve_region_results: self.preserve_region_results,
+            read_routing: self.read_routing.clone(),
         }
     }
 }
@@ -414,6 +465,8 @@ where
             self.backoff.clone(),
             concurrency_permits.clone(),
             self.preserve_region_results,
+            self.read_routing.clone(),
+            0,
         )
         .await
     }
@@ -602,6 +655,7 @@ pub struct ResolveLock<P: Plan, PdC: PdClient> {
     pub backoff: Backoff,
     pub keyspace: Keyspace,
     pub(crate) request_context: RequestContext,
+    pub(crate) read_routing: ReadRouting,
 }
 
 impl<P: Plan, PdC: PdClient> Clone for ResolveLock<P, PdC> {
@@ -612,6 +666,7 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLock<P, PdC> {
             backoff: self.backoff.clone(),
             keyspace: self.keyspace,
             request_context: self.request_context.clone(),
+            read_routing: self.read_routing.clone(),
         }
     }
 }
@@ -619,7 +674,7 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLock<P, PdC> {
 #[async_trait]
 impl<P: Plan, PdC: PdClient> Plan for ResolveLock<P, PdC>
 where
-    P::Result: HasLocks,
+    P::Result: HasLocks + Default + SetRegionError,
 {
     type Result = P::Result;
 
@@ -636,6 +691,13 @@ where
                 return Err(Error::ResolveLockError(locks));
             }
 
+            let stale_read_meet_lock = self.read_routing.is_stale_read();
+            if stale_read_meet_lock {
+                // Align with client-go: once stale-read sees a lock, it falls back to a leader read
+                // after resolving locks.
+                self.read_routing.force_leader();
+            }
+
             let pd_client = self.pd_client.clone();
             let live_locks = resolve_locks(
                 locks,
@@ -644,19 +706,44 @@ where
                 &self.request_context,
             )
             .await?;
-            if live_locks.is_empty() {
-                result = self.inner.execute().await?;
-            } else {
-                match clone.backoff.next_delay_duration() {
-                    None => return Err(Error::ResolveLockError(live_locks)),
+
+            if stale_read_meet_lock {
+                // Trigger a region-level retry so the request can be re-routed (to leader). We use
+                // `epoch_not_match` with empty `current_regions` to avoid region-backoff sleeps.
+                if live_locks.is_empty() {
+                    return Ok(reroute_to_leader::<P::Result>());
+                }
+                return match clone.backoff.next_delay_duration() {
+                    None => Err(Error::ResolveLockError(live_locks)),
                     Some(delay_duration) => {
                         sleep(delay_duration).await;
-                        result = clone.inner.execute().await?;
+                        Ok(reroute_to_leader::<P::Result>())
                     }
+                };
+            }
+
+            if live_locks.is_empty() {
+                result = self.inner.execute().await?;
+                continue;
+            }
+
+            match clone.backoff.next_delay_duration() {
+                None => return Err(Error::ResolveLockError(live_locks)),
+                Some(delay_duration) => {
+                    sleep(delay_duration).await;
+                    result = clone.inner.execute().await?;
                 }
             }
         }
     }
+}
+
+fn reroute_to_leader<R: Default + SetRegionError>() -> R {
+    let mut resp = R::default();
+    let mut region_error = errorpb::Error::default();
+    region_error.epoch_not_match = Some(EpochNotMatch::default());
+    resp.set_region_error(region_error);
+    resp
 }
 
 #[derive(Debug, Default)]
@@ -969,10 +1056,12 @@ mod test {
                 pd_client: Arc::new(MockPdClient::default()),
                 keyspace: Keyspace::Disable,
                 request_context: RequestContext::default(),
+                read_routing: ReadRouting::default(),
             },
             pd_client: Arc::new(MockPdClient::default()),
             backoff: Backoff::no_backoff(),
             preserve_region_results: false,
+            read_routing: ReadRouting::default(),
         };
         assert!(plan.execute().await.is_err())
     }

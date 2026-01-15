@@ -112,6 +112,7 @@ mod pd;
 mod proto;
 mod region;
 mod region_cache;
+mod replica_read;
 mod request_context;
 mod stats;
 mod store;
@@ -170,5 +171,7 @@ pub use crate::transaction::Snapshot;
 pub use crate::transaction::Transaction;
 #[doc(inline)]
 pub use crate::transaction::TransactionOptions;
+#[doc(inline)]
+pub use replica_read::ReplicaReadType;
 
 pub(crate) use request_context::RequestContext;
