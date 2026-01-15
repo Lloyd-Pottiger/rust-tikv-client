@@ -17,11 +17,16 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
     - 设计 Rust 侧 public API（尽量小的 surface）并实现 region peer 选择/回退策略
     - UT 覆盖：leader/follower/learner/mixed/prefer-leader 的 peer 选择与 context 字段写入
 
-- Resource Control（resource group tag + ResourceControlContext）
+- Resource Control（Txn 路径：request context builder 复用到 TransactionClient/Transaction）
   - 计划：
-    - 对齐 `client-go/tikvrpc.ResourceGroupTagger` + `kvrpcpb::Context.resource_control_context`
-    - Rust 侧提供可组合的 request context builder（Raw/Txn 复用），并在发送前写入 context
-    - UT：校验所有关键 RPC 的 context 字段已写入且可覆盖
+    - 将 `request_source/resource_group_tag/resource_group_name` 贯穿到 txn read/write/2PC 请求（含 prewrite/commit/resolve lock）
+    - UT：抽样校验关键 txn RPC 的 context 字段写入
+
+- Resource Control（扩展项：penalty/override_priority + tagger/interceptor）
+  - 计划：
+    - 对齐 `client-go/tikvrpc.ResourceGroupTagger` 与 TiDB 侧 tagger 逻辑
+    - Rust 侧提供可插拔 hook（发送前可改写 context/tag），默认关闭
+    - UT：hook 覆盖与优先级规则
 
 - 事务协议补齐：pipelined txn / txn local latches（按 client-go v2 行为）
   - 计划：
@@ -79,3 +84,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 实现：新增可重复生成的本地工具 `tools/client-go-api-inventory/`（用 `go list -json` + AST 提取，避免手工漏项）
   - 验证：`go run ./tools/client-go-api-inventory` 可重复生成（重复运行内容稳定）
   - 改动文件：`tools/client-go-api-inventory/main.go`、`go.mod`、`.codex/progress/client-go-api-inventory.md`、`.codex/progress/parity-checklist.md`、`.codex/progress/daemon.md`
+
+- Resource Control（RawClient 支持 `resource_group_name` / `ResourceControlContext` 写入）
+  - 实现：扩展 `store::Request` trait，统一写入 `kvrpcpb::Context.resource_control_context.resource_group_name`
+  - 新增：`RawClient::with_resource_group_name`（clone-style），并在 raw 请求发送前写入 context
+  - 测试：扩展 RawClient UT 校验 `RawGetRequest.context.resource_control_context.resource_group_name`；`cargo test` 通过
+  - 改动文件：`new-client-rust/src/store/request.rs`、`new-client-rust/src/raw/client.rs`、`new-client-rust/src/raw/requests.rs`、`.codex/progress/daemon.md`

@@ -51,6 +51,7 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
     keyspace: Keyspace,
     request_source: Option<Arc<str>>,
     resource_group_tag: Option<Arc<[u8]>>,
+    resource_group_name: Option<Arc<str>>,
 }
 
 impl<PdC: PdClient> Clone for Client<PdC> {
@@ -63,6 +64,7 @@ impl<PdC: PdClient> Clone for Client<PdC> {
             keyspace: self.keyspace,
             request_source: self.request_source.clone(),
             resource_group_tag: self.resource_group_tag.clone(),
+            resource_group_name: self.resource_group_name.clone(),
         }
     }
 }
@@ -133,6 +135,7 @@ impl Client<PdRpcClient> {
             keyspace,
             request_source: None,
             resource_group_tag: None,
+            resource_group_name: None,
         })
     }
 
@@ -170,6 +173,7 @@ impl Client<PdRpcClient> {
             keyspace: self.keyspace,
             request_source: self.request_source.clone(),
             resource_group_tag: self.resource_group_tag.clone(),
+            resource_group_name: self.resource_group_name.clone(),
         }
     }
 
@@ -201,6 +205,7 @@ impl Client<PdRpcClient> {
             keyspace: self.keyspace,
             request_source: self.request_source.clone(),
             resource_group_tag: self.resource_group_tag.clone(),
+            resource_group_name: self.resource_group_name.clone(),
         }
     }
 
@@ -221,6 +226,7 @@ impl Client<PdRpcClient> {
             keyspace: self.keyspace,
             request_source: self.request_source.clone(),
             resource_group_tag: self.resource_group_tag.clone(),
+            resource_group_name: self.resource_group_name.clone(),
         }
     }
 }
@@ -242,12 +248,24 @@ impl<PdC: PdClient> Client<PdC> {
         cloned
     }
 
+    /// Set `kvrpcpb::Context.resource_control_context.resource_group_name` for all requests created
+    /// by this client.
+    #[must_use]
+    pub fn with_resource_group_name(&self, name: impl Into<String>) -> Self {
+        let mut cloned = self.clone();
+        cloned.resource_group_name = Some(Arc::<str>::from(name.into()));
+        cloned
+    }
+
     fn with_request_context<R: crate::store::Request>(&self, mut request: R) -> R {
         if let Some(source) = &self.request_source {
             request.set_request_source(source);
         }
         if let Some(tag) = &self.resource_group_tag {
             request.set_resource_group_tag(tag);
+        }
+        if let Some(name) = &self.resource_group_name {
+            request.set_resource_group_name(name);
         }
         request
     }
@@ -1033,6 +1051,7 @@ mod tests {
             keyspace: Keyspace::Enable { keyspace_id: 0 },
             request_source: None,
             resource_group_tag: None,
+            resource_group_name: None,
         };
         let pairs = vec![
             KvPair(vec![11].into(), vec![12]),
@@ -1068,6 +1087,7 @@ mod tests {
             keyspace: Keyspace::Enable { keyspace_id: 0 },
             request_source: None,
             resource_group_tag: None,
+            resource_group_name: None,
         };
         let resps = client
             .coprocessor(
@@ -1098,15 +1118,22 @@ mod tests {
     async fn test_request_source_and_resource_group_tag() -> Result<()> {
         let expected_source = "unit-test".to_owned();
         let expected_tag = vec![1_u8, 2, 3];
+        let expected_group_name = "unit-test-group".to_owned();
 
         let hook_source = expected_source.clone();
         let hook_tag = expected_tag.clone();
+        let hook_group_name = expected_group_name.clone();
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() {
                     let ctx = req.context.as_ref().expect("context should be set");
                     assert_eq!(ctx.request_source, hook_source);
                     assert_eq!(ctx.resource_group_tag, hook_tag);
+                    let resource_ctl_ctx = ctx
+                        .resource_control_context
+                        .as_ref()
+                        .expect("resource_control_context should be set");
+                    assert_eq!(resource_ctl_ctx.resource_group_name, hook_group_name);
 
                     let resp = kvrpcpb::RawGetResponse {
                         not_found: true,
@@ -1127,9 +1154,11 @@ mod tests {
             keyspace: Keyspace::Disable,
             request_source: None,
             resource_group_tag: None,
+            resource_group_name: None,
         }
         .with_request_source(expected_source)
-        .with_resource_group_tag(expected_tag);
+        .with_resource_group_tag(expected_tag)
+        .with_resource_group_name(expected_group_name);
 
         assert_eq!(client.get(vec![1_u8]).await?, None);
         Ok(())

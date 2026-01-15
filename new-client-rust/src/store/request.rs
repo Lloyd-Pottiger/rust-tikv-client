@@ -28,6 +28,8 @@ pub trait Request: Any + Sync + Send + 'static {
     fn set_request_source(&mut self, _source: &str) {}
 
     fn set_resource_group_tag(&mut self, _tag: &[u8]) {}
+
+    fn set_resource_group_name(&mut self, _name: &str) {}
 }
 
 macro_rules! impl_request {
@@ -81,6 +83,14 @@ macro_rules! impl_request {
             fn set_resource_group_tag(&mut self, tag: &[u8]) {
                 let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
                 ctx.resource_group_tag = tag.to_vec();
+            }
+
+            fn set_resource_group_name(&mut self, name: &str) {
+                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                let resource_ctl_ctx = ctx
+                    .resource_control_context
+                    .get_or_insert(kvrpcpb::ResourceControlContext::default());
+                resource_ctl_ctx.resource_group_name = name.to_owned();
             }
         }
     };

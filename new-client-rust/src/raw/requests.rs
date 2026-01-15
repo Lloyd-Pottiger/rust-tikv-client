@@ -608,6 +608,10 @@ impl Request for RawCoprocessorRequest {
     fn set_resource_group_tag(&mut self, tag: &[u8]) {
         self.inner.set_resource_group_tag(tag);
     }
+
+    fn set_resource_group_name(&mut self, name: &str) {
+        self.inner.set_resource_group_name(name);
+    }
 }
 
 impl KvRequest for RawCoprocessorRequest {
