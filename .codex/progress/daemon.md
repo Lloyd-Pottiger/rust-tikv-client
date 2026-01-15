@@ -13,11 +13,15 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 - 整体目标复审：按最新 `client-go/` 代码重新刷新 parity 状态并列出剩余 gap（只保留仍 relevant 的 public API/能力点）
   - 计划：
-    - 运行/核对 `.codex/progress/client-go-api-inventory.md` 与 `.codex/progress/parity-checklist.md`（必要时重新生成 inventory）
+    - 运行/核对 `.codex/progress/client-go-api-inventory.md` 与 `.codex/progress/parity-checklist.md`
     - 结合 `new-client-rust` 现状，筛掉已废弃/不需要的项（本仓库“只为最新 tikv”）
     - 将剩余 gap 拆成可落地的小任务，补齐到本文件「待做工作」，并开始最高优先级项
 
 # 已完成工作
+
+- Tools：`client-go-api-inventory` 支持 merge 既有 `.codex/progress/parity-checklist.md`（保留 `[x]`/Rust/Tests）
+  - 完成：工具读取旧 checklist 并按 (package/section/signature) key 回填到新 skeleton；新增项保持空；删除项自动丢弃；已用 `go run ./tools/client-go-api-inventory` 验证不会覆盖既有回填内容
+  - 改动文件：`tools/client-go-api-inventory/main.go`、`.codex/progress/parity-checklist.md`、`.codex/progress/daemon.md`
 
 - Txn buffer flags：补齐 `KeyFlags/FlagsOp` per-key 元数据（assertion/presumeKNE/prewrite-only），并与 2PC lowering/commit 对齐
   - 完成：新增 `KeyFlags(u16)` + `FlagsOp`，Buffer 持久化 flags；`presumeKNE` 影响 Put→Insert 与 pessimistic lock 默认 NotExist；`prewrite-only` 用于 `Op_CheckNotExists` 跳过 commit/rollback

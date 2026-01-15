@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -34,6 +35,18 @@ type pkgAPI struct {
 	Consts  []string
 	Vars    []string
 	Methods []string
+}
+
+type checklistKey struct {
+	Package string
+	Section string
+	Item    string
+}
+
+type checklistEntry struct {
+	Checked bool
+	Rust    string
+	Tests   string
 }
 
 func main() {
@@ -85,7 +98,11 @@ func main() {
 		fatalf("write inventory: %v", err)
 	}
 
-	chk := renderChecklist(modulePath, apis)
+	existingChecklist, err := readChecklist(outChecklist)
+	if err != nil {
+		fatalf("read existing checklist: %v", err)
+	}
+	chk := renderChecklist(modulePath, apis, existingChecklist)
 	if err := writeFileAtomic(outChecklist, chk); err != nil {
 		fatalf("write checklist: %v", err)
 	}
@@ -335,7 +352,7 @@ func renderInventory(modulePath string, apis []pkgAPI) []byte {
 	return []byte(b.String())
 }
 
-func renderChecklist(modulePath string, apis []pkgAPI) []byte {
+func renderChecklist(modulePath string, apis []pkgAPI, existing map[checklistKey]checklistEntry) []byte {
 	var b strings.Builder
 	fmt.Fprintln(&b, "# client-go v2 parity checklist (auto-generated skeleton)")
 	fmt.Fprintln(&b)
@@ -352,11 +369,11 @@ func renderChecklist(modulePath string, apis []pkgAPI) []byte {
 	for _, api := range apis {
 		rel := importPathRel(modulePath, api.ImportPath)
 		fmt.Fprintf(&b, "## %s (package %s)\n\n", rel, api.Name)
-		renderChecklistSection(&b, "Types", api.Types)
-		renderChecklistSection(&b, "Functions", api.Funcs)
-		renderChecklistSection(&b, "Consts", api.Consts)
-		renderChecklistSection(&b, "Vars", api.Vars)
-		renderChecklistSection(&b, "Methods", api.Methods)
+		renderChecklistSection(&b, rel, "Types", api.Types, existing)
+		renderChecklistSection(&b, rel, "Functions", api.Funcs, existing)
+		renderChecklistSection(&b, rel, "Consts", api.Consts, existing)
+		renderChecklistSection(&b, rel, "Vars", api.Vars, existing)
+		renderChecklistSection(&b, rel, "Methods", api.Methods, existing)
 	}
 
 	return []byte(b.String())
@@ -375,7 +392,13 @@ func renderSection(b *strings.Builder, title string, items []string, format func
 	fmt.Fprintln(b)
 }
 
-func renderChecklistSection(b *strings.Builder, title string, items []string) {
+func renderChecklistSection(
+	b *strings.Builder,
+	pkgRel string,
+	title string,
+	items []string,
+	existing map[checklistKey]checklistEntry,
+) {
 	fmt.Fprintf(b, "### %s\n", title)
 	if len(items) == 0 {
 		fmt.Fprintln(b, "- (none)")
@@ -383,9 +406,117 @@ func renderChecklistSection(b *strings.Builder, title string, items []string) {
 		return
 	}
 	for _, it := range items {
-		fmt.Fprintf(b, "- [ ] `%s` | Rust:  | Tests:\n", it)
+		key := checklistKey{
+			Package: pkgRel,
+			Section: title,
+			Item:    it,
+		}
+		entry, ok := existing[key]
+		checked := " "
+		rust := ""
+		tests := ""
+		if ok {
+			if entry.Checked {
+				checked = "x"
+			}
+			rust = entry.Rust
+			tests = entry.Tests
+		}
+		fmt.Fprintf(b, "- [%s] `%s` | Rust: %s | Tests: %s\n", checked, it, rust, tests)
 	}
 	fmt.Fprintln(b)
+}
+
+func readChecklist(path string) (map[checklistKey]checklistEntry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[checklistKey]checklistEntry{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	entries := make(map[checklistKey]checklistEntry)
+	var currentPkg string
+	var currentSection string
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case strings.HasPrefix(line, "## "):
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "## "))
+			pkg, _, ok := strings.Cut(rest, " (package ")
+			if ok {
+				currentPkg = strings.TrimSpace(pkg)
+			} else {
+				currentPkg = rest
+			}
+			currentSection = ""
+		case strings.HasPrefix(line, "### "):
+			currentSection = strings.TrimSpace(strings.TrimPrefix(line, "### "))
+		case strings.HasPrefix(line, "- ["):
+			if currentPkg == "" || currentSection == "" {
+				continue
+			}
+			item, entry, ok := parseChecklistItem(line)
+			if !ok {
+				continue
+			}
+			entries[checklistKey{
+				Package: currentPkg,
+				Section: currentSection,
+				Item:    item,
+			}] = entry
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func parseChecklistItem(line string) (string, checklistEntry, bool) {
+	var entry checklistEntry
+	if len(line) < len("- [ ] `") || !strings.HasPrefix(line, "- [") || line[4] != ']' {
+		return "", entry, false
+	}
+	switch line[3] {
+	case 'x', 'X':
+		entry.Checked = true
+	case ' ':
+	default:
+		return "", entry, false
+	}
+
+	start := strings.IndexByte(line, '`')
+	if start == -1 {
+		return "", entry, false
+	}
+	end := strings.IndexByte(line[start+1:], '`')
+	if end == -1 {
+		return "", entry, false
+	}
+	end = start + 1 + end
+	item := line[start+1 : end]
+
+	rest := strings.TrimSpace(line[end+1:])
+	if rest == "" {
+		return item, entry, true
+	}
+	for _, part := range strings.Split(rest, "|") {
+		part = strings.TrimSpace(part)
+		switch {
+		case strings.HasPrefix(part, "Rust:"):
+			entry.Rust = strings.TrimSpace(strings.TrimPrefix(part, "Rust:"))
+		case strings.HasPrefix(part, "Tests:"):
+			entry.Tests = strings.TrimSpace(strings.TrimPrefix(part, "Tests:"))
+		}
+	}
+
+	return item, entry, true
 }
 
 func writeFileAtomic(path string, content []byte) error {
