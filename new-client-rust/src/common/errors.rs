@@ -33,6 +33,12 @@ pub enum Error {
     /// An operation requires a primary key, but the transaction was empty.
     #[error("transaction has no primary key")]
     NoPrimaryKey,
+    /// Transaction became stale while waiting for local latches.
+    #[error("Transaction is stale while waiting for local latches (start_ts={start_ts})")]
+    WriteConflictInLatch { start_ts: u64 },
+    /// Pipelined transaction options are invalid or unsupported.
+    #[error("Invalid pipelined transaction: {message}")]
+    InvalidPipelinedTransaction { message: String },
     /// For raw client, operation is not supported in atomic/non-atomic mode.
     #[error(
         "The operation is not supported in current mode, please consider using RawClient with or without atomic mode"

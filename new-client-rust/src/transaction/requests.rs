@@ -329,6 +329,69 @@ impl Batchable for kvrpcpb::PrewriteRequest {
     }
 }
 
+pub fn new_flush_request(
+    mutations: Vec<kvrpcpb::Mutation>,
+    primary_key: Vec<u8>,
+    start_ts: u64,
+    generation: u64,
+    lock_ttl: u64,
+) -> kvrpcpb::FlushRequest {
+    let mut req = kvrpcpb::FlushRequest::default();
+    req.mutations = mutations;
+    req.primary_key = primary_key;
+    req.start_ts = start_ts;
+    req.min_commit_ts = start_ts.saturating_add(1);
+    req.generation = generation;
+    req.lock_ttl = lock_ttl;
+    req
+}
+
+impl KvRequest for kvrpcpb::FlushRequest {
+    type Response = kvrpcpb::FlushResponse;
+}
+
+impl Shardable for kvrpcpb::FlushRequest {
+    type Shard = Vec<kvrpcpb::Mutation>;
+
+    fn shards(
+        &self,
+        pd_client: &Arc<impl PdClient>,
+    ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+        let mut mutations = self.mutations.clone();
+        mutations.sort_by(|a, b| a.key.cmp(&b.key));
+
+        region_stream_for_keys(mutations.into_iter(), pd_client.clone())
+            .flat_map(|result| match result {
+                Ok((mutations, region)) => stream::iter(kvrpcpb::FlushRequest::batches(
+                    mutations,
+                    TXN_COMMIT_BATCH_SIZE,
+                ))
+                .map(move |batch| Ok((batch, region.clone())))
+                .boxed(),
+                Err(e) => stream::iter(Err(e)).boxed(),
+            })
+            .boxed()
+    }
+
+    fn apply_shard(&mut self, shard: Self::Shard) {
+        self.mutations = shard;
+    }
+
+    fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        store.apply_to_request(self)
+    }
+}
+
+impl Batchable for kvrpcpb::FlushRequest {
+    type Item = kvrpcpb::Mutation;
+
+    fn item_size(item: &Self::Item) -> u64 {
+        let mut size = item.key.len() as u64;
+        size += item.value.len() as u64;
+        size
+    }
+}
+
 pub fn new_commit_request(
     keys: Vec<Vec<u8>>,
     start_version: u64,
@@ -876,6 +939,15 @@ impl HasLocks for kvrpcpb::PessimisticLockResponse {
 }
 
 impl HasLocks for kvrpcpb::PrewriteResponse {
+    fn take_locks(&mut self) -> Vec<kvrpcpb::LockInfo> {
+        self.errors
+            .iter_mut()
+            .filter_map(|error| error.locked.take())
+            .collect()
+    }
+}
+
+impl HasLocks for kvrpcpb::FlushResponse {
     fn take_locks(&mut self) -> Vec<kvrpcpb::LockInfo> {
         self.errors
             .iter_mut()

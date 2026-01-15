@@ -13,6 +13,9 @@ import "rustproto.proto";
 option (gogoproto.sizer_all) = true;
 option (gogoproto.marshaler_all) = true;
 option (gogoproto.unmarshaler_all) = true;
+option (gogoproto.goproto_unkeyed_all) = false;
+option (gogoproto.goproto_unrecognized_all) = false;
+option (gogoproto.goproto_sizecache_all) = false;
 option (rustproto.lite_runtime_all) = true;
 
 option java_package = "org.tikv.kvproto";
@@ -39,6 +42,8 @@ service Tikv {
     rpc KvDeleteRange(kvrpcpb.DeleteRangeRequest) returns (kvrpcpb.DeleteRangeResponse) {}
     rpc KvPrepareFlashbackToVersion(kvrpcpb.PrepareFlashbackToVersionRequest) returns (kvrpcpb.PrepareFlashbackToVersionResponse) {}
     rpc KvFlashbackToVersion(kvrpcpb.FlashbackToVersionRequest) returns (kvrpcpb.FlashbackToVersionResponse) {}
+    rpc KvFlush(kvrpcpb.FlushRequest) returns (kvrpcpb.FlushResponse) {}
+    rpc KvBufferBatchGet(kvrpcpb.BufferBatchGetRequest) returns (kvrpcpb.BufferBatchGetResponse) {}
 
     // Raw commands; no transaction support.
     rpc RawGet(kvrpcpb.RawGetRequest) returns (kvrpcpb.RawGetResponse) {}
@@ -68,6 +73,9 @@ service Tikv {
     rpc Coprocessor(coprocessor.Request) returns (coprocessor.Response) {}
     rpc CoprocessorStream(coprocessor.Request) returns (stream coprocessor.Response) {}
     rpc BatchCoprocessor(coprocessor.BatchRequest) returns (stream coprocessor.BatchResponse) {}
+
+    // Command send by remote coprocessor to TiKV for executing coprocessor request.
+    rpc DelegateCoprocessor(coprocessor.DelegateRequest) returns (coprocessor.DelegateResponse) {}
 
     // Command for executing custom user requests in TiKV coprocessor_v2.
     rpc RawCoprocessor(kvrpcpb.RawCoprocessorRequest) returns (kvrpcpb.RawCoprocessorResponse) {}
@@ -134,6 +142,11 @@ service Tikv {
     rpc FetchDisaggPages(disaggregated.FetchDisaggPagesRequest) returns (stream disaggregated.PagesPacket) {}
     /// Compute node get configuration from Write node
     rpc GetDisaggConfig(disaggregated.GetDisaggConfigRequest) returns (disaggregated.GetDisaggConfigResponse) {}
+
+    /// Get health feedback info from the TiKV node.
+    rpc GetHealthFeedback(kvrpcpb.GetHealthFeedbackRequest) returns (kvrpcpb.GetHealthFeedbackResponse) {}
+    /// Broadcast the transaction status to all TiKV nodes
+    rpc BroadcastTxnStatus(kvrpcpb.BroadcastTxnStatusRequest) returns (kvrpcpb.BroadcastTxnStatusResponse) {}
 }
 
 message BatchCommandsRequest {
@@ -178,7 +191,12 @@ message BatchCommandsRequest {
 
             kvrpcpb.FlashbackToVersionRequest FlashbackToVersion = 35;
             kvrpcpb.PrepareFlashbackToVersionRequest PrepareFlashbackToVersion = 36;
+            kvrpcpb.FlushRequest Flush = 37;
+            kvrpcpb.BufferBatchGetRequest BufferBatchGet = 38;
 
+            kvrpcpb.GetHealthFeedbackRequest GetHealthFeedback = 39;
+
+            kvrpcpb.BroadcastTxnStatusRequest BroadcastTxnStatus = 40;
             // For some test cases.
             BatchCommandsEmptyRequest Empty = 255;
         }
@@ -193,6 +211,7 @@ message BatchCommandsResponse {
     repeated uint64 request_ids = 2;
     // 280 means TiKV gRPC cpu usage is 280%.
     uint64 transport_layer_load = 3;
+    kvrpcpb.HealthFeedback health_feedback = 4;
 
     message Response {
         oneof cmd {
@@ -232,6 +251,13 @@ message BatchCommandsResponse {
 
             kvrpcpb.FlashbackToVersionResponse FlashbackToVersion = 35;
             kvrpcpb.PrepareFlashbackToVersionResponse PrepareFlashbackToVersion = 36;
+            
+            kvrpcpb.FlushResponse Flush = 37;
+            kvrpcpb.BufferBatchGetResponse BufferBatchGet = 38;
+
+            kvrpcpb.GetHealthFeedbackResponse GetHealthFeedback = 39;
+            
+            kvrpcpb.BroadcastTxnStatusResponse BroadcastTxnStatus = 40;
 
             // For some test cases.
             BatchCommandsEmptyResponse Empty = 255;
@@ -244,6 +270,8 @@ message BatchCommandsResponse {
 
 message BatchRaftMessage {
     repeated raft_serverpb.RaftMessage msgs = 1;
+    // Used for measure the send duration.
+    uint64 last_observed_time = 13;
 }
 
 message BatchCommandsEmptyRequest {

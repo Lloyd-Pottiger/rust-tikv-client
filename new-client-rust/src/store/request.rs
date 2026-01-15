@@ -172,6 +172,12 @@ impl_request!(
 );
 impl_request!(ResolveLockRequest, kv_resolve_lock, "kv_resolve_lock");
 impl_request!(ScanLockRequest, kv_scan_lock, "kv_scan_lock");
+impl_request!(FlushRequest, kv_flush, "kv_flush");
+impl_request!(
+    BufferBatchGetRequest,
+    kv_buffer_batch_get,
+    "kv_buffer_batch_get"
+);
 impl_request!(
     PessimisticLockRequest,
     kv_pessimistic_lock,
@@ -194,4 +200,9 @@ impl_request!(
     UnsafeDestroyRangeRequest,
     unsafe_destroy_range,
     "unsafe_destroy_range"
+);
+impl_request!(
+    BroadcastTxnStatusRequest,
+    broadcast_txn_status,
+    "broadcast_txn_status"
 );

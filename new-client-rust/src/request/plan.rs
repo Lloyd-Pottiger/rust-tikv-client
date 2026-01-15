@@ -108,8 +108,8 @@ impl<Req: KvRequest + StoreRequest> StoreRequest for Dispatch<Req> {
     }
 }
 
-const MULTI_REGION_CONCURRENCY: usize = 16;
-const MULTI_STORES_CONCURRENCY: usize = 16;
+pub(crate) const MULTI_REGION_CONCURRENCY: usize = 16;
+pub(crate) const MULTI_STORES_CONCURRENCY: usize = 16;
 
 fn is_grpc_error(e: &Error) -> bool {
     matches!(e, Error::GrpcAPI(_) | Error::Grpc(_))
@@ -119,6 +119,7 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     pub(super) inner: P,
     pub pd_client: Arc<PdC>,
     pub backoff: Backoff,
+    pub concurrency: usize,
 
     /// Preserve all regions' results for other downstream plans to handle.
     /// If true, return Ok and preserve all regions' results, even if some of them are Err.
@@ -505,6 +506,7 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
             inner: self.inner.clone(),
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
+            concurrency: self.concurrency,
             preserve_region_results: self.preserve_region_results,
             request_context: self.request_context.clone(),
             read_routing: self.read_routing.clone(),
@@ -523,7 +525,8 @@ where
         // Limit the maximum concurrency of multi-region request. If there are
         // too many concurrent requests, TiKV is more likely to return a "TiKV
         // is busy" error
-        let concurrency_permits = Arc::new(Semaphore::new(MULTI_REGION_CONCURRENCY));
+        let concurrency = self.concurrency.max(1);
+        let concurrency_permits = Arc::new(Semaphore::new(concurrency));
         Self::single_plan_handler(
             self.pd_client.clone(),
             self.inner.clone(),
@@ -1126,6 +1129,7 @@ mod test {
             },
             pd_client: Arc::new(MockPdClient::default()),
             backoff: Backoff::no_backoff(),
+            concurrency: MULTI_REGION_CONCURRENCY,
             preserve_region_results: false,
             request_context: RequestContext::default(),
             read_routing: ReadRouting::default(),

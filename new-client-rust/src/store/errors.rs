@@ -74,6 +74,7 @@ has_region_error!(kvrpcpb::RawBatchScanResponse);
 has_region_error!(kvrpcpb::RawCasResponse);
 has_region_error!(kvrpcpb::RawCoprocessorResponse);
 has_region_error!(kvrpcpb::RawChecksumResponse);
+has_region_error!(kvrpcpb::FlushResponse);
 
 macro_rules! set_region_error {
     ($type:ty) => {
@@ -116,6 +117,7 @@ set_region_error!(kvrpcpb::RawBatchScanResponse);
 set_region_error!(kvrpcpb::RawCasResponse);
 set_region_error!(kvrpcpb::RawCoprocessorResponse);
 set_region_error!(kvrpcpb::RawChecksumResponse);
+set_region_error!(kvrpcpb::FlushResponse);
 
 macro_rules! has_key_error {
     ($type:ty) => {
@@ -199,6 +201,12 @@ impl HasKeyErrors for kvrpcpb::RawBatchScanResponse {
 }
 
 impl HasKeyErrors for kvrpcpb::PrewriteResponse {
+    fn key_errors(&mut self) -> Option<Vec<Error>> {
+        extract_errors(std::mem::take(&mut self.errors).into_iter().map(Some))
+    }
+}
+
+impl HasKeyErrors for kvrpcpb::FlushResponse {
     fn key_errors(&mut self) -> Option<Vec<Error>> {
         extract_errors(std::mem::take(&mut self.errors).into_iter().map(Some))
     }

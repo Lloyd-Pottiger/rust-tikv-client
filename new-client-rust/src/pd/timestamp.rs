@@ -157,6 +157,9 @@ impl Stream for TsoRequestStream {
                 header: Some(RequestHeader {
                     cluster_id: *this.cluster_id,
                     sender_id: 0,
+                    // Optional metadata; keep empty for now.
+                    caller_id: String::new(),
+                    caller_component: String::new(),
                 }),
                 count: requests.len() as u32,
                 dc_location: String::new(),

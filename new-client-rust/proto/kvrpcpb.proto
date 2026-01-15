@@ -3,15 +3,19 @@ package kvrpcpb;
 
 import "metapb.proto";
 import "errorpb.proto";
-import "gogoproto/gogo.proto";
-import "rustproto.proto";
 import "deadlock.proto";
 import "tracepb.proto";
 import "resource_manager.proto";
 
-option (gogoproto.marshaler_all) = true;
+import "gogoproto/gogo.proto";
+import "rustproto.proto";
+
 option (gogoproto.sizer_all) = true;
+option (gogoproto.marshaler_all) = true;
 option (gogoproto.unmarshaler_all) = true;
+option (gogoproto.goproto_unkeyed_all) = false;
+option (gogoproto.goproto_unrecognized_all) = false;
+option (gogoproto.goproto_sizecache_all) = false;
 option (rustproto.lite_runtime_all) = true;
 
 option java_package = "org.tikv.kvproto";
@@ -27,6 +31,8 @@ message GetRequest {
     Context context = 1;
     bytes key = 2;
     uint64 version = 3;
+    // If true, the response will include the commit ts of the key.
+    bool need_commit_ts = 4;
 }
 
 message GetResponse {
@@ -42,6 +48,9 @@ message GetResponse {
     reserved 5;
     // Time and scan details when processing the request.
     ExecDetailsV2 exec_details_v2 = 6;
+    // The commit timestamp of the key.
+    // If it is zero, it means the commit timestamp is unknown.
+    uint64 commit_ts = 7;
 }
 
 // Scan fetches values for a range of keys; it is part of the transaction with
@@ -80,10 +89,13 @@ message PrewriteRequest {
     // What kind of checks need to be performed for keys in a pessimistic transaction.
     enum PessimisticAction {
         // The key needn't be locked and no extra write conflict checks are needed.
+        // Deprecated in next-gen (cloud-storage-engine).
         SKIP_PESSIMISTIC_CHECK = 0;
-        // The key should have been locked at the time of prewrite.
+        // The key should have been locked at the time of prewrite. If the lock is missing,
+        // the lock will be amended. This is the normal case for pessimistic transactions.
         DO_PESSIMISTIC_CHECK = 1;
-        // The key doesn't need a pessimistic lock. But we need to do data constraint checks.
+        // The key does not acquire a pessimistic lock for performance optimization.
+        // Constraint checking (write conflicts + data constraints) is deferred to prewrite.
         DO_CONSTRAINT_CHECK = 2;
     }
 
@@ -132,6 +144,9 @@ message PrewriteRequest {
     // for_update_ts constriants that should be checked when prewriting a pessimistic transaction.
     // See https://github.com/tikv/tikv/issues/14311
     repeated ForUpdateTSConstraint for_update_ts_constraints = 16;
+
+    // Reserved for file based transaction.
+    repeated uint64 txn_file_chunks = 100;
 }
 
 message PrewriteResponse {
@@ -271,6 +286,13 @@ message TxnHeartBeatRequest {
     uint64 start_version = 3;
     // The new TTL the sender would like.
     uint64 advise_lock_ttl = 4;
+    // Optionally update PK's min_commit_ts.
+    // Only for non-async-commmit and non-1PC transactions.
+    // If it is 0, ignore this field.
+    uint64 min_commit_ts = 5;
+
+    // Reserved for file based transaction.
+    bool is_txn_file = 100;
 }
 
 message TxnHeartBeatResponse {
@@ -315,6 +337,9 @@ message CheckTxnStatusRequest {
     // because the old versions of clients cannot handle some results returned from TiKV correctly.
     // For new versions, this field should always be set to true.
     bool verify_is_primary = 9;
+
+    // Reserved for file based transaction.
+    bool is_txn_file = 100;
 }
 
 message CheckTxnStatusResponse {
@@ -357,6 +382,16 @@ message CheckSecondaryLocksResponse {
     ExecDetailsV2 exec_details_v2 = 5;
 }
 
+// CommitRole indicates the current commit request is a primary commit or a secondary commit.
+enum CommitRole {
+    // Unknown about the current request is a primary commit or a secondary commit;
+    Unknown = 0;
+    // Current request is a primary commit;
+    Primary = 1;
+    // Current request is a secondary commit;
+    Secondary = 2;
+}
+
 // The second phase of writing to TiKV. If there are no errors or conflicts, then this request
 // commits a transaction so that its data can be read by other transactions.
 message CommitRequest {
@@ -369,6 +404,17 @@ message CommitRequest {
     repeated bytes keys = 3;
     // Timestamp for the end of the transaction. Must be greater than `start_version`.
     uint64 commit_version = 4;
+    // commit_role indicates the current commit request is a primary commit or a secondary commit.
+    // It's value maybe `Unknown` when using a client with an old version.
+    CommitRole commit_role = 6;
+    // primary_key indicates the primary key of the transaction.
+    // Its value may be empty when using an old version client.
+    bytes primary_key = 7;
+    // Whether committing an `use_async_commit` (i.e. should be treated as committed) prewrite.
+    bool use_async_commit = 8;
+
+    // Reserved for file based transaction.
+    bool is_txn_file = 100;
 }
 
 message CommitResponse {
@@ -415,6 +461,8 @@ message BatchGetRequest {
     Context context = 1;
     repeated bytes keys = 2;
     uint64 version = 3;
+    // If true, the response will include the commit ts of the key.
+    bool need_commit_ts = 4;
 }
 
 message BatchGetResponse {
@@ -437,6 +485,9 @@ message BatchRollbackRequest {
     uint64 start_version = 2;
     // The keys to rollback.
     repeated bytes keys = 3;
+
+    // Reserved for file based transaction.
+    bool is_txn_file = 100;
 }
 
 message BatchRollbackResponse {
@@ -480,6 +531,9 @@ message ResolveLockRequest {
     repeated TxnInfo txn_infos = 4;
     // Only resolve specified keys.
     repeated bytes keys = 5;
+
+    // Reserved for file based transaction.
+    bool is_txn_file = 100;
 }
 
 message ResolveLockResponse {
@@ -748,6 +802,9 @@ message SplitRegionResponse {
     metapb.Region left  = 2 [deprecated=true]; // set when there are only 2 result regions.
     metapb.Region right = 3 [deprecated=true]; // set when there are only 2 result regions.
     repeated metapb.Region regions = 4; // include all result regions.
+
+    // Reserved for file based transaction.
+    repeated KeyError errors = 100;
 }
 
 // Sent from TiFlash to a TiKV node.
@@ -852,7 +909,7 @@ message Context {
     // The source of the request, will be used as the tag of the metrics reporting.
     // This field can be set for any requests that require to report metrics with any extra labels.
     string request_source = 24;
-    
+
     // The source of the current transaction.
     uint64 txn_source = 25;
 
@@ -867,15 +924,38 @@ message Context {
 
     // The keyspace that the request is sent to.
     // NOTE: This field is only meaningful while the api_version is V2.
+    string keyspace_name = 31;
+
+    // The keyspace that the request is sent to.
+    // NOTE: This field is only meaningful while the api_version is V2.
     uint32 keyspace_id = 32;
-    
+
     // The buckets version that the request is sent to.
     // NOTE: This field is only meaningful while enable buckets.
     uint64 buckets_version = 33;
-    
+
     // It tells us where the request comes from in TiDB. If it isn't from TiDB, leave it blank.
     // This is for tests only and thus can be safely changed/removed without affecting compatibility.
     SourceStmt source_stmt = 34;
+
+    // The cluster id of the request
+    uint64 cluster_id = 35;
+
+    // The trace id of the request, will be used for tracing the request's execution's inner steps.
+    bytes trace_id = 36;
+
+    // Control flags for trace logging behavior.
+    // Bit 0: immediate_log - Force immediate logging without buffering
+    // Bit 1: category_req_resp - Enable request/response tracing
+    // Bit 2: category_write_details - Enable detailed write tracing
+    // Bit 3: category_read_details - Enable detailed read tracing
+    // Bits 4-63: Reserved for future use
+    // This field is set by client-go based on an extractor function provided by TiDB.
+    uint64 trace_control_flags = 37;
+
+    // TODO(slock): tidb should send requests with a feature flag to indicate whether it
+    // supports shared locks, so that tikv can fail the requests from old tidb versions
+    // when needed.
 }
 
 message ResourceControlContext {
@@ -887,7 +967,7 @@ message ResourceControlContext {
     resource_manager.Consumption penalty = 2;
 
     // This priority would override the original priority of the resource group for the request.
-    // Used to deprioritize the runaway queries. 
+    // Used to deprioritize the runaway queries.
     uint64 override_priority = 3;
 }
 
@@ -968,9 +1048,19 @@ message LockInfo {
     uint64 min_commit_ts = 9;
     repeated bytes secondaries = 10;
     // The time elapsed since last update of lock wait info when waiting.
-    // It's used in timeout errors. 0 means unknown or not applicable. 
+    // It's used in timeout errors. 0 means unknown or not applicable.
     // It can be used to help the client decide whether to try resolving the lock.
     uint64 duration_to_last_update_ms = 11;
+    // When lock_type is SharedLock, this describes transactions holding the shared lock.
+    // Important: when lock_type is SharedLock, all shared locks must use shared_lock_infos;
+    // DO NOT read from the wrapper LockInfo.
+    // TODO(slock): tidb should send requests with a feature flag to indicate whether it
+    // supports shared locks, so that tikv can fail the requests from old tidb versions
+    // when needed.
+    repeated LockInfo shared_lock_infos = 12;
+
+    // Reserved for file based transaction.
+    bool is_txn_file = 100;
 }
 
 message KeyError {
@@ -985,6 +1075,10 @@ message KeyError {
     CommitTsTooLarge commit_ts_too_large = 9; // Calculated commit TS exceeds the limit given by the user.
     AssertionFailed assertion_failed = 10; // Assertion of a `Mutation` is evaluated as a failure.
     PrimaryMismatch primary_mismatch = 11; // CheckTxnStatus is sent to a lock that's not the primary.
+    TxnLockNotFound txn_lock_not_found = 12; // TxnLockNotFound indicates the txn lock is not found.
+
+    // Extra information for error debugging
+    DebugInfo debug_info = 100;
 }
 
 message WriteConflict {
@@ -994,7 +1088,8 @@ message WriteConflict {
         PessimisticRetry = 2; // a lock acquisition request waits for a lock and awakes, or meets a newer version of data, let TiDB retry.
         SelfRolledBack = 3; // the transaction itself has been rolled back when it tries to prewrite.
         RcCheckTs = 4; // RcCheckTs failure by meeting a newer version, let TiDB retry.
-        LazyUniquenessCheck = 5; // write conflict found in lazy uniqueness check in pessimistic transactions.
+        LazyUniquenessCheck = 5; // write conflict found when deferring constraint checks in pessimistic transactions. Deprecated in next-gen (cloud-storage-engine).
+        NotLockedKeyConflict = 6; // write conflict found on keys that do not acquire pessimistic locks in pessimistic transactions.
     }
 
     uint64 start_ts = 1;
@@ -1012,8 +1107,13 @@ message AlreadyExist {
 message Deadlock {
     uint64 lock_ts = 1;
     bytes lock_key = 2;
+
+    // The hash of `deadlock_key` field.
     uint64 deadlock_key_hash = 3;
     repeated deadlock.WaitForEntry wait_chain = 4;
+
+    // The key that the current transaction has already acquired and blocks another transaction to form the deadlock.
+    bytes deadlock_key = 5;
 }
 
 message CommitTsExpired {
@@ -1042,6 +1142,19 @@ message AssertionFailed {
 
 message PrimaryMismatch {
     LockInfo lock_info = 1;
+}
+
+message TxnLockNotFound {
+    bytes key = 1;
+}
+
+message MvccDebugInfo {
+    bytes key = 1;
+    MvccInfo mvcc = 2;
+}
+
+message DebugInfo {
+    repeated MvccDebugInfo mvcc_info = 1;
 }
 
 enum CommandPri {
@@ -1095,6 +1208,10 @@ message TimeDetailV2 {
     uint64 kv_read_wall_time_ns = 4;
     // Total wall clock time spent on this RPC in TiKV .
     uint64 total_rpc_wall_time_ns = 5;
+    // Time spent on the gRPC layer.
+    uint64 kv_grpc_process_time_ns = 6;
+    // Time spent on waiting for run again in grpc pool from other executor pool.
+    uint64 kv_grpc_wait_time_ns = 7;
 }
 
 message ScanInfo {
@@ -1244,6 +1361,9 @@ message KvPair {
     KeyError error = 1;
     bytes key = 2;
     bytes value = 3;
+    // The commit timestamp of the key.
+    // If it is zero, it means the commit timestamp is unknown.
+    uint64 commit_ts = 4;
 }
 
 enum Op {
@@ -1253,8 +1373,13 @@ enum Op {
     Rollback = 3;
     // insert operation has a constraint that key should not exist before.
     Insert = 4;
+    // PessimisticLock is exclusive lock acquired in pessimistic transaction.
     PessimisticLock = 5;
     CheckNotExists = 6;
+    // SharedLock likes Lock but in shared mode.
+    SharedLock = 7;
+    // SharedPessimisticLock is shared lock acquired in pessimistic transaction.
+    SharedPessimisticLock = 8;
 }
 
 enum Assertion {
@@ -1320,6 +1445,9 @@ message MvccInfo {
 message TxnInfo {
     uint64 txn = 1;
     uint64 status = 2;
+
+    // Reserved for file based transaction.
+    bool is_txn_file = 100;
 }
 
 enum Action {
@@ -1529,4 +1657,87 @@ message TiFlashSystemTableRequest {
 
 message TiFlashSystemTableResponse {
     bytes data = 1 [(gogoproto.customtype) = "github.com/pingcap/kvproto/pkg/sharedbytes.SharedBytes", (gogoproto.nullable) = false];
+}
+
+// Flush is introduced from the pipelined DML protocol.
+// A Flush request writes some keys and values to TiKV, storing in LOCK and DEFAULT CF, just like a Prewrite request.
+message FlushRequest {
+    Context context = 1;
+    repeated Mutation mutations = 2;
+    bytes primary_key = 3;
+    uint64 start_ts = 4;
+    uint64 min_commit_ts = 5;
+    // generation of the flush request. It is a monotonically increasing number in each transaction.
+    uint64 generation = 6;
+    uint64 lock_ttl = 7;
+    AssertionLevel assertion_level = 8;
+}
+
+message FlushResponse {
+    errorpb.Error region_error = 1;
+    repeated KeyError errors = 2;
+    ExecDetailsV2 exec_details_v2 = 3;
+}
+
+// BufferBatchGet is introduced from the pipelined DML protocol.
+// It is similar to a BatchGet request, except that it can only read the data that has been flushed by itself.
+message BufferBatchGetRequest {
+    Context context = 1;
+    repeated bytes keys = 2;
+    uint64 version = 3;
+}
+
+message BufferBatchGetResponse {
+    errorpb.Error region_error = 1;
+    KeyError error = 2;
+    repeated KvPair pairs = 3;
+    // Time and scan details when processing the request.
+    ExecDetailsV2 exec_details_v2 = 4;
+}
+
+// Actively request TiKV to report health feedback information. TiKV won't omit the health feedback information when sending the
+// `BatchCommandsResponse` that contains this response.
+// The health feedback information won't be replied in the response, but will be attached to `BatchCommandsResponse.health_feedback` field as usual.
+// Only works when batch RPC is enabled.
+message GetHealthFeedbackRequest {
+    Context context = 1;
+}
+
+message GetHealthFeedbackResponse {
+    // The error field is added for keeping consistent. This request won't meet any region error as it's store level rather than region level.
+    errorpb.Error region_error = 1;
+    HealthFeedback health_feedback = 2;
+}
+
+message HealthFeedback {
+    uint64 store_id = 1;
+    // The sequence number of the feedback message.
+    // It's defined as an incrementing integer, starting from the unix timestamp (milliseconds) at
+    // the time that the TiKV node is started.
+    // This can be useful for filtering out out-of-order feedback messages.
+    // Note that considering the possibility of system clock changing, this field doesn't guarantee
+    // uniqueness and monotonic if the TiKV node is restarted.
+    uint64 feedback_seq_no = 2;
+    // The slow_score calculated in raftstore module. Due to some limitations of slow score, this would
+    // be replaced by `SlowTrend` in the future.
+    int32 slow_score = 3;
+}
+
+message BroadcastTxnStatusRequest {
+    Context context = 1;
+    repeated TxnStatus txn_status = 2;
+}
+
+message TxnStatus {
+    uint64 start_ts = 1;
+    // a non-zero min_commit_ts indicates the transaction is ongoing
+    uint64 min_commit_ts = 2;
+    // a non-zero commit_ts indicates the transaction is committed
+    uint64 commit_ts = 3;
+    bool rolled_back = 4;
+    // The txn has unlocked all keys, implying that it can be removed from txn_status_cache.
+    bool is_completed = 5;
+}
+
+message BroadcastTxnStatusResponse {
 }

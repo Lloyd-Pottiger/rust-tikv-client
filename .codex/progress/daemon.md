@@ -9,15 +9,29 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
+- (none)
+
 # 待做工作
 
-- 事务协议补齐：pipelined txn / txn local latches（按 client-go v2 行为）
+- 错误模型对齐：将 `kvrpcpb::KeyError` 映射为结构化 Rust `Error`（WriteConflict/Deadlock/KeyExist/AssertionFailed…）+ helper predicates
   - 计划：
-    - 对齐 `client-go/txnkv/transaction` 下 pipelined 相关实现与公开选项
-    - 评估 Rust 侧实现方式（lock table/latch 抽象 + 任务驱动），并先做最小可用版本
-    - UT：并发冲突/写冲突/回滚路径
+    - 盘点 `client-go/error` 的可判定错误类型与提取逻辑（从 `kvrpcpb::KeyError`/`errorpb::Error` 中提取）
+    - Rust：新增/补齐 `Error` variants + `is_xxx()` helpers（尽量不泄露 proto 类型到 public API）
+    - UT：构造 key-error/region-error 响应覆盖提取与显示信息
+
+- RequestContext 补齐：`disk_full_opt` / `txn_source`（并贯穿 Raw/Txn/resolve lock/flush）
+  - 计划：
+    - 对齐 client-go `KVTxn.SetDiskFullOpt/SetTxnSource` 与 Raw/Txn 请求默认值
+    - Rust：扩展 `RequestContext` + RawClient/TxnClient/Transaction setters；确保 pipelined flush/resolve-lock 也携带
+    - UT：新增 context 透传用例
 
 # 已完成工作
+
+- 事务协议补齐：pipelined txn / txn local latches（对齐 client-go v2）
+  - 完成：实现 `kvrpcpb::FlushRequest` 管线（generation+min_commit_ts+TTL）与 Txn pipelined commit/rollback（commit primary + 异步 resolve-lock range；rollback cancel+flush_wait+resolve-lock）；实现进程内 local latches（murmur3 slot + stale=max_commit_ts）并接入 optimistic commit（pessimistic/pipelined bypass）
+  - 关键决策：pipelined flush/resolve-lock 固定 `Context.request_source="external_pdml"`；flushed range 记录为 `[min_key, max_key.next())`；ResolveLockRequest 仍保持“上层手动处理 region error”的约束
+  - 测试：新增 pipelined flush/rollback + latch UT；`cd new-client-rust && cargo test` 通过
+  - 改动文件：`new-client-rust/src/transaction/{pipelined.rs,latch.rs,transaction.rs,requests.rs,client.rs,buffer.rs,mod.rs}`、`new-client-rust/src/store/{request.rs,errors.rs}`、`new-client-rust/src/request/{plan.rs,plan_builder.rs}`、`new-client-rust/src/common/errors.rs`、`new-client-rust/src/pd/timestamp.rs`、`new-client-rust/proto/*`、`new-client-rust/src/generated/*`、`.codex/progress/daemon.md`
 
 - Parity 规划与清单（client-go v2 / client-rust 现状）
   - 关键产物：`.codex/progress/client-go-api-inventory.md`、`.codex/progress/parity-map.md`、`.codex/progress/gap-analysis.md`、`.codex/progress/parity-checklist.md`、`tools/client-go-api-inventory/`

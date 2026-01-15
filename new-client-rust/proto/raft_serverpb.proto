@@ -6,8 +6,16 @@ import "metapb.proto";
 import "kvrpcpb.proto";
 import "disk_usage.proto";
 import "encryptionpb.proto";
+
+import "gogoproto/gogo.proto";
 import "rustproto.proto";
 
+option (gogoproto.sizer_all) = true;
+option (gogoproto.marshaler_all) = true;
+option (gogoproto.unmarshaler_all) = true;
+option (gogoproto.goproto_unkeyed_all) = false;
+option (gogoproto.goproto_unrecognized_all) = false;
+option (gogoproto.goproto_sizecache_all) = false;
 option (rustproto.lite_runtime_all) = true;
 
 option java_package = "org.tikv.kvproto";
@@ -252,6 +260,15 @@ enum ExtraMessageType {
     MsgGcPeerResponse = 12;
     MsgFlushMemtable = 13;
     MsgRefreshBuckets = 14;
+    // Messages for the snapshot gen precheck process.
+    MsgSnapGenPrecheckRequest = 15;
+    MsgSnapGenPrecheckResponse = 16;
+    // Used in transfer leader process for leader to inform follower to load the 
+    // region into in-memory engine if the relevant region is cached.
+    MsgPreLoadRegionRequest = 17;
+    // Used in transfer leader process for follower to inform leader the completes 
+    // of the region cache
+    MsgPreLoadRegionResponse = 18;
 }
 
 message FlushMemtable {
@@ -293,4 +310,7 @@ message ExtraMessage {
     AvailabilityContext availability_context = 8;
     // notice the peer to refresh buckets version
     RefreshBuckets refresh_buckets = 9;
+    // snap_gen_precheck_passed is used to indicate the precheck result when
+    // a follower responds to a leader's snapshot gen precheck request.
+    bool snap_gen_precheck_passed = 10;
 }

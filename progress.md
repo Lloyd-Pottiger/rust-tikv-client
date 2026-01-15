@@ -43,6 +43,20 @@
 |------|-------|----------|--------|--------|
 | Raw checksum + full suite | `cd new-client-rust && cargo test` | pass | pass | ok |
 
+## Session: 2026-01-16
+
+### Phase 3: Implementation (Iterative)
+- Actions taken:
+  - Implemented pipelined DML txn protocol parity (FlushRequest pipeline + commit primary + async ResolveLock; rollback cancel+flush_wait+resolve-lock).
+  - Implemented in-process txn local latches (hashed slots + stale detection) and integrated into optimistic commit.
+  - Synced/extended kvproto protos + regenerated Rust code to include pipelined Flush RPC and related messages.
+  - Verified full test suite: `cd new-client-rust && cargo test` passed.
+
+## Test Results
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Pipelined txn + latches + full suite | `cd new-client-rust && cargo test` | pass | pass | ok |
+
 ## Error Log
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|

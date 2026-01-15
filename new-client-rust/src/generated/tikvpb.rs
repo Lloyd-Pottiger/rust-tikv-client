@@ -14,7 +14,7 @@ pub mod batch_commands_request {
     pub struct Request {
         #[prost(
             oneof = "request::Cmd",
-            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 255"
+            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 37, 38, 39, 40, 255"
         )]
         pub cmd: ::core::option::Option<request::Cmd>,
     }
@@ -89,6 +89,14 @@ pub mod batch_commands_request {
             PrepareFlashbackToVersion(
                 super::super::super::kvrpcpb::PrepareFlashbackToVersionRequest,
             ),
+            #[prost(message, tag = "37")]
+            Flush(super::super::super::kvrpcpb::FlushRequest),
+            #[prost(message, tag = "38")]
+            BufferBatchGet(super::super::super::kvrpcpb::BufferBatchGetRequest),
+            #[prost(message, tag = "39")]
+            GetHealthFeedback(super::super::super::kvrpcpb::GetHealthFeedbackRequest),
+            #[prost(message, tag = "40")]
+            BroadcastTxnStatus(super::super::super::kvrpcpb::BroadcastTxnStatusRequest),
             /// For some test cases.
             #[prost(message, tag = "255")]
             Empty(super::super::BatchCommandsEmptyRequest),
@@ -105,6 +113,8 @@ pub struct BatchCommandsResponse {
     /// 280 means TiKV gRPC cpu usage is 280%.
     #[prost(uint64, tag = "3")]
     pub transport_layer_load: u64,
+    #[prost(message, optional, tag = "4")]
+    pub health_feedback: ::core::option::Option<super::kvrpcpb::HealthFeedback>,
 }
 /// Nested message and enum types in `BatchCommandsResponse`.
 pub mod batch_commands_response {
@@ -113,7 +123,7 @@ pub mod batch_commands_response {
     pub struct Response {
         #[prost(
             oneof = "response::Cmd",
-            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 255"
+            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 37, 38, 39, 40, 255"
         )]
         pub cmd: ::core::option::Option<response::Cmd>,
     }
@@ -188,6 +198,14 @@ pub mod batch_commands_response {
             PrepareFlashbackToVersion(
                 super::super::super::kvrpcpb::PrepareFlashbackToVersionResponse,
             ),
+            #[prost(message, tag = "37")]
+            Flush(super::super::super::kvrpcpb::FlushResponse),
+            #[prost(message, tag = "38")]
+            BufferBatchGet(super::super::super::kvrpcpb::BufferBatchGetResponse),
+            #[prost(message, tag = "39")]
+            GetHealthFeedback(super::super::super::kvrpcpb::GetHealthFeedbackResponse),
+            #[prost(message, tag = "40")]
+            BroadcastTxnStatus(super::super::super::kvrpcpb::BroadcastTxnStatusResponse),
             /// For some test cases.
             #[prost(message, tag = "255")]
             Empty(super::super::BatchCommandsEmptyResponse),
@@ -199,6 +217,9 @@ pub mod batch_commands_response {
 pub struct BatchRaftMessage {
     #[prost(message, repeated, tag = "1")]
     pub msgs: ::prost::alloc::vec::Vec<super::raft_serverpb::RaftMessage>,
+    /// Used for measure the send duration.
+    #[prost(uint64, tag = "13")]
+    pub last_observed_time: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -762,6 +783,55 @@ pub mod tikv_client {
                 .insert(GrpcMethod::new("tikvpb.Tikv", "KvFlashbackToVersion"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn kv_flush(
+            &mut self,
+            request: impl tonic::IntoRequest<super::super::kvrpcpb::FlushRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::super::kvrpcpb::FlushResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/tikvpb.Tikv/KvFlush");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("tikvpb.Tikv", "KvFlush"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn kv_buffer_batch_get(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                super::super::kvrpcpb::BufferBatchGetRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::super::kvrpcpb::BufferBatchGetResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/tikvpb.Tikv/KvBufferBatchGet",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("tikvpb.Tikv", "KvBufferBatchGet"));
+            self.inner.unary(req, path, codec).await
+        }
         /// Raw commands; no transaction support.
         pub async fn raw_get(
             &mut self,
@@ -1255,6 +1325,32 @@ pub mod tikv_client {
             req.extensions_mut()
                 .insert(GrpcMethod::new("tikvpb.Tikv", "BatchCoprocessor"));
             self.inner.server_streaming(req, path, codec).await
+        }
+        /// Command send by remote coprocessor to TiKV for executing coprocessor request.
+        pub async fn delegate_coprocessor(
+            &mut self,
+            request: impl tonic::IntoRequest<super::super::coprocessor::DelegateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::super::coprocessor::DelegateResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/tikvpb.Tikv/DelegateCoprocessor",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("tikvpb.Tikv", "DelegateCoprocessor"));
+            self.inner.unary(req, path, codec).await
         }
         /// Command for executing custom user requests in TiKV coprocessor_v2.
         pub async fn raw_coprocessor(
@@ -1961,6 +2057,62 @@ pub mod tikv_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("tikvpb.Tikv", "GetDisaggConfig"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// / Get health feedback info from the TiKV node.
+        pub async fn get_health_feedback(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                super::super::kvrpcpb::GetHealthFeedbackRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::super::kvrpcpb::GetHealthFeedbackResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/tikvpb.Tikv/GetHealthFeedback",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("tikvpb.Tikv", "GetHealthFeedback"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// / Broadcast the transaction status to all TiKV nodes
+        pub async fn broadcast_txn_status(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                super::super::kvrpcpb::BroadcastTxnStatusRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::super::kvrpcpb::BroadcastTxnStatusResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/tikvpb.Tikv/BroadcastTxnStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("tikvpb.Tikv", "BroadcastTxnStatus"));
             self.inner.unary(req, path, codec).await
         }
     }

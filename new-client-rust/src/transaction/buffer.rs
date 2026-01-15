@@ -264,6 +264,12 @@ impl Buffer {
             .collect()
     }
 
+    pub(crate) fn mutation_for_key(&self, key: &Key) -> Option<kvrpcpb::Mutation> {
+        self.entry_map
+            .get(key)
+            .and_then(|entry| entry.to_proto_with_key(key))
+    }
+
     pub fn get_write_size(&self) -> usize {
         self.entry_map
             .iter()

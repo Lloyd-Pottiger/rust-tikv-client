@@ -190,7 +190,22 @@ where
         self,
         backoff: Backoff,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
-        self.make_retry_multi_region(backoff, false)
+        self.make_retry_multi_region(
+            backoff,
+            false,
+            crate::request::plan::MULTI_REGION_CONCURRENCY,
+        )
+    }
+
+    /// Split the request into shards with a custom per-request concurrency limit.
+    ///
+    /// This is useful for protocols that want to cap their own fan-out (e.g. pipelined flush).
+    pub fn retry_multi_region_with_concurrency(
+        self,
+        backoff: Backoff,
+        concurrency: usize,
+    ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
+        self.make_retry_multi_region(backoff, false, concurrency)
     }
 
     /// Preserve all results, even some of them are Err.
@@ -199,13 +214,27 @@ where
         self,
         backoff: Backoff,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
-        self.make_retry_multi_region(backoff, true)
+        self.make_retry_multi_region(
+            backoff,
+            true,
+            crate::request::plan::MULTI_REGION_CONCURRENCY,
+        )
+    }
+
+    /// Preserve all results with a custom per-request concurrency limit.
+    pub fn retry_multi_region_preserve_results_with_concurrency(
+        self,
+        backoff: Backoff,
+        concurrency: usize,
+    ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
+        self.make_retry_multi_region(backoff, true, concurrency)
     }
 
     fn make_retry_multi_region(
         self,
         backoff: Backoff,
         preserve_region_results: bool,
+        concurrency: usize,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
         PlanBuilder {
             pd_client: self.pd_client.clone(),
@@ -213,6 +242,7 @@ where
                 inner: self.plan,
                 pd_client: self.pd_client,
                 backoff,
+                concurrency,
                 preserve_region_results,
                 request_context: self.request_context.clone(),
                 read_routing: self.read_routing.clone(),

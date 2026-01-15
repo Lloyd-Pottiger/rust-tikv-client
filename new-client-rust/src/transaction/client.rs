@@ -55,6 +55,7 @@ pub struct Client {
     pd: Arc<PdRpcClient>,
     keyspace: Keyspace,
     request_context: RequestContext,
+    txn_latches: Option<Arc<super::LatchesScheduler>>,
 }
 
 impl Clone for Client {
@@ -63,6 +64,7 @@ impl Clone for Client {
             pd: self.pd.clone(),
             keyspace: self.keyspace,
             request_context: self.request_context.clone(),
+            txn_latches: self.txn_latches.clone(),
         }
     }
 }
@@ -129,6 +131,7 @@ impl Client {
             pd,
             keyspace,
             request_context: RequestContext::default(),
+            txn_latches: None,
         })
     }
 
@@ -224,6 +227,18 @@ impl Client {
         cloned
     }
 
+    /// Enable in-process transaction local latches for commits.
+    ///
+    /// This can reduce client-side write conflicts by serializing commits with overlapping keys.
+    /// It is only applied for *optimistic, non-pipelined* transactions (matching client-go's
+    /// behavior).
+    #[must_use]
+    pub fn with_txn_local_latches(&self, capacity: usize) -> Self {
+        let mut cloned = self.clone();
+        cloned.txn_latches = Some(super::LatchesScheduler::new(capacity));
+        cloned
+    }
+
     /// Creates a new optimistic [`Transaction`].
     ///
     /// Use the transaction to issue requests like [`get`](Transaction::get) or
@@ -292,6 +307,7 @@ impl Client {
     /// ```
     pub async fn begin_with_options(&self, options: TransactionOptions) -> Result<Transaction> {
         debug!("creating new customized transaction");
+        options.validate()?;
         let timestamp = self.current_timestamp().await?;
         Ok(self.new_transaction(timestamp, options))
     }
@@ -427,6 +443,7 @@ impl Client {
             options,
             self.keyspace,
             self.request_context.clone(),
+            self.txn_latches.clone(),
         )
     }
 }

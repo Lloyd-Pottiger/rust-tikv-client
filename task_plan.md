@@ -7,15 +7,15 @@ Implement a new Rust TiKV client in `./new-client-rust` with feature + public-AP
 > This file is my per-session working memory (planning-with-files skill).
 
 ## Current Phase
-Phase 1
+Phase 3
 
 ## Phases
 
 ### Phase 1: Requirements & Discovery
-- [ ] Inventory `client-go` v2 exported APIs (by package) and map to feature areas.
-- [ ] Audit `client-rust` capabilities and identify gaps vs `client-go` v2.
-- [ ] Record findings in `findings.md` and update `.codex/progress/daemon.md`.
-- **Status:** in_progress
+- [x] Inventory `client-go` v2 exported APIs (by package) and map to feature areas.
+- [x] Audit `client-rust` capabilities and identify gaps vs `client-go` v2.
+- [x] Record findings in `findings.md` and update `.codex/progress/daemon.md`.
+- **Status:** complete
 
 ### Phase 2: Architecture & Crate Layout
 - [ ] Decide crate/workspace structure under `new-client-rust/`.
@@ -24,11 +24,11 @@ Phase 1
 - **Status:** pending
 
 ### Phase 3: Implementation (Iterative)
-- [ ] Bootstrap workspace + proto build pipeline.
-- [ ] Implement core transport (gRPC), PD client, region cache.
-- [ ] Implement raw client parity.
-- [ ] Implement transactional client parity (2PC/1PC/async-commit, lock resolve, etc.).
-- **Status:** pending
+- [x] Bootstrap workspace + proto build pipeline.
+- [x] Implement core transport (gRPC), PD client, region cache.
+- [ ] Implement raw client parity (partial).
+- [ ] Implement transactional client parity (2PC/1PC/async-commit, lock resolve, etc.) (partial).
+- **Status:** in_progress
 
 ### Phase 4: Testing & Verification
 - [ ] Port/author unit tests for key algorithms (region cache, backoff, lock resolver).
@@ -56,4 +56,3 @@ Phase 1
 | Error | Attempt | Resolution |
 |-------|---------|------------|
 |       | 1       |            |
-
