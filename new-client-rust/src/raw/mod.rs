@@ -19,6 +19,19 @@ mod client;
 pub mod lowering;
 mod requests;
 
+/// The checksum result for a raw range.
+///
+/// Returned by [`Client::checksum`](crate::RawClient::checksum).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RawChecksum {
+    /// The xor of per-region CRC64 checksums over the range.
+    pub crc64_xor: u64,
+    /// The total number of key/value pairs included in the checksum.
+    pub total_kvs: u64,
+    /// The total number of bytes included in the checksum.
+    pub total_bytes: u64,
+}
+
 /// A [`ColumnFamily`](ColumnFamily) is an optional parameter for [`raw::Client`](Client) requests.
 ///
 /// TiKV uses RocksDB's `ColumnFamily` support. You can learn more about RocksDB's `ColumnFamily`s [on their wiki](https://github.com/facebook/rocksdb/wiki/Column-Families).

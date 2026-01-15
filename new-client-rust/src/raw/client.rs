@@ -7,6 +7,7 @@ use std::sync::Arc;
 use log::debug;
 use tokio::time::sleep;
 
+use super::RawChecksum;
 use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF};
 use crate::common::Error;
 use crate::config::Config;
@@ -479,6 +480,37 @@ impl<PdC: PdClient> Client<PdC> {
             .plan();
         plan.execute().await?;
         Ok(())
+    }
+
+    /// Compute a checksum over the keys in the given range.
+    ///
+    /// The checksum is computed by TiKV and aggregated client-side across regions.
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// # use tikv_client::{RawClient, RawChecksum, IntoOwnedRange};
+    /// # use futures::prelude::*;
+    /// # futures::executor::block_on(async {
+    /// let client = RawClient::new(vec!["127.0.0.1:2379"]).await.unwrap();
+    /// let checksum: RawChecksum = client.checksum(("a".."z").into_owned()).await.unwrap();
+    /// # });
+    /// ```
+    pub async fn checksum(&self, range: impl Into<BoundRange>) -> Result<RawChecksum> {
+        debug!("invoking raw checksum request");
+        let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
+        let (start_key, end_key) = range.clone().into_keys();
+        if let Some(end_key) = &end_key {
+            if start_key >= *end_key {
+                return Ok(RawChecksum::default());
+            }
+        }
+
+        let request = new_raw_checksum_request(range);
+        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .retry_multi_region(self.backoff.clone())
+            .merge(Collect)
+            .plan();
+        plan.execute().await
     }
 
     /// Create a new 'scan' request.

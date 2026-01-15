@@ -65,6 +65,7 @@ has_region_error!(kvrpcpb::RawScanResponse);
 has_region_error!(kvrpcpb::RawBatchScanResponse);
 has_region_error!(kvrpcpb::RawCasResponse);
 has_region_error!(kvrpcpb::RawCoprocessorResponse);
+has_region_error!(kvrpcpb::RawChecksumResponse);
 
 macro_rules! has_key_error {
     ($type:ty) => {
@@ -112,6 +113,7 @@ has_str_error!(kvrpcpb::RawBatchDeleteResponse);
 has_str_error!(kvrpcpb::RawDeleteRangeResponse);
 has_str_error!(kvrpcpb::RawCasResponse);
 has_str_error!(kvrpcpb::RawCoprocessorResponse);
+has_str_error!(kvrpcpb::RawChecksumResponse);
 has_str_error!(kvrpcpb::ImportResponse);
 has_str_error!(kvrpcpb::DeleteRangeResponse);
 has_str_error!(kvrpcpb::UnsafeDestroyRangeResponse);
@@ -232,5 +234,19 @@ mod test {
 
         let mut resp: Result<kvrpcpb::CommitResponse, _> = Err(internal_err!("some error"));
         assert!(resp.key_errors().is_some());
+    }
+
+    #[test]
+    fn raw_checksum_str_error_is_key_error() {
+        let mut resp = kvrpcpb::RawChecksumResponse {
+            error: "boom".to_owned(),
+            ..Default::default()
+        };
+        let errs = resp.key_errors().expect("expected error to be extracted");
+        assert_eq!(errs.len(), 1);
+        match &errs[0] {
+            Error::KvError { message } => assert_eq!(message, "boom"),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 }

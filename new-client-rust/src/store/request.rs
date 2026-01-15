@@ -84,6 +84,7 @@ impl_request!(RawBatchScanRequest, raw_batch_scan, "raw_batch_scan");
 impl_request!(RawDeleteRangeRequest, raw_delete_range, "raw_delete_range");
 impl_request!(RawCasRequest, raw_compare_and_swap, "raw_compare_and_swap");
 impl_request!(RawCoprocessorRequest, raw_coprocessor, "raw_coprocessor");
+impl_request!(RawChecksumRequest, raw_checksum, "raw_checksum");
 
 impl_request!(GetRequest, kv_get, "kv_get");
 impl_request!(ScanRequest, kv_scan, "kv_scan");

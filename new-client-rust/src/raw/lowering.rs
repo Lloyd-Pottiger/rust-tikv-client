@@ -107,6 +107,10 @@ pub fn new_raw_batch_scan_request(
     requests::new_raw_batch_scan_request(ranges.map(Into::into).collect(), each_limit, key_only, cf)
 }
 
+pub fn new_raw_checksum_request(range: BoundRange) -> kvrpcpb::RawChecksumRequest {
+    requests::new_raw_checksum_request(range.into())
+}
+
 pub fn new_cas_request(
     key: Key,
     value: Value,

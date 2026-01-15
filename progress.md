@@ -14,6 +14,7 @@
   - Drafted a client-rust vs client-go(v2) gap analysis (`.codex/progress/gap-analysis.md`).
   - Bootstrapped `new-client-rust/` by copying `client-rust/` (excluding `.git`) as a starting point.
   - Verified baseline builds/tests: `cargo test` in `new-client-rust/` passed.
+  - Implemented RawKV checksum parity in `new-client-rust/` (`RawClient::checksum` + `RawChecksum`) and added unit tests.
 - Files created/modified:
   - `task_plan.md` (created)
   - `findings.md` (created)
@@ -22,11 +23,18 @@
   - `.codex/progress/parity-map.md` (created)
   - `.codex/progress/gap-analysis.md` (created)
   - `new-client-rust/` (populated from `client-rust/`)
+  - `new-client-rust/src/raw/client.rs` (modified)
+  - `new-client-rust/src/raw/mod.rs` (modified)
+  - `new-client-rust/src/raw/requests.rs` (modified)
+  - `new-client-rust/src/raw/lowering.rs` (modified)
+  - `new-client-rust/src/store/request.rs` (modified)
+  - `new-client-rust/src/store/errors.rs` (modified)
+  - `new-client-rust/src/lib.rs` (modified)
 
 ## Test Results
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
-|      |       |          |        |        |
+| Raw checksum + full suite | `cd new-client-rust && cargo test` | pass | pass | ok |
 
 ## Error Log
 | Timestamp | Error | Attempt | Resolution |

@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use super::RawChecksum;
 use super::RawRpcRequest;
 use crate::collect_single;
 use crate::kv::KvPairTTL;
@@ -23,6 +24,7 @@ use crate::shardable_key;
 use crate::shardable_keys;
 use crate::shardable_range;
 use crate::store::region_stream_for_keys;
+use crate::store::region_stream_for_range;
 use crate::store::region_stream_for_ranges;
 use crate::store::RegionStore;
 use crate::store::Request;
@@ -452,6 +454,60 @@ impl Merge<kvrpcpb::RawBatchScanResponse> for Collect {
     }
 }
 
+pub fn new_raw_checksum_request(range: kvrpcpb::KeyRange) -> kvrpcpb::RawChecksumRequest {
+    let mut req = kvrpcpb::RawChecksumRequest::default();
+    req.algorithm = kvrpcpb::ChecksumAlgorithm::Crc64Xor as i32;
+    req.ranges = vec![range];
+    req
+}
+
+impl KvRequest for kvrpcpb::RawChecksumRequest {
+    type Response = kvrpcpb::RawChecksumResponse;
+}
+
+impl Shardable for kvrpcpb::RawChecksumRequest {
+    type Shard = (Vec<u8>, Vec<u8>);
+
+    fn shards(
+        &self,
+        pd_client: &Arc<impl PdClient>,
+    ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+        let Some(range) = self.ranges.first() else {
+            return stream::empty().boxed();
+        };
+        region_stream_for_range(
+            (range.start_key.clone(), range.end_key.clone()),
+            pd_client.clone(),
+        )
+    }
+
+    fn apply_shard(&mut self, shard: Self::Shard) {
+        let mut range = kvrpcpb::KeyRange::default();
+        range.start_key = shard.0;
+        range.end_key = shard.1;
+        self.ranges = vec![range];
+    }
+
+    fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        self.set_leader(&store.region_with_leader)
+    }
+}
+
+impl Merge<kvrpcpb::RawChecksumResponse> for Collect {
+    type Out = RawChecksum;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::RawChecksumResponse>>) -> Result<Self::Out> {
+        let mut out = RawChecksum::default();
+        for resp in input {
+            let resp = resp?;
+            out.crc64_xor ^= resp.checksum;
+            out.total_kvs = out.total_kvs.saturating_add(resp.total_kvs);
+            out.total_bytes = out.total_bytes.saturating_add(resp.total_bytes);
+        }
+        Ok(out)
+    }
+}
+
 pub fn new_cas_request(
     key: Vec<u8>,
     value: Vec<u8>,
@@ -650,6 +706,8 @@ impl HasLocks for kvrpcpb::RawCasResponse {}
 
 impl HasLocks for kvrpcpb::RawCoprocessorResponse {}
 
+impl HasLocks for kvrpcpb::RawChecksumResponse {}
+
 #[cfg(test)]
 mod test {
     use std::any::Any;
@@ -665,6 +723,24 @@ mod test {
     use crate::proto::kvrpcpb;
     use crate::request::Keyspace;
     use crate::request::Plan;
+
+    #[test]
+    fn test_raw_checksum_merge() {
+        let mut r1 = kvrpcpb::RawChecksumResponse::default();
+        r1.checksum = 0b1010;
+        r1.total_kvs = 1;
+        r1.total_bytes = 10;
+
+        let mut r2 = kvrpcpb::RawChecksumResponse::default();
+        r2.checksum = 0b1100;
+        r2.total_kvs = 2;
+        r2.total_bytes = 20;
+
+        let out = Collect.merge(vec![Ok(r1), Ok(r2)]).unwrap();
+        assert_eq!(out.crc64_xor, 0b0110);
+        assert_eq!(out.total_kvs, 3);
+        assert_eq!(out.total_bytes, 30);
+    }
 
     #[rstest::rstest]
     #[case(Keyspace::Disable)]

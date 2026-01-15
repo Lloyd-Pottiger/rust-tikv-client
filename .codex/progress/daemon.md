@@ -11,6 +11,10 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
+- 明确 new-client-rust 的对外 API 规划（按 parity-map 分阶段落地）
+  - 先给出“最小 public surface”（Raw/Txn/Config/Key types）并补充 rustdoc
+  - 再逐步补齐 client-go 的 `tikvrpc`/interceptor/replica read/resource control 等能力
+
 # 已完成工作
 
 - 梳理 client-go(v2) Public API + 功能清单（以代码为准）
@@ -28,3 +32,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：以 `client-rust` 代码为起点迁移到 `new-client-rust/`（保留 workspace + 生成 proto 方式）
   - 验证：`new-client-rust/` 下 `cargo test` 通过（基础单测可运行）
   - 改动文件：`new-client-rust/**`（从 `client-rust` 复制，不含 `.git`）、`.codex/progress/daemon.md`、`findings.md`、`progress.md`
+
+- 实现 RawKV Checksum（对齐 client-go `rawkv.Client.Checksum` 能力）
+  - 新增：`RawClient::checksum` + `RawChecksum`（crc64_xor/total_kvs/total_bytes），按 region 分片并聚合（xor + sum）
+  - 增补：`RawChecksum{Request,Response}` 的 dispatch、region/key error 抽取、`HasLocks` 空实现、merge 逻辑
+  - 测试：新增单测覆盖聚合；`cargo test` 通过
+  - 改动文件：`new-client-rust/src/raw/client.rs`、`new-client-rust/src/raw/mod.rs`、`new-client-rust/src/raw/requests.rs`、`new-client-rust/src/raw/lowering.rs`、`new-client-rust/src/store/request.rs`、`new-client-rust/src/store/errors.rs`、`new-client-rust/src/lib.rs`、`.codex/progress/daemon.md`
