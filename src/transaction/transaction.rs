@@ -2812,7 +2812,7 @@ mod tests {
             .lock_keys_with_options(vec![vec![1u8], vec![20u8]], LockOptions::new())
             .await
             .expect_err("lock must fail");
-        assert!(matches!(err, crate::Error::WriteConflict(_)), "{err:?}");
+        assert!(err.is_write_conflict(), "{err:?}");
 
         let rollback_reqs = rollback_reqs.lock().unwrap().clone();
         assert_eq!(rollback_reqs.len(), 1);

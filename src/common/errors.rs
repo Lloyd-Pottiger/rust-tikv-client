@@ -428,23 +428,62 @@ pub type Result<T> = result::Result<T, Error>;
 
 impl Error {
     pub fn is_write_conflict(&self) -> bool {
-        matches!(self, Error::WriteConflict(_))
+        match self {
+            Error::WriteConflict(_) => true,
+            Error::UndeterminedError(inner) => inner.is_write_conflict(),
+            Error::PessimisticLockError { inner, .. } => inner.is_write_conflict(),
+            Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
+                errors.iter().any(Error::is_write_conflict)
+            }
+            _ => false,
+        }
     }
 
     pub fn is_deadlock(&self) -> bool {
-        matches!(self, Error::Deadlock(_))
+        match self {
+            Error::Deadlock(_) => true,
+            Error::UndeterminedError(inner) => inner.is_deadlock(),
+            Error::PessimisticLockError { inner, .. } => inner.is_deadlock(),
+            Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
+                errors.iter().any(Error::is_deadlock)
+            }
+            _ => false,
+        }
     }
 
     pub fn is_key_exists(&self) -> bool {
-        matches!(self, Error::KeyExists(_))
+        match self {
+            Error::KeyExists(_) => true,
+            Error::UndeterminedError(inner) => inner.is_key_exists(),
+            Error::PessimisticLockError { inner, .. } => inner.is_key_exists(),
+            Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
+                errors.iter().any(Error::is_key_exists)
+            }
+            _ => false,
+        }
     }
 
     pub fn is_assertion_failed(&self) -> bool {
-        matches!(self, Error::AssertionFailed(_))
+        match self {
+            Error::AssertionFailed(_) => true,
+            Error::UndeterminedError(inner) => inner.is_assertion_failed(),
+            Error::PessimisticLockError { inner, .. } => inner.is_assertion_failed(),
+            Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
+                errors.iter().any(Error::is_assertion_failed)
+            }
+            _ => false,
+        }
     }
 
     pub fn is_undetermined(&self) -> bool {
-        matches!(self, Error::UndeterminedError(_))
+        match self {
+            Error::UndeterminedError(_) => true,
+            Error::PessimisticLockError { inner, .. } => inner.is_undetermined(),
+            Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
+                errors.iter().any(Error::is_undetermined)
+            }
+            _ => false,
+        }
     }
 }
 
