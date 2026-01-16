@@ -293,4 +293,29 @@ mod tests {
         let key = Key::from(vec![0xAB, 0xCD, 0xEF]);
         assert_eq!(key.clone().truncate_keyspace(keyspace), key);
     }
+
+    #[test]
+    fn test_prepend_and_pretruncate_bytes_round_trip() {
+        const N: usize = KEYSPACE_PREFIX_LEN;
+        let prefix = [0xAA, 0xBB, 0xCC, 0xDD];
+        assert_eq!(prefix.len(), N);
+
+        // Keep the test deterministic and fast; cover a range of sizes and contents.
+        for len in 0..64usize {
+            let original = (0..len as u8).collect::<Vec<_>>();
+
+            let mut buf = original.clone();
+            prepend_bytes(&mut buf, &prefix);
+            assert_eq!(&buf[..N], &prefix);
+            assert_eq!(&buf[N..], original.as_slice());
+
+            pretruncate_bytes::<N>(&mut buf);
+            assert_eq!(buf, original);
+        }
+
+        // Shorter-than-prefix input is a no-op.
+        let mut short = vec![1, 2, 3];
+        pretruncate_bytes::<N>(&mut short);
+        assert_eq!(short, vec![1, 2, 3]);
+    }
 }

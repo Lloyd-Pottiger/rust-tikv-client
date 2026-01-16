@@ -16,10 +16,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - docs：补齐 crate-level “how to test/benchmark/tiup” 开发者指南（README/doc 分散，整理到单一入口）
   - 计划：新增 `new-client-rust/doc/development.md`（fmt/clippy/unit/integration/doc/bench/tiup）；README 加链接；CI 不改
 
-- safety：梳理/注释关键 unsafe 合同并加回归单测（仅覆盖当前仍存在的 unsafe）
-  - 计划：枚举 `unsafe {}` 点；为每处补齐 `// SAFETY:` 说明（若缺）；挑 1-2 个关键点加单测/断言
-
 # 已完成工作
+
+- safety：梳理关键 unsafe 并补齐回归单测
+  - 结论：当前非 generated 代码的 `unsafe {}` 均已带 `// SAFETY:` 合同说明（pin projection / Vec prepend+truncate / codec memmove / repr(transparent) cast）
+  - tests：新增 keyspace prepend+pretruncate round-trip 单测，覆盖 `ptr::copy` + `set_len` 相关路径
+  - 文件：`new-client-rust/src/request/keyspace.rs`
 
 - hardening：清理 new-client-rust 残留的 `todo!/unimplemented!`（避免隐藏 panic）
   - 关键决策：mock 层用显式 `Ok/Err(Error::Unimplemented)` 替代 panic；keyspace mock 返回 Enabled meta 以便 test-util 可用
