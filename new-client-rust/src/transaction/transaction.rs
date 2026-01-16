@@ -14,7 +14,6 @@ use log::{debug, trace};
 use tokio::time::Duration;
 
 use crate::backoff::Backoff;
-use crate::backoff::DEFAULT_REGION_BACKOFF;
 use crate::interceptor::RpcContextInfo;
 use crate::interceptor::RpcInterceptor;
 use crate::interceptor::RpcInterceptorChain;
@@ -455,11 +454,15 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.buffer
             .get_or_else(key, |key| async move {
                 let request = request_context.apply_to(new_get_request(key, timestamp));
+                let RetryOptions {
+                    region_backoff,
+                    lock_backoff,
+                } = retry_options;
                 let plan = PlanBuilder::new(rpc, keyspace, request)
                     .with_request_context(request_context)
                     .with_read_routing(read_routing)
-                    .resolve_lock(retry_options.lock_backoff, keyspace)
-                    .retry_multi_region(DEFAULT_REGION_BACKOFF)
+                    .resolve_lock(lock_backoff, keyspace)
+                    .retry_multi_region(region_backoff)
                     .merge(CollectSingle)
                     .post_process_default()
                     .plan();
@@ -2509,6 +2512,7 @@ mod tests {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::pd::PdClient;
+    use crate::proto::errorpb;
     use crate::proto::keyspacepb;
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -2518,14 +2522,61 @@ mod tests {
     use crate::resource_manager;
     use crate::store::{RegionStore, Store};
     use crate::timestamp::TimestampExt;
+    use crate::transaction::CheckLevel;
     use crate::transaction::FlagsOp;
     use crate::transaction::HeartbeatOption;
     use crate::transaction::LockOptions;
     use crate::CommandPriority;
+    use crate::Error;
     use crate::ReplicaReadType;
     use crate::RequestContext;
     use crate::Transaction;
     use crate::TransactionOptions;
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_respects_no_resolve_regions() -> Result<(), io::Error> {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let dispatches_cloned = dispatches.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::GetRequest>().is_none() {
+                    unreachable!("unexpected request type: {:?}", req.type_id());
+                }
+
+                let attempt = dispatches_cloned.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    resp.region_error = Some(errorpb::Error {
+                        stale_command: Some(errorpb::StaleCommand::default()),
+                        ..Default::default()
+                    });
+                    Ok(Box::new(resp) as Box<dyn Any>)
+                } else {
+                    Ok(Box::new(kvrpcpb::GetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>)
+                }
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(42),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .no_resolve_regions()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        let res = txn.get("key".to_owned()).await;
+        assert!(matches!(res, Err(Error::RegionError(_))));
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
 
     #[rstest::rstest]
     #[case(Keyspace::Disable)]

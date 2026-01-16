@@ -8,7 +8,7 @@ use log::debug;
 use tokio::time::sleep;
 
 use super::RawChecksum;
-use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF};
+use crate::backoff::DEFAULT_REGION_BACKOFF;
 use crate::common::Error;
 use crate::config::Config;
 use crate::interceptor::RpcContextInfo;
@@ -792,12 +792,8 @@ impl<PdC: PdClient> Client<PdC> {
     /// Create a new 'batch scan' request.
     ///
     /// Once resolved this request will result in a set of scanners over the given keys.
-    ///
-    /// **Warning**: This method is experimental. The `each_limit` parameter does not work as expected.
-    /// It does not limit the number of results returned of each range,
-    /// instead it limits the number of results in each region of each range.
-    /// As a result, you may get **more than** `each_limit` key-value pairs for each range.
-    /// But you should not miss any entries.
+    /// This is equivalent to calling [`scan`](Self::scan) for each range and concatenating the
+    /// results (in the same order as the input ranges).
     ///
     /// # Examples
     /// ```rust,no_run
@@ -824,12 +820,8 @@ impl<PdC: PdClient> Client<PdC> {
     /// Create a new 'batch scan' request that only returns the keys.
     ///
     /// Once resolved this request will result in a set of scanners over the given keys.
-    ///
-    /// **Warning**: This method is experimental.
-    /// The `each_limit` parameter does not limit the number of results returned of each range,
-    /// instead it limits the number of results in each region of each range.
-    /// As a result, you may get **more than** `each_limit` key-value pairs for each range,
-    /// but you should not miss any entries.
+    /// This is equivalent to calling [`scan_keys`](Self::scan_keys) for each range and
+    /// concatenating the results (in the same order as the input ranges).
     ///
     /// # Examples
     /// ```rust,no_run
@@ -951,7 +943,8 @@ impl<PdC: PdClient> Client<PdC> {
                 max_limit: MAX_RAW_KV_SCAN_LIMIT,
             });
         }
-        let backoff = DEFAULT_STORE_BACKOFF;
+        // For raw clients, retry/backoff is user-configurable via `RawClient::with_backoff`.
+        let backoff = self.backoff.clone();
         let mut range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut result = Vec::new();
         let mut current_limit = limit;
@@ -1062,26 +1055,13 @@ impl<PdC: PdClient> Client<PdC> {
             });
         }
 
-        let ranges = ranges
-            .into_iter()
-            .map(|range| range.into().encode_keyspace(self.keyspace, KeyMode::Raw));
-
-        let request = self.with_request_context(new_raw_batch_scan_request(
-            ranges,
-            each_limit,
-            key_only,
-            self.cf.clone(),
-        ));
-        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .with_request_context(self.request_context.clone())
-            .retry_multi_region(self.backoff.clone())
-            .merge(Collect)
-            .plan();
-        plan.execute().await.map(|r| {
-            r.into_iter()
-                .map(|pair| pair.truncate_keyspace(self.keyspace))
-                .collect()
-        })
+        let results = futures::future::try_join_all(
+            ranges
+                .into_iter()
+                .map(|range| self.scan_inner(range.into(), each_limit, key_only, false)),
+        )
+        .await?;
+        Ok(results.into_iter().flatten().collect())
     }
 
     fn assert_non_atomic(&self) -> Result<()> {
@@ -1273,6 +1253,112 @@ mod tests {
         .with_txn_source(expected_txn_source);
 
         assert_eq!(client.get(vec![1_u8]).await?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_batch_scan_each_limit_is_per_range() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawScanRequest>() else {
+                    unreachable!()
+                };
+                let ctx = req.context.as_ref().expect("context should be set");
+                let (region_start, region_end) = match ctx.region_id {
+                    1 => (vec![], vec![10]),
+                    2 => (vec![10], vec![250, 250]),
+                    3 => (vec![250, 250], vec![]),
+                    _ => unreachable!("unexpected region_id: {}", ctx.region_id),
+                };
+
+                // Simulate a tiny ordered dataset across regions:
+                // - region 1: [1], [2]
+                // - region 2: [10], [11], [12], [13]
+                let data: &[(Vec<u8>, Vec<u8>)] = &[
+                    (vec![1], vec![1]),
+                    (vec![2], vec![2]),
+                    (vec![10], vec![10]),
+                    (vec![11], vec![11]),
+                    (vec![12], vec![12]),
+                    (vec![13], vec![13]),
+                ];
+
+                let start = if req.start_key < region_start {
+                    region_start.clone()
+                } else {
+                    req.start_key.clone()
+                };
+                let mut end = req.end_key.clone();
+                if end.is_empty() || (!region_end.is_empty() && end > region_end) {
+                    end = region_end.clone();
+                }
+
+                let mut kvs = Vec::new();
+                for (k, v) in data {
+                    if k.as_slice() < start.as_slice() {
+                        continue;
+                    }
+                    if !end.is_empty() && k.as_slice() >= end.as_slice() {
+                        break;
+                    }
+
+                    kvs.push(kvrpcpb::KvPair {
+                        key: k.clone(),
+                        value: if req.key_only { vec![] } else { v.clone() },
+                        ..Default::default()
+                    });
+                    if kvs.len() >= req.limit as usize {
+                        break;
+                    }
+                }
+
+                Ok(Box::new(kvrpcpb::RawScanResponse {
+                    kvs,
+                    ..Default::default()
+                }) as Box<dyn Any>)
+            },
+        )));
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let ranges = vec![vec![1_u8]..vec![14_u8], vec![10_u8]..vec![13_u8]];
+        let each_limit = 3;
+
+        let pairs = client.batch_scan(ranges.clone(), each_limit).await?;
+        assert_eq!(pairs.len(), 6);
+        let keys: Vec<Vec<u8>> = pairs.into_iter().map(|p| p.0.into()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                vec![1_u8],
+                vec![2_u8],
+                vec![10_u8],
+                vec![10_u8],
+                vec![11_u8],
+                vec![12_u8],
+            ]
+        );
+
+        let keys = client.batch_scan_keys(ranges, each_limit).await?;
+        let keys: Vec<Vec<u8>> = keys.into_iter().map(Into::into).collect();
+        assert_eq!(
+            keys,
+            vec![
+                vec![1_u8],
+                vec![2_u8],
+                vec![10_u8],
+                vec![10_u8],
+                vec![11_u8],
+                vec![12_u8],
+            ]
+        );
         Ok(())
     }
 }
