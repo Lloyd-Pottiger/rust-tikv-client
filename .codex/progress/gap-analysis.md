@@ -1,17 +1,17 @@
-# client-rust / new-client-rust vs client-go(v2) 缺口分析（滚动更新）
+# client-rust / tikv-client（Rust）vs client-go(v2) 缺口分析（滚动更新）
 
-> 目的：决定 `new-client-rust` 的复用策略与优先补齐的能力点。  
+> 目的：决定 Rust client（repo 根目录 crate）的复用策略与优先补齐的能力点。  
 > 说明：本文件只记录“能力/协议/对外可用性”，不是逐函数签名级 diff（签名级跟踪见 `.codex/progress/parity-checklist.md`）。
 
-## new-client-rust 已具备（从代码确认）
+## Rust client 已具备（从代码确认）
 
-- 基础：PD 交互、region cache、Backoff/Retry、请求 plan 执行框架（`new-client-rust/src/{pd,store,request,region_cache}.rs`）。
-- Raw API：`RawClient` 支持 get/put/batch/scan/delete_range/TTL/CAS、raw coprocessor、raw checksum（`new-client-rust/src/raw/*`）。
-- Txn API：`TransactionClient`/`Transaction` 支持 optimistic/pessimistic、2PC、try-1PC、async-commit、pipelined flush、txn local latches、lock resolver、scan locks、GC（`new-client-rust/src/transaction/*`）。
-- Keyspace：`Config::with_keyspace` + `PdRpcClient::load_keyspace`（`new-client-rust/src/{config.rs,pd/*}`）。
-- Replica Read / Stale Read：leader/follower/learner + stale read 路由，`kvrpcpb::Context` 字段注入（`new-client-rust/src/{request/*,replica_read.rs}`）。
-- Resource Control：request_source / resource group tag / override priority + interceptor 链（`new-client-rust/src/{request_context.rs,interceptor.rs}`）。
-- Trace/Metrics：trace hooks（最小 public surface）+ prometheus feature-gate 的 metrics（`new-client-rust/src/{trace.rs,metrics.rs,stats.rs}`）。
+- 基础：PD 交互、region cache、Backoff/Retry、请求 plan 执行框架（`src/{pd,store,request,region_cache}.rs`）。
+- Raw API：`RawClient` 支持 get/put/batch/scan/delete_range/TTL/CAS、raw coprocessor、raw checksum（`src/raw/*`）。
+- Txn API：`TransactionClient`/`Transaction` 支持 optimistic/pessimistic、2PC、try-1PC、async-commit、pipelined flush、txn local latches、lock resolver、scan locks、GC（`src/transaction/*`）。
+- Keyspace：`Config::with_keyspace` + `PdRpcClient::load_keyspace`（`src/{config.rs,pd/*}`）。
+- Replica Read / Stale Read：leader/follower/learner + stale read 路由，`kvrpcpb::Context` 字段注入（`src/{request/*,replica_read.rs}`）。
+- Resource Control：request_source / resource group tag / override priority + interceptor 链（`src/{request_context.rs,interceptor.rs}`）。
+- Trace/Metrics：trace hooks（最小 public surface）+ prometheus feature-gate 的 metrics（`src/{trace.rs,metrics.rs,stats.rs}`）。
 - parity artifacts：inventory + checklist + scope policy（`.codex/progress/{client-go-api-inventory.md,parity-checklist.md,parity-map.md}`）。
 
 ## 相对 client-go(v2) 的差异（按能力域，粗粒度）
@@ -35,5 +35,5 @@
 
 ## 结论（策略建议）
 
-- `new-client-rust` 以 `client-rust` 迁移为起点的策略成立：能力/协议已覆盖；Rust public surface 维持“前门小、实现细节隐藏”。
+- 以 `client-rust` 迁移为起点的策略成立：能力/协议已覆盖；Rust public surface 维持“前门小、实现细节隐藏”。
 - 后续迭代重点应放在 hardening（integration/doc/bench/CI guardrail），以 `.codex/progress/daemon.md` 为准。

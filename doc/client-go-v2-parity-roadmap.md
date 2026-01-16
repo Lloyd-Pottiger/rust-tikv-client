@@ -1,6 +1,6 @@
-# new-client-rust roadmap: client-go(v2) parity
+# Roadmap: client-go(v2) parity
 
-This directory (`./new-client-rust`) is the new Rust TiKV client implementation used in this repo.
+This repo's Rust TiKV client implementation (crate at the repo root) is developed here.
 The long-term target is **feature + public-API parity** with `./client-go` (v2), while keeping the
 Rust surface idiomatic and high-performance.
 
@@ -40,8 +40,8 @@ expose it for parity.
 
 ## Verification
 
-- Unit tests: `cd new-client-rust && cargo test`
-- Lints: `cd new-client-rust && cargo clippy --all-targets`
+- Unit tests: `cargo test`
+- Lints: `cargo clippy --all-targets`
 - Integration tests (needs a running PD/TiKV): `PD_ADDRS=127.0.0.1:2379 cargo test --features integration-tests`
 
 ## Repo-local artifacts used to drive the plan

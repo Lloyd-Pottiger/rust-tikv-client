@@ -1,6 +1,6 @@
-# client-go(v2) → new-client-rust 映射草案（高层）
+# client-go(v2) → tikv-client（Rust）映射草案（高层）
 
-目标：以 `client-go` v2 的**功能**与**对外 API 能力**为基准，规划 `new-client-rust` 的 crate/module 边界；Rust 侧 API 命名/构造方式遵循 Rust 风格（避免 Go 式全局 config / 可变单例）。
+目标：以 `client-go` v2 的**功能**与**对外 API 能力**为基准，规划 Rust crate 的 module 边界；Rust 侧 API 命名/构造方式遵循 Rust 风格（避免 Go 式全局 config / 可变单例）。
 
 ## Scope policy（Rust 侧暴露策略）
 

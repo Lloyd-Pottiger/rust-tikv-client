@@ -335,7 +335,7 @@ func renderInventory(modulePath string, apis []pkgAPI) []byte {
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "Module: `%s`\n\n", modulePath)
 	fmt.Fprintln(&b, "Generated from local source under `client-go/` (excluding `internal/`, `integration_tests/`, `examples/`, `testutils/`).")
-	fmt.Fprintln(&b, "This is a signature-level inventory used to drive parity work in `new-client-rust/`.")
+	fmt.Fprintln(&b, "This is a signature-level inventory used to drive parity work in this repo's Rust client crate (repo root).")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "Regenerate:")
 	fmt.Fprintln(&b, "- `go run ./tools/client-go-api-inventory`")

@@ -1,7 +1,7 @@
-# Architecture (new-client-rust)
+# Architecture
 
-This document explains the major modules and control-flow in `new-client-rust/` so future
-contributors can change behavior with confidence (and without re-learning client-go internals).
+This document explains the major modules and control-flow in this crate so future contributors can
+change behavior with confidence (and without re-learning client-go internals).
 
 Scope: this is an implementation/maintenance guide, not an API reference.
 
@@ -122,7 +122,6 @@ to TiKV, and response keys are truncated back to the user view. See:
 ## Tests
 
 - Unit tests live next to the implementation (`src/**`).
-- Property tests are under `src/proptests/*`.
 - Integration tests require a real PD/TiKV cluster:
   - `tests/integration_tests.rs` (feature `integration-tests`)
   - `Makefile` has a `tiup` helper and `integration-test-*` targets.
@@ -137,4 +136,3 @@ Unsafe code is intentionally rare and should be locally justified:
 - `src/compat.rs`: manual pin-projection for a loop-based stream adapter.
 
 Every unsafe block should have a `// SAFETY: ...` comment describing required invariants.
-

@@ -1,10 +1,10 @@
 # Development
 
-This document describes the developer workflows for `new-client-rust/`.
+This document describes the developer workflows for the Rust client crate at the repo root.
 
 ## Quick Start
 
-From `new-client-rust/`:
+From the repo root:
 
 ```bash
 # Compile + rustfmt + clippy (warnings are denied).
@@ -79,4 +79,3 @@ make all
 
 This runs: proto generation, `cargo check`, `cargo fmt --check`, `cargo clippy`, rustdoc, unit
 tests, and (optionally) integration tests when a cluster is available.
-

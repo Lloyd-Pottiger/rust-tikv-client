@@ -12,23 +12,23 @@ Conventions:
 ## config (package config)
 
 ### Types
-- [x] `type AsyncCommit struct` | Rust: `tikv_client::TransactionOptions::{use_async_commit,max_commit_ts_safe_window}` (new-client-rust/src/transaction/transaction.rs) | Tests: `new-client-rust/src/transaction/transaction.rs (test_async_commit_fallback_to_2pc_when_min_commit_ts_is_zero, test_async_commit_uses_min_commit_ts_when_available)`
-- [x] `type Config struct` | Rust: `tikv_client::Config` (new-client-rust/src/config.rs) | Tests: N/A
+- [x] `type AsyncCommit struct` | Rust: `tikv_client::TransactionOptions::{use_async_commit,max_commit_ts_safe_window}` (src/transaction/transaction.rs) | Tests: `src/transaction/transaction.rs (test_async_commit_fallback_to_2pc_when_min_commit_ts_is_zero, test_async_commit_uses_min_commit_ts_when_available)`
+- [x] `type Config struct` | Rust: `tikv_client::Config` (src/config.rs) | Tests: N/A
 - [x] `type CoprocessorCache struct` | Rust: N/A (out-of-scope: client-go internal cache config not exposed) | Tests: N/A
 - [x] `type PDClient struct` | Rust: N/A (out-of-scope: PD client config is internal; use `Config`/defaults) | Tests: N/A
-- [x] `type PessimisticTxn struct` | Rust: `tikv_client::TransactionClient::begin_pessimistic` + `tikv_client::TransactionOptions::new_pessimistic` (new-client-rust/src/transaction/{client,transaction}.rs) | Tests: N/A
-- [x] `type Security struct` | Rust: `tikv_client::Config::with_security` + `tikv_client::SecurityManager` (new-client-rust/src/{config.rs,common/security.rs}) | Tests: `new-client-rust/src/common/security.rs (test_security)`
+- [x] `type PessimisticTxn struct` | Rust: `tikv_client::TransactionClient::begin_pessimistic` + `tikv_client::TransactionOptions::new_pessimistic` (src/transaction/{client,transaction}.rs) | Tests: N/A
+- [x] `type Security struct` | Rust: `tikv_client::Config::with_security` + `tikv_client::SecurityManager` (src/{config.rs,common/security.rs}) | Tests: `src/common/security.rs (test_security)`
 - [x] `type TiKVClient struct` | Rust: N/A (out-of-scope: TiKV gRPC client config is internal; use `Config`/defaults) | Tests: N/A
-- [x] `type TxnLocalLatches struct` | Rust: `tikv_client::TransactionClient::with_txn_local_latches` (new-client-rust/src/transaction/client.rs) | Tests: `new-client-rust/src/transaction/latch.rs (tests)`
+- [x] `type TxnLocalLatches struct` | Rust: `tikv_client::TransactionClient::with_txn_local_latches` (src/transaction/client.rs) | Tests: `src/transaction/latch.rs (tests)`
 
 ### Functions
-- [x] `func DefaultConfig() Config` | Rust: `Config::default()` (new-client-rust/src/config.rs) | Tests: N/A
+- [x] `func DefaultConfig() Config` | Rust: `Config::default()` (src/config.rs) | Tests: N/A
 - [x] `func DefaultPDClient() PDClient` | Rust: N/A (out-of-scope: PD client config is internal; use `Config`/defaults) | Tests: N/A
 - [x] `func DefaultTiKVClient() TiKVClient` | Rust: N/A (out-of-scope: TiKV gRPC client config is internal; use `Config`/defaults) | Tests: N/A
 - [x] `func DefaultTxnLocalLatches() TxnLocalLatches` | Rust: N/A (out-of-scope: configure via `TransactionClient::with_txn_local_latches`) | Tests: N/A
 - [x] `func GetGlobalConfig() *Config` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
 - [x] `func GetTxnScopeFromConfig() string` | Rust: N/A (out-of-scope: no global config; use `GLOBAL_TXN_SCOPE` and explicit options) | Tests: N/A
-- [x] `func NewSecurity(sslCA, sslCert, sslKey string, verityCN []string) Security` | Rust: `Config::with_security` + `SecurityManager::load` (new-client-rust/src/{config.rs,common/security.rs}) | Tests: `new-client-rust/src/common/security.rs (test_security)`
+- [x] `func NewSecurity(sslCA, sslCert, sslKey string, verityCN []string) Security` | Rust: `Config::with_security` + `SecurityManager::load` (src/{config.rs,common/security.rs}) | Tests: `src/common/security.rs (test_security)`
 - [x] `func ParsePath(path string) (etcdAddrs []string, disableGC bool, keyspaceName string, err error)` | Rust: N/A (out-of-scope: no DSN parser; pass PD endpoints + `Config`) | Tests: N/A
 - [x] `func StoreGlobalConfig(config *Config)` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
 - [x] `func UpdateGlobal(f func(conf *Config)) func()` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
@@ -54,29 +54,29 @@ Conventions:
 - [x] `func (config *TiKVClient) GetGrpcKeepAliveTimeout() time.Duration` | Rust: N/A (out-of-scope: internal gRPC tuning not exposed) | Tests: N/A
 - [x] `func (config *TiKVClient) Valid() error` | Rust: N/A (out-of-scope: internal gRPC tuning not exposed) | Tests: N/A
 - [x] `func (p *PDClient) Valid() error` | Rust: N/A (out-of-scope: internal PD tuning not exposed) | Tests: N/A
-- [x] `func (s *Security) ToTLSConfig() (tlsConfig *tls.Config, err error)` | Rust: `SecurityManager::load` (new-client-rust/src/common/security.rs) | Tests: `new-client-rust/src/common/security.rs (test_security)`
+- [x] `func (s *Security) ToTLSConfig() (tlsConfig *tls.Config, err error)` | Rust: `SecurityManager::load` (src/common/security.rs) | Tests: `src/common/security.rs (test_security)`
 
 ## config/retry (package retry)
 
 ### Types
-- [x] `type BackoffFnCfg struct` | Rust: `tikv_client::Backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (test_*)`
-- [x] `type Backoffer struct` | Rust: N/A (capability: request retries via `tikv_client::request::PlanBuilder` + `RetryOptions`) | Tests: `new-client-rust/src/request/mod.rs (test_region_retry)`
-- [x] `type Config struct` | Rust: `tikv_client::RetryOptions` (new-client-rust/src/request/mod.rs) | Tests: `new-client-rust/src/request/mod.rs (test_region_retry)`
+- [x] `type BackoffFnCfg struct` | Rust: `tikv_client::Backoff` (src/backoff.rs) | Tests: `src/backoff.rs (test_*)`
+- [x] `type Backoffer struct` | Rust: N/A (capability: request retries via `tikv_client::request::PlanBuilder` + `RetryOptions`) | Tests: `src/request/mod.rs (test_region_retry)`
+- [x] `type Config struct` | Rust: `tikv_client::RetryOptions` (src/request/mod.rs) | Tests: `src/request/mod.rs (test_region_retry)`
 
 ### Functions
-- [x] `func IsFakeRegionError(err *errorpb.Error) bool` | Rust: N/A (capability: region error retry handled by `PlanBuilder` internal region handler) | Tests: `new-client-rust/src/request/mod.rs (test_region_retry)`
-- [x] `func MayBackoffForRegionError(regionErr *errorpb.Error, bo *Backoffer) error` | Rust: N/A (capability: region error retry handled by `PlanBuilder` + `RetryOptions`) | Tests: `new-client-rust/src/request/mod.rs (test_region_retry)`
-- [x] `func NewBackoffFnCfg(base, cap, jitter int) *BackoffFnCfg` | Rust: `Backoff::{no_jitter_backoff,full_jitter_backoff,equal_jitter_backoff,decorrelated_jitter_backoff}` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (tests)`
+- [x] `func IsFakeRegionError(err *errorpb.Error) bool` | Rust: N/A (capability: region error retry handled by `PlanBuilder` internal region handler) | Tests: `src/request/mod.rs (test_region_retry)`
+- [x] `func MayBackoffForRegionError(regionErr *errorpb.Error, bo *Backoffer) error` | Rust: N/A (capability: region error retry handled by `PlanBuilder` + `RetryOptions`) | Tests: `src/request/mod.rs (test_region_retry)`
+- [x] `func NewBackoffFnCfg(base, cap, jitter int) *BackoffFnCfg` | Rust: `Backoff::{no_jitter_backoff,full_jitter_backoff,equal_jitter_backoff,decorrelated_jitter_backoff}` (src/backoff.rs) | Tests: `src/backoff.rs (tests)`
 - [x] `func NewBackoffer(ctx context.Context, maxSleep int) *Backoffer` | Rust: N/A (out-of-scope: no Go-style Backoffer; use `RetryOptions` + `Backoff`) | Tests: N/A
 - [x] `func NewBackofferWithVars(ctx context.Context, maxSleep int, vars *kv.Variables) *Backoffer` | Rust: N/A (out-of-scope: no Go-style Backoffer/Variables) | Tests: N/A
 - [x] `func NewConfig(name string, metric *prometheus.Observer, backoffFnCfg *BackoffFnCfg, err error) *Config` | Rust: N/A (out-of-scope: no per-error backoff config object; use `RetryOptions`) | Tests: N/A
-- [x] `func NewNoopBackoff(ctx context.Context) *Backoffer` | Rust: `Backoff::no_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (test_no_jitter_backoff)`
+- [x] `func NewNoopBackoff(ctx context.Context) *Backoffer` | Rust: `Backoff::no_backoff` (src/backoff.rs) | Tests: `src/backoff.rs (test_no_jitter_backoff)`
 
 ### Consts
-- [x] `DecorrJitter` | Rust: `Backoff::decorrelated_jitter_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (tests)`
-- [x] `EqualJitter` | Rust: `Backoff::equal_jitter_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (tests)`
-- [x] `FullJitter` | Rust: `Backoff::full_jitter_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (tests)`
-- [x] `NoJitter` | Rust: `Backoff::no_jitter_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (test_no_jitter_backoff)`
+- [x] `DecorrJitter` | Rust: `Backoff::decorrelated_jitter_backoff` (src/backoff.rs) | Tests: `src/backoff.rs (tests)`
+- [x] `EqualJitter` | Rust: `Backoff::equal_jitter_backoff` (src/backoff.rs) | Tests: `src/backoff.rs (tests)`
+- [x] `FullJitter` | Rust: `Backoff::full_jitter_backoff` (src/backoff.rs) | Tests: `src/backoff.rs (tests)`
+- [x] `NoJitter` | Rust: `Backoff::no_jitter_backoff` (src/backoff.rs) | Tests: `src/backoff.rs (test_no_jitter_backoff)`
 
 ### Vars
 - [x] `BoCommitTSLag` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
@@ -126,35 +126,35 @@ Conventions:
 ## error (package error)
 
 ### Types
-- [x] `type ErrAssertionFailed struct` | Rust: `new-client-rust/src/common/errors.rs (AssertionFailedError, Error::AssertionFailed)` | Tests: `new-client-rust/src/common/errors.rs (key_error_assertion_failed_maps_to_assertion_failed)`
-- [x] `type ErrDeadlock struct` | Rust: `new-client-rust/src/common/errors.rs (DeadlockError, Error::Deadlock)` | Tests: `new-client-rust/src/common/errors.rs (key_error_deadlock_maps_to_deadlock)`
+- [x] `type ErrAssertionFailed struct` | Rust: `src/common/errors.rs (AssertionFailedError, Error::AssertionFailed)` | Tests: `src/common/errors.rs (key_error_assertion_failed_maps_to_assertion_failed)`
+- [x] `type ErrDeadlock struct` | Rust: `src/common/errors.rs (DeadlockError, Error::Deadlock)` | Tests: `src/common/errors.rs (key_error_deadlock_maps_to_deadlock)`
 - [x] `type ErrEntryTooLarge struct` | Rust: N/A (out-of-scope: typed size-limit errors not exposed; surfaced as `Error`) | Tests: N/A
 - [x] `type ErrGCTooEarly struct` | Rust: N/A (out-of-scope: deprecated in Go; not exposed) | Tests: N/A
-- [x] `type ErrKeyExist struct` | Rust: `new-client-rust/src/common/errors.rs (KeyExistsError, Error::KeyExists)` | Tests: `new-client-rust/src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
+- [x] `type ErrKeyExist struct` | Rust: `src/common/errors.rs (KeyExistsError, Error::KeyExists)` | Tests: `src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
 - [x] `type ErrKeyTooLarge struct` | Rust: N/A (out-of-scope: typed size-limit errors not exposed; surfaced as `Error`) | Tests: N/A
 - [x] `type ErrLockOnlyIfExistsNoPrimaryKey struct` | Rust: N/A (out-of-scope: Go lock-ctx validation error not exposed) | Tests: N/A
 - [x] `type ErrLockOnlyIfExistsNoReturnValue struct` | Rust: N/A (out-of-scope: Go lock-ctx validation error not exposed) | Tests: N/A
 - [x] `type ErrPDServerTimeout struct` | Rust: N/A (out-of-scope: PD timeouts surfaced as `Error::Grpc*` / internal errors) | Tests: N/A
 - [x] `type ErrQueryInterruptedWithSignal struct` | Rust: N/A (out-of-scope: TiDB integration error) | Tests: N/A
-- [x] `type ErrRetryable struct` | Rust: `new-client-rust/src/common/errors.rs (Error::Retryable)` | Tests: `new-client-rust/src/common/errors.rs (key_error_retryable_maps_to_retryable)`
+- [x] `type ErrRetryable struct` | Rust: `src/common/errors.rs (Error::Retryable)` | Tests: `src/common/errors.rs (key_error_retryable_maps_to_retryable)`
 - [x] `type ErrTokenLimit struct` | Rust: N/A (out-of-scope: token limiter error not exposed) | Tests: N/A
-- [x] `type ErrTxnAbortedByGC struct` | Rust: `new-client-rust/src/common/errors.rs (Error::TxnAborted)` | Tests: `new-client-rust/src/common/errors.rs (key_error_abort_maps_to_txn_aborted)`
+- [x] `type ErrTxnAbortedByGC struct` | Rust: `src/common/errors.rs (Error::TxnAborted)` | Tests: `src/common/errors.rs (key_error_abort_maps_to_txn_aborted)`
 - [x] `type ErrTxnTooLarge struct` | Rust: N/A (out-of-scope: typed txn-too-large error not exposed; surfaced as `Error`) | Tests: N/A
-- [x] `type ErrWriteConflict struct` | Rust: `new-client-rust/src/common/errors.rs (WriteConflictError, Error::WriteConflict)` | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
-- [x] `type ErrWriteConflictInLatch struct` | Rust: `new-client-rust/src/common/errors.rs (Error::WriteConflictInLatch)` | Tests: `new-client-rust/src/transaction/transaction.rs (latch tests)`
+- [x] `type ErrWriteConflict struct` | Rust: `src/common/errors.rs (WriteConflictError, Error::WriteConflict)` | Tests: `src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
+- [x] `type ErrWriteConflictInLatch struct` | Rust: `src/common/errors.rs (Error::WriteConflictInLatch)` | Tests: `src/transaction/transaction.rs (latch tests)`
 - [x] `type PDError struct` | Rust: N/A (out-of-scope: does not expose PD error wrapper types) | Tests: N/A
 
 ### Functions
 - [x] `func ExtractDebugInfoStrFromKeyErr(keyErr *kvrpcpb.KeyError) string` | Rust: N/A (out-of-scope: no JSON/redaction debug-info helper) | Tests: N/A
-- [x] `func ExtractKeyErr(keyErr *kvrpcpb.KeyError) error` | Rust: `tikv_client::Error::from(kvrpcpb::KeyError)` (new-client-rust/src/common/errors.rs) | Tests: `new-client-rust/src/common/errors.rs (key_error_*_maps_*)`
-- [x] `func IsErrKeyExist(err error) bool` | Rust: `new-client-rust/src/common/errors.rs (Error::is_key_exists)` | Tests: `new-client-rust/src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
+- [x] `func ExtractKeyErr(keyErr *kvrpcpb.KeyError) error` | Rust: `tikv_client::Error::from(kvrpcpb::KeyError)` (src/common/errors.rs) | Tests: `src/common/errors.rs (key_error_*_maps_*)`
+- [x] `func IsErrKeyExist(err error) bool` | Rust: `src/common/errors.rs (Error::is_key_exists)` | Tests: `src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
 - [x] `func IsErrNotFound(err error) bool` | Rust: N/A (out-of-scope: not-found represented as `Option` in Rust APIs) | Tests: N/A
-- [x] `func IsErrWriteConflict(err error) bool` | Rust: `new-client-rust/src/common/errors.rs (Error::is_write_conflict)` | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
+- [x] `func IsErrWriteConflict(err error) bool` | Rust: `src/common/errors.rs (Error::is_write_conflict)` | Tests: `src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
 - [x] `func IsErrorCommitTSLag(err error) bool` | Rust: N/A (out-of-scope: no explicit commit-ts-lag error) | Tests: N/A
-- [x] `func IsErrorUndetermined(err error) bool` | Rust: `tikv_client::Error::is_undetermined` (new-client-rust/src/common/errors.rs) | Tests: `new-client-rust/src/common/errors.rs (undetermined_error_query)`
+- [x] `func IsErrorUndetermined(err error) bool` | Rust: `tikv_client::Error::is_undetermined` (src/common/errors.rs) | Tests: `src/common/errors.rs (undetermined_error_query)`
 - [x] `func Log(err error)` | Rust: N/A (out-of-scope: use application logging/tracing) | Tests: N/A
 - [x] `func NewErrPDServerTimeout(msg string) error` | Rust: N/A (out-of-scope: PD timeouts surfaced as `Error::Grpc*` / internal errors) | Tests: N/A
-- [x] `func NewErrWriteConflict(conflict *kvrpcpb.WriteConflict) *ErrWriteConflict` | Rust: `WriteConflictError::from(kvrpcpb::WriteConflict)` + `Error::WriteConflict` (new-client-rust/src/common/errors.rs) | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
+- [x] `func NewErrWriteConflict(conflict *kvrpcpb.WriteConflict) *ErrWriteConflict` | Rust: `WriteConflictError::from(kvrpcpb::WriteConflict)` + `Error::WriteConflict` (src/common/errors.rs) | Tests: `src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
 - [x] `func NewErrWriteConflictWithArgs(startTs, conflictTs, conflictCommitTs uint64, key []byte, reason kvrpcpb.WriteConflict_Reason) *ErrWriteConflict` | Rust: N/A (out-of-scope: construct `WriteConflictError` directly) | Tests: N/A
 
 ### Consts
@@ -177,7 +177,7 @@ Conventions:
 - [x] `ErrRegionRecoveryInProgress` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `ErrRegionUnavailable` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `ErrResolveLockTimeout` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `ErrResultUndetermined` | Rust: `Error::UndeterminedError` (new-client-rust/src/common/errors.rs) | Tests: `new-client-rust/src/common/errors.rs (undetermined_error_query)`
+- [x] `ErrResultUndetermined` | Rust: `Error::UndeterminedError` (src/common/errors.rs) | Tests: `src/common/errors.rs (undetermined_error_query)`
 - [x] `ErrTiDBShuttingDown` | Rust: N/A (out-of-scope: TiDB integration error) | Tests: N/A
 - [x] `ErrTiFlashServerBusy` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `ErrTiFlashServerTimeout` | Rust: N/A (out-of-scope) | Tests: N/A
@@ -189,9 +189,9 @@ Conventions:
 - [x] `ErrUnknown` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Methods
-- [x] `func (d *ErrDeadlock) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for DeadlockError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_deadlock_maps_to_deadlock)`
+- [x] `func (d *ErrDeadlock) Error() string` | Rust: `src/common/errors.rs (impl Display for DeadlockError)` | Tests: `src/common/errors.rs (key_error_deadlock_maps_to_deadlock)`
 - [x] `func (d *PDError) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `func (e *ErrAssertionFailed) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for AssertionFailedError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_assertion_failed_maps_to_assertion_failed)`
+- [x] `func (e *ErrAssertionFailed) Error() string` | Rust: `src/common/errors.rs (impl Display for AssertionFailedError)` | Tests: `src/common/errors.rs (key_error_assertion_failed_maps_to_assertion_failed)`
 - [x] `func (e *ErrEntryTooLarge) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (e *ErrGCTooEarly) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (e *ErrKeyTooLarge) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
@@ -199,13 +199,13 @@ Conventions:
 - [x] `func (e *ErrLockOnlyIfExistsNoReturnValue) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (e *ErrPDServerTimeout) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (e *ErrTokenLimit) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `func (e *ErrTxnAbortedByGC) Error() string` | Rust: `new-client-rust/src/common/errors.rs (Error::TxnAborted Display)` | Tests: `new-client-rust/src/common/errors.rs (key_error_abort_maps_to_txn_aborted)`
+- [x] `func (e *ErrTxnAbortedByGC) Error() string` | Rust: `src/common/errors.rs (Error::TxnAborted Display)` | Tests: `src/common/errors.rs (key_error_abort_maps_to_txn_aborted)`
 - [x] `func (e *ErrTxnTooLarge) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `func (e *ErrWriteConflictInLatch) Error() string` | Rust: `new-client-rust/src/common/errors.rs (Error::WriteConflictInLatch Display)` | Tests: `new-client-rust/src/transaction/latch.rs (tests)`
+- [x] `func (e *ErrWriteConflictInLatch) Error() string` | Rust: `src/common/errors.rs (Error::WriteConflictInLatch Display)` | Tests: `src/transaction/latch.rs (tests)`
 - [x] `func (e ErrQueryInterruptedWithSignal) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `func (k *ErrKeyExist) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for KeyExistsError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
-- [x] `func (k *ErrRetryable) Error() string` | Rust: `new-client-rust/src/common/errors.rs (Error::Retryable Display)` | Tests: `new-client-rust/src/common/errors.rs (key_error_retryable_maps_to_retryable)`
-- [x] `func (k *ErrWriteConflict) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for WriteConflictError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
+- [x] `func (k *ErrKeyExist) Error() string` | Rust: `src/common/errors.rs (impl Display for KeyExistsError)` | Tests: `src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
+- [x] `func (k *ErrRetryable) Error() string` | Rust: `src/common/errors.rs (Error::Retryable Display)` | Tests: `src/common/errors.rs (key_error_retryable_maps_to_retryable)`
+- [x] `func (k *ErrWriteConflict) Error() string` | Rust: `src/common/errors.rs (impl Display for WriteConflictError)` | Tests: `src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
 
 ## kv (package kv)
 
@@ -214,15 +214,15 @@ Conventions:
 - [x] `type BatchGetOption interface` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
 - [x] `type BatchGetOptions struct` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
 - [x] `type BatchGetter interface` | Rust: N/A (out-of-scope: no Go-style getter interfaces) | Tests: N/A
-- [x] `type FlagsOp uint32` | Rust: `tikv_client::transaction::FlagsOp` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `type FlagsOp uint32` | Rust: `tikv_client::transaction::FlagsOp` (src/transaction/key_flags.rs) | Tests: N/A
 - [x] `type GetOption interface` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
 - [x] `type GetOptions struct` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
 - [x] `type GetOrBatchGetOption interface` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
 - [x] `type Getter interface` | Rust: N/A (out-of-scope: no Go-style getter interfaces) | Tests: N/A
-- [x] `type KeyFlags uint16` | Rust: `tikv_client::transaction::KeyFlags` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
-- [x] `type KeyRange struct` | Rust: `tikv_client::BoundRange` (new-client-rust/src/kv/bound_range.rs) | Tests: `new-client-rust/src/kv/bound_range.rs (doctests)`
+- [x] `type KeyFlags uint16` | Rust: `tikv_client::transaction::KeyFlags` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `type KeyRange struct` | Rust: `tikv_client::BoundRange` (src/kv/bound_range.rs) | Tests: `src/kv/bound_range.rs (doctests)`
 - [x] `type LockCtx struct` | Rust: N/A (out-of-scope: use `tikv_client::transaction::LockOptions`) | Tests: N/A
-- [x] `type ReplicaReadType byte` | Rust: `new-client-rust/src/replica_read.rs (ReplicaReadType)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_replica_read_peer_selection_and_context_fields)`
+- [x] `type ReplicaReadType byte` | Rust: `src/replica_read.rs (ReplicaReadType)` | Tests: `src/transaction/transaction.rs (test_replica_read_peer_selection_and_context_fields)`
 - [x] `type ReturnedValue struct` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `type ValueEntry struct` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `type Variables struct` | Rust: N/A (out-of-scope) | Tests: N/A
@@ -249,19 +249,19 @@ Conventions:
 - [x] `DelNeedCheckExists` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `DelNeedConstraintCheckInPrewrite` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `DelNeedLocked` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `DelPresumeKeyNotExists` | Rust: `FlagsOp::DelPresumeKeyNotExists` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `DelPresumeKeyNotExists` | Rust: `FlagsOp::DelPresumeKeyNotExists` (src/transaction/key_flags.rs) | Tests: N/A
 - [x] `FlagBytes` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `LockAlwaysWait` | Rust: N/A (capability: `transaction::LockOptions::wait_timeout_ms`) | Tests: N/A
 - [x] `LockNoWait` | Rust: N/A (capability: `transaction::LockOptions::wait_timeout_ms`) | Tests: N/A
-- [x] `ReplicaReadFollower` | Rust: `ReplicaReadType::Follower` (new-client-rust/src/replica_read.rs) | Tests: N/A
-- [x] `ReplicaReadLeader` | Rust: `ReplicaReadType::Leader` (new-client-rust/src/replica_read.rs) | Tests: N/A
-- [x] `ReplicaReadLearner` | Rust: `ReplicaReadType::Learner` (new-client-rust/src/replica_read.rs) | Tests: N/A
-- [x] `ReplicaReadMixed` | Rust: `ReplicaReadType::Mixed` (new-client-rust/src/replica_read.rs) | Tests: N/A
-- [x] `ReplicaReadPreferLeader` | Rust: `ReplicaReadType::PreferLeader` (new-client-rust/src/replica_read.rs) | Tests: N/A
-- [x] `SetAssertExist` | Rust: `FlagsOp::SetAssertExist` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
-- [x] `SetAssertNone` | Rust: `FlagsOp::SetAssertNone` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
-- [x] `SetAssertNotExist` | Rust: `FlagsOp::SetAssertNotExist` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
-- [x] `SetAssertUnknown` | Rust: `FlagsOp::SetAssertUnknown` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `ReplicaReadFollower` | Rust: `ReplicaReadType::Follower` (src/replica_read.rs) | Tests: N/A
+- [x] `ReplicaReadLeader` | Rust: `ReplicaReadType::Leader` (src/replica_read.rs) | Tests: N/A
+- [x] `ReplicaReadLearner` | Rust: `ReplicaReadType::Learner` (src/replica_read.rs) | Tests: N/A
+- [x] `ReplicaReadMixed` | Rust: `ReplicaReadType::Mixed` (src/replica_read.rs) | Tests: N/A
+- [x] `ReplicaReadPreferLeader` | Rust: `ReplicaReadType::PreferLeader` (src/replica_read.rs) | Tests: N/A
+- [x] `SetAssertExist` | Rust: `FlagsOp::SetAssertExist` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetAssertNone` | Rust: `FlagsOp::SetAssertNone` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetAssertNotExist` | Rust: `FlagsOp::SetAssertNotExist` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetAssertUnknown` | Rust: `FlagsOp::SetAssertUnknown` (src/transaction/key_flags.rs) | Tests: N/A
 - [x] `SetIgnoredIn2PC` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `SetKeyLocked` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `SetKeyLockedValueExists` | Rust: N/A (out-of-scope) | Tests: N/A
@@ -269,9 +269,9 @@ Conventions:
 - [x] `SetNeedConstraintCheckInPrewrite` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `SetNeedLocked` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `SetNewlyInserted` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `SetPresumeKeyNotExists` | Rust: `FlagsOp::SetPresumeKeyNotExists` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetPresumeKeyNotExists` | Rust: `FlagsOp::SetPresumeKeyNotExists` (src/transaction/key_flags.rs) | Tests: N/A
 - [x] `SetPreviousPresumeKNE` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `SetPrewriteOnly` | Rust: `FlagsOp::SetPrewriteOnly` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetPrewriteOnly` | Rust: `FlagsOp::SetPrewriteOnly` (src/transaction/key_flags.rs) | Tests: N/A
 - [x] `SetReadable` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Vars
@@ -288,10 +288,10 @@ Conventions:
 - [x] `func (e ValueEntry) IsValueEmpty() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (e ValueEntry) Size() int` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (f KeyFlags) AndPersistent() KeyFlags` | Rust: N/A (out-of-scope: persistent flags are internal in Rust) | Tests: N/A
-- [x] `func (f KeyFlags) HasAssertExist() bool` | Rust: `KeyFlags::has_assert_exist` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
-- [x] `func (f KeyFlags) HasAssertNotExist() bool` | Rust: `KeyFlags::has_assert_not_exist` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
-- [x] `func (f KeyFlags) HasAssertUnknown() bool` | Rust: `KeyFlags::has_assert_unknown` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
-- [x] `func (f KeyFlags) HasAssertionFlags() bool` | Rust: `KeyFlags::has_assertion_flags` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasAssertExist() bool` | Rust: `KeyFlags::has_assert_exist` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasAssertNotExist() bool` | Rust: `KeyFlags::has_assert_not_exist` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasAssertUnknown() bool` | Rust: `KeyFlags::has_assert_unknown` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasAssertionFlags() bool` | Rust: `KeyFlags::has_assertion_flags` (src/transaction/key_flags.rs) | Tests: N/A
 - [x] `func (f KeyFlags) HasIgnoredIn2PC() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (f KeyFlags) HasLocked() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (f KeyFlags) HasLockedValueExists() bool` | Rust: N/A (out-of-scope) | Tests: N/A
@@ -299,13 +299,13 @@ Conventions:
 - [x] `func (f KeyFlags) HasNeedConstraintCheckInPrewrite() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (f KeyFlags) HasNeedLocked() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (f KeyFlags) HasNewlyInserted() bool` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `func (f KeyFlags) HasPresumeKeyNotExists() bool` | Rust: `KeyFlags::has_presume_key_not_exists` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
-- [x] `func (f KeyFlags) HasPrewriteOnly() bool` | Rust: `KeyFlags::has_prewrite_only` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasPresumeKeyNotExists() bool` | Rust: `KeyFlags::has_presume_key_not_exists` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasPrewriteOnly() bool` | Rust: `KeyFlags::has_prewrite_only` (src/transaction/key_flags.rs) | Tests: N/A
 - [x] `func (f KeyFlags) HasReadable() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (o *BatchGetOptions) Apply(opts []BatchGetOption)` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (o *GetOptions) Apply(opts []GetOption)` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `func (r ReplicaReadType) IsFollowerRead() bool` | Rust: `ReplicaReadType::is_follower_read` (new-client-rust/src/replica_read.rs) | Tests: N/A
-- [x] `func (r ReplicaReadType) String() string` | Rust: `impl Display for ReplicaReadType` (new-client-rust/src/replica_read.rs) | Tests: N/A
+- [x] `func (r ReplicaReadType) IsFollowerRead() bool` | Rust: `ReplicaReadType::is_follower_read` (src/replica_read.rs) | Tests: N/A
+- [x] `func (r ReplicaReadType) String() string` | Rust: `impl Display for ReplicaReadType` (src/replica_read.rs) | Tests: N/A
 
 ## metrics (package metrics)
 
@@ -321,7 +321,7 @@ Conventions:
 - [x] `func InitMetrics(namespace, subsystem string)` | Rust: N/A (out-of-scope: fixed metric names; use `metrics::register`) | Tests: N/A
 - [x] `func InitMetricsWithConstLabels(namespace, subsystem string, constLabels prometheus.Labels)` | Rust: N/A (out-of-scope: fixed metric names; use `metrics::register`) | Tests: N/A
 - [x] `func ObserveReadSLI(readKeys uint64, readTime float64, readSize float64)` | Rust: N/A (out-of-scope: SLI set not ported yet; can be re-added behind `prometheus`) | Tests: N/A
-- [x] `func RegisterMetrics()` | Rust: `tikv_client::metrics::register` (new-client-rust/src/metrics.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
+- [x] `func RegisterMetrics()` | Rust: `tikv_client::metrics::register` (src/metrics.rs) | Tests: `src/metrics.rs (gather_contains_core_metrics)`
 
 ### Consts
 - [x] `LabelBatchRecvLoop` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
@@ -453,7 +453,7 @@ Conventions:
 - [x] `TiKVAsyncBatchGetCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVAsyncCommitTxnCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVAsyncSendReqCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
-- [x] `TiKVBackoffHistogram` | Rust: `tikv_client::stats::observe_backoff_sleep` → `tikv_backoff_sleep_duration_seconds` (new-client-rust/src/stats.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
+- [x] `TiKVBackoffHistogram` | Rust: `tikv_client::stats::observe_backoff_sleep` → `tikv_backoff_sleep_duration_seconds` (src/stats.rs) | Tests: `src/metrics.rs (gather_contains_core_metrics)`
 - [x] `TiKVBatchBestSize` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVBatchClientRecycle` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVBatchClientUnavailable` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
@@ -491,7 +491,7 @@ Conventions:
 - [x] `TiKVPipelinedFlushThrottleSecondsHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVPreferLeaderFlowsGauge` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVPrewriteAssertionUsageCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
-- [x] `TiKVRPCErrorCounter` | Rust: N/A (capability: aggregate failures via `tikv_failed_request_total`) (new-client-rust/src/stats.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
+- [x] `TiKVRPCErrorCounter` | Rust: N/A (capability: aggregate failures via `tikv_failed_request_total`) (src/stats.rs) | Tests: `src/metrics.rs (gather_contains_core_metrics)`
 - [x] `TiKVRPCNetLatencyHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVRangeTaskPushDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVRangeTaskStats` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
@@ -500,13 +500,13 @@ Conventions:
 - [x] `TiKVReadRequestBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVReadThroughput` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVRegionCacheCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
-- [x] `TiKVRegionErrorCounter` | Rust: N/A (capability: aggregate failures via `tikv_failed_request_total`) (new-client-rust/src/stats.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
+- [x] `TiKVRegionErrorCounter` | Rust: N/A (capability: aggregate failures via `tikv_failed_request_total`) (src/stats.rs) | Tests: `src/metrics.rs (gather_contains_core_metrics)`
 - [x] `TiKVReplicaSelectorFailureCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVRequestRetryTimesHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVSafeTSUpdateCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVSecondaryLockCleanupFailureCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVSendReqBySourceSummary` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
-- [x] `TiKVSendReqHistogram` | Rust: `tikv_client::stats::tikv_stats` → `tikv_request_total` + `tikv_request_duration_seconds` (new-client-rust/src/stats.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
+- [x] `TiKVSendReqHistogram` | Rust: `tikv_client::stats::tikv_stats` → `tikv_request_total` + `tikv_request_duration_seconds` (src/stats.rs) | Tests: `src/metrics.rs (gather_contains_core_metrics)`
 - [x] `TiKVSmallReadDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVStaleReadBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 - [x] `TiKVStaleReadCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
@@ -584,16 +584,16 @@ Conventions:
 - [x] `type ReadTSValidator interface` | Rust: N/A (out-of-scope: read-ts validation not exposed) | Tests: N/A
 
 ### Functions
-- [x] `func ComposeTS(physical, logical int64) uint64` | Rust: `tikv_client::compose_ts` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (ts_parts_round_trip)`
-- [x] `func ExtractLogical(ts uint64) int64` | Rust: `tikv_client::extract_logical` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (ts_parts_round_trip)`
-- [x] `func ExtractPhysical(ts uint64) int64` | Rust: `tikv_client::extract_physical` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (ts_parts_round_trip)`
-- [x] `func GetPhysical(t time.Time) int64` | Rust: `tikv_client::get_physical(SystemTime)` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (system_time_round_trip_is_ms_precision)`
-- [x] `func GetTimeFromTS(ts uint64) time.Time` | Rust: `tikv_client::get_time_from_ts` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (system_time_round_trip_is_ms_precision)`
-- [x] `func GoTimeToLowerLimitStartTS(now time.Time, maxTxnTimeUse int64) uint64` | Rust: `tikv_client::lower_limit_start_ts(now, Duration)` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (lower_limit_matches_subtracted_time)`
-- [x] `func GoTimeToTS(t time.Time) uint64` | Rust: `tikv_client::time_to_ts` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (system_time_round_trip_is_ms_precision)`
+- [x] `func ComposeTS(physical, logical int64) uint64` | Rust: `tikv_client::compose_ts` (src/timestamp.rs) | Tests: `src/timestamp.rs (ts_parts_round_trip)`
+- [x] `func ExtractLogical(ts uint64) int64` | Rust: `tikv_client::extract_logical` (src/timestamp.rs) | Tests: `src/timestamp.rs (ts_parts_round_trip)`
+- [x] `func ExtractPhysical(ts uint64) int64` | Rust: `tikv_client::extract_physical` (src/timestamp.rs) | Tests: `src/timestamp.rs (ts_parts_round_trip)`
+- [x] `func GetPhysical(t time.Time) int64` | Rust: `tikv_client::get_physical(SystemTime)` (src/timestamp.rs) | Tests: `src/timestamp.rs (system_time_round_trip_is_ms_precision)`
+- [x] `func GetTimeFromTS(ts uint64) time.Time` | Rust: `tikv_client::get_time_from_ts` (src/timestamp.rs) | Tests: `src/timestamp.rs (system_time_round_trip_is_ms_precision)`
+- [x] `func GoTimeToLowerLimitStartTS(now time.Time, maxTxnTimeUse int64) uint64` | Rust: `tikv_client::lower_limit_start_ts(now, Duration)` (src/timestamp.rs) | Tests: `src/timestamp.rs (lower_limit_matches_subtracted_time)`
+- [x] `func GoTimeToTS(t time.Time) uint64` | Rust: `tikv_client::time_to_ts` (src/timestamp.rs) | Tests: `src/timestamp.rs (system_time_round_trip_is_ms_precision)`
 
 ### Consts
-- [x] `GlobalTxnScope` | Rust: `tikv_client::GLOBAL_TXN_SCOPE` (new-client-rust/src/timestamp.rs) | Tests: N/A
+- [x] `GlobalTxnScope` | Rust: `tikv_client::GLOBAL_TXN_SCOPE` (src/timestamp.rs) | Tests: N/A
 
 ### Vars
 - (none)
@@ -641,51 +641,51 @@ Conventions:
 ## rawkv (package rawkv)
 
 ### Types
-- [x] `type Client struct` | Rust: `tikv_client::RawClient` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (tests)`
+- [x] `type Client struct` | Rust: `tikv_client::RawClient` (src/raw/client.rs) | Tests: `src/raw/client.rs (tests)`
 - [x] `type ClientOpt func(*option)` | Rust: N/A (out-of-scope: Rust uses explicit `Config` on `RawClient::new_with_config`) | Tests: N/A
 - [x] `type ClientProbe struct` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
 - [x] `type ConfigProbe struct` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
-- [x] `type RawChecksum struct` | Rust: `tikv_client::RawChecksum` (new-client-rust/src/raw/mod.rs) | Tests: `new-client-rust/src/raw/requests.rs (test_raw_checksum_merge)`
+- [x] `type RawChecksum struct` | Rust: `tikv_client::RawChecksum` (src/raw/mod.rs) | Tests: `src/raw/requests.rs (test_raw_checksum_merge)`
 - [x] `type RawOption interface` | Rust: N/A (out-of-scope: Rust uses typed methods like `with_cf`/`scan_keys`) | Tests: N/A
 
 ### Functions
-- [x] `func NewClient(ctx context.Context, pdAddrs []string, security config.Security, opts ...opt.ClientOption) (*Client, error)` | Rust: `RawClient::new_with_config` + `Config::with_security` (new-client-rust/src/{raw/client.rs,config.rs}) | Tests: `new-client-rust/src/common/security.rs (test_security)`
-- [x] `func NewClientWithOpts(ctx context.Context, pdAddrs []string, opts ...ClientOpt) (*Client, error)` | Rust: `RawClient::new` / `RawClient::new_with_config` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (tests)`
-- [x] `func ScanKeyOnly() RawOption` | Rust: `RawClient::{scan_keys,scan_keys_reverse}` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [x] `func SetColumnFamily(cf string) RawOption` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (new-client-rust/src/raw/{client.rs,mod.rs}) | Tests: N/A
+- [x] `func NewClient(ctx context.Context, pdAddrs []string, security config.Security, opts ...opt.ClientOption) (*Client, error)` | Rust: `RawClient::new_with_config` + `Config::with_security` (src/{raw/client.rs,config.rs}) | Tests: `src/common/security.rs (test_security)`
+- [x] `func NewClientWithOpts(ctx context.Context, pdAddrs []string, opts ...ClientOpt) (*Client, error)` | Rust: `RawClient::new` / `RawClient::new_with_config` (src/raw/client.rs) | Tests: `src/raw/client.rs (tests)`
+- [x] `func ScanKeyOnly() RawOption` | Rust: `RawClient::{scan_keys,scan_keys_reverse}` (src/raw/client.rs) | Tests: N/A
+- [x] `func SetColumnFamily(cf string) RawOption` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (src/raw/{client.rs,mod.rs}) | Tests: N/A
 - [x] `func WithAPIVersion(apiVersion kvrpcpb.APIVersion) ClientOpt` | Rust: N/A (out-of-scope: target TiKV uses API v2; use `Config::with_keyspace`) | Tests: N/A
 - [x] `func WithGRPCDialOptions(opts ...grpc.DialOption) ClientOpt` | Rust: N/A (out-of-scope: no gRPC dial option passthrough; use `Config`/defaults) | Tests: N/A
-- [x] `func WithKeyspace(name string) ClientOpt` | Rust: `Config::with_keyspace` / `Config::with_default_keyspace` (new-client-rust/src/config.rs) | Tests: N/A
+- [x] `func WithKeyspace(name string) ClientOpt` | Rust: `Config::with_keyspace` / `Config::with_default_keyspace` (src/config.rs) | Tests: N/A
 - [x] `func WithPDOptions(opts ...opt.ClientOption) ClientOpt` | Rust: N/A (out-of-scope: no PD option passthrough; use `Config`/defaults) | Tests: N/A
-- [x] `func WithSecurity(security config.Security) ClientOpt` | Rust: `Config::with_security` (new-client-rust/src/config.rs) | Tests: `new-client-rust/src/common/security.rs (test_security)`
+- [x] `func WithSecurity(security config.Security) ClientOpt` | Rust: `Config::with_security` (src/config.rs) | Tests: `src/common/security.rs (test_security)`
 
 ### Consts
 - (none)
 
 ### Vars
-- [x] `ErrMaxScanLimitExceeded` | Rust: `Error::MaxScanLimitExceeded` (new-client-rust/src/common/errors.rs) | Tests: N/A
-- [x] `MaxRawKVScanLimit` | Rust: `MAX_RAW_KV_SCAN_LIMIT` (new-client-rust/src/raw/client.rs) | Tests: N/A
+- [x] `ErrMaxScanLimitExceeded` | Rust: `Error::MaxScanLimitExceeded` (src/common/errors.rs) | Tests: N/A
+- [x] `MaxRawKVScanLimit` | Rust: `MAX_RAW_KV_SCAN_LIMIT` (src/raw/client.rs) | Tests: N/A
 
 ### Methods
-- [x] `func (c *Client) BatchDelete(ctx context.Context, keys [][]byte, options ...RawOption) error` | Rust: `RawClient::batch_delete` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOption) ([][]byte, error)` | Rust: `RawClient::batch_get` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) BatchPut(ctx context.Context, keys, values [][]byte, options ...RawOption) error` | Rust: `RawClient::batch_put` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (test_batch_put_with_ttl)`
-- [x] `func (c *Client) BatchPutWithTTL(ctx context.Context, keys, values [][]byte, ttls []uint64, options ...RawOption) error` | Rust: `RawClient::batch_put_with_ttl` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (test_batch_put_with_ttl)`
-- [x] `func (c *Client) Checksum(ctx context.Context, startKey, endKey []byte, options ...RawOption, ) (check RawChecksum, err error)` | Rust: `RawClient::checksum` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/requests.rs (test_raw_checksum_merge)`
+- [x] `func (c *Client) BatchDelete(ctx context.Context, keys [][]byte, options ...RawOption) error` | Rust: `RawClient::batch_delete` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOption) ([][]byte, error)` | Rust: `RawClient::batch_get` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) BatchPut(ctx context.Context, keys, values [][]byte, options ...RawOption) error` | Rust: `RawClient::batch_put` (src/raw/client.rs) | Tests: `src/raw/client.rs (test_batch_put_with_ttl)`
+- [x] `func (c *Client) BatchPutWithTTL(ctx context.Context, keys, values [][]byte, ttls []uint64, options ...RawOption) error` | Rust: `RawClient::batch_put_with_ttl` (src/raw/client.rs) | Tests: `src/raw/client.rs (test_batch_put_with_ttl)`
+- [x] `func (c *Client) Checksum(ctx context.Context, startKey, endKey []byte, options ...RawOption, ) (check RawChecksum, err error)` | Rust: `RawClient::checksum` (src/raw/client.rs) | Tests: `src/raw/requests.rs (test_raw_checksum_merge)`
 - [x] `func (c *Client) Close() error` | Rust: N/A (out-of-scope: drop closes client) | Tests: N/A
-- [x] `func (c *Client) ClusterID() uint64` | Rust: `RawClient::cluster_id` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (tests)`
-- [x] `func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValue []byte, options ...RawOption) ([]byte, bool, error)` | Rust: `RawClient::compare_and_swap` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) error` | Rust: `RawClient::delete` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte, options ...RawOption) error` | Rust: `RawClient::delete_range` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]byte, error)` | Rust: `RawClient::get` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (test_request_source_and_resource_group_tag)`
-- [x] `func (c *Client) GetKeyTTL(ctx context.Context, key []byte, options ...RawOption) (*uint64, error)` | Rust: `RawClient::get_key_ttl_secs` (new-client-rust/src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) ClusterID() uint64` | Rust: `RawClient::cluster_id` (src/raw/client.rs) | Tests: `src/raw/client.rs (tests)`
+- [x] `func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValue []byte, options ...RawOption) ([]byte, bool, error)` | Rust: `RawClient::compare_and_swap` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) error` | Rust: `RawClient::delete` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte, options ...RawOption) error` | Rust: `RawClient::delete_range` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]byte, error)` | Rust: `RawClient::get` (src/raw/client.rs) | Tests: `src/raw/client.rs (test_request_source_and_resource_group_tag)`
+- [x] `func (c *Client) GetKeyTTL(ctx context.Context, key []byte, options ...RawOption) (*uint64, error)` | Rust: `RawClient::get_key_ttl_secs` (src/raw/client.rs) | Tests: N/A
 - [x] `func (c *Client) GetPDClient() pd.Client` | Rust: N/A (out-of-scope: PD client is internal; use `request::PlanBuilder`/clients) | Tests: N/A
-- [x] `func (c *Client) Put(ctx context.Context, key, value []byte, options ...RawOption) error` | Rust: `RawClient::put` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, options ...RawOption) error` | Rust: `RawClient::put_with_ttl` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption) (keys [][]byte, values [][]byte, err error)` | Rust: `RawClient::scan_reverse` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/requests.rs (test_raw_scan)`
-- [x] `func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption, ) (keys [][]byte, values [][]byte, err error)` | Rust: `RawClient::scan` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/requests.rs (test_raw_scan)`
-- [x] `func (c *Client) SetAtomicForCAS(b bool) *Client` | Rust: `RawClient::with_atomic_for_cas` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) SetColumnFamily(columnFamily string) *Client` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (new-client-rust/src/raw/{client.rs,mod.rs}) | Tests: N/A
+- [x] `func (c *Client) Put(ctx context.Context, key, value []byte, options ...RawOption) error` | Rust: `RawClient::put` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, options ...RawOption) error` | Rust: `RawClient::put_with_ttl` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption) (keys [][]byte, values [][]byte, err error)` | Rust: `RawClient::scan_reverse` (src/raw/client.rs) | Tests: `src/raw/requests.rs (test_raw_scan)`
+- [x] `func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption, ) (keys [][]byte, values [][]byte, err error)` | Rust: `RawClient::scan` (src/raw/client.rs) | Tests: `src/raw/requests.rs (test_raw_scan)`
+- [x] `func (c *Client) SetAtomicForCAS(b bool) *Client` | Rust: `RawClient::with_atomic_for_cas` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) SetColumnFamily(columnFamily string) *Client` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (src/raw/{client.rs,mod.rs}) | Tests: N/A
 - [x] `func (c ClientProbe) GetRegionCache() *locate.RegionCache` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
 - [x] `func (c ClientProbe) SetPDClient(client pd.Client)` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
 - [x] `func (c ClientProbe) SetRPCClient(client client.Client)` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
@@ -786,7 +786,7 @@ Conventions:
 - [x] `func SetLogContextKey(key interface{})` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func SetRegionCacheTTLSec(t int64)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func SetRegionCacheTTLWithJitter(base int64, jitter int64)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
-- [x] `func SetResourceControlInterceptor(interceptor resourceControlClient.ResourceGroupKVInterceptor)` | Rust: `interceptor::RpcInterceptor` + `RawClient/TransactionClient/PlanBuilder::{with_rpc_interceptor,with_added_rpc_interceptor}` | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func SetResourceControlInterceptor(interceptor resourceControlClient.ResourceGroupKVInterceptor)` | Rust: `interceptor::RpcInterceptor` + `RawClient/TransactionClient/PlanBuilder::{with_rpc_interceptor,with_added_rpc_interceptor}` | Tests: `src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 - [x] `func SetStoreLivenessTimeout(t time.Duration)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func StoreShuttingDown(v uint32)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func TxnStartKey() interface{}` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
@@ -932,23 +932,23 @@ Conventions:
 - [x] `type EndpointType uint8` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 - [x] `type Lease struct` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 - [x] `type MPPStreamResponse struct` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
-- [x] `type Request struct` | Rust: N/A (capability: kvproto request types + `tikv_client::request::PlanBuilder`) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
-- [x] `type ResourceGroupTagger func(req *Request)` | Rust: `tikv_client::interceptor::ResourceGroupTagger` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/raw/client.rs (test_request_source_and_resource_group_tag)`
-- [x] `type Response struct` | Rust: N/A (capability: typed kvproto response types + `request::{Merge,Process}`) | Tests: `new-client-rust/src/request/plan.rs (tests)`
+- [x] `type Request struct` | Rust: N/A (capability: kvproto request types + `tikv_client::request::PlanBuilder`) | Tests: `src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `type ResourceGroupTagger func(req *Request)` | Rust: `tikv_client::interceptor::ResourceGroupTagger` (src/interceptor.rs) | Tests: `src/raw/client.rs (test_request_source_and_resource_group_tag)`
+- [x] `type Response struct` | Rust: N/A (capability: typed kvproto response types + `request::{Merge,Process}`) | Tests: `src/request/plan.rs (tests)`
 - [x] `type ResponseExt struct` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 
 ### Functions
-- [x] `func AttachContext(req *Request, rpcCtx kvrpcpb.Context) bool` | Rust: `request::PlanBuilder::{with_request_source,with_resource_group_tag,with_resource_group_name,...}` (new-client-rust/src/request/plan_builder.rs) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func AttachContext(req *Request, rpcCtx kvrpcpb.Context) bool` | Rust: `request::PlanBuilder::{with_request_source,with_resource_group_tag,with_resource_group_name,...}` (src/request/plan_builder.rs) | Tests: `src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 - [x] `func CallDebugRPC(ctx context.Context, client debugpb.DebugClient, req *Request) (*Response, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 - [x] `func CallRPC(ctx context.Context, client tikvpb.TikvClient, req *Request) (*Response, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 - [x] `func CheckStreamTimeoutLoop(ch <-chan *Lease, done <-chan struct{})` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 - [x] `func FromBatchCommandsResponse(res *tikvpb.BatchCommandsResponse_Response) (*Response, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 - [x] `func GenRegionErrorResp(req *Request, e *errorpb.Error) (*Response, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 - [x] `func GetStoreTypeByMeta(store *metapb.Store) EndpointType` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
-- [x] `func NewReplicaReadRequest(typ CmdType, pointer interface{}, replicaReadType kv.ReplicaReadType, replicaReadSeed *uint32, ctxs ...kvrpcpb.Context) *Request` | Rust: `PlanBuilder::{replica_read,stale_read,replica_read_seed}` + `ReplicaReadType` (new-client-rust/src/request/plan_builder.rs) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
-- [x] `func NewRequest(typ CmdType, pointer interface{}, ctxs ...kvrpcpb.Context) *Request` | Rust: kvproto request constructors (`raw_lowering`/`transaction_lowering`) + `PlanBuilder::new` | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
-- [x] `func SetContext(req *Request, region *metapb.Region, peer *metapb.Peer) error` | Rust: N/A (capability: PlanBuilder resolves regions and sets context automatically) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
-- [x] `func SetContextNoAttach(req *Request, region *metapb.Region, peer *metapb.Peer) error` | Rust: N/A (capability: PlanBuilder resolves regions and sets context automatically) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func NewReplicaReadRequest(typ CmdType, pointer interface{}, replicaReadType kv.ReplicaReadType, replicaReadSeed *uint32, ctxs ...kvrpcpb.Context) *Request` | Rust: `PlanBuilder::{replica_read,stale_read,replica_read_seed}` + `ReplicaReadType` (src/request/plan_builder.rs) | Tests: `src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func NewRequest(typ CmdType, pointer interface{}, ctxs ...kvrpcpb.Context) *Request` | Rust: kvproto request constructors (`raw_lowering`/`transaction_lowering`) + `PlanBuilder::new` | Tests: `src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func SetContext(req *Request, region *metapb.Region, peer *metapb.Peer) error` | Rust: N/A (capability: PlanBuilder resolves regions and sets context automatically) | Tests: `src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func SetContextNoAttach(req *Request, region *metapb.Region, peer *metapb.Peer) error` | Rust: N/A (capability: PlanBuilder resolves regions and sets context automatically) | Tests: `src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 
 ### Consts
 - [x] `CmdBatchCop` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
@@ -1102,17 +1102,17 @@ Conventions:
 ## tikvrpc/interceptor (package interceptor)
 
 ### Types
-- [x] `type MockInterceptorManager struct` | Rust: `tikv_client::interceptor::MockInterceptorManager` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
-- [x] `type RPCInterceptor interface` | Rust: `tikv_client::interceptor::RpcInterceptor` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/raw/client.rs (test_request_source_and_resource_group_tag)`
-- [x] `type RPCInterceptorChain struct` | Rust: `tikv_client::interceptor::RpcInterceptorChain` (new-client-rust/src/interceptor.rs) | Tests: N/A
-- [x] `type RPCInterceptorFunc func(target string, req *tikvrpc.Request) (*tikvrpc.Response, error)` | Rust: `tikv_client::interceptor::RpcInterceptorFunc` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `type MockInterceptorManager struct` | Rust: `tikv_client::interceptor::MockInterceptorManager` (src/interceptor.rs) | Tests: `src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `type RPCInterceptor interface` | Rust: `tikv_client::interceptor::RpcInterceptor` (src/interceptor.rs) | Tests: `src/raw/client.rs (test_request_source_and_resource_group_tag)`
+- [x] `type RPCInterceptorChain struct` | Rust: `tikv_client::interceptor::RpcInterceptorChain` (src/interceptor.rs) | Tests: N/A
+- [x] `type RPCInterceptorFunc func(target string, req *tikvrpc.Request) (*tikvrpc.Response, error)` | Rust: `tikv_client::interceptor::RpcInterceptorFunc` (src/interceptor.rs) | Tests: `src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
 
 ### Functions
-- [x] `func ChainRPCInterceptors(first RPCInterceptor, rest ...RPCInterceptor) RPCInterceptor` | Rust: `tikv_client::interceptor::chain_rpc_interceptors` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (chain_rpc_interceptors_dedup_by_name)`
+- [x] `func ChainRPCInterceptors(first RPCInterceptor, rest ...RPCInterceptor) RPCInterceptor` | Rust: `tikv_client::interceptor::chain_rpc_interceptors` (src/interceptor.rs) | Tests: `src/interceptor.rs (chain_rpc_interceptors_dedup_by_name)`
 - [x] `func GetRPCInterceptorFromCtx(ctx context.Context) RPCInterceptor` | Rust: N/A (out-of-scope: no Go-style context; configure on PlanBuilder/client) | Tests: N/A
-- [x] `func NewMockInterceptorManager() *MockInterceptorManager` | Rust: `MockInterceptorManager::new` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
-- [x] `func NewRPCInterceptor(name string, fn func(next RPCInterceptorFunc) RPCInterceptorFunc) RPCInterceptor` | Rust: `tikv_client::interceptor::rpc_interceptor` (new-client-rust/src/interceptor.rs) | Tests: N/A
-- [x] `func NewRPCInterceptorChain() *RPCInterceptorChain` | Rust: `RpcInterceptorChain::new` (new-client-rust/src/interceptor.rs) | Tests: N/A
+- [x] `func NewMockInterceptorManager() *MockInterceptorManager` | Rust: `MockInterceptorManager::new` (src/interceptor.rs) | Tests: `src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func NewRPCInterceptor(name string, fn func(next RPCInterceptorFunc) RPCInterceptorFunc) RPCInterceptor` | Rust: `tikv_client::interceptor::rpc_interceptor` (src/interceptor.rs) | Tests: N/A
+- [x] `func NewRPCInterceptorChain() *RPCInterceptorChain` | Rust: `RpcInterceptorChain::new` (src/interceptor.rs) | Tests: N/A
 - [x] `func WithRPCInterceptor(ctx context.Context, interceptor RPCInterceptor) context.Context` | Rust: N/A (out-of-scope: configure on client via `with_rpc_interceptor`) | Tests: N/A
 
 ### Consts
@@ -1122,52 +1122,52 @@ Conventions:
 - (none)
 
 ### Methods
-- [x] `func (c *RPCInterceptorChain) Len() int` | Rust: `RpcInterceptorChain::len` (new-client-rust/src/interceptor.rs) | Tests: N/A
-- [x] `func (c *RPCInterceptorChain) Link(it RPCInterceptor) *RPCInterceptorChain` | Rust: `RpcInterceptorChain::link` (new-client-rust/src/interceptor.rs) | Tests: N/A
-- [x] `func (c *RPCInterceptorChain) Name() string` | Rust: `RpcInterceptorChain::name` (new-client-rust/src/interceptor.rs) | Tests: N/A
-- [x] `func (c *RPCInterceptorChain) Wrap(next RPCInterceptorFunc) RPCInterceptorFunc` | Rust: `RpcInterceptorChain::wrap` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
-- [x] `func (m *MockInterceptorManager) BeginCount() int` | Rust: `MockInterceptorManager::begin_count` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
-- [x] `func (m *MockInterceptorManager) CreateMockInterceptor(name string) RPCInterceptor` | Rust: `MockInterceptorManager::create_mock_interceptor` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
-- [x] `func (m *MockInterceptorManager) EndCount() int` | Rust: `MockInterceptorManager::end_count` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
-- [x] `func (m *MockInterceptorManager) ExecLog() []string` | Rust: `MockInterceptorManager::exec_log` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
-- [x] `func (m *MockInterceptorManager) Reset()` | Rust: `MockInterceptorManager::reset` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (c *RPCInterceptorChain) Len() int` | Rust: `RpcInterceptorChain::len` (src/interceptor.rs) | Tests: N/A
+- [x] `func (c *RPCInterceptorChain) Link(it RPCInterceptor) *RPCInterceptorChain` | Rust: `RpcInterceptorChain::link` (src/interceptor.rs) | Tests: N/A
+- [x] `func (c *RPCInterceptorChain) Name() string` | Rust: `RpcInterceptorChain::name` (src/interceptor.rs) | Tests: N/A
+- [x] `func (c *RPCInterceptorChain) Wrap(next RPCInterceptorFunc) RPCInterceptorFunc` | Rust: `RpcInterceptorChain::wrap` (src/interceptor.rs) | Tests: `src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (m *MockInterceptorManager) BeginCount() int` | Rust: `MockInterceptorManager::begin_count` (src/interceptor.rs) | Tests: `src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (m *MockInterceptorManager) CreateMockInterceptor(name string) RPCInterceptor` | Rust: `MockInterceptorManager::create_mock_interceptor` (src/interceptor.rs) | Tests: `src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (m *MockInterceptorManager) EndCount() int` | Rust: `MockInterceptorManager::end_count` (src/interceptor.rs) | Tests: `src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (m *MockInterceptorManager) ExecLog() []string` | Rust: `MockInterceptorManager::exec_log` (src/interceptor.rs) | Tests: `src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (m *MockInterceptorManager) Reset()` | Rust: `MockInterceptorManager::reset` (src/interceptor.rs) | Tests: `src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
 
 ## trace (package trace)
 
 ### Types
-- [x] `type Category uint32` | Rust: `tikv_client::trace::Category` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
-- [x] `type IsCategoryEnabledFunc func(category Category) bool` | Rust: `tikv_client::trace::IsCategoryEnabledFn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `type Category uint32` | Rust: `tikv_client::trace::Category` (src/trace.rs) | Tests: `src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `type IsCategoryEnabledFunc func(category Category) bool` | Rust: `tikv_client::trace::IsCategoryEnabledFn` (src/trace.rs) | Tests: `src/trace.rs (trace_event_is_guarded_by_category)`
 - [x] `type TraceControlExtractorFunc func(ctx context.Context) TraceControlFlags` | Rust: N/A (out-of-scope: no Go-style context; set flags explicitly via `PlanBuilder::with_trace_control`) | Tests: N/A
-- [x] `type TraceControlFlags uint64` | Rust: `tikv_client::trace::TraceControlFlags` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
-- [x] `type TraceEventFunc func(ctx context.Context, category Category, name string, fields ...zap.Field)` | Rust: `tikv_client::trace::TraceEventFn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `type TraceControlFlags uint64` | Rust: `tikv_client::trace::TraceControlFlags` (src/trace.rs) | Tests: `src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `type TraceEventFunc func(ctx context.Context, category Category, name string, fields ...zap.Field)` | Rust: `tikv_client::trace::TraceEventFn` (src/trace.rs) | Tests: `src/trace.rs (trace_event_is_guarded_by_category)`
 
 ### Functions
-- [x] `func ContextWithTraceID(ctx context.Context, traceID []byte) context.Context` | Rust: `tikv_client::request::PlanBuilder::with_trace_id` (new-client-rust/src/request/plan_builder.rs) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func ContextWithTraceID(ctx context.Context, traceID []byte) context.Context` | Rust: `tikv_client::request::PlanBuilder::with_trace_id` (src/request/plan_builder.rs) | Tests: `src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 - [x] `func GetTraceControlFlags(ctx context.Context) TraceControlFlags` | Rust: N/A (out-of-scope: no Go-style context; pass flags explicitly via `PlanBuilder::with_trace_control`) | Tests: N/A
 - [x] `func ImmediateLoggingEnabled(ctx context.Context) bool` | Rust: N/A (capability: `TraceControlFlags::has(FLAG_IMMEDIATE_LOG)`) | Tests: N/A
-- [x] `func IsCategoryEnabled(category Category) bool` | Rust: `tikv_client::trace::is_category_enabled` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
-- [x] `func SetIsCategoryEnabledFunc(fn IsCategoryEnabledFunc)` | Rust: `tikv_client::trace::set_is_category_enabled_fn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `func IsCategoryEnabled(category Category) bool` | Rust: `tikv_client::trace::is_category_enabled` (src/trace.rs) | Tests: `src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `func SetIsCategoryEnabledFunc(fn IsCategoryEnabledFunc)` | Rust: `tikv_client::trace::set_is_category_enabled_fn` (src/trace.rs) | Tests: `src/trace.rs (trace_event_is_guarded_by_category)`
 - [x] `func SetTraceControlExtractor(fn TraceControlExtractorFunc)` | Rust: N/A (out-of-scope: no Go-style context) | Tests: N/A
-- [x] `func SetTraceEventFunc(fn TraceEventFunc)` | Rust: `tikv_client::trace::set_trace_event_fn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
-- [x] `func TraceEvent(ctx context.Context, category Category, name string, fields ...zap.Field)` | Rust: `tikv_client::trace::trace_event` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `func SetTraceEventFunc(fn TraceEventFunc)` | Rust: `tikv_client::trace::set_trace_event_fn` (src/trace.rs) | Tests: `src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `func TraceEvent(ctx context.Context, category Category, name string, fields ...zap.Field)` | Rust: `tikv_client::trace::trace_event` (src/trace.rs) | Tests: `src/trace.rs (trace_event_is_guarded_by_category)`
 - [x] `func TraceIDFromContext(ctx context.Context) []byte` | Rust: N/A (out-of-scope: no Go-style context; use `PlanBuilder::with_trace_id`) | Tests: N/A
 
 ### Consts
-- [x] `CategoryKVRequest` | Rust: `trace::CATEGORY_KV_REQUEST` (new-client-rust/src/trace.rs) | Tests: N/A
-- [x] `CategoryRegionCache` | Rust: `trace::CATEGORY_REGION_CACHE` (new-client-rust/src/trace.rs) | Tests: N/A
-- [x] `CategoryTxn2PC` | Rust: `trace::CATEGORY_TXN_2PC` (new-client-rust/src/trace.rs) | Tests: N/A
-- [x] `CategoryTxnLockResolve` | Rust: `trace::CATEGORY_TXN_LOCK_RESOLVE` (new-client-rust/src/trace.rs) | Tests: N/A
-- [x] `FlagImmediateLog` | Rust: `trace::FLAG_IMMEDIATE_LOG` (new-client-rust/src/trace.rs) | Tests: N/A
-- [x] `FlagTiKVCategoryReadDetails` | Rust: `trace::FLAG_TIKV_CATEGORY_READ_DETAILS` (new-client-rust/src/trace.rs) | Tests: N/A
-- [x] `FlagTiKVCategoryRequest` | Rust: `trace::FLAG_TIKV_CATEGORY_REQUEST` (new-client-rust/src/trace.rs) | Tests: N/A
-- [x] `FlagTiKVCategoryWriteDetails` | Rust: `trace::FLAG_TIKV_CATEGORY_WRITE_DETAILS` (new-client-rust/src/trace.rs) | Tests: N/A
+- [x] `CategoryKVRequest` | Rust: `trace::CATEGORY_KV_REQUEST` (src/trace.rs) | Tests: N/A
+- [x] `CategoryRegionCache` | Rust: `trace::CATEGORY_REGION_CACHE` (src/trace.rs) | Tests: N/A
+- [x] `CategoryTxn2PC` | Rust: `trace::CATEGORY_TXN_2PC` (src/trace.rs) | Tests: N/A
+- [x] `CategoryTxnLockResolve` | Rust: `trace::CATEGORY_TXN_LOCK_RESOLVE` (src/trace.rs) | Tests: N/A
+- [x] `FlagImmediateLog` | Rust: `trace::FLAG_IMMEDIATE_LOG` (src/trace.rs) | Tests: N/A
+- [x] `FlagTiKVCategoryReadDetails` | Rust: `trace::FLAG_TIKV_CATEGORY_READ_DETAILS` (src/trace.rs) | Tests: N/A
+- [x] `FlagTiKVCategoryRequest` | Rust: `trace::FLAG_TIKV_CATEGORY_REQUEST` (src/trace.rs) | Tests: N/A
+- [x] `FlagTiKVCategoryWriteDetails` | Rust: `trace::FLAG_TIKV_CATEGORY_WRITE_DETAILS` (src/trace.rs) | Tests: N/A
 
 ### Vars
 - (none)
 
 ### Methods
-- [x] `func (f TraceControlFlags) Has(flag TraceControlFlags) bool` | Rust: `TraceControlFlags::has` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
-- [x] `func (f TraceControlFlags) With(flag TraceControlFlags) TraceControlFlags` | Rust: `TraceControlFlags::with` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `func (f TraceControlFlags) Has(flag TraceControlFlags) bool` | Rust: `TraceControlFlags::has` (src/trace.rs) | Tests: `src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `func (f TraceControlFlags) With(flag TraceControlFlags) TraceControlFlags` | Rust: `TraceControlFlags::with` (src/trace.rs) | Tests: `src/trace.rs (trace_event_is_guarded_by_category)`
 
 ## txnkv (package txnkv)
 
@@ -1259,7 +1259,7 @@ Conventions:
 - [x] `type KVTxn struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `type LifecycleHooks struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `type MemBufferMutationsProbe struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
-- [x] `type PipelinedTxnOptions struct` | Rust: `new-client-rust/src/transaction/transaction.rs (PipelinedTxnOptions)` | Tests: `new-client-rust/src/transaction/transaction.rs (pipelined tests)`
+- [x] `type PipelinedTxnOptions struct` | Rust: `src/transaction/transaction.rs (PipelinedTxnOptions)` | Tests: `src/transaction/transaction.rs (pipelined tests)`
 - [x] `type PlainMutation struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `type PlainMutations struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `type PrewriteEncounterLockPolicy int` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
@@ -1288,7 +1288,7 @@ Conventions:
 - [x] `MutationFlagIsPessimisticLock` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `MutationFlagNeedConstraintCheckInPrewrite` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `NoResolvePolicy` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
-- [x] `PipelinedRequestSource` | Rust: `new-client-rust/src/transaction/pipelined.rs (PIPELINED_REQUEST_SOURCE)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_pipelined_flush_commit_and_resolve_locks)`
+- [x] `PipelinedRequestSource` | Rust: `src/transaction/pipelined.rs (PIPELINED_REQUEST_SOURCE)` | Tests: `src/transaction/transaction.rs (test_pipelined_flush_commit_and_resolve_locks)`
 - [x] `TryResolvePolicy` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `TsoMaxBackoff` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 
@@ -1296,7 +1296,7 @@ Conventions:
 - [x] `CommitMaxBackoff` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `CtxInGetTimestampForCommitKey` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `ManagedLockTTL` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
-- [x] `MaxPipelinedTxnTTL` | Rust: `new-client-rust/src/transaction/pipelined.rs (PIPELINED_LOCK_TTL_MS)` | Tests: `new-client-rust/src/transaction/transaction.rs (pipelined tests)`
+- [x] `MaxPipelinedTxnTTL` | Rust: `src/transaction/pipelined.rs (PIPELINED_LOCK_TTL_MS)` | Tests: `src/transaction/transaction.rs (pipelined tests)`
 - [x] `PrewriteMaxBackoff` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `SetSuccess` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 
@@ -1375,7 +1375,7 @@ Conventions:
 - [x] `func (i *AggressiveLockedKeyInfo) Key() []byte` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (i *AggressiveLockedKeyInfo) Value() kv.ReturnedValue` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (p PrewriteEncounterLockPolicy) String() string` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
-- [x] `func (txn *KVTxn) AddRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::add_rpc_interceptor)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
+- [x] `func (txn *KVTxn) AddRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `src/transaction/transaction.rs (Transaction::add_rpc_interceptor)` | Tests: `src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
 - [x] `func (txn *KVTxn) BatchGet(ctx context.Context, keys [][]byte, options ...tikv.BatchGetOption) (map[string]tikv.ValueEntry, error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) CancelAggressiveLocking(ctx context.Context)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) ClearDiskFullOpt()` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
@@ -1395,7 +1395,7 @@ Conventions:
 - [x] `func (txn *KVTxn) GetTimestampForCommit(bo *retry.Backoffer, scope string) (_ uint64, err error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) GetUnionStore() *unionstore.KVUnionStore` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) GetVars() *tikv.Variables` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
-- [x] `func (txn *KVTxn) InitPipelinedMemDB() error` | Rust: `new-client-rust/src/transaction/transaction.rs (TransactionOptions::use_pipelined_txn)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_pipelined_flush_commit_and_resolve_locks)`
+- [x] `func (txn *KVTxn) InitPipelinedMemDB() error` | Rust: `src/transaction/transaction.rs (TransactionOptions::use_pipelined_txn)` | Tests: `src/transaction/transaction.rs (test_pipelined_flush_commit_and_resolve_locks)`
 - [x] `func (txn *KVTxn) IsCasualConsistency() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) IsInAggressiveLockingMode() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) IsInAggressiveLockingStage(key []byte) bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
@@ -1413,7 +1413,7 @@ Conventions:
 - [x] `func (txn *KVTxn) RetryAggressiveLocking(ctx context.Context)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) Rollback() error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) Set(k []byte, v []byte) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
-- [x] `func (txn *KVTxn) SetAssertionLevel(assertionLevel kvrpcpb.AssertionLevel)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_assertion_level, TransactionOptions::assertion_level)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_prewrite_propagates_assertion_level_and_mutation_assertions)`
+- [x] `func (txn *KVTxn) SetAssertionLevel(assertionLevel kvrpcpb.AssertionLevel)` | Rust: `src/transaction/transaction.rs (Transaction::set_assertion_level, TransactionOptions::assertion_level)` | Tests: `src/transaction/transaction.rs (test_prewrite_propagates_assertion_level_and_mutation_assertions)`
 - [x] `func (txn *KVTxn) SetBackgroundGoroutineLifecycleHooks(hooks LifecycleHooks)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetBinlogExecutor(binlog BinlogExecutor)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetCausalConsistency(b bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
@@ -1421,7 +1421,7 @@ Conventions:
 - [x] `func (txn *KVTxn) SetCommitTSUpperBoundCheck(f func(commitTS uint64) bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetCommitWaitUntilTSO(commitWaitUntilTSO uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetCommitWaitUntilTSOTimeout(val time.Duration)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
-- [x] `func (txn *KVTxn) SetDiskFullOpt(level kvrpcpb.DiskFullOpt)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_disk_full_opt)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (txn *KVTxn) SetDiskFullOpt(level kvrpcpb.DiskFullOpt)` | Rust: `src/transaction/transaction.rs (Transaction::set_disk_full_opt)` | Tests: `src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
 - [x] `func (txn *KVTxn) SetEnable1PC(b bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetEnableAsyncCommit(b bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetExplicitRequestSourceType(tp string)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
@@ -1429,18 +1429,18 @@ Conventions:
 - [x] `func (txn *KVTxn) SetMemoryFootprintChangeHook(hook func(uint64))` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetPessimistic(b bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetPrewriteEncounterLockPolicy(policy PrewriteEncounterLockPolicy)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
-- [x] `func (txn *KVTxn) SetPriority(pri txnutil.Priority)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_priority)` | Tests: `new-client-rust/src/transaction/transaction.rs (request_context tests)`
-- [x] `func (txn *KVTxn) SetRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_rpc_interceptor)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
+- [x] `func (txn *KVTxn) SetPriority(pri txnutil.Priority)` | Rust: `src/transaction/transaction.rs (Transaction::set_priority)` | Tests: `src/transaction/transaction.rs (request_context tests)`
+- [x] `func (txn *KVTxn) SetRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `src/transaction/transaction.rs (Transaction::set_rpc_interceptor)` | Tests: `src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
 - [x] `func (txn *KVTxn) SetRequestSourceInternal(internal bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
-- [x] `func (txn *KVTxn) SetRequestSourceType(tp string)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_request_source)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
-- [x] `func (txn *KVTxn) SetResourceGroupName(name string)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_resource_group_name)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
-- [x] `func (txn *KVTxn) SetResourceGroupTag(tag []byte)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_resource_group_tag)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
-- [x] `func (txn *KVTxn) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_resource_group_tagger)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_fixed_resource_group_tag_takes_precedence_over_tagger)`
+- [x] `func (txn *KVTxn) SetRequestSourceType(tp string)` | Rust: `src/transaction/transaction.rs (Transaction::set_request_source)` | Tests: `src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (txn *KVTxn) SetResourceGroupName(name string)` | Rust: `src/transaction/transaction.rs (Transaction::set_resource_group_name)` | Tests: `src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (txn *KVTxn) SetResourceGroupTag(tag []byte)` | Rust: `src/transaction/transaction.rs (Transaction::set_resource_group_tag)` | Tests: `src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (txn *KVTxn) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger)` | Rust: `src/transaction/transaction.rs (Transaction::set_resource_group_tagger)` | Tests: `src/transaction/transaction.rs (test_fixed_resource_group_tag_takes_precedence_over_tagger)`
 - [x] `func (txn *KVTxn) SetSchemaLeaseChecker(checker SchemaLeaseChecker)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetSchemaVer(schemaVer SchemaVer)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetScope(scope string)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetSessionID(sessionID uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
-- [x] `func (txn *KVTxn) SetTxnSource(txnSource uint64)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_txn_source)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (txn *KVTxn) SetTxnSource(txnSource uint64)` | Rust: `src/transaction/transaction.rs (Transaction::set_txn_source)` | Tests: `src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
 - [x] `func (txn *KVTxn) SetVars(vars *tikv.Variables)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) Size() int` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) StartAggressiveLocking()` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
@@ -1582,14 +1582,14 @@ Conventions:
 - [x] `func (s *KVSnapshot) SetMatchStoreLabels(labels []*metapb.StoreLabel)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 - [x] `func (s *KVSnapshot) SetNotFillCache(b bool)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 - [x] `func (s *KVSnapshot) SetPipelined(ts uint64)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
-- [x] `func (s *KVSnapshot) SetPriority(pri txnutil.Priority)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_priority)` | Tests: `new-client-rust/src/transaction/transaction.rs (request_context tests)`
-- [x] `func (s *KVSnapshot) SetRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_rpc_interceptor)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
+- [x] `func (s *KVSnapshot) SetPriority(pri txnutil.Priority)` | Rust: `src/transaction/snapshot.rs (Snapshot::set_priority)` | Tests: `src/transaction/transaction.rs (request_context tests)`
+- [x] `func (s *KVSnapshot) SetRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `src/transaction/snapshot.rs (Snapshot::set_rpc_interceptor)` | Tests: `src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
 - [x] `func (s *KVSnapshot) SetReadReplicaScope(scope string)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 - [x] `func (s *KVSnapshot) SetReplicaRead(readType kv.ReplicaReadType)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 - [x] `func (s *KVSnapshot) SetReplicaReadAdjuster(f ReplicaReadAdjuster)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
-- [x] `func (s *KVSnapshot) SetResourceGroupName(name string)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_resource_group_name)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
-- [x] `func (s *KVSnapshot) SetResourceGroupTag(tag []byte)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_resource_group_tag)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
-- [x] `func (s *KVSnapshot) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_resource_group_tagger)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_fixed_resource_group_tag_takes_precedence_over_tagger)`
+- [x] `func (s *KVSnapshot) SetResourceGroupName(name string)` | Rust: `src/transaction/snapshot.rs (Snapshot::set_resource_group_name)` | Tests: `src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (s *KVSnapshot) SetResourceGroupTag(tag []byte)` | Rust: `src/transaction/snapshot.rs (Snapshot::set_resource_group_tag)` | Tests: `src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
+- [x] `func (s *KVSnapshot) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger)` | Rust: `src/transaction/snapshot.rs (Snapshot::set_resource_group_tagger)` | Tests: `src/transaction/transaction.rs (test_fixed_resource_group_tag_takes_precedence_over_tagger)`
 - [x] `func (s *KVSnapshot) SetRuntimeStats(stats *SnapshotRuntimeStats)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 - [x] `func (s *KVSnapshot) SetSampleStep(step uint32)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 - [x] `func (s *KVSnapshot) SetScanBatchSize(batchSize int)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 

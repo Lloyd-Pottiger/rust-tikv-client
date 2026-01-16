@@ -4,7 +4,7 @@ This crate includes small microbenchmarks to keep performance work grounded in m
 
 ## Running
 
-From `new-client-rust/`:
+From the repo root:
 
 - Keyspace encoding/decoding:
   - `cargo bench --bench keyspace`
@@ -18,4 +18,3 @@ Use `cargo-flamegraph` in your environment:
 
 - `cargo install flamegraph --locked`
 - `cargo flamegraph --bench plan --features test-util`
-

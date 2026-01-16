@@ -1,4 +1,4 @@
-# TiKV Client (Rust) — new-client-rust
+# TiKV Client (Rust)
 
 This is the new Rust TiKV client implementation in this repo.
 
@@ -26,7 +26,7 @@ The TiKV client is a Rust library (crate). To use this crate in your project, ad
 
 ```toml
 [dependencies]
-tikv-client = { path = "/path/to/new-client-rust" }
+tikv-client = { path = "/path/to/tikv-client" }
 ```
 
 ### Prerequisites
@@ -183,7 +183,7 @@ forwarder:
 
 ```toml
 [dependencies]
-tikv-client = { path = "/path/to/new-client-rust", features = ["tracing"] }
+tikv-client = { path = "/path/to/tikv-client", features = ["tracing"] }
 ```
 
 ```rust,ignore

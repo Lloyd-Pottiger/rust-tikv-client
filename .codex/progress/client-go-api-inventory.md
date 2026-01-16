@@ -3,7 +3,7 @@
 Module: `github.com/tikv/client-go/v2`
 
 Generated from local source under `client-go/` (excluding `internal/`, `integration_tests/`, `examples/`, `testutils/`).
-This is a signature-level inventory used to drive parity work in `new-client-rust/`.
+This is a signature-level inventory used to drive parity work in this repo's Rust client crate (repo root).
 
 Regenerate:
 - `go run ./tools/client-go-api-inventory`
@@ -1875,4 +1875,3 @@ Regenerate:
 
 ### Methods
 - (none)
-

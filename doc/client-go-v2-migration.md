@@ -1,8 +1,8 @@
-# Migrating from `client-go` v2 to `new-client-rust`
+# Migrating from `client-go` v2 to `tikv-client` (Rust)
 
 This document is a user-facing guide for migrating common `client-go` v2 usage patterns to this
-repo’s Rust client (`./new-client-rust`). The goal is **feature parity** with a **Rust-idiomatic**
-public API, so the Rust API is *not* a 1:1 mapping of Go packages/types.
+repo’s Rust client crate (at the repo root). The goal is **feature parity** with a
+**Rust-idiomatic** public API, so the Rust API is *not* a 1:1 mapping of Go packages/types.
 
 ## High-level mapping
 
@@ -15,8 +15,8 @@ public API, so the Rust API is *not* a 1:1 mapping of Go packages/types.
 
 ## Connecting and configuration
 
-In `new-client-rust`, configuration is **explicit** and passed at construction time (no global
-mutable config singleton).
+In this crate, configuration is **explicit** and passed at construction time (no global mutable
+config singleton).
 
 ```rust,no_run
 # use std::time::Duration;
@@ -90,8 +90,8 @@ let _ = snapshot.get("k".to_owned()).await?;
 
 ## Low-level requests (`tikv_client::request`)
 
-`client-go` exposes a public “request wrapper” layer (`tikvrpc`). `new-client-rust` intentionally
-avoids an enum-based “mega wrapper” and instead exposes a typed request-plan abstraction:
+`client-go` exposes a public “request wrapper” layer (`tikvrpc`). This crate intentionally avoids
+an enum-based “mega wrapper” and instead exposes a typed request-plan abstraction:
 
 - Build a `request::PlanBuilder` over a concrete kvproto request type
 - Execute it to get a concrete kvproto response type
@@ -108,7 +108,7 @@ machinery.
 ## Capability-only vs out-of-scope (differences vs Go)
 
 Some `client-go` exports exist only because Go lacks fine-grained visibility (or because they are
-Go-ecosystem conveniences like global config mutation). In `new-client-rust`:
+Go-ecosystem conveniences like global config mutation). In this crate:
 
 - “Implementation details” are kept crate-private but the underlying capability exists.
 - Go-style global config and some internal tuning knobs are intentionally not exposed; prefer

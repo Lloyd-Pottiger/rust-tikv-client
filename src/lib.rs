@@ -8,7 +8,8 @@
 //!
 //! ## Project status (this repo)
 //!
-//! This crate is developed under `./new-client-rust` and targets parity with `client-go` v2.
+//! This crate is developed in this repo (crate at the repo root) and targets parity with
+//! `client-go` v2.
 //! See `doc/client-go-v2-parity-roadmap.md` for the staged plan.
 //!
 //! The TiKV Rust client supports several levels of abstraction. The most convenient way to use the
