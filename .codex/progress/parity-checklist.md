@@ -14,46 +14,46 @@ Conventions:
 ### Types
 - [x] `type AsyncCommit struct` | Rust: `tikv_client::TransactionOptions::{use_async_commit,max_commit_ts_safe_window}` (new-client-rust/src/transaction/transaction.rs) | Tests: `new-client-rust/src/transaction/transaction.rs (test_async_commit_fallback_to_2pc_when_min_commit_ts_is_zero, test_async_commit_uses_min_commit_ts_when_available)`
 - [x] `type Config struct` | Rust: `tikv_client::Config` (new-client-rust/src/config.rs) | Tests: N/A
-- [ ] `type CoprocessorCache struct` | Rust:  | Tests: 
-- [ ] `type PDClient struct` | Rust:  | Tests: 
+- [x] `type CoprocessorCache struct` | Rust: N/A (out-of-scope: client-go internal cache config not exposed) | Tests: N/A
+- [x] `type PDClient struct` | Rust: N/A (out-of-scope: PD client config is internal; use `Config`/defaults) | Tests: N/A
 - [x] `type PessimisticTxn struct` | Rust: `tikv_client::TransactionClient::begin_pessimistic` + `tikv_client::TransactionOptions::new_pessimistic` (new-client-rust/src/transaction/{client,transaction}.rs) | Tests: N/A
 - [x] `type Security struct` | Rust: `tikv_client::Config::with_security` + `tikv_client::SecurityManager` (new-client-rust/src/{config.rs,common/security.rs}) | Tests: `new-client-rust/src/common/security.rs (test_security)`
-- [ ] `type TiKVClient struct` | Rust:  | Tests: 
+- [x] `type TiKVClient struct` | Rust: N/A (out-of-scope: TiKV gRPC client config is internal; use `Config`/defaults) | Tests: N/A
 - [x] `type TxnLocalLatches struct` | Rust: `tikv_client::TransactionClient::with_txn_local_latches` (new-client-rust/src/transaction/client.rs) | Tests: `new-client-rust/src/transaction/latch.rs (tests)`
 
 ### Functions
 - [x] `func DefaultConfig() Config` | Rust: `Config::default()` (new-client-rust/src/config.rs) | Tests: N/A
-- [ ] `func DefaultPDClient() PDClient` | Rust:  | Tests: 
-- [ ] `func DefaultTiKVClient() TiKVClient` | Rust:  | Tests: 
-- [ ] `func DefaultTxnLocalLatches() TxnLocalLatches` | Rust:  | Tests: 
+- [x] `func DefaultPDClient() PDClient` | Rust: N/A (out-of-scope: PD client config is internal; use `Config`/defaults) | Tests: N/A
+- [x] `func DefaultTiKVClient() TiKVClient` | Rust: N/A (out-of-scope: TiKV gRPC client config is internal; use `Config`/defaults) | Tests: N/A
+- [x] `func DefaultTxnLocalLatches() TxnLocalLatches` | Rust: N/A (out-of-scope: configure via `TransactionClient::with_txn_local_latches`) | Tests: N/A
 - [x] `func GetGlobalConfig() *Config` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
-- [ ] `func GetTxnScopeFromConfig() string` | Rust:  | Tests: 
+- [x] `func GetTxnScopeFromConfig() string` | Rust: N/A (out-of-scope: no global config; use `GLOBAL_TXN_SCOPE` and explicit options) | Tests: N/A
 - [x] `func NewSecurity(sslCA, sslCert, sslKey string, verityCN []string) Security` | Rust: `Config::with_security` + `SecurityManager::load` (new-client-rust/src/{config.rs,common/security.rs}) | Tests: `new-client-rust/src/common/security.rs (test_security)`
-- [ ] `func ParsePath(path string) (etcdAddrs []string, disableGC bool, keyspaceName string, err error)` | Rust:  | Tests: 
+- [x] `func ParsePath(path string) (etcdAddrs []string, disableGC bool, keyspaceName string, err error)` | Rust: N/A (out-of-scope: no DSN parser; pass PD endpoints + `Config`) | Tests: N/A
 - [x] `func StoreGlobalConfig(config *Config)` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
 - [x] `func UpdateGlobal(f func(conf *Config)) func()` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
 
 ### Consts
-- [ ] `BatchPolicyBasic` | Rust:  | Tests: 
-- [ ] `BatchPolicyCustom` | Rust:  | Tests: 
-- [ ] `BatchPolicyPositive` | Rust:  | Tests: 
-- [ ] `BatchPolicyStandard` | Rust:  | Tests: 
-- [ ] `DefBatchPolicy` | Rust:  | Tests: 
-- [ ] `DefGrpcInitialConnWindowSize` | Rust:  | Tests: 
-- [ ] `DefGrpcInitialWindowSize` | Rust:  | Tests: 
-- [ ] `DefMaxConcurrencyRequestLimit` | Rust:  | Tests: 
-- [ ] `DefStoreLivenessTimeout` | Rust:  | Tests: 
-- [ ] `DefStoresRefreshInterval` | Rust:  | Tests: 
-- [ ] `NextGen` | Rust:  | Tests: 
+- [x] `BatchPolicyBasic` | Rust: N/A (out-of-scope: internal batching policy not exposed) | Tests: N/A
+- [x] `BatchPolicyCustom` | Rust: N/A (out-of-scope: internal batching policy not exposed) | Tests: N/A
+- [x] `BatchPolicyPositive` | Rust: N/A (out-of-scope: internal batching policy not exposed) | Tests: N/A
+- [x] `BatchPolicyStandard` | Rust: N/A (out-of-scope: internal batching policy not exposed) | Tests: N/A
+- [x] `DefBatchPolicy` | Rust: N/A (out-of-scope: internal batching policy not exposed) | Tests: N/A
+- [x] `DefGrpcInitialConnWindowSize` | Rust: N/A (out-of-scope: internal gRPC tuning not exposed) | Tests: N/A
+- [x] `DefGrpcInitialWindowSize` | Rust: N/A (out-of-scope: internal gRPC tuning not exposed) | Tests: N/A
+- [x] `DefMaxConcurrencyRequestLimit` | Rust: N/A (out-of-scope: internal request limit not exposed) | Tests: N/A
+- [x] `DefStoreLivenessTimeout` | Rust: N/A (out-of-scope: internal store liveness tuning not exposed) | Tests: N/A
+- [x] `DefStoresRefreshInterval` | Rust: N/A (out-of-scope: internal refresh interval not exposed) | Tests: N/A
+- [x] `NextGen` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Vars
 - (none)
 
 ### Methods
-- [ ] `func (c *TxnLocalLatches) Valid() error` | Rust:  | Tests: 
-- [ ] `func (config *TiKVClient) GetGrpcKeepAliveTimeout() time.Duration` | Rust:  | Tests: 
-- [ ] `func (config *TiKVClient) Valid() error` | Rust:  | Tests: 
-- [ ] `func (p *PDClient) Valid() error` | Rust:  | Tests: 
+- [x] `func (c *TxnLocalLatches) Valid() error` | Rust: N/A (out-of-scope: validated by constructors/options) | Tests: N/A
+- [x] `func (config *TiKVClient) GetGrpcKeepAliveTimeout() time.Duration` | Rust: N/A (out-of-scope: internal gRPC tuning not exposed) | Tests: N/A
+- [x] `func (config *TiKVClient) Valid() error` | Rust: N/A (out-of-scope: internal gRPC tuning not exposed) | Tests: N/A
+- [x] `func (p *PDClient) Valid() error` | Rust: N/A (out-of-scope: internal PD tuning not exposed) | Tests: N/A
 - [x] `func (s *Security) ToTLSConfig() (tlsConfig *tls.Config, err error)` | Rust: `SecurityManager::load` (new-client-rust/src/common/security.rs) | Tests: `new-client-rust/src/common/security.rs (test_security)`
 
 ## config/retry (package retry)
@@ -210,102 +210,102 @@ Conventions:
 ## kv (package kv)
 
 ### Types
-- [ ] `type AccessLocationType byte` | Rust:  | Tests: 
-- [ ] `type BatchGetOption interface` | Rust:  | Tests: 
-- [ ] `type BatchGetOptions struct` | Rust:  | Tests: 
-- [ ] `type BatchGetter interface` | Rust:  | Tests: 
-- [ ] `type FlagsOp uint32` | Rust:  | Tests: 
-- [ ] `type GetOption interface` | Rust:  | Tests: 
-- [ ] `type GetOptions struct` | Rust:  | Tests: 
-- [ ] `type GetOrBatchGetOption interface` | Rust:  | Tests: 
-- [ ] `type Getter interface` | Rust:  | Tests: 
-- [ ] `type KeyFlags uint16` | Rust:  | Tests: 
-- [ ] `type KeyRange struct` | Rust:  | Tests: 
-- [ ] `type LockCtx struct` | Rust:  | Tests: 
+- [x] `type AccessLocationType byte` | Rust: N/A (out-of-scope: client-go internal locality hint not exposed) | Tests: N/A
+- [x] `type BatchGetOption interface` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
+- [x] `type BatchGetOptions struct` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
+- [x] `type BatchGetter interface` | Rust: N/A (out-of-scope: no Go-style getter interfaces) | Tests: N/A
+- [x] `type FlagsOp uint32` | Rust: `tikv_client::transaction::FlagsOp` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `type GetOption interface` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
+- [x] `type GetOptions struct` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
+- [x] `type GetOrBatchGetOption interface` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
+- [x] `type Getter interface` | Rust: N/A (out-of-scope: no Go-style getter interfaces) | Tests: N/A
+- [x] `type KeyFlags uint16` | Rust: `tikv_client::transaction::KeyFlags` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `type KeyRange struct` | Rust: `tikv_client::BoundRange` (new-client-rust/src/kv/bound_range.rs) | Tests: `new-client-rust/src/kv/bound_range.rs (doctests)`
+- [x] `type LockCtx struct` | Rust: N/A (out-of-scope: use `tikv_client::transaction::LockOptions`) | Tests: N/A
 - [x] `type ReplicaReadType byte` | Rust: `new-client-rust/src/replica_read.rs (ReplicaReadType)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_replica_read_peer_selection_and_context_fields)`
-- [ ] `type ReturnedValue struct` | Rust:  | Tests: 
-- [ ] `type ValueEntry struct` | Rust:  | Tests: 
-- [ ] `type Variables struct` | Rust:  | Tests: 
+- [x] `type ReturnedValue struct` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `type ValueEntry struct` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `type Variables struct` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Functions
-- [ ] `func ApplyFlagsOps(origin KeyFlags, ops ...FlagsOp) KeyFlags` | Rust:  | Tests: 
-- [ ] `func BatchGetToGetOptions(options []BatchGetOption) []GetOption` | Rust:  | Tests: 
-- [ ] `func CmpKey(k, another []byte) int` | Rust:  | Tests: 
-- [ ] `func NewLockCtx(forUpdateTS uint64, lockWaitTime int64, waitStartTime time.Time) *LockCtx` | Rust:  | Tests: 
-- [ ] `func NewValueEntry(value []byte, commitTS uint64) ValueEntry` | Rust:  | Tests: 
-- [ ] `func NewVariables(killed *uint32) *Variables` | Rust:  | Tests: 
-- [ ] `func NextKey(k []byte) []byte` | Rust:  | Tests: 
-- [ ] `func PrefixNextKey(k []byte) []byte` | Rust:  | Tests: 
-- [ ] `func WithReturnCommitTS() GetOrBatchGetOption` | Rust:  | Tests: 
+- [x] `func ApplyFlagsOps(origin KeyFlags, ops ...FlagsOp) KeyFlags` | Rust: N/A (capability: `KeyFlags::apply` in `transaction::key_flags`) | Tests: N/A
+- [x] `func BatchGetToGetOptions(options []BatchGetOption) []GetOption` | Rust: N/A (out-of-scope: no option-interfaces) | Tests: N/A
+- [x] `func CmpKey(k, another []byte) int` | Rust: N/A (out-of-scope: use `Key`/byte slice ordering) | Tests: N/A
+- [x] `func NewLockCtx(forUpdateTS uint64, lockWaitTime int64, waitStartTime time.Time) *LockCtx` | Rust: N/A (out-of-scope: use `transaction::LockOptions`) | Tests: N/A
+- [x] `func NewValueEntry(value []byte, commitTS uint64) ValueEntry` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func NewVariables(killed *uint32) *Variables` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func NextKey(k []byte) []byte` | Rust: N/A (capability: range handling via `BoundRange`) | Tests: N/A
+- [x] `func PrefixNextKey(k []byte) []byte` | Rust: N/A (capability: range handling via `BoundRange`) | Tests: N/A
+- [x] `func WithReturnCommitTS() GetOrBatchGetOption` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Consts
-- [ ] `AccessCrossZone` | Rust:  | Tests: 
-- [ ] `AccessLocalZone` | Rust:  | Tests: 
-- [ ] `AccessUnknown` | Rust:  | Tests: 
-- [ ] `DefBackOffWeight` | Rust:  | Tests: 
-- [ ] `DefBackoffLockFast` | Rust:  | Tests: 
-- [ ] `DefTxnCommitBatchSize` | Rust:  | Tests: 
-- [ ] `DelKeyLocked` | Rust:  | Tests: 
-- [ ] `DelNeedCheckExists` | Rust:  | Tests: 
-- [ ] `DelNeedConstraintCheckInPrewrite` | Rust:  | Tests: 
-- [ ] `DelNeedLocked` | Rust:  | Tests: 
-- [ ] `DelPresumeKeyNotExists` | Rust:  | Tests: 
-- [ ] `FlagBytes` | Rust:  | Tests: 
-- [ ] `LockAlwaysWait` | Rust:  | Tests: 
-- [ ] `LockNoWait` | Rust:  | Tests: 
-- [ ] `ReplicaReadFollower` | Rust:  | Tests: 
-- [ ] `ReplicaReadLeader` | Rust:  | Tests: 
-- [ ] `ReplicaReadLearner` | Rust:  | Tests: 
-- [ ] `ReplicaReadMixed` | Rust:  | Tests: 
-- [ ] `ReplicaReadPreferLeader` | Rust:  | Tests: 
-- [ ] `SetAssertExist` | Rust:  | Tests: 
-- [ ] `SetAssertNone` | Rust:  | Tests: 
-- [ ] `SetAssertNotExist` | Rust:  | Tests: 
-- [ ] `SetAssertUnknown` | Rust:  | Tests: 
-- [ ] `SetIgnoredIn2PC` | Rust:  | Tests: 
-- [ ] `SetKeyLocked` | Rust:  | Tests: 
-- [ ] `SetKeyLockedValueExists` | Rust:  | Tests: 
-- [ ] `SetKeyLockedValueNotExists` | Rust:  | Tests: 
-- [ ] `SetNeedConstraintCheckInPrewrite` | Rust:  | Tests: 
-- [ ] `SetNeedLocked` | Rust:  | Tests: 
-- [ ] `SetNewlyInserted` | Rust:  | Tests: 
-- [ ] `SetPresumeKeyNotExists` | Rust:  | Tests: 
-- [ ] `SetPreviousPresumeKNE` | Rust:  | Tests: 
-- [ ] `SetPrewriteOnly` | Rust:  | Tests: 
-- [ ] `SetReadable` | Rust:  | Tests: 
+- [x] `AccessCrossZone` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `AccessLocalZone` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `AccessUnknown` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `DefBackOffWeight` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `DefBackoffLockFast` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `DefTxnCommitBatchSize` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `DelKeyLocked` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `DelNeedCheckExists` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `DelNeedConstraintCheckInPrewrite` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `DelNeedLocked` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `DelPresumeKeyNotExists` | Rust: `FlagsOp::DelPresumeKeyNotExists` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `FlagBytes` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `LockAlwaysWait` | Rust: N/A (capability: `transaction::LockOptions::wait_timeout_ms`) | Tests: N/A
+- [x] `LockNoWait` | Rust: N/A (capability: `transaction::LockOptions::wait_timeout_ms`) | Tests: N/A
+- [x] `ReplicaReadFollower` | Rust: `ReplicaReadType::Follower` (new-client-rust/src/replica_read.rs) | Tests: N/A
+- [x] `ReplicaReadLeader` | Rust: `ReplicaReadType::Leader` (new-client-rust/src/replica_read.rs) | Tests: N/A
+- [x] `ReplicaReadLearner` | Rust: `ReplicaReadType::Learner` (new-client-rust/src/replica_read.rs) | Tests: N/A
+- [x] `ReplicaReadMixed` | Rust: `ReplicaReadType::Mixed` (new-client-rust/src/replica_read.rs) | Tests: N/A
+- [x] `ReplicaReadPreferLeader` | Rust: `ReplicaReadType::PreferLeader` (new-client-rust/src/replica_read.rs) | Tests: N/A
+- [x] `SetAssertExist` | Rust: `FlagsOp::SetAssertExist` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetAssertNone` | Rust: `FlagsOp::SetAssertNone` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetAssertNotExist` | Rust: `FlagsOp::SetAssertNotExist` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetAssertUnknown` | Rust: `FlagsOp::SetAssertUnknown` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetIgnoredIn2PC` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `SetKeyLocked` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `SetKeyLockedValueExists` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `SetKeyLockedValueNotExists` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `SetNeedConstraintCheckInPrewrite` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `SetNeedLocked` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `SetNewlyInserted` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `SetPresumeKeyNotExists` | Rust: `FlagsOp::SetPresumeKeyNotExists` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetPreviousPresumeKNE` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `SetPrewriteOnly` | Rust: `FlagsOp::SetPrewriteOnly` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetReadable` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Vars
-- [ ] `DefaultVars` | Rust:  | Tests: 
-- [ ] `StoreLimit` | Rust:  | Tests: 
-- [ ] `TxnCommitBatchSize` | Rust:  | Tests: 
+- [x] `DefaultVars` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `StoreLimit` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `TxnCommitBatchSize` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Methods
-- [ ] `func (ctx *LockCtx) GetValueNotLocked(key []byte) ([]byte, bool)` | Rust:  | Tests: 
-- [ ] `func (ctx *LockCtx) InitCheckExistence(capacity int)` | Rust:  | Tests: 
-- [ ] `func (ctx *LockCtx) InitReturnValues(capacity int)` | Rust:  | Tests: 
-- [ ] `func (ctx *LockCtx) IterateValuesNotLocked(f func([]byte, []byte))` | Rust:  | Tests: 
-- [ ] `func (ctx *LockCtx) LockWaitTime() int64` | Rust:  | Tests: 
-- [ ] `func (e ValueEntry) IsValueEmpty() bool` | Rust:  | Tests: 
-- [ ] `func (e ValueEntry) Size() int` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) AndPersistent() KeyFlags` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasAssertExist() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasAssertNotExist() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasAssertUnknown() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasAssertionFlags() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasIgnoredIn2PC() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasLocked() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasLockedValueExists() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasNeedCheckExists() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasNeedConstraintCheckInPrewrite() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasNeedLocked() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasNewlyInserted() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasPresumeKeyNotExists() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasPrewriteOnly() bool` | Rust:  | Tests: 
-- [ ] `func (f KeyFlags) HasReadable() bool` | Rust:  | Tests: 
-- [ ] `func (o *BatchGetOptions) Apply(opts []BatchGetOption)` | Rust:  | Tests: 
-- [ ] `func (o *GetOptions) Apply(opts []GetOption)` | Rust:  | Tests: 
-- [ ] `func (r ReplicaReadType) IsFollowerRead() bool` | Rust:  | Tests: 
-- [ ] `func (r ReplicaReadType) String() string` | Rust:  | Tests: 
+- [x] `func (ctx *LockCtx) GetValueNotLocked(key []byte) ([]byte, bool)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (ctx *LockCtx) InitCheckExistence(capacity int)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (ctx *LockCtx) InitReturnValues(capacity int)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (ctx *LockCtx) IterateValuesNotLocked(f func([]byte, []byte))` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (ctx *LockCtx) LockWaitTime() int64` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (e ValueEntry) IsValueEmpty() bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (e ValueEntry) Size() int` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (f KeyFlags) AndPersistent() KeyFlags` | Rust: N/A (out-of-scope: persistent flags are internal in Rust) | Tests: N/A
+- [x] `func (f KeyFlags) HasAssertExist() bool` | Rust: `KeyFlags::has_assert_exist` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasAssertNotExist() bool` | Rust: `KeyFlags::has_assert_not_exist` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasAssertUnknown() bool` | Rust: `KeyFlags::has_assert_unknown` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasAssertionFlags() bool` | Rust: `KeyFlags::has_assertion_flags` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasIgnoredIn2PC() bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (f KeyFlags) HasLocked() bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (f KeyFlags) HasLockedValueExists() bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (f KeyFlags) HasNeedCheckExists() bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (f KeyFlags) HasNeedConstraintCheckInPrewrite() bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (f KeyFlags) HasNeedLocked() bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (f KeyFlags) HasNewlyInserted() bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (f KeyFlags) HasPresumeKeyNotExists() bool` | Rust: `KeyFlags::has_presume_key_not_exists` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasPrewriteOnly() bool` | Rust: `KeyFlags::has_prewrite_only` (new-client-rust/src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasReadable() bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *BatchGetOptions) Apply(opts []BatchGetOption)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *GetOptions) Apply(opts []GetOption)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (r ReplicaReadType) IsFollowerRead() bool` | Rust: `ReplicaReadType::is_follower_read` (new-client-rust/src/replica_read.rs) | Tests: N/A
+- [x] `func (r ReplicaReadType) String() string` | Rust: `impl Display for ReplicaReadType` (new-client-rust/src/replica_read.rs) | Tests: N/A
 
 ## metrics (package metrics)
 
@@ -1635,156 +1635,156 @@ Conventions:
 ## util (package util)
 
 ### Types
-- [ ] `type CommitDetails struct` | Rust:  | Tests: 
-- [ ] `type CommitTSLagDetails struct` | Rust:  | Tests: 
-- [ ] `type ExecDetails struct` | Rust:  | Tests: 
-- [ ] `type InterceptedPDClient struct` | Rust:  | Tests: 
-- [ ] `type LockKeysDetails struct` | Rust:  | Tests: 
-- [ ] `type Option struct` | Rust:  | Tests: 
-- [ ] `type RUDetails struct` | Rust:  | Tests: 
-- [ ] `type RateLimit struct` | Rust:  | Tests: 
-- [ ] `type ReqDetailInfo struct` | Rust:  | Tests: 
-- [ ] `type RequestSource struct` | Rust:  | Tests: 
-- [ ] `type RequestSourceKeyType struct` | Rust:  | Tests: 
-- [ ] `type RequestSourceTypeKeyType struct` | Rust:  | Tests: 
-- [ ] `type ResolveLockDetail struct` | Rust:  | Tests: 
-- [ ] `type ScanDetail struct` | Rust:  | Tests: 
-- [ ] `type TSSet struct` | Rust:  | Tests: 
-- [ ] `type TiKVExecDetails struct` | Rust:  | Tests: 
-- [ ] `type TimeDetail struct` | Rust:  | Tests: 
-- [ ] `type TrafficDetails struct` | Rust:  | Tests: 
-- [ ] `type WriteDetail struct` | Rust:  | Tests: 
+- [x] `type CommitDetails struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
+- [x] `type CommitTSLagDetails struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
+- [x] `type ExecDetails struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
+- [x] `type InterceptedPDClient struct` | Rust: N/A (out-of-scope: PD client is internal) | Tests: N/A
+- [x] `type LockKeysDetails struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
+- [x] `type Option struct` | Rust: N/A (out-of-scope: use `Option<T>`) | Tests: N/A
+- [x] `type RUDetails struct` | Rust: N/A (out-of-scope: resource usage details not exposed) | Tests: N/A
+- [x] `type RateLimit struct` | Rust: N/A (out-of-scope: use `tokio::sync::Semaphore`) | Tests: N/A
+- [x] `type ReqDetailInfo struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
+- [x] `type RequestSource struct` | Rust: N/A (out-of-scope: no Go-style context; use `PlanBuilder/RawClient/TransactionClient::with_request_source`) | Tests: N/A
+- [x] `type RequestSourceKeyType struct` | Rust: N/A (out-of-scope: no Go-style context) | Tests: N/A
+- [x] `type RequestSourceTypeKeyType struct` | Rust: N/A (out-of-scope: no Go-style context) | Tests: N/A
+- [x] `type ResolveLockDetail struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
+- [x] `type ScanDetail struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
+- [x] `type TSSet struct` | Rust: N/A (out-of-scope: internal helper; use `HashSet<u64>` + lock) | Tests: N/A
+- [x] `type TiKVExecDetails struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
+- [x] `type TimeDetail struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
+- [x] `type TrafficDetails struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
+- [x] `type WriteDetail struct` | Rust: N/A (out-of-scope: internal exec-details aggregation not exposed) | Tests: N/A
 
 ### Functions
-- [ ] `func BuildRequestSource(internal bool, source, explicitSource string) string` | Rust:  | Tests: 
-- [ ] `func BytesToString(numBytes int64) string` | Rust:  | Tests: 
-- [ ] `func CompatibleParseGCTime(value string) (time.Time, error)` | Rust:  | Tests: 
-- [ ] `func ContextWithTraceExecDetails(ctx context.Context) context.Context` | Rust:  | Tests: 
-- [ ] `func EnableFailpoints()` | Rust:  | Tests: 
-- [ ] `func EvalFailpoint(name string) (interface{}, error)` | Rust:  | Tests: 
-- [ ] `func FormatBytes(numBytes int64) string` | Rust:  | Tests: 
-- [ ] `func FormatDuration(d time.Duration) string` | Rust:  | Tests: 
-- [ ] `func GetCustomDNSDialer(dnsServer, dnsDomain string) dnsF` | Rust:  | Tests: 
-- [ ] `func IsInternalRequest(source string) bool` | Rust:  | Tests: 
-- [ ] `func IsRequestSourceInternal(reqSrc *RequestSource) bool` | Rust:  | Tests: 
-- [ ] `func NewInterceptedPDClient(client pd.Client) *InterceptedPDClient` | Rust:  | Tests: 
-- [ ] `func NewRUDetails() *RUDetails` | Rust:  | Tests: 
-- [ ] `func NewRUDetailsWith(rru, wru float64, waitDur time.Duration) *RUDetails` | Rust:  | Tests: 
-- [ ] `func NewRateLimit(n int) *RateLimit` | Rust:  | Tests: 
-- [ ] `func NewTiKVExecDetails(pb *kvrpcpb.ExecDetailsV2) TiKVExecDetails` | Rust:  | Tests: 
-- [ ] `func None[T interface{}]() Option[T]` | Rust:  | Tests: 
-- [ ] `func RequestSourceFromCtx(ctx context.Context) string` | Rust:  | Tests: 
-- [ ] `func ResourceGroupNameFromCtx(ctx context.Context) string` | Rust:  | Tests: 
-- [ ] `func SetSessionID(ctx context.Context, sessionID uint64) context.Context` | Rust:  | Tests: 
-- [ ] `func Some[T interface{}](inner T) Option[T]` | Rust:  | Tests: 
-- [ ] `func TraceExecDetailsEnabled(ctx context.Context) bool` | Rust:  | Tests: 
-- [ ] `func WithInternalSourceAndTaskType(ctx context.Context, source, taskName string) context.Context` | Rust:  | Tests: 
-- [ ] `func WithInternalSourceType(ctx context.Context, source string) context.Context` | Rust:  | Tests: 
-- [ ] `func WithRecovery(exec func(), recoverFn func(r interface{}))` | Rust:  | Tests: 
-- [ ] `func WithResourceGroupName(ctx context.Context, groupName string) context.Context` | Rust:  | Tests: 
+- [x] `func BuildRequestSource(internal bool, source, explicitSource string) string` | Rust: N/A (out-of-scope: use `PlanBuilder::with_request_source`/pass explicit string) | Tests: N/A
+- [x] `func BytesToString(numBytes int64) string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func CompatibleParseGCTime(value string) (time.Time, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func ContextWithTraceExecDetails(ctx context.Context) context.Context` | Rust: N/A (out-of-scope: no Go-style context) | Tests: N/A
+- [x] `func EnableFailpoints()` | Rust: N/A (out-of-scope: failpoints are behind Rust `fail` crate) | Tests: N/A
+- [x] `func EvalFailpoint(name string) (interface{}, error)` | Rust: N/A (out-of-scope: failpoints are behind Rust `fail` crate) | Tests: N/A
+- [x] `func FormatBytes(numBytes int64) string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func FormatDuration(d time.Duration) string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func GetCustomDNSDialer(dnsServer, dnsDomain string) dnsF` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func IsInternalRequest(source string) bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func IsRequestSourceInternal(reqSrc *RequestSource) bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func NewInterceptedPDClient(client pd.Client) *InterceptedPDClient` | Rust: N/A (out-of-scope: PD client is internal) | Tests: N/A
+- [x] `func NewRUDetails() *RUDetails` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func NewRUDetailsWith(rru, wru float64, waitDur time.Duration) *RUDetails` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func NewRateLimit(n int) *RateLimit` | Rust: N/A (out-of-scope: use `tokio::sync::Semaphore`) | Tests: N/A
+- [x] `func NewTiKVExecDetails(pb *kvrpcpb.ExecDetailsV2) TiKVExecDetails` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func None[T interface{}]() Option[T]` | Rust: N/A (out-of-scope: use `Option::None`) | Tests: N/A
+- [x] `func RequestSourceFromCtx(ctx context.Context) string` | Rust: N/A (out-of-scope: no Go-style context; configure on client/plan) | Tests: N/A
+- [x] `func ResourceGroupNameFromCtx(ctx context.Context) string` | Rust: N/A (out-of-scope: no Go-style context; configure on client/plan) | Tests: N/A
+- [x] `func SetSessionID(ctx context.Context, sessionID uint64) context.Context` | Rust: N/A (out-of-scope: no Go-style context) | Tests: N/A
+- [x] `func Some[T interface{}](inner T) Option[T]` | Rust: N/A (out-of-scope: use `Some(inner)`) | Tests: N/A
+- [x] `func TraceExecDetailsEnabled(ctx context.Context) bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func WithInternalSourceAndTaskType(ctx context.Context, source, taskName string) context.Context` | Rust: N/A (out-of-scope: no Go-style context) | Tests: N/A
+- [x] `func WithInternalSourceType(ctx context.Context, source string) context.Context` | Rust: N/A (out-of-scope: no Go-style context) | Tests: N/A
+- [x] `func WithRecovery(exec func(), recoverFn func(r interface{}))` | Rust: N/A (out-of-scope: Rust panics use `catch_unwind` explicitly) | Tests: N/A
+- [x] `func WithResourceGroupName(ctx context.Context, groupName string) context.Context` | Rust: N/A (out-of-scope: no Go-style context; configure on client/plan) | Tests: N/A
 
 ### Consts
-- [ ] `ExplicitTypeBR` | Rust:  | Tests: 
-- [ ] `ExplicitTypeBackground` | Rust:  | Tests: 
-- [ ] `ExplicitTypeDDL` | Rust:  | Tests: 
-- [ ] `ExplicitTypeDumpling` | Rust:  | Tests: 
-- [ ] `ExplicitTypeEmpty` | Rust:  | Tests: 
-- [ ] `ExplicitTypeLightning` | Rust:  | Tests: 
-- [ ] `ExplicitTypeStats` | Rust:  | Tests: 
-- [ ] `ExternalRequest` | Rust:  | Tests: 
-- [ ] `GCTimeFormat` | Rust:  | Tests: 
-- [ ] `InternalRequest` | Rust:  | Tests: 
-- [ ] `InternalRequestPrefix` | Rust:  | Tests: 
-- [ ] `InternalTxnGC` | Rust:  | Tests: 
-- [ ] `InternalTxnMeta` | Rust:  | Tests: 
-- [ ] `InternalTxnOthers` | Rust:  | Tests: 
-- [ ] `InternalTxnStats` | Rust:  | Tests: 
-- [ ] `SourceUnknown` | Rust:  | Tests: 
+- [x] `ExplicitTypeBR` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ExplicitTypeBackground` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ExplicitTypeDDL` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ExplicitTypeDumpling` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ExplicitTypeEmpty` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ExplicitTypeLightning` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ExplicitTypeStats` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ExternalRequest` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `GCTimeFormat` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `InternalRequest` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `InternalRequestPrefix` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `InternalTxnGC` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `InternalTxnMeta` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `InternalTxnOthers` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `InternalTxnStats` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `SourceUnknown` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Vars
-- [ ] `CommitDetailCtxKey` | Rust:  | Tests: 
-- [ ] `ExecDetailsKey` | Rust:  | Tests: 
-- [ ] `ExplicitTypeList` | Rust:  | Tests: 
-- [ ] `LockKeysDetailCtxKey` | Rust:  | Tests: 
-- [ ] `RUDetailsCtxKey` | Rust:  | Tests: 
-- [ ] `RequestSourceKey` | Rust:  | Tests: 
-- [ ] `RequestSourceTypeKey` | Rust:  | Tests: 
-- [ ] `SessionID` | Rust:  | Tests: 
+- [x] `CommitDetailCtxKey` | Rust: N/A (out-of-scope: no Go-style context keys) | Tests: N/A
+- [x] `ExecDetailsKey` | Rust: N/A (out-of-scope: no Go-style context keys) | Tests: N/A
+- [x] `ExplicitTypeList` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `LockKeysDetailCtxKey` | Rust: N/A (out-of-scope: no Go-style context keys) | Tests: N/A
+- [x] `RUDetailsCtxKey` | Rust: N/A (out-of-scope: no Go-style context keys) | Tests: N/A
+- [x] `RequestSourceKey` | Rust: N/A (out-of-scope: no Go-style context keys) | Tests: N/A
+- [x] `RequestSourceTypeKey` | Rust: N/A (out-of-scope: no Go-style context keys) | Tests: N/A
+- [x] `SessionID` | Rust: N/A (out-of-scope: no Go-style context keys) | Tests: N/A
 
 ### Methods
-- [ ] `func (cd *CommitDetails) Clone() *CommitDetails` | Rust:  | Tests: 
-- [ ] `func (cd *CommitDetails) Merge(other *CommitDetails)` | Rust:  | Tests: 
-- [ ] `func (cd *CommitDetails) MergeCommitReqDetails(reqDuration time.Duration, regionID uint64, addr string, execDetails *kvrpcpb.ExecDetailsV2)` | Rust:  | Tests: 
-- [ ] `func (cd *CommitDetails) MergeFlushReqDetails(reqDuration time.Duration, regionID uint64, addr string, execDetails *kvrpcpb.ExecDetailsV2)` | Rust:  | Tests: 
-- [ ] `func (cd *CommitDetails) MergePrewriteReqDetails(reqDuration time.Duration, regionID uint64, addr string, execDetails *kvrpcpb.ExecDetailsV2)` | Rust:  | Tests: 
-- [ ] `func (d *CommitTSLagDetails) Merge(other *CommitTSLagDetails)` | Rust:  | Tests: 
-- [ ] `func (ed *TiKVExecDetails) String() string` | Rust:  | Tests: 
-- [ ] `func (ld *LockKeysDetails) Clone() *LockKeysDetails` | Rust:  | Tests: 
-- [ ] `func (ld *LockKeysDetails) Merge(lockKey *LockKeysDetails)` | Rust:  | Tests: 
-- [ ] `func (ld *LockKeysDetails) MergeReqDetails(reqDuration time.Duration, regionID uint64, addr string, execDetails *kvrpcpb.ExecDetailsV2)` | Rust:  | Tests: 
-- [ ] `func (m InterceptedPDClient) GetPrevRegion(ctx context.Context, key []byte, opts ...opt.GetRegionOption) (*router.Region, error)` | Rust:  | Tests: 
-- [ ] `func (m InterceptedPDClient) GetRegion(ctx context.Context, key []byte, opts ...opt.GetRegionOption) (*router.Region, error)` | Rust:  | Tests: 
-- [ ] `func (m InterceptedPDClient) GetRegionByID(ctx context.Context, regionID uint64, opts ...opt.GetRegionOption) (*router.Region, error)` | Rust:  | Tests: 
-- [ ] `func (m InterceptedPDClient) GetStore(ctx context.Context, storeID uint64) (*metapb.Store, error)` | Rust:  | Tests: 
-- [ ] `func (m InterceptedPDClient) GetTS(ctx context.Context) (int64, int64, error)` | Rust:  | Tests: 
-- [ ] `func (m InterceptedPDClient) GetTSAsync(ctx context.Context) tso.TSFuture` | Rust:  | Tests: 
-- [ ] `func (m InterceptedPDClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int, opts ...opt.GetRegionOption) ([]*router.Region, error)` | Rust:  | Tests: 
-- [ ] `func (m InterceptedPDClient) WithCallerComponent(component caller.Component) pd.Client` | Rust:  | Tests: 
-- [ ] `func (o Option[T]) Inner() *T` | Rust:  | Tests: 
-- [ ] `func (r *RateLimit) GetCapacity() int` | Rust:  | Tests: 
-- [ ] `func (r *RateLimit) GetToken(done <-chan struct{}) (exit bool)` | Rust:  | Tests: 
-- [ ] `func (r *RateLimit) PutToken()` | Rust:  | Tests: 
-- [ ] `func (r *RequestSource) GetRequestSource() string` | Rust:  | Tests: 
-- [ ] `func (r *RequestSource) SetExplicitRequestSourceType(tp string)` | Rust:  | Tests: 
-- [ ] `func (r *RequestSource) SetRequestSourceInternal(internal bool)` | Rust:  | Tests: 
-- [ ] `func (r *RequestSource) SetRequestSourceType(tp string)` | Rust:  | Tests: 
-- [ ] `func (rd *RUDetails) Clone() *RUDetails` | Rust:  | Tests: 
-- [ ] `func (rd *RUDetails) Merge(other *RUDetails)` | Rust:  | Tests: 
-- [ ] `func (rd *RUDetails) RRU() float64` | Rust:  | Tests: 
-- [ ] `func (rd *RUDetails) RUWaitDuration() time.Duration` | Rust:  | Tests: 
-- [ ] `func (rd *RUDetails) String() string` | Rust:  | Tests: 
-- [ ] `func (rd *RUDetails) Update(consumption *rmpb.Consumption, waitDuration time.Duration)` | Rust:  | Tests: 
-- [ ] `func (rd *RUDetails) WRU() float64` | Rust:  | Tests: 
-- [ ] `func (rd *ResolveLockDetail) Merge(resolveLock *ResolveLockDetail)` | Rust:  | Tests: 
-- [ ] `func (s *TSSet) GetAll() []uint64` | Rust:  | Tests: 
-- [ ] `func (s *TSSet) Put(tss ...uint64)` | Rust:  | Tests: 
-- [ ] `func (sd *ScanDetail) Merge(scanDetail *ScanDetail)` | Rust:  | Tests: 
-- [ ] `func (sd *ScanDetail) MergeFromScanDetailV2(scanDetail *kvrpcpb.ScanDetailV2)` | Rust:  | Tests: 
-- [ ] `func (sd *ScanDetail) String() string` | Rust:  | Tests: 
-- [ ] `func (td *TimeDetail) Merge(detail *TimeDetail)` | Rust:  | Tests: 
-- [ ] `func (td *TimeDetail) MergeFromTimeDetail(timeDetailV2 *kvrpcpb.TimeDetailV2, timeDetail *kvrpcpb.TimeDetail)` | Rust:  | Tests: 
-- [ ] `func (td *TimeDetail) String() string` | Rust:  | Tests: 
-- [ ] `func (wd *WriteDetail) Merge(writeDetail *WriteDetail)` | Rust:  | Tests: 
-- [ ] `func (wd *WriteDetail) MergeFromWriteDetailPb(pb *kvrpcpb.WriteDetail)` | Rust:  | Tests: 
-- [ ] `func (wd *WriteDetail) String() string` | Rust:  | Tests: 
+- [x] `func (cd *CommitDetails) Clone() *CommitDetails` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (cd *CommitDetails) Merge(other *CommitDetails)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (cd *CommitDetails) MergeCommitReqDetails(reqDuration time.Duration, regionID uint64, addr string, execDetails *kvrpcpb.ExecDetailsV2)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (cd *CommitDetails) MergeFlushReqDetails(reqDuration time.Duration, regionID uint64, addr string, execDetails *kvrpcpb.ExecDetailsV2)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (cd *CommitDetails) MergePrewriteReqDetails(reqDuration time.Duration, regionID uint64, addr string, execDetails *kvrpcpb.ExecDetailsV2)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (d *CommitTSLagDetails) Merge(other *CommitTSLagDetails)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (ed *TiKVExecDetails) String() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (ld *LockKeysDetails) Clone() *LockKeysDetails` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (ld *LockKeysDetails) Merge(lockKey *LockKeysDetails)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (ld *LockKeysDetails) MergeReqDetails(reqDuration time.Duration, regionID uint64, addr string, execDetails *kvrpcpb.ExecDetailsV2)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (m InterceptedPDClient) GetPrevRegion(ctx context.Context, key []byte, opts ...opt.GetRegionOption) (*router.Region, error)` | Rust: N/A (out-of-scope: PD client is internal) | Tests: N/A
+- [x] `func (m InterceptedPDClient) GetRegion(ctx context.Context, key []byte, opts ...opt.GetRegionOption) (*router.Region, error)` | Rust: N/A (out-of-scope: PD client is internal) | Tests: N/A
+- [x] `func (m InterceptedPDClient) GetRegionByID(ctx context.Context, regionID uint64, opts ...opt.GetRegionOption) (*router.Region, error)` | Rust: N/A (out-of-scope: PD client is internal) | Tests: N/A
+- [x] `func (m InterceptedPDClient) GetStore(ctx context.Context, storeID uint64) (*metapb.Store, error)` | Rust: N/A (out-of-scope: PD client is internal) | Tests: N/A
+- [x] `func (m InterceptedPDClient) GetTS(ctx context.Context) (int64, int64, error)` | Rust: N/A (out-of-scope: PD client is internal) | Tests: N/A
+- [x] `func (m InterceptedPDClient) GetTSAsync(ctx context.Context) tso.TSFuture` | Rust: N/A (out-of-scope: PD client is internal) | Tests: N/A
+- [x] `func (m InterceptedPDClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int, opts ...opt.GetRegionOption) ([]*router.Region, error)` | Rust: N/A (out-of-scope: PD client is internal) | Tests: N/A
+- [x] `func (m InterceptedPDClient) WithCallerComponent(component caller.Component) pd.Client` | Rust: N/A (out-of-scope: PD client is internal) | Tests: N/A
+- [x] `func (o Option[T]) Inner() *T` | Rust: N/A (out-of-scope: use `Option<T>` API) | Tests: N/A
+- [x] `func (r *RateLimit) GetCapacity() int` | Rust: N/A (out-of-scope: use `tokio::sync::Semaphore`) | Tests: N/A
+- [x] `func (r *RateLimit) GetToken(done <-chan struct{}) (exit bool)` | Rust: N/A (out-of-scope: use `tokio::sync::Semaphore`) | Tests: N/A
+- [x] `func (r *RateLimit) PutToken()` | Rust: N/A (out-of-scope: use `tokio::sync::Semaphore`) | Tests: N/A
+- [x] `func (r *RequestSource) GetRequestSource() string` | Rust: N/A (out-of-scope: no Go-style context; pass request source string explicitly) | Tests: N/A
+- [x] `func (r *RequestSource) SetExplicitRequestSourceType(tp string)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (r *RequestSource) SetRequestSourceInternal(internal bool)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (r *RequestSource) SetRequestSourceType(tp string)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (rd *RUDetails) Clone() *RUDetails` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (rd *RUDetails) Merge(other *RUDetails)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (rd *RUDetails) RRU() float64` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (rd *RUDetails) RUWaitDuration() time.Duration` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (rd *RUDetails) String() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (rd *RUDetails) Update(consumption *rmpb.Consumption, waitDuration time.Duration)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (rd *RUDetails) WRU() float64` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (rd *ResolveLockDetail) Merge(resolveLock *ResolveLockDetail)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (s *TSSet) GetAll() []uint64` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (s *TSSet) Put(tss ...uint64)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (sd *ScanDetail) Merge(scanDetail *ScanDetail)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (sd *ScanDetail) MergeFromScanDetailV2(scanDetail *kvrpcpb.ScanDetailV2)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (sd *ScanDetail) String() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (td *TimeDetail) Merge(detail *TimeDetail)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (td *TimeDetail) MergeFromTimeDetail(timeDetailV2 *kvrpcpb.TimeDetailV2, timeDetail *kvrpcpb.TimeDetail)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (td *TimeDetail) String() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (wd *WriteDetail) Merge(writeDetail *WriteDetail)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (wd *WriteDetail) MergeFromWriteDetailPb(pb *kvrpcpb.WriteDetail)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (wd *WriteDetail) String() string` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ## util/async (package async)
 
 ### Types
-- [ ] `type Callback interface` | Rust:  | Tests: 
-- [ ] `type Executor interface` | Rust:  | Tests: 
-- [ ] `type Pool interface` | Rust:  | Tests: 
-- [ ] `type RunLoop struct` | Rust:  | Tests: 
-- [ ] `type State uint32` | Rust:  | Tests: 
+- [x] `type Callback interface` | Rust: N/A (out-of-scope: Rust uses `Future`/async closures) | Tests: N/A
+- [x] `type Executor interface` | Rust: N/A (out-of-scope: use Tokio executor) | Tests: N/A
+- [x] `type Pool interface` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `type RunLoop struct` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `type State uint32` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Functions
-- [ ] `func NewCallback[T any](e Executor, f func(T, error)) Callback[T]` | Rust:  | Tests: 
-- [ ] `func NewRunLoop() *RunLoop` | Rust:  | Tests: 
+- [x] `func NewCallback[T any](e Executor, f func(T, error)) Callback[T]` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func NewRunLoop() *RunLoop` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Consts
-- [ ] `StateIdle` | Rust:  | Tests: 
-- [ ] `StateRunning` | Rust:  | Tests: 
-- [ ] `StateWaiting` | Rust:  | Tests: 
+- [x] `StateIdle` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `StateRunning` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `StateWaiting` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Vars
 - (none)
 
 ### Methods
-- [ ] `func (l *RunLoop) Append(fs ...func())` | Rust:  | Tests: 
-- [ ] `func (l *RunLoop) Exec(ctx context.Context) (int, error)` | Rust:  | Tests: 
-- [ ] `func (l *RunLoop) Go(f func())` | Rust:  | Tests: 
-- [ ] `func (l *RunLoop) NumRunnable() int` | Rust:  | Tests: 
-- [ ] `func (l *RunLoop) State() State` | Rust:  | Tests: 
+- [x] `func (l *RunLoop) Append(fs ...func())` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (l *RunLoop) Exec(ctx context.Context) (int, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (l *RunLoop) Go(f func())` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (l *RunLoop) NumRunnable() int` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (l *RunLoop) State() State` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ## util/codec (package codec)
 
@@ -1792,26 +1792,26 @@ Conventions:
 - (none)
 
 ### Functions
-- [ ] `func DecodeBytes(b []byte, buf []byte) ([]byte, []byte, error)` | Rust:  | Tests: 
-- [ ] `func DecodeCmpUintToInt(u uint64) int64` | Rust:  | Tests: 
-- [ ] `func DecodeComparableUvarint(b []byte) ([]byte, uint64, error)` | Rust:  | Tests: 
-- [ ] `func DecodeComparableVarint(b []byte) ([]byte, int64, error)` | Rust:  | Tests: 
-- [ ] `func DecodeInt(b []byte) ([]byte, int64, error)` | Rust:  | Tests: 
-- [ ] `func DecodeIntDesc(b []byte) ([]byte, int64, error)` | Rust:  | Tests: 
-- [ ] `func DecodeUint(b []byte) ([]byte, uint64, error)` | Rust:  | Tests: 
-- [ ] `func DecodeUintDesc(b []byte) ([]byte, uint64, error)` | Rust:  | Tests: 
-- [ ] `func DecodeUvarint(b []byte) ([]byte, uint64, error)` | Rust:  | Tests: 
-- [ ] `func DecodeVarint(b []byte) ([]byte, int64, error)` | Rust:  | Tests: 
-- [ ] `func EncodeBytes(b []byte, data []byte) []byte` | Rust:  | Tests: 
-- [ ] `func EncodeComparableUvarint(b []byte, v uint64) []byte` | Rust:  | Tests: 
-- [ ] `func EncodeComparableVarint(b []byte, v int64) []byte` | Rust:  | Tests: 
-- [ ] `func EncodeInt(b []byte, v int64) []byte` | Rust:  | Tests: 
-- [ ] `func EncodeIntDesc(b []byte, v int64) []byte` | Rust:  | Tests: 
-- [ ] `func EncodeIntToCmpUint(v int64) uint64` | Rust:  | Tests: 
-- [ ] `func EncodeUint(b []byte, v uint64) []byte` | Rust:  | Tests: 
-- [ ] `func EncodeUintDesc(b []byte, v uint64) []byte` | Rust:  | Tests: 
-- [ ] `func EncodeUvarint(b []byte, v uint64) []byte` | Rust:  | Tests: 
-- [ ] `func EncodeVarint(b []byte, v int64) []byte` | Rust:  | Tests: 
+- [x] `func DecodeBytes(b []byte, buf []byte) ([]byte, []byte, error)` | Rust: N/A (out-of-scope: internal encoding helpers not exposed) | Tests: N/A
+- [x] `func DecodeCmpUintToInt(u uint64) int64` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func DecodeComparableUvarint(b []byte) ([]byte, uint64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func DecodeComparableVarint(b []byte) ([]byte, int64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func DecodeInt(b []byte) ([]byte, int64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func DecodeIntDesc(b []byte) ([]byte, int64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func DecodeUint(b []byte) ([]byte, uint64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func DecodeUintDesc(b []byte) ([]byte, uint64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func DecodeUvarint(b []byte) ([]byte, uint64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func DecodeVarint(b []byte) ([]byte, int64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func EncodeBytes(b []byte, data []byte) []byte` | Rust: N/A (capability: memcomparable bytes encoding in `kv::codec`) | Tests: N/A
+- [x] `func EncodeComparableUvarint(b []byte, v uint64) []byte` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func EncodeComparableVarint(b []byte, v int64) []byte` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func EncodeInt(b []byte, v int64) []byte` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func EncodeIntDesc(b []byte, v int64) []byte` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func EncodeIntToCmpUint(v int64) uint64` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func EncodeUint(b []byte, v uint64) []byte` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func EncodeUintDesc(b []byte, v uint64) []byte` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func EncodeUvarint(b []byte, v uint64) []byte` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func EncodeVarint(b []byte, v int64) []byte` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Consts
 - (none)
@@ -1834,7 +1834,7 @@ Conventions:
 - (none)
 
 ### Vars
-- [ ] `InTest` | Rust:  | Tests: 
+- [x] `InTest` | Rust: N/A (out-of-scope: Rust tests use `cfg(test)`/features) | Tests: N/A
 
 ### Methods
 - (none)
@@ -1848,7 +1848,7 @@ Conventions:
 - (none)
 
 ### Consts
-- [ ] `RaceEnabled` | Rust:  | Tests: 
+- [x] `RaceEnabled` | Rust: N/A (out-of-scope: Rust has no data race mode switch like Go) | Tests: N/A
 
 ### Vars
 - (none)
@@ -1862,11 +1862,11 @@ Conventions:
 - (none)
 
 ### Functions
-- [ ] `func Key(key []byte) string` | Rust:  | Tests: 
-- [ ] `func KeyBytes(key []byte) []byte` | Rust:  | Tests: 
-- [ ] `func NeedRedact() bool` | Rust:  | Tests: 
-- [ ] `func RedactKeyErrIfNecessary(err *kvrpcpb.KeyError)` | Rust:  | Tests: 
-- [ ] `func String(b []byte) (s string)` | Rust:  | Tests: 
+- [x] `func Key(key []byte) string` | Rust: N/A (out-of-scope: use structured logging + avoid logging raw keys) | Tests: N/A
+- [x] `func KeyBytes(key []byte) []byte` | Rust: N/A (out-of-scope: use structured logging + avoid logging raw keys) | Tests: N/A
+- [x] `func NeedRedact() bool` | Rust: N/A (out-of-scope: no global redact toggle) | Tests: N/A
+- [x] `func RedactKeyErrIfNecessary(err *kvrpcpb.KeyError)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func String(b []byte) (s string)` | Rust: N/A (out-of-scope: avoid logging raw key bytes) | Tests: N/A
 
 ### Consts
 - (none)

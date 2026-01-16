@@ -9,15 +9,19 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- config/kv/util：收敛剩余导出符号（Rust mapping / capability-only / out-of-scope），清空 checklist 未标注项
+- 验证与收尾：fmt/clippy + feature 组合（no-default-features）构建/测试
   - 计划：
-    - `config`：PD/TiKV client config / batch policy / ParsePath 等标注 out-of-scope（Rust 侧显式 `Config`/builder 替代）
-    - `kv`：将 `ReplicaReadType` 常量/方法映射到 `ReplicaReadType`；`KeyFlags/FlagsOp` 映射到 `transaction::{KeyFlags,FlagsOp}`；其余 internal helper 标注 capability-only/out-of-scope
-    - `util/*`：context/execdetails/pd interceptor/async/codec/redact 多数标注 out-of-scope；必要时补最小 Rust helper（如 `RateLimit/TSSet`）并加单测
+    - `cargo fmt --check`
+    - `cargo test` / `cargo test --no-default-features`
+    - `cargo clippy`（必要时做最小修复，不做无关重构）
 
 # 待做工作
 
 # 已完成工作
+
+- config/kv/util：收敛剩余导出符号（Rust mapping / capability-only / out-of-scope），清空 checklist 未标注项
+  - 关键决策：Go `config/kv/util` 大量导出项为实现细节/Go context helpers；Rust 侧以 `Config` + builder/typed API 替代，统一标注 out-of-scope/capability-only
+  - 文件：`.codex/progress/parity-checklist.md`，`.codex/progress/daemon.md`
 
 - rawkv：补齐剩余 public API（Scan/ReverseScan/ClusterID）+ option/probe 取舍，并更新 checklist
   - 关键决策：不复刻 Go `RawOption`/functional options；改为 `Config` + chainable builder（`with_cf/with_request_source/...`）；`GetPDClient/Probe` 等保持 out-of-scope
