@@ -13,9 +13,18 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- （无）
+- docs：补齐 crate-level “how to test/benchmark/tiup” 开发者指南（README/doc 分散，整理到单一入口）
+  - 计划：新增 `new-client-rust/doc/development.md`（fmt/clippy/unit/integration/doc/bench/tiup）；README 加链接；CI 不改
+
+- safety：梳理/注释关键 unsafe 合同并加回归单测（仅覆盖当前仍存在的 unsafe）
+  - 计划：枚举 `unsafe {}` 点；为每处补齐 `// SAFETY:` 说明（若缺）；挑 1-2 个关键点加单测/断言
 
 # 已完成工作
+
+- hardening：清理 new-client-rust 残留的 `todo!/unimplemented!`（避免隐藏 panic）
+  - 关键决策：mock 层用显式 `Ok/Err(Error::Unimplemented)` 替代 panic；keyspace mock 返回 Enabled meta 以便 test-util 可用
+  - 改动：MockPdClient/ReplicaReadPdClient/RegionCache test mock 补齐 `update_safepoint/update_leader/load_keyspace/get_store/...` 的返回
+  - 文件：`new-client-rust/src/mock.rs`，`new-client-rust/src/region_cache.rs`，`new-client-rust/src/transaction/transaction.rs`
 
 - tests：清零 integration/failpoint 剩余 TODO/FIXME，补齐缺失用例并稳定断言
   - 关键决策：cleanup_locks 的 rollback/region-error 走 MockPd/MockKv 单测覆盖（避免依赖真实集群触发 region error 的不稳定）

@@ -211,7 +211,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
-        unimplemented!()
+        Ok(true)
     }
 
     async fn update_leader(
@@ -219,14 +219,19 @@ impl PdClient for MockPdClient {
         _ver_id: crate::region::RegionVerId,
         _leader: metapb::Peer,
     ) -> Result<()> {
-        todo!()
+        Ok(())
     }
 
     async fn invalidate_region_cache(&self, _ver_id: crate::region::RegionVerId) {}
 
     async fn invalidate_store_cache(&self, _store_id: crate::region::StoreId) {}
 
-    async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
-        unimplemented!()
+    async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+        Ok(keyspacepb::KeyspaceMeta {
+            id: 0,
+            name: keyspace.to_owned(),
+            state: keyspacepb::KeyspaceState::Enabled as i32,
+            ..Default::default()
+        })
     }
 }

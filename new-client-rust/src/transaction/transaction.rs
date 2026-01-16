@@ -3549,11 +3549,16 @@ mod tests {
         }
 
         async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> crate::Result<bool> {
-            unimplemented!()
+            Ok(true)
         }
 
-        async fn load_keyspace(&self, _keyspace: &str) -> crate::Result<keyspacepb::KeyspaceMeta> {
-            unimplemented!()
+        async fn load_keyspace(&self, keyspace: &str) -> crate::Result<keyspacepb::KeyspaceMeta> {
+            Ok(keyspacepb::KeyspaceMeta {
+                id: 0,
+                name: keyspace.to_owned(),
+                state: keyspacepb::KeyspaceState::Enabled as i32,
+                ..Default::default()
+            })
         }
 
         async fn all_stores(&self) -> crate::Result<Vec<Store>> {

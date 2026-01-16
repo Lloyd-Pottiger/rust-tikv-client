@@ -488,27 +488,27 @@ mod test {
             self: Arc<Self>,
             _id: crate::region::StoreId,
         ) -> Result<crate::proto::metapb::Store> {
-            todo!()
+            Err(Error::Unimplemented)
         }
 
         async fn get_all_stores(self: Arc<Self>) -> Result<Vec<crate::proto::metapb::Store>> {
-            todo!()
+            Err(Error::Unimplemented)
         }
 
         async fn get_timestamp(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
-            todo!()
+            Err(Error::Unimplemented)
         }
 
         async fn get_min_ts(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
-            todo!()
+            Err(Error::Unimplemented)
         }
 
         async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
-            todo!()
+            Err(Error::Unimplemented)
         }
 
         async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
-            unimplemented!()
+            Err(Error::Unimplemented)
         }
     }
 
