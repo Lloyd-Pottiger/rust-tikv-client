@@ -9,12 +9,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- Protocol TODO（第 1 项）：启用 lite resolve lock（对齐 client-go 的 PrewriteRequest.txn_size 语义）
-  - 计划：
-    - 阅读 `client-go/txnkv/transaction/prewrite.go` / 2PC 相关代码，确认 txn_size 的设定条件与含义
-    - Rust: 移除 `txn_size=u64::MAX` 的禁用逻辑，改为传递真实 txn size（必要时对齐“超大 txn”策略）
-    - 补单测：确保请求字段与 fallback 行为对齐（至少覆盖 async-commit/1PC + pessimistic）
-
 # 待做工作
 
 - metrics/trace：补齐 feature-gate 策略与最小 public API（对齐 client-go 导出包语义）
@@ -62,3 +56,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - Parity checklist 回填（第 2 批）：`tikvrpc` entrypoints + `tikv` 核心入口标注
   - 关键决策：`tikvrpc.{CmdType,Request,Response}` 标注 out-of-scope（以 PlanBuilder + typed requests 替代）；`tikv.NewKVStore` 标注 out-of-scope（Rust 不暴露内部 store wiring）
   - 文件：`.codex/progress/parity-checklist.md`
+
+- Protocol TODO（第 1 项）：启用 lite resolve lock（对齐 client-go 的 PrewriteRequest.txn_size 语义）
+  - 关键决策：txn_size=“同一 region 内涉及的 key 数”（与 batching 无关）；region error 重试 attempt>0 时强制 txn_size=u64::MAX 以避免意外 resolve-lock-lite
+  - 文件：`new-client-rust/src/transaction/requests.rs`
+  - 测试：新增 prewrite txn_size + retry fallback + async-commit/1PC/pessimistic 覆盖单测

@@ -251,8 +251,6 @@ pub fn new_prewrite_request(
     req.primary_lock = primary_lock;
     req.start_version = start_version;
     req.lock_ttl = lock_ttl;
-    // FIXME: Lite resolve lock is currently disabled
-    req.txn_size = u64::MAX;
 
     req
 }
@@ -277,8 +275,18 @@ impl KvRequest for kvrpcpb::PrewriteRequest {
     type Response = kvrpcpb::PrewriteResponse;
 }
 
+#[derive(Clone, Debug)]
+pub struct PrewriteShard {
+    pub mutations: Vec<kvrpcpb::Mutation>,
+    /// The number of keys involved in this transaction *within the target region*.
+    ///
+    /// This mirrors client-go's semantics: all locks written in the same region should carry the
+    /// same `txn_size` (regardless of batching).
+    pub txn_size: u64,
+}
+
 impl Shardable for kvrpcpb::PrewriteRequest {
-    type Shard = Vec<kvrpcpb::Mutation>;
+    type Shard = PrewriteShard;
 
     fn shards(
         &self,
@@ -289,33 +297,55 @@ impl Shardable for kvrpcpb::PrewriteRequest {
 
         region_stream_for_keys(mutations.into_iter(), pd_client.clone())
             .flat_map(|result| match result {
-                Ok((mutations, region)) => stream::iter(kvrpcpb::PrewriteRequest::batches(
-                    mutations,
-                    TXN_COMMIT_BATCH_SIZE,
-                ))
-                .map(move |batch| Ok((batch, region.clone())))
-                .boxed(),
+                Ok((mutations, region)) => {
+                    let txn_size = mutations.len() as u64;
+                    stream::iter(kvrpcpb::PrewriteRequest::batches(
+                        mutations,
+                        TXN_COMMIT_BATCH_SIZE,
+                    ))
+                    .map(move |batch| {
+                        Ok((
+                            PrewriteShard {
+                                mutations: batch,
+                                txn_size,
+                            },
+                            region.clone(),
+                        ))
+                    })
+                    .boxed()
+                }
                 Err(e) => stream::iter(Err(e)).boxed(),
             })
             .boxed()
     }
 
     fn apply_shard(&mut self, shard: Self::Shard) {
+        let is_primary_shard = shard.mutations.iter().any(|m| m.key == self.primary_lock);
+
         // Only need to set secondary keys if we're sending the primary key.
-        if self.use_async_commit && !self.mutations.iter().any(|m| m.key == self.primary_lock) {
+        if self.use_async_commit && !is_primary_shard {
             self.secondaries = vec![];
         }
 
         // Only if there is only one request to send
-        if self.try_one_pc && shard.len() != self.secondaries.len() + 1 {
+        if self.try_one_pc
+            && (!is_primary_shard || shard.mutations.len() != self.secondaries.len() + 1)
+        {
             self.try_one_pc = false;
         }
 
-        self.mutations = shard;
+        self.txn_size = shard.txn_size;
+        self.mutations = shard.mutations;
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
-        store.apply_to_request(self)
+        store.apply_to_request(self)?;
+        // When we retry due to region errors we may lose the original region-level txn size
+        // information. Disable resolve-lock-lite for these requests to match client-go.
+        if store.attempt > 0 {
+            self.txn_size = u64::MAX;
+        }
+        Ok(())
     }
 }
 
@@ -1039,13 +1069,157 @@ impl Merge<kvrpcpb::UnsafeDestroyRangeResponse> for Collect {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+
     use crate::common::Error::PessimisticLockError;
     use crate::common::Error::ResolveLockError;
+    use crate::mock::MockPdClient;
+    use crate::pd::PdClient;
     use crate::proto::kvrpcpb;
     use crate::request::plan::Merge;
     use crate::request::CollectWithShard;
     use crate::request::ResponseWithShard;
+    use crate::request::Shardable;
     use crate::KvPair;
+
+    #[tokio::test]
+    async fn test_prewrite_txn_size_is_region_key_count_and_retry_disables_lite() {
+        let pd = Arc::new(MockPdClient::default());
+
+        let keys: Vec<Vec<u8>> = vec![
+            vec![10],
+            vec![2],
+            vec![1],
+            vec![11],
+            vec![5],
+            vec![12],
+            vec![4],
+            vec![3],
+        ];
+        let primary_lock = vec![1];
+        let secondaries = keys
+            .iter()
+            .filter(|k| k.as_slice() != primary_lock.as_slice())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mutations = keys
+            .iter()
+            .map(|k| kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: k.clone(),
+                value: vec![0],
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+
+        let mut req = super::new_prewrite_request(mutations, primary_lock.clone(), 42, 100);
+        // Cover async-commit + 1PC flag handling in sharding.
+        req.use_async_commit = true;
+        req.try_one_pc = true;
+        req.secondaries = secondaries;
+
+        let shards = req.shards(&pd).collect::<Vec<_>>().await;
+        assert_eq!(
+            shards.len(),
+            2,
+            "expected 2 regions (mock region1 + region2)"
+        );
+
+        let mut saw_primary = false;
+        for shard in shards {
+            let (shard, region) = shard.unwrap();
+            let expected_txn_size = match region.region.id {
+                1 => 5, // keys < 10
+                2 => 3, // keys in [10, 250..)
+                other => panic!("unexpected region id {other}"),
+            };
+            assert_eq!(
+                shard.txn_size, expected_txn_size,
+                "unexpected txn_size for region {}",
+                region.region.id
+            );
+
+            let mut sharded_req = req.clone_then_apply_shard(shard.clone());
+            assert_eq!(sharded_req.txn_size, shard.txn_size);
+
+            let is_primary_shard = shard
+                .mutations
+                .iter()
+                .any(|m| m.key.as_slice() == primary_lock.as_slice());
+            if is_primary_shard {
+                saw_primary = true;
+                assert!(
+                    !sharded_req.secondaries.is_empty(),
+                    "primary prewrite should include secondaries"
+                );
+            } else {
+                assert!(
+                    sharded_req.secondaries.is_empty(),
+                    "secondary prewrite should not include secondaries"
+                );
+            }
+            assert!(
+                !sharded_req.try_one_pc,
+                "1PC must be disabled when prewrite is split into multiple requests"
+            );
+
+            // attempt=0 keeps region-level txn_size
+            let mut store = pd
+                .clone()
+                .map_region_to_store(region.clone())
+                .await
+                .unwrap();
+            store.attempt = 0;
+            sharded_req.apply_store(&store).unwrap();
+            assert_eq!(
+                sharded_req.txn_size, expected_txn_size,
+                "attempt=0 must preserve region txn_size"
+            );
+
+            // attempt>0 disables resolve-lock-lite by forcing txn_size to MAX
+            store.attempt = 1;
+            let mut retry_req = sharded_req.clone();
+            retry_req.apply_store(&store).unwrap();
+            assert_eq!(
+                retry_req.txn_size,
+                u64::MAX,
+                "attempt>0 must disable resolve-lock-lite by forcing txn_size to MAX"
+            );
+        }
+        assert!(saw_primary, "must include a primary prewrite shard");
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_prewrite_txn_size_is_region_key_count() {
+        let pd = Arc::new(MockPdClient::default());
+
+        let keys: Vec<Vec<u8>> = vec![vec![1], vec![2], vec![3], vec![10], vec![11]];
+        let mutations = keys
+            .iter()
+            .map(|k| kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: k.clone(),
+                value: vec![0],
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+
+        let req = super::new_pessimistic_prewrite_request(mutations, vec![1], 42, 100, 44);
+        let shards = req.shards(&pd).collect::<Vec<_>>().await;
+        assert_eq!(shards.len(), 2, "expected 2 regions");
+
+        for shard in shards {
+            let (shard, region) = shard.unwrap();
+            let expected_txn_size = match region.region.id {
+                1 => 3, // keys < 10
+                2 => 2, // keys in [10, 250..)
+                other => panic!("unexpected region id {other}"),
+            };
+            assert_eq!(shard.txn_size, expected_txn_size);
+        }
+    }
 
     #[tokio::test]
     async fn test_merge_pessimistic_lock_response() {
