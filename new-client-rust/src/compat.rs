@@ -43,6 +43,10 @@ where
         if self.errored {
             return Poll::Ready(None);
         }
+        // SAFETY: `self` is pinned for the duration of this call. We never move `self` itself.
+        // We manually pin-project `future` to poll it. We only replace `future` after it has
+        // completed (`Poll::Ready`), which allows dropping the previous future in place without
+        // moving it while pinned.
         unsafe {
             let this = Pin::get_unchecked_mut(self);
             match ready!(Pin::new_unchecked(&mut this.future).poll(cx)) {

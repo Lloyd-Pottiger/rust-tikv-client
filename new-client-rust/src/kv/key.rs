@@ -185,6 +185,8 @@ impl<'a> From<&'a Key> for &'a [u8] {
 
 impl<'a> From<&'a Vec<u8>> for &'a Key {
     fn from(key: &'a Vec<u8>) -> Self {
+        // SAFETY: `Key` is `#[repr(transparent)]` over `Vec<u8>`, so the layout is identical.
+        // We only create a shared reference with the same lifetime as the source reference.
         unsafe { &*(key as *const Vec<u8> as *const Key) }
     }
 }
@@ -196,6 +198,8 @@ impl AsRef<Key> for Key {
 
 impl AsRef<Key> for Vec<u8> {
     fn as_ref(&self) -> &Key {
+        // SAFETY: `Key` is `#[repr(transparent)]` over `Vec<u8>`, so the layout is identical.
+        // We only create a shared reference with the same lifetime as the source reference.
         unsafe { &*(self as *const Vec<u8> as *const Key) }
     }
 }
@@ -203,5 +207,22 @@ impl AsRef<Key> for Vec<u8> {
 impl fmt::Debug for Key {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Key({})", HexRepr(&self.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vec_key_ref_cast_round_trips_bytes() {
+        let v = vec![0xAA, 0xBB, 0xCC];
+        let k: &Key = (&v).into();
+        let bytes: &[u8] = k.into();
+        assert_eq!(bytes, v.as_slice());
+
+        let k2: &Key = v.as_ref();
+        let bytes2: &[u8] = k2.into();
+        assert_eq!(bytes2, v.as_slice());
     }
 }

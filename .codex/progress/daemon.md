@@ -9,11 +9,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- safety：审阅并加固 unsafe 代码块（补齐 SAFETY 说明 + 边界测试）
+- docs：补齐核心抽象/模块边界/关键流程的架构文档（便于后续迭代与评审）
   - 计划：
-    - `rg '\\bunsafe\\b' new-client-rust/src --glob '!*/generated/*'` 盘点所有 unsafe 点
-    - 为每个 unsafe block 增补 `// SAFETY: ...`（前置条件/不变式/为何不会 UB）
-    - 针对关键边界（Key repr cast / keyspace prefix truncate / memmove）补齐单测
+    - 产出 `new-client-rust/doc/architecture.md`：模块划分、核心对象/数据流（PD/RegionCache/PlanBuilder/Txn）
+    - 补齐关键实现注释（为什么这么做/不变式/失败模式），并在 README/guide 中加入口
+    - `cargo fmt && cargo test` 校验文档/示例
 
 # 待做工作
 
@@ -59,3 +59,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：锁中毒/字段缺失/配置异常不再 panic（返回 `Error`）；`Backoff` jitter 构造参数自动 clamp（避免 `gen_range(0..0)`）；timestamp helpers 改为 `Result`；移除 `lazy_static+regex` scheme 处理；修复 `internal_err!` 宏递归路径的作用域问题
   - 测试：补齐 scheme strip / backoff invalid params / pd retry `leader_change_retry==0` / buffer cache mismatch / timestamp negative；验证 `cargo fmt && cargo test && cargo clippy --all-targets`（含 `--no-default-features`）
   - 文件：`new-client-rust/Cargo.toml`，`new-client-rust/src/{backoff.rs,timestamp.rs,common/{errors,security}.rs,pd/retry.rs,request/{keyspace,plan,shard}.rs,transaction/{buffer,requests,transaction}.rs,region_cache.rs,kv/key.rs}`，以及相关 panic/unwrap 清理文件，`.codex/progress/daemon.md`
+
+- safety：审阅并加固 unsafe 代码块（补齐 SAFETY 说明 + 边界测试）
+  - 关键决策：`Key` repr-cast / keyspace prefix memmove / codec decode memmove / pin-projection 等 unsafe 统一补齐 SAFETY contract；短 key truncate-keyspace 视为 noop（避免 panic/UB）
+  - 测试：新增 `kv::key` repr cast roundtrip；新增 truncate-keyspace(short key)；`cargo test` 通过
+  - 文件：`new-client-rust/src/{compat.rs,kv/{key,codec}.rs,request/keyspace.rs}`，`.codex/progress/daemon.md`
+  - 验证：`cargo fmt && cargo test && cargo clippy --all-targets`

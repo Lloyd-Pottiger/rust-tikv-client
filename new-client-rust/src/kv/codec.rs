@@ -83,10 +83,10 @@ pub fn decode_bytes_in_place(data: &mut Vec<u8>, desc: bool) -> Result<()> {
             return Err(internal_err!("unexpected EOF, original key = {:?}", data));
         };
 
+        // SAFETY: This is equivalent to C's `memmove`. Source and destination are within the
+        // allocation (`marker_offset` bounds-checked above, and we only move `ENC_GROUP_SIZE`
+        // bytes). The regions may overlap, which is why we use `ptr::copy`.
         unsafe {
-            // it is semantically equivalent to C's memmove()
-            // and the src and dest may overlap
-            // if src == dest do nothing
             ptr::copy(
                 data.as_ptr().add(read_offset),
                 data.as_mut_ptr().add(write_offset),
@@ -119,6 +119,8 @@ pub fn decode_bytes_in_place(data: &mut Vec<u8>, desc: bool) -> Result<()> {
             if &data[write_offset - pad_size..write_offset] != padding_slice {
                 return Err(internal_err!("invalid key padding"));
             }
+            // SAFETY: We only shrink the vector. Bytes `[0..write_offset-pad_size)` have been
+            // copied from the original initialized data, and the padding was validated above.
             unsafe {
                 data.set_len(write_offset - pad_size);
             }

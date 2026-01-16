@@ -178,6 +178,10 @@ fn keyspace_prefix(keyspace_id: u32, key_mode: KeyMode) -> [u8; KEYSPACE_PREFIX_
 }
 
 fn prepend_bytes<const N: usize>(vec: &mut Vec<u8>, prefix: &[u8; N]) {
+    // SAFETY: We reserve `N` extra bytes so `len + N` is within capacity, then `ptr::copy` is
+    // used as a memmove to shift the initialized bytes forward by `N` within the same allocation
+    // (overlap is allowed). We then write `prefix` into the first `N` bytes and finally update
+    // the vector length.
     unsafe {
         vec.reserve_exact(N);
         std::ptr::copy(vec.as_ptr(), vec.as_mut_ptr().add(N), vec.len());
@@ -190,6 +194,9 @@ fn pretruncate_bytes<const N: usize>(vec: &mut Vec<u8>) {
     if vec.len() < N {
         return;
     }
+    // SAFETY: `vec.len() >= N`, so `add(N)` stays within the allocation. `ptr::copy` acts as a
+    // memmove to shift bytes `[N..len)` down to `[0..len-N)` (overlap is allowed). We then shrink
+    // the length; all remaining bytes are initialized.
     unsafe {
         std::ptr::copy(vec.as_ptr().add(N), vec.as_mut_ptr(), vec.len() - N);
         vec.set_len(vec.len() - N);
@@ -278,5 +285,12 @@ mod tests {
         };
         let expected_key = Key::from(vec![0xBE, 0xEF]);
         assert_eq!(key.truncate_keyspace(keyspace), expected_key);
+    }
+
+    #[test]
+    fn truncate_keyspace_is_noop_on_short_keys() {
+        let keyspace = Keyspace::Enable { keyspace_id: 1 };
+        let key = Key::from(vec![0xAB, 0xCD, 0xEF]);
+        assert_eq!(key.clone().truncate_keyspace(keyspace), key);
     }
 }
