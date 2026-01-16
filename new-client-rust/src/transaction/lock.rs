@@ -8,6 +8,7 @@ use fail::fail_point;
 use log::debug;
 use log::error;
 use tokio::sync::RwLock;
+use tokio::time::sleep;
 
 use crate::backoff::Backoff;
 use crate::backoff::DEFAULT_REGION_BACKOFF;
@@ -100,6 +101,7 @@ pub async fn resolve_locks(
             &lock.key,
             lock.lock_version,
             commit_version,
+            DEFAULT_REGION_BACKOFF,
             pd_client.clone(),
             keyspace,
             request_context,
@@ -117,21 +119,23 @@ async fn resolve_lock_with_retry(
     #[allow(clippy::ptr_arg)] key: &Vec<u8>,
     start_version: u64,
     commit_version: u64,
+    mut region_backoff: Backoff,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
     request_context: &RequestContext,
 ) -> Result<RegionVerId> {
     debug!("resolving locks with retry");
-    // FIXME: Add backoff
     let mut error = None;
     for i in 0..RESOLVE_LOCK_RETRY_LIMIT {
         debug!("resolving locks: attempt {}", (i + 1));
-        let store = pd_client.clone().store_for_key(key.into()).await?;
+        let mut store = pd_client.clone().store_for_key(key.into()).await?;
+        store.attempt = i;
         let ver_id = store.region_with_leader.ver_id();
         let request = request_context.apply_to(requests::new_resolve_lock_request(
             start_version,
             commit_version,
         ));
+        let region_store = store.clone();
         let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
             .with_request_context(request_context.clone())
             .single_region_with_store(store)
@@ -147,8 +151,20 @@ async fn resolve_lock_with_retry(
             Err(Error::ExtractedErrors(mut errors)) => {
                 // ResolveLockResponse can have at most 1 error
                 match errors.pop() {
-                    e @ Some(Error::RegionError(_)) => {
-                        error = e;
+                    Some(Error::RegionError(e)) => {
+                        let region_error = *e;
+                        error = Some(Error::RegionError(Box::new(region_error.clone())));
+                        let resolved = crate::request::plan::handle_region_error(
+                            pd_client.clone(),
+                            region_error,
+                            region_store,
+                        )
+                        .await?;
+                        if !resolved && i + 1 < RESOLVE_LOCK_RETRY_LIMIT {
+                            if let Some(duration) = region_backoff.next_delay_duration() {
+                                sleep(duration).await;
+                            }
+                        }
                         continue;
                     }
                     Some(e) => return Err(e),
@@ -489,17 +505,32 @@ mod tests {
         let key = vec![1];
         let region1 = MockPdClient::region1();
         let request_context = RequestContext::default();
-        let resolved_region =
-            resolve_lock_with_retry(&key, 1, 2, client.clone(), keyspace, &request_context)
-                .await
-                .unwrap();
+        let resolved_region = resolve_lock_with_retry(
+            &key,
+            1,
+            2,
+            Backoff::no_jitter_backoff(0, 0, RESOLVE_LOCK_RETRY_LIMIT as u32),
+            client.clone(),
+            keyspace,
+            &request_context,
+        )
+        .await
+        .unwrap();
         assert_eq!(region1.ver_id(), resolved_region);
 
         // Test resolve lock over retry limit
         fail::cfg("region-error", "10*return").unwrap();
         let key = vec![100];
-        resolve_lock_with_retry(&key, 3, 4, client, keyspace, &request_context)
-            .await
-            .expect_err("should return error");
+        resolve_lock_with_retry(
+            &key,
+            3,
+            4,
+            Backoff::no_jitter_backoff(0, 0, RESOLVE_LOCK_RETRY_LIMIT as u32),
+            client,
+            keyspace,
+            &request_context,
+        )
+        .await
+        .expect_err("should return error");
     }
 }

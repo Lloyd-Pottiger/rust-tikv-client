@@ -16,11 +16,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
     - prometheus/tracing 依赖改为可选 feature
     - 先对齐核心 counters/histograms（可渐进补齐）
 
-- Protocol TODO（后续）：lock resolver backoff / retry 参数校准
-  - 计划：
-    - 逐 TODO/FIXME 立项（从 `.codex/progress/gap-analysis.md` + `rg TODO|FIXME new-client-rust/src`）
-    - 每项补单测与行为对齐说明
-
 # 已完成工作
 
 - Core crate 基线（new-client-rust）：Raw/Txn 客户端、PD/Region 路由、request plan、Keyspace、基础 Error/RequestContext（可编译可测试）
@@ -61,3 +56,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：txn_size=“同一 region 内涉及的 key 数”（与 batching 无关）；region error 重试 attempt>0 时强制 txn_size=u64::MAX 以避免意外 resolve-lock-lite
   - 文件：`new-client-rust/src/transaction/requests.rs`
   - 测试：新增 prewrite txn_size + retry fallback + async-commit/1PC/pessimistic 覆盖单测
+
+- Protocol TODO（后续）：lock resolver backoff / retry 参数校准
+  - 关键决策：`resolve_lock_with_retry` 对 region error 引入 backoff + 复用 `handle_region_error` 做 cache/leader 更新；store.attempt 透传到 request context
+  - 文件：`new-client-rust/src/transaction/lock.rs`
+  - 测试：lock resolver 重试单测改用 0ms backoff（避免 sleep 放大测试耗时）
