@@ -59,11 +59,24 @@ mod tests {
     #[cfg(feature = "prometheus")]
     #[test]
     fn gather_contains_core_metrics() {
+        use std::time::Duration;
+
+        let _ = crate::stats::tikv_stats("test").done(Ok(()));
+        let _ = crate::stats::tikv_stats("test")
+            .done(crate::Result::<()>::Err(crate::Error::Unimplemented));
+        crate::stats::observe_backoff_sleep("grpc", Duration::from_millis(1));
+        let _ = crate::stats::pd_stats("test").done(Ok(()));
+
         super::register();
         let text = super::gather_as_text().expect("prometheus feature enabled");
-        assert!(
-            text.contains("tikv_request_total"),
-            "missing expected metric name"
-        );
+        for name in [
+            "tikv_request_total",
+            "tikv_request_duration_seconds",
+            "tikv_failed_request_total",
+            "tikv_backoff_sleep_duration_seconds",
+            "pd_request_total",
+        ] {
+            assert!(text.contains(name), "missing expected metric name: {name}");
+        }
     }
 }

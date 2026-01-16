@@ -310,267 +310,267 @@ Conventions:
 ## metrics (package metrics)
 
 ### Types
-- [ ] `type LabelPair = dto.LabelPair` | Rust:  | Tests: 
-- [ ] `type MetricVec interface` | Rust:  | Tests: 
-- [ ] `type TxnCommitCounter struct` | Rust:  | Tests: 
+- [x] `type LabelPair = dto.LabelPair` | Rust: N/A (out-of-scope: does not expose Prometheus DTO types) | Tests: N/A
+- [x] `type MetricVec interface` | Rust: N/A (out-of-scope: does not expose per-metric handles) | Tests: N/A
+- [x] `type TxnCommitCounter struct` | Rust: N/A (out-of-scope: does not expose per-metric handles) | Tests: N/A
 
 ### Functions
-- [ ] `func FindNextStaleStoreID(collector prometheus.Collector, validStoreIDs map[uint64]struct{}) uint64` | Rust:  | Tests: 
-- [ ] `func GetStoreMetricVecList() []MetricVec` | Rust:  | Tests: 
-- [ ] `func GetTxnCommitCounter() TxnCommitCounter` | Rust:  | Tests: 
+- [x] `func FindNextStaleStoreID(collector prometheus.Collector, validStoreIDs map[uint64]struct{}) uint64` | Rust: N/A (out-of-scope: no per-store metric vec list) | Tests: N/A
+- [x] `func GetStoreMetricVecList() []MetricVec` | Rust: N/A (out-of-scope: no per-metric handle list) | Tests: N/A
+- [x] `func GetTxnCommitCounter() TxnCommitCounter` | Rust: N/A (out-of-scope: no per-metric handle exposure) | Tests: N/A
 - [x] `func InitMetrics(namespace, subsystem string)` | Rust: N/A (out-of-scope: fixed metric names; use `metrics::register`) | Tests: N/A
 - [x] `func InitMetricsWithConstLabels(namespace, subsystem string, constLabels prometheus.Labels)` | Rust: N/A (out-of-scope: fixed metric names; use `metrics::register`) | Tests: N/A
-- [ ] `func ObserveReadSLI(readKeys uint64, readTime float64, readSize float64)` | Rust:  | Tests: 
+- [x] `func ObserveReadSLI(readKeys uint64, readTime float64, readSize float64)` | Rust: N/A (out-of-scope: SLI set not ported yet; can be re-added behind `prometheus`) | Tests: N/A
 - [x] `func RegisterMetrics()` | Rust: `tikv_client::metrics::register` (new-client-rust/src/metrics.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
 
 ### Consts
-- [ ] `LabelBatchRecvLoop` | Rust:  | Tests: 
-- [ ] `LabelBatchSendLoop` | Rust:  | Tests: 
-- [ ] `LblAbort` | Rust:  | Tests: 
-- [ ] `LblAddress` | Rust:  | Tests: 
-- [ ] `LblBatchGet` | Rust:  | Tests: 
-- [ ] `LblCommit` | Rust:  | Tests: 
-- [ ] `LblDirection` | Rust:  | Tests: 
-- [ ] `LblFromStore` | Rust:  | Tests: 
-- [ ] `LblGeneral` | Rust:  | Tests: 
-- [ ] `LblGet` | Rust:  | Tests: 
-- [ ] `LblInternal` | Rust:  | Tests: 
-- [ ] `LblLockKeys` | Rust:  | Tests: 
-- [ ] `LblReason` | Rust:  | Tests: 
-- [ ] `LblResult` | Rust:  | Tests: 
-- [ ] `LblRollback` | Rust:  | Tests: 
-- [ ] `LblScope` | Rust:  | Tests: 
-- [ ] `LblSource` | Rust:  | Tests: 
-- [ ] `LblStaleRead` | Rust:  | Tests: 
-- [ ] `LblStore` | Rust:  | Tests: 
-- [ ] `LblTarget` | Rust:  | Tests: 
-- [ ] `LblToStore` | Rust:  | Tests: 
-- [ ] `LblType` | Rust:  | Tests: 
+- [x] `LabelBatchRecvLoop` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LabelBatchSendLoop` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblAbort` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblAddress` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblBatchGet` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblCommit` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblDirection` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblFromStore` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblGeneral` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblGet` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblInternal` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblLockKeys` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblReason` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblResult` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblRollback` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblScope` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblSource` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblStaleRead` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblStore` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblTarget` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblToStore` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
+- [x] `LblType` | Rust: N/A (out-of-scope: does not expose metrics label consts) | Tests: N/A
 
 ### Vars
-- [ ] `AggressiveLockedKeysDerived` | Rust:  | Tests: 
-- [ ] `AggressiveLockedKeysLockedWithConflict` | Rust:  | Tests: 
-- [ ] `AggressiveLockedKeysNew` | Rust:  | Tests: 
-- [ ] `AggressiveLockedKeysNonForceLock` | Rust:  | Tests: 
-- [ ] `AsyncBatchGetCounterWithLockError` | Rust:  | Tests: 
-- [ ] `AsyncBatchGetCounterWithOK` | Rust:  | Tests: 
-- [ ] `AsyncBatchGetCounterWithOtherError` | Rust:  | Tests: 
-- [ ] `AsyncBatchGetCounterWithRegionError` | Rust:  | Tests: 
-- [ ] `AsyncCommitTxnCounterError` | Rust:  | Tests: 
-- [ ] `AsyncCommitTxnCounterOk` | Rust:  | Tests: 
-- [ ] `AsyncSendReqCounterWithOK` | Rust:  | Tests: 
-- [ ] `AsyncSendReqCounterWithOtherError` | Rust:  | Tests: 
-- [ ] `AsyncSendReqCounterWithRPCError` | Rust:  | Tests: 
-- [ ] `AsyncSendReqCounterWithRegionError` | Rust:  | Tests: 
-- [ ] `AsyncSendReqCounterWithSendError` | Rust:  | Tests: 
-- [ ] `BackoffHistogramDataNotReady` | Rust:  | Tests: 
-- [ ] `BackoffHistogramEmpty` | Rust:  | Tests: 
-- [ ] `BackoffHistogramIsWitness` | Rust:  | Tests: 
-- [ ] `BackoffHistogramLock` | Rust:  | Tests: 
-- [ ] `BackoffHistogramLockFast` | Rust:  | Tests: 
-- [ ] `BackoffHistogramPD` | Rust:  | Tests: 
-- [ ] `BackoffHistogramRPC` | Rust:  | Tests: 
-- [ ] `BackoffHistogramRegionMiss` | Rust:  | Tests: 
-- [ ] `BackoffHistogramRegionRecoveryInProgress` | Rust:  | Tests: 
-- [ ] `BackoffHistogramRegionScheduling` | Rust:  | Tests: 
-- [ ] `BackoffHistogramServerBusy` | Rust:  | Tests: 
-- [ ] `BackoffHistogramStaleCmd` | Rust:  | Tests: 
-- [ ] `BackoffHistogramTiKVDiskFull` | Rust:  | Tests: 
-- [ ] `BatchRecvHistogramError` | Rust:  | Tests: 
-- [ ] `BatchRecvHistogramOK` | Rust:  | Tests: 
-- [ ] `BatchRequestDurationDone` | Rust:  | Tests: 
-- [ ] `BatchRequestDurationRecv` | Rust:  | Tests: 
-- [ ] `BatchRequestDurationSend` | Rust:  | Tests: 
-- [ ] `LagCommitTSAttemptHistogramWithError` | Rust:  | Tests: 
-- [ ] `LagCommitTSAttemptHistogramWithOK` | Rust:  | Tests: 
-- [ ] `LagCommitTSWaitHistogramWithError` | Rust:  | Tests: 
-- [ ] `LagCommitTSWaitHistogramWithOK` | Rust:  | Tests: 
-- [ ] `LoadRegionCacheHistogramWhenCacheMiss` | Rust:  | Tests: 
-- [ ] `LoadRegionCacheHistogramWithBatchScanRegions` | Rust:  | Tests: 
-- [ ] `LoadRegionCacheHistogramWithGetStore` | Rust:  | Tests: 
-- [ ] `LoadRegionCacheHistogramWithRegionByID` | Rust:  | Tests: 
-- [ ] `LoadRegionCacheHistogramWithRegions` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithBatchResolve` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithExpired` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithNotExpired` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithQueryCheckSecondaryLocks` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithQueryTxnStatus` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithQueryTxnStatusCommitted` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithQueryTxnStatusRolledBack` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithResolve` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithResolveAsync` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithResolveForWrite` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithResolveLockLite` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithResolveLocks` | Rust:  | Tests: 
-- [ ] `LockResolverCountWithWaitExpired` | Rust:  | Tests: 
-- [ ] `OnePCTxnCounterError` | Rust:  | Tests: 
-- [ ] `OnePCTxnCounterFallback` | Rust:  | Tests: 
-- [ ] `OnePCTxnCounterOk` | Rust:  | Tests: 
-- [ ] `PrewriteAssertionUsageCounterExist` | Rust:  | Tests: 
-- [ ] `PrewriteAssertionUsageCounterNone` | Rust:  | Tests: 
-- [ ] `PrewriteAssertionUsageCounterNotExist` | Rust:  | Tests: 
-- [ ] `PrewriteAssertionUsageCounterUnknown` | Rust:  | Tests: 
-- [ ] `RawkvCmdHistogramWithBatchDelete` | Rust:  | Tests: 
-- [ ] `RawkvCmdHistogramWithBatchGet` | Rust:  | Tests: 
-- [ ] `RawkvCmdHistogramWithBatchPut` | Rust:  | Tests: 
-- [ ] `RawkvCmdHistogramWithDelete` | Rust:  | Tests: 
-- [ ] `RawkvCmdHistogramWithGet` | Rust:  | Tests: 
-- [ ] `RawkvCmdHistogramWithRawChecksum` | Rust:  | Tests: 
-- [ ] `RawkvCmdHistogramWithRawReversScan` | Rust:  | Tests: 
-- [ ] `RawkvCmdHistogramWithRawScan` | Rust:  | Tests: 
-- [ ] `RawkvSizeHistogramWithKey` | Rust:  | Tests: 
-- [ ] `RawkvSizeHistogramWithValue` | Rust:  | Tests: 
-- [ ] `ReadRequestFollowerLocalBytes` | Rust:  | Tests: 
-- [ ] `ReadRequestFollowerRemoteBytes` | Rust:  | Tests: 
-- [ ] `ReadRequestLeaderLocalBytes` | Rust:  | Tests: 
-- [ ] `ReadRequestLeaderRemoteBytes` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithBatchScanRegionsError` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithBatchScanRegionsOK` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithGetCacheMissError` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithGetCacheMissOK` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithGetRegionByIDError` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithGetRegionByIDOK` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithGetStoreError` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithGetStoreOK` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithInvalidateRegionFromCacheOK` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithInvalidateStoreRegionsOK` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithScanRegionsError` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithScanRegionsOK` | Rust:  | Tests: 
-- [ ] `RegionCacheCounterWithSendFail` | Rust:  | Tests: 
-- [ ] `SecondaryLockCleanupFailureCounterCommit` | Rust:  | Tests: 
-- [ ] `SecondaryLockCleanupFailureCounterRollback` | Rust:  | Tests: 
-- [ ] `StaleReadHitCounter` | Rust:  | Tests: 
-- [ ] `StaleReadLocalInBytes` | Rust:  | Tests: 
-- [ ] `StaleReadLocalOutBytes` | Rust:  | Tests: 
-- [ ] `StaleReadMissCounter` | Rust:  | Tests: 
-- [ ] `StaleReadRemoteInBytes` | Rust:  | Tests: 
-- [ ] `StaleReadRemoteOutBytes` | Rust:  | Tests: 
-- [ ] `StaleReadReqCrossZoneCounter` | Rust:  | Tests: 
-- [ ] `StaleReadReqLocalCounter` | Rust:  | Tests: 
-- [ ] `StatusCountWithError` | Rust:  | Tests: 
-- [ ] `StatusCountWithOK` | Rust:  | Tests: 
-- [ ] `TiKVAggressiveLockedKeysCounter` | Rust:  | Tests: 
-- [ ] `TiKVAsyncBatchGetCounter` | Rust:  | Tests: 
-- [ ] `TiKVAsyncCommitTxnCounter` | Rust:  | Tests: 
-- [ ] `TiKVAsyncSendReqCounter` | Rust:  | Tests: 
-- [ ] `TiKVBackoffHistogram` | Rust:  | Tests: 
-- [ ] `TiKVBatchBestSize` | Rust:  | Tests: 
-- [ ] `TiKVBatchClientRecycle` | Rust:  | Tests: 
-- [ ] `TiKVBatchClientUnavailable` | Rust:  | Tests: 
-- [ ] `TiKVBatchClientWaitEstablish` | Rust:  | Tests: 
-- [ ] `TiKVBatchHeadArrivalInterval` | Rust:  | Tests: 
-- [ ] `TiKVBatchMoreRequests` | Rust:  | Tests: 
-- [ ] `TiKVBatchPendingRequests` | Rust:  | Tests: 
-- [ ] `TiKVBatchRecvLoopDuration` | Rust:  | Tests: 
-- [ ] `TiKVBatchRecvTailLatency` | Rust:  | Tests: 
-- [ ] `TiKVBatchRequestDuration` | Rust:  | Tests: 
-- [ ] `TiKVBatchRequests` | Rust:  | Tests: 
-- [ ] `TiKVBatchSendLoopDuration` | Rust:  | Tests: 
-- [ ] `TiKVBatchSendTailLatency` | Rust:  | Tests: 
-- [ ] `TiKVBatchWaitOverLoad` | Rust:  | Tests: 
-- [ ] `TiKVBucketClampedCounter` | Rust:  | Tests: 
-- [ ] `TiKVFeedbackSlowScoreGauge` | Rust:  | Tests: 
-- [ ] `TiKVForwardRequestCounter` | Rust:  | Tests: 
-- [ ] `TiKVGRPCConnTransientFailureCounter` | Rust:  | Tests: 
-- [ ] `TiKVGrpcConnectionState` | Rust:  | Tests: 
-- [ ] `TiKVHealthFeedbackOpsCounter` | Rust:  | Tests: 
-- [ ] `TiKVLoadRegionCacheHistogram` | Rust:  | Tests: 
-- [ ] `TiKVLoadRegionCounter` | Rust:  | Tests: 
-- [ ] `TiKVLoadTxnSafePointCounter` | Rust:  | Tests: 
-- [ ] `TiKVLocalLatchWaitTimeHistogram` | Rust:  | Tests: 
-- [ ] `TiKVLockResolverCounter` | Rust:  | Tests: 
-- [ ] `TiKVLowResolutionTSOUpdateIntervalSecondsGauge` | Rust:  | Tests: 
-- [ ] `TiKVMinSafeTSGapSeconds` | Rust:  | Tests: 
-- [ ] `TiKVNoAvailableConnectionCounter` | Rust:  | Tests: 
-- [ ] `TiKVOnePCTxnCounter` | Rust:  | Tests: 
-- [ ] `TiKVPanicCounter` | Rust:  | Tests: 
-- [ ] `TiKVPessimisticLockKeysDuration` | Rust:  | Tests: 
-- [ ] `TiKVPipelinedFlushDuration` | Rust:  | Tests: 
-- [ ] `TiKVPipelinedFlushLenHistogram` | Rust:  | Tests: 
-- [ ] `TiKVPipelinedFlushSizeHistogram` | Rust:  | Tests: 
-- [ ] `TiKVPipelinedFlushThrottleSecondsHistogram` | Rust:  | Tests: 
-- [ ] `TiKVPreferLeaderFlowsGauge` | Rust:  | Tests: 
-- [ ] `TiKVPrewriteAssertionUsageCounter` | Rust:  | Tests: 
-- [ ] `TiKVRPCErrorCounter` | Rust:  | Tests: 
-- [ ] `TiKVRPCNetLatencyHistogram` | Rust:  | Tests: 
-- [ ] `TiKVRangeTaskPushDuration` | Rust:  | Tests: 
-- [ ] `TiKVRangeTaskStats` | Rust:  | Tests: 
-- [ ] `TiKVRawkvCmdHistogram` | Rust:  | Tests: 
-- [ ] `TiKVRawkvSizeHistogram` | Rust:  | Tests: 
-- [ ] `TiKVReadRequestBytes` | Rust:  | Tests: 
-- [ ] `TiKVReadThroughput` | Rust:  | Tests: 
-- [ ] `TiKVRegionCacheCounter` | Rust:  | Tests: 
-- [ ] `TiKVRegionErrorCounter` | Rust:  | Tests: 
-- [ ] `TiKVReplicaSelectorFailureCounter` | Rust:  | Tests: 
-- [ ] `TiKVRequestRetryTimesHistogram` | Rust:  | Tests: 
-- [ ] `TiKVSafeTSUpdateCounter` | Rust:  | Tests: 
-- [ ] `TiKVSecondaryLockCleanupFailureCounter` | Rust:  | Tests: 
-- [ ] `TiKVSendReqBySourceSummary` | Rust:  | Tests: 
-- [ ] `TiKVSendReqHistogram` | Rust:  | Tests: 
-- [ ] `TiKVSmallReadDuration` | Rust:  | Tests: 
-- [ ] `TiKVStaleReadBytes` | Rust:  | Tests: 
-- [ ] `TiKVStaleReadCounter` | Rust:  | Tests: 
-- [ ] `TiKVStaleReadReqCounter` | Rust:  | Tests: 
-- [ ] `TiKVStaleRegionFromPDCounter` | Rust:  | Tests: 
-- [ ] `TiKVStatusCounter` | Rust:  | Tests: 
-- [ ] `TiKVStatusDuration` | Rust:  | Tests: 
-- [ ] `TiKVStoreLimitErrorCounter` | Rust:  | Tests: 
-- [ ] `TiKVStoreLivenessGauge` | Rust:  | Tests: 
-- [ ] `TiKVStoreSlowScoreGauge` | Rust:  | Tests: 
-- [ ] `TiKVTSFutureWaitDuration` | Rust:  | Tests: 
-- [ ] `TiKVTTLLifeTimeReachCounter` | Rust:  | Tests: 
-- [ ] `TiKVTTLManagerHistogram` | Rust:  | Tests: 
-- [ ] `TiKVTokenWaitDuration` | Rust:  | Tests: 
-- [ ] `TiKVTwoPCTxnCounter` | Rust:  | Tests: 
-- [ ] `TiKVTxnCmdHistogram` | Rust:  | Tests: 
-- [ ] `TiKVTxnCommitBackoffCount` | Rust:  | Tests: 
-- [ ] `TiKVTxnCommitBackoffSeconds` | Rust:  | Tests: 
-- [ ] `TiKVTxnHeartBeatHistogram` | Rust:  | Tests: 
-- [ ] `TiKVTxnLagCommitTSAttemptHistogram` | Rust:  | Tests: 
-- [ ] `TiKVTxnLagCommitTSWaitHistogram` | Rust:  | Tests: 
-- [ ] `TiKVTxnRegionsNumHistogram` | Rust:  | Tests: 
-- [ ] `TiKVTxnWriteConflictCounter` | Rust:  | Tests: 
-- [ ] `TiKVTxnWriteKVCountHistogram` | Rust:  | Tests: 
-- [ ] `TiKVTxnWriteSizeHistogram` | Rust:  | Tests: 
-- [ ] `TiKVUnsafeDestroyRangeFailuresCounterVec` | Rust:  | Tests: 
-- [ ] `TiKVValidateReadTSFromPDCount` | Rust:  | Tests: 
-- [ ] `TwoPCTxnCounterError` | Rust:  | Tests: 
-- [ ] `TwoPCTxnCounterOk` | Rust:  | Tests: 
-- [ ] `TxnCmdHistogramWithBatchGetGeneral` | Rust:  | Tests: 
-- [ ] `TxnCmdHistogramWithBatchGetInternal` | Rust:  | Tests: 
-- [ ] `TxnCmdHistogramWithCommitGeneral` | Rust:  | Tests: 
-- [ ] `TxnCmdHistogramWithCommitInternal` | Rust:  | Tests: 
-- [ ] `TxnCmdHistogramWithGetGeneral` | Rust:  | Tests: 
-- [ ] `TxnCmdHistogramWithGetInternal` | Rust:  | Tests: 
-- [ ] `TxnCmdHistogramWithLockKeysGeneral` | Rust:  | Tests: 
-- [ ] `TxnCmdHistogramWithLockKeysInternal` | Rust:  | Tests: 
-- [ ] `TxnCmdHistogramWithRollbackGeneral` | Rust:  | Tests: 
-- [ ] `TxnCmdHistogramWithRollbackInternal` | Rust:  | Tests: 
-- [ ] `TxnHeartBeatHistogramError` | Rust:  | Tests: 
-- [ ] `TxnHeartBeatHistogramOK` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramCleanup` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramCleanupInternal` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramCommit` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramCommitInternal` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramPessimisticLock` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramPessimisticLockInternal` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramPessimisticRollback` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramPessimisticRollbackInternal` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramPrewrite` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramPrewriteInternal` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramWithBatchCoprocessor` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramWithBatchCoprocessorInternal` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramWithCoprocessor` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramWithCoprocessorInternal` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramWithSnapshot` | Rust:  | Tests: 
-- [ ] `TxnRegionsNumHistogramWithSnapshotInternal` | Rust:  | Tests: 
-- [ ] `TxnWriteKVCountHistogramGeneral` | Rust:  | Tests: 
-- [ ] `TxnWriteKVCountHistogramInternal` | Rust:  | Tests: 
-- [ ] `TxnWriteSizeHistogramGeneral` | Rust:  | Tests: 
-- [ ] `TxnWriteSizeHistogramInternal` | Rust:  | Tests: 
+- [x] `AggressiveLockedKeysDerived` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AggressiveLockedKeysLockedWithConflict` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AggressiveLockedKeysNew` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AggressiveLockedKeysNonForceLock` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncBatchGetCounterWithLockError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncBatchGetCounterWithOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncBatchGetCounterWithOtherError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncBatchGetCounterWithRegionError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncCommitTxnCounterError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncCommitTxnCounterOk` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncSendReqCounterWithOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncSendReqCounterWithOtherError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncSendReqCounterWithRPCError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncSendReqCounterWithRegionError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `AsyncSendReqCounterWithSendError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramDataNotReady` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramEmpty` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramIsWitness` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramLock` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramLockFast` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramPD` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramRPC` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramRegionMiss` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramRegionRecoveryInProgress` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramRegionScheduling` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramServerBusy` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramStaleCmd` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BackoffHistogramTiKVDiskFull` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BatchRecvHistogramError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BatchRecvHistogramOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BatchRequestDurationDone` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BatchRequestDurationRecv` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `BatchRequestDurationSend` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LagCommitTSAttemptHistogramWithError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LagCommitTSAttemptHistogramWithOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LagCommitTSWaitHistogramWithError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LagCommitTSWaitHistogramWithOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LoadRegionCacheHistogramWhenCacheMiss` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LoadRegionCacheHistogramWithBatchScanRegions` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LoadRegionCacheHistogramWithGetStore` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LoadRegionCacheHistogramWithRegionByID` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LoadRegionCacheHistogramWithRegions` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithBatchResolve` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithExpired` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithNotExpired` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithQueryCheckSecondaryLocks` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithQueryTxnStatus` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithQueryTxnStatusCommitted` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithQueryTxnStatusRolledBack` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithResolve` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithResolveAsync` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithResolveForWrite` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithResolveLockLite` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithResolveLocks` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `LockResolverCountWithWaitExpired` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `OnePCTxnCounterError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `OnePCTxnCounterFallback` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `OnePCTxnCounterOk` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `PrewriteAssertionUsageCounterExist` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `PrewriteAssertionUsageCounterNone` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `PrewriteAssertionUsageCounterNotExist` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `PrewriteAssertionUsageCounterUnknown` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RawkvCmdHistogramWithBatchDelete` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RawkvCmdHistogramWithBatchGet` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RawkvCmdHistogramWithBatchPut` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RawkvCmdHistogramWithDelete` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RawkvCmdHistogramWithGet` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RawkvCmdHistogramWithRawChecksum` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RawkvCmdHistogramWithRawReversScan` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RawkvCmdHistogramWithRawScan` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RawkvSizeHistogramWithKey` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RawkvSizeHistogramWithValue` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `ReadRequestFollowerLocalBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `ReadRequestFollowerRemoteBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `ReadRequestLeaderLocalBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `ReadRequestLeaderRemoteBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithBatchScanRegionsError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithBatchScanRegionsOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithGetCacheMissError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithGetCacheMissOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithGetRegionByIDError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithGetRegionByIDOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithGetStoreError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithGetStoreOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithInvalidateRegionFromCacheOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithInvalidateStoreRegionsOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithScanRegionsError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithScanRegionsOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `RegionCacheCounterWithSendFail` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `SecondaryLockCleanupFailureCounterCommit` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `SecondaryLockCleanupFailureCounterRollback` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `StaleReadHitCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `StaleReadLocalInBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `StaleReadLocalOutBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `StaleReadMissCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `StaleReadRemoteInBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `StaleReadRemoteOutBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `StaleReadReqCrossZoneCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `StaleReadReqLocalCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `StatusCountWithError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `StatusCountWithOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVAggressiveLockedKeysCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVAsyncBatchGetCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVAsyncCommitTxnCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVAsyncSendReqCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBackoffHistogram` | Rust: `tikv_client::stats::observe_backoff_sleep` → `tikv_backoff_sleep_duration_seconds` (new-client-rust/src/stats.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
+- [x] `TiKVBatchBestSize` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchClientRecycle` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchClientUnavailable` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchClientWaitEstablish` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchHeadArrivalInterval` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchMoreRequests` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchPendingRequests` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchRecvLoopDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchRecvTailLatency` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchRequestDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchRequests` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchSendLoopDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchSendTailLatency` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBatchWaitOverLoad` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVBucketClampedCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVFeedbackSlowScoreGauge` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVForwardRequestCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVGRPCConnTransientFailureCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVGrpcConnectionState` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVHealthFeedbackOpsCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVLoadRegionCacheHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVLoadRegionCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVLoadTxnSafePointCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVLocalLatchWaitTimeHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVLockResolverCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVLowResolutionTSOUpdateIntervalSecondsGauge` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVMinSafeTSGapSeconds` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVNoAvailableConnectionCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVOnePCTxnCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVPanicCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVPessimisticLockKeysDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVPipelinedFlushDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVPipelinedFlushLenHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVPipelinedFlushSizeHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVPipelinedFlushThrottleSecondsHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVPreferLeaderFlowsGauge` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVPrewriteAssertionUsageCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVRPCErrorCounter` | Rust: N/A (capability: aggregate failures via `tikv_failed_request_total`) (new-client-rust/src/stats.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
+- [x] `TiKVRPCNetLatencyHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVRangeTaskPushDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVRangeTaskStats` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVRawkvCmdHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVRawkvSizeHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVReadRequestBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVReadThroughput` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVRegionCacheCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVRegionErrorCounter` | Rust: N/A (capability: aggregate failures via `tikv_failed_request_total`) (new-client-rust/src/stats.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
+- [x] `TiKVReplicaSelectorFailureCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVRequestRetryTimesHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVSafeTSUpdateCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVSecondaryLockCleanupFailureCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVSendReqBySourceSummary` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVSendReqHistogram` | Rust: `tikv_client::stats::tikv_stats` → `tikv_request_total` + `tikv_request_duration_seconds` (new-client-rust/src/stats.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
+- [x] `TiKVSmallReadDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVStaleReadBytes` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVStaleReadCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVStaleReadReqCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVStaleRegionFromPDCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVStatusCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVStatusDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVStoreLimitErrorCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVStoreLivenessGauge` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVStoreSlowScoreGauge` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTSFutureWaitDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTTLLifeTimeReachCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTTLManagerHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTokenWaitDuration` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTwoPCTxnCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTxnCmdHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTxnCommitBackoffCount` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTxnCommitBackoffSeconds` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTxnHeartBeatHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTxnLagCommitTSAttemptHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTxnLagCommitTSWaitHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTxnRegionsNumHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTxnWriteConflictCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTxnWriteKVCountHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVTxnWriteSizeHistogram` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVUnsafeDestroyRangeFailuresCounterVec` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TiKVValidateReadTSFromPDCount` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TwoPCTxnCounterError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TwoPCTxnCounterOk` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnCmdHistogramWithBatchGetGeneral` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnCmdHistogramWithBatchGetInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnCmdHistogramWithCommitGeneral` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnCmdHistogramWithCommitInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnCmdHistogramWithGetGeneral` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnCmdHistogramWithGetInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnCmdHistogramWithLockKeysGeneral` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnCmdHistogramWithLockKeysInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnCmdHistogramWithRollbackGeneral` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnCmdHistogramWithRollbackInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnHeartBeatHistogramError` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnHeartBeatHistogramOK` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramCleanup` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramCleanupInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramCommit` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramCommitInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramPessimisticLock` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramPessimisticLockInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramPessimisticRollback` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramPessimisticRollbackInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramPrewrite` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramPrewriteInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramWithBatchCoprocessor` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramWithBatchCoprocessorInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramWithCoprocessor` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramWithCoprocessorInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramWithSnapshot` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnRegionsNumHistogramWithSnapshotInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnWriteKVCountHistogramGeneral` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnWriteKVCountHistogramInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnWriteSizeHistogramGeneral` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
+- [x] `TxnWriteSizeHistogramInternal` | Rust: N/A (out-of-scope: does not expose per-metric handles/shortcuts) | Tests: N/A
 
 ### Methods
-- [ ] `func (c TxnCommitCounter) Sub(rhs TxnCommitCounter) TxnCommitCounter` | Rust:  | Tests: 
+- [x] `func (c TxnCommitCounter) Sub(rhs TxnCommitCounter) TxnCommitCounter` | Rust: N/A (out-of-scope: does not expose per-metric handles) | Tests: N/A
 
 ## oracle (package oracle)
 
