@@ -695,409 +695,409 @@ Conventions:
 ## tikv (package tikv)
 
 ### Types
-- [ ] `type BackoffConfig = retry.Config` | Rust:  | Tests: 
-- [ ] `type Backoffer = retry.Backoffer` | Rust:  | Tests: 
-- [ ] `type BaseRegionLockResolver struct` | Rust:  | Tests: 
-- [ ] `type BatchLocateKeyRangesOpt = locate.BatchLocateKeyRangesOpt` | Rust:  | Tests: 
-- [ ] `type BinlogWriteResult = transaction.BinlogWriteResult` | Rust:  | Tests: 
-- [ ] `type Client = client.Client` | Rust:  | Tests: 
-- [ ] `type ClientEventListener = client.ClientEventListener` | Rust:  | Tests: 
-- [ ] `type ClientOpt = client.Opt` | Rust:  | Tests: 
-- [ ] `type Codec = apicodec.Codec` | Rust:  | Tests: 
-- [ ] `type CodecClient struct` | Rust:  | Tests: 
-- [ ] `type CodecPDClient = locate.CodecPDClient` | Rust:  | Tests: 
-- [ ] `type ConfigProbe struct` | Rust:  | Tests: 
-- [ ] `type EtcdSafePointKV struct` | Rust:  | Tests: 
-- [ ] `type GCOpt func(*gcOption)` | Rust:  | Tests: 
-- [ ] `type Getter = kv.Getter` | Rust:  | Tests: 
-- [ ] `type Iterator = unionstore.Iterator` | Rust:  | Tests: 
-- [ ] `type KVFilter = transaction.KVFilter` | Rust:  | Tests: 
-- [ ] `type KVStore struct` | Rust:  | Tests: 
-- [ ] `type KVTxn = transaction.KVTxn` | Rust:  | Tests: 
-- [ ] `type KeyLocation = locate.KeyLocation` | Rust:  | Tests: 
-- [ ] `type KeyRange = kv.KeyRange` | Rust:  | Tests: 
-- [ ] `type KeyspaceID = apicodec.KeyspaceID` | Rust:  | Tests: 
-- [ ] `type LabelFilter = locate.LabelFilter` | Rust:  | Tests: 
-- [ ] `type LockResolverProbe struct` | Rust:  | Tests: 
-- [ ] `type MemBuffer = unionstore.MemBuffer` | Rust:  | Tests: 
-- [ ] `type MemBufferSnapshot = unionstore.MemBufferSnapshot` | Rust:  | Tests: 
-- [ ] `type MemDB = unionstore.MemDB` | Rust:  | Tests: 
-- [ ] `type MemDBCheckpoint = unionstore.MemDBCheckpoint` | Rust:  | Tests: 
-- [ ] `type Metrics = unionstore.Metrics` | Rust:  | Tests: 
-- [ ] `type MockSafePointKV struct` | Rust:  | Tests: 
-- [ ] `type Mode = apicodec.Mode` | Rust:  | Tests: 
-- [ ] `type Option func(*KVStore)` | Rust:  | Tests: 
-- [ ] `type Pool interface` | Rust:  | Tests: 
-- [ ] `type RPCCanceller = locate.RPCCanceller` | Rust:  | Tests: 
-- [ ] `type RPCCancellerCtxKey = locate.RPCCancellerCtxKey` | Rust:  | Tests: 
-- [ ] `type RPCContext = locate.RPCContext` | Rust:  | Tests: 
-- [ ] `type RPCRuntimeStats = locate.RPCRuntimeStats` | Rust:  | Tests: 
-- [ ] `type Region = locate.Region` | Rust:  | Tests: 
-- [ ] `type RegionCache = locate.RegionCache` | Rust:  | Tests: 
-- [ ] `type RegionLockResolver interface` | Rust:  | Tests: 
-- [ ] `type RegionRequestRuntimeStats = locate.RegionRequestRuntimeStats` | Rust:  | Tests: 
-- [ ] `type RegionRequestSender = locate.RegionRequestSender` | Rust:  | Tests: 
-- [ ] `type RegionVerID = locate.RegionVerID` | Rust:  | Tests: 
-- [ ] `type SafePointKV interface` | Rust:  | Tests: 
-- [ ] `type SafePointKVOpt func(*option)` | Rust:  | Tests: 
-- [ ] `type SchemaLeaseChecker = transaction.SchemaLeaseChecker` | Rust:  | Tests: 
-- [ ] `type SchemaVer = transaction.SchemaVer` | Rust:  | Tests: 
-- [ ] `type Spool struct` | Rust:  | Tests: 
-- [ ] `type Storage interface` | Rust:  | Tests: 
-- [ ] `type Store = locate.Store` | Rust:  | Tests: 
-- [ ] `type StoreProbe struct` | Rust:  | Tests: 
-- [ ] `type StoreSelectorOption = locate.StoreSelectorOption` | Rust:  | Tests: 
-- [ ] `type TxnOption func(*transaction.TxnOptions)` | Rust:  | Tests: 
-- [ ] `type Variables = kv.Variables` | Rust:  | Tests: 
+- [x] `type BackoffConfig = retry.Config` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Backoffer = retry.Backoffer` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type BaseRegionLockResolver struct` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type BatchLocateKeyRangesOpt = locate.BatchLocateKeyRangesOpt` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type BinlogWriteResult = transaction.BinlogWriteResult` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Client = client.Client` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type ClientEventListener = client.ClientEventListener` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type ClientOpt = client.Opt` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Codec = apicodec.Codec` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type CodecClient struct` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type CodecPDClient = locate.CodecPDClient` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type ConfigProbe struct` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type EtcdSafePointKV struct` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type GCOpt func(*gcOption)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Getter = kv.Getter` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Iterator = unionstore.Iterator` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type KVFilter = transaction.KVFilter` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type KVStore struct` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type KVTxn = transaction.KVTxn` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type KeyLocation = locate.KeyLocation` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type KeyRange = kv.KeyRange` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type KeyspaceID = apicodec.KeyspaceID` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type LabelFilter = locate.LabelFilter` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type LockResolverProbe struct` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type MemBuffer = unionstore.MemBuffer` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type MemBufferSnapshot = unionstore.MemBufferSnapshot` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type MemDB = unionstore.MemDB` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type MemDBCheckpoint = unionstore.MemDBCheckpoint` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Metrics = unionstore.Metrics` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type MockSafePointKV struct` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Mode = apicodec.Mode` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Option func(*KVStore)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Pool interface` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type RPCCanceller = locate.RPCCanceller` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type RPCCancellerCtxKey = locate.RPCCancellerCtxKey` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type RPCContext = locate.RPCContext` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type RPCRuntimeStats = locate.RPCRuntimeStats` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Region = locate.Region` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type RegionCache = locate.RegionCache` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type RegionLockResolver interface` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type RegionRequestRuntimeStats = locate.RegionRequestRuntimeStats` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type RegionRequestSender = locate.RegionRequestSender` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type RegionVerID = locate.RegionVerID` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type SafePointKV interface` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type SafePointKVOpt func(*option)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type SchemaLeaseChecker = transaction.SchemaLeaseChecker` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type SchemaVer = transaction.SchemaVer` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Spool struct` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Storage interface` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Store = locate.Store` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type StoreProbe struct` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type StoreSelectorOption = locate.StoreSelectorOption` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type TxnOption func(*transaction.TxnOptions)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type Variables = kv.Variables` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 
 ### Functions
-- [ ] `func BoPDRPC() *BackoffConfig` | Rust:  | Tests: 
-- [ ] `func BoRegionMiss() *BackoffConfig` | Rust:  | Tests: 
-- [ ] `func BoTiFlashRPC() *BackoffConfig` | Rust:  | Tests: 
-- [ ] `func BoTiKVRPC() *BackoffConfig` | Rust:  | Tests: 
-- [ ] `func BoTxnLock() *BackoffConfig` | Rust:  | Tests: 
-- [ ] `func ChangePDRegionMetaCircuitBreakerSettings(apply func(config *circuitbreaker.Settings))` | Rust:  | Tests: 
-- [ ] `func CodecV1ExcludePrefixes() [][]byte` | Rust:  | Tests: 
-- [ ] `func CodecV2Prefixes() [][]byte` | Rust:  | Tests: 
+- [x] `func BoPDRPC() *BackoffConfig` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func BoRegionMiss() *BackoffConfig` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func BoTiFlashRPC() *BackoffConfig` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func BoTiKVRPC() *BackoffConfig` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func BoTxnLock() *BackoffConfig` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func ChangePDRegionMetaCircuitBreakerSettings(apply func(config *circuitbreaker.Settings))` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func CodecV1ExcludePrefixes() [][]byte` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func CodecV2Prefixes() [][]byte` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func DisableResourceControl()` | Rust: N/A (out-of-scope: no global toggle; use per-client/plan context + interceptors) | Tests: N/A
 - [x] `func EnableResourceControl()` | Rust: N/A (out-of-scope: no global toggle; use per-client/plan context + interceptors) | Tests: N/A
-- [ ] `func GetStoreTypeByMeta(store *metapb.Store) tikvrpc.EndpointType` | Rust:  | Tests: 
-- [ ] `func LoadShuttingDown() uint32` | Rust:  | Tests: 
-- [ ] `func NewBackoffer(ctx context.Context, maxSleep int) *Backoffer` | Rust:  | Tests: 
-- [ ] `func NewBackofferWithVars(ctx context.Context, maxSleep int, vars *kv.Variables) *Backoffer` | Rust:  | Tests: 
-- [ ] `func NewEtcdSafePointKV(addrs []string, tlsConfig *tls.Config, opts ...SafePointKVOpt) (*EtcdSafePointKV, error)` | Rust:  | Tests: 
-- [ ] `func NewGcResolveLockMaxBackoffer(ctx context.Context) *Backoffer` | Rust:  | Tests: 
+- [x] `func GetStoreTypeByMeta(store *metapb.Store) tikvrpc.EndpointType` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func LoadShuttingDown() uint32` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewBackoffer(ctx context.Context, maxSleep int) *Backoffer` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewBackofferWithVars(ctx context.Context, maxSleep int, vars *kv.Variables) *Backoffer` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewEtcdSafePointKV(addrs []string, tlsConfig *tls.Config, opts ...SafePointKVOpt) (*EtcdSafePointKV, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewGcResolveLockMaxBackoffer(ctx context.Context) *Backoffer` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func NewKVStore( uuid string, pdClient pd.Client, spkv SafePointKV, tikvclient Client, opt ...Option, ) (_ *KVStore, retErr error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`, internal store wiring is not public) | Tests: N/A
-- [ ] `func NewLockResolver(etcdAddrs []string, security config.Security, opts ...opt.ClientOption) ( *txnlock.LockResolver, error, )` | Rust:  | Tests: 
-- [ ] `func NewLockResolverProb(r *txnlock.LockResolver) *LockResolverProbe` | Rust:  | Tests: 
-- [ ] `func NewMockSafePointKV(opts ...SafePointKVOpt) *MockSafePointKV` | Rust:  | Tests: 
-- [ ] `func NewPDClient(pdAddrs []string) (pd.Client, error)` | Rust:  | Tests: 
-- [ ] `func NewRPCClient(opts ...ClientOpt) *client.RPCClient` | Rust:  | Tests: 
-- [ ] `func NewRPCanceller() *RPCCanceller` | Rust:  | Tests: 
-- [ ] `func NewRegionCache(pdClient pd.Client) *locate.RegionCache` | Rust:  | Tests: 
-- [ ] `func NewRegionLockResolver(identifier string, store Storage) *BaseRegionLockResolver` | Rust:  | Tests: 
-- [ ] `func NewRegionRequestRuntimeStats() *RegionRequestRuntimeStats` | Rust:  | Tests: 
-- [ ] `func NewRegionRequestSender(regionCache *RegionCache, client client.Client, readTSValidator oracle.ReadTSValidator) *RegionRequestSender` | Rust:  | Tests: 
-- [ ] `func NewRegionVerID(id, confVer, ver uint64) RegionVerID` | Rust:  | Tests: 
-- [ ] `func NewSpool(n int, dur time.Duration) *Spool` | Rust:  | Tests: 
-- [ ] `func NewTestKeyspaceTiKVStore(client Client, pdClient pd.Client, clientHijack func(Client) Client, pdClientHijack func(pd.Client) pd.Client, txnLocalLatches uint, keyspaceMeta keyspacepb.KeyspaceMeta, opt ...Option) (*KVStore, error)` | Rust:  | Tests: 
-- [ ] `func NewTestTiKVStore(client Client, pdClient pd.Client, clientHijack func(Client) Client, pdClientHijack func(pd.Client) pd.Client, txnLocalLatches uint, opt ...Option) (*KVStore, error)` | Rust:  | Tests: 
-- [ ] `func ResolveLocksForRange( ctx context.Context, resolver RegionLockResolver, maxVersion uint64, startKey []byte, endKey []byte, createBackoffFn func(context.Context) *Backoffer, scanLimit uint32, ) (rangetask.TaskStat, error)` | Rust:  | Tests: 
-- [ ] `func SetLogContextKey(key interface{})` | Rust:  | Tests: 
-- [ ] `func SetRegionCacheTTLSec(t int64)` | Rust:  | Tests: 
-- [ ] `func SetRegionCacheTTLWithJitter(base int64, jitter int64)` | Rust:  | Tests: 
+- [x] `func NewLockResolver(etcdAddrs []string, security config.Security, opts ...opt.ClientOption) ( *txnlock.LockResolver, error, )` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewLockResolverProb(r *txnlock.LockResolver) *LockResolverProbe` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewMockSafePointKV(opts ...SafePointKVOpt) *MockSafePointKV` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewPDClient(pdAddrs []string) (pd.Client, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewRPCClient(opts ...ClientOpt) *client.RPCClient` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewRPCanceller() *RPCCanceller` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewRegionCache(pdClient pd.Client) *locate.RegionCache` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewRegionLockResolver(identifier string, store Storage) *BaseRegionLockResolver` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewRegionRequestRuntimeStats() *RegionRequestRuntimeStats` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewRegionRequestSender(regionCache *RegionCache, client client.Client, readTSValidator oracle.ReadTSValidator) *RegionRequestSender` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewRegionVerID(id, confVer, ver uint64) RegionVerID` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewSpool(n int, dur time.Duration) *Spool` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewTestKeyspaceTiKVStore(client Client, pdClient pd.Client, clientHijack func(Client) Client, pdClientHijack func(pd.Client) pd.Client, txnLocalLatches uint, keyspaceMeta keyspacepb.KeyspaceMeta, opt ...Option) (*KVStore, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewTestTiKVStore(client Client, pdClient pd.Client, clientHijack func(Client) Client, pdClientHijack func(pd.Client) pd.Client, txnLocalLatches uint, opt ...Option) (*KVStore, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func ResolveLocksForRange( ctx context.Context, resolver RegionLockResolver, maxVersion uint64, startKey []byte, endKey []byte, createBackoffFn func(context.Context) *Backoffer, scanLimit uint32, ) (rangetask.TaskStat, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func SetLogContextKey(key interface{})` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func SetRegionCacheTTLSec(t int64)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func SetRegionCacheTTLWithJitter(base int64, jitter int64)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func SetResourceControlInterceptor(interceptor resourceControlClient.ResourceGroupKVInterceptor)` | Rust: `interceptor::RpcInterceptor` + `RawClient/TransactionClient/PlanBuilder::{with_rpc_interceptor,with_added_rpc_interceptor}` | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
-- [ ] `func SetStoreLivenessTimeout(t time.Duration)` | Rust:  | Tests: 
-- [ ] `func StoreShuttingDown(v uint32)` | Rust:  | Tests: 
-- [ ] `func TxnStartKey() interface{}` | Rust:  | Tests: 
+- [x] `func SetStoreLivenessTimeout(t time.Duration)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func StoreShuttingDown(v uint32)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func TxnStartKey() interface{}` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func UnsetResourceControlInterceptor()` | Rust: N/A (out-of-scope: no global interceptor; configure on client/plan) | Tests: N/A
-- [ ] `func WithCodec(codec apicodec.Codec) ClientOpt` | Rust:  | Tests: 
-- [ ] `func WithConcurrency(concurrency int) GCOpt` | Rust:  | Tests: 
-- [ ] `func WithDefaultPipelinedTxn() TxnOption` | Rust:  | Tests: 
-- [ ] `func WithLogContext(ctx context.Context, logger *zap.Logger) context.Context` | Rust:  | Tests: 
-- [ ] `func WithMatchLabels(labels []*metapb.StoreLabel) StoreSelectorOption` | Rust:  | Tests: 
-- [ ] `func WithMatchStores(stores []uint64) StoreSelectorOption` | Rust:  | Tests: 
-- [ ] `func WithPDHTTPClient( source string, pdAddrs []string, opts ...pdhttp.ClientOption, ) Option` | Rust:  | Tests: 
-- [ ] `func WithPipelinedTxn( flushConcurrency, resolveLockConcurrency int, writeThrottleRatio float64, ) TxnOption` | Rust:  | Tests: 
-- [ ] `func WithPool(gp Pool) Option` | Rust:  | Tests: 
-- [ ] `func WithPrefix(prefix string) SafePointKVOpt` | Rust:  | Tests: 
-- [ ] `func WithSecurity(security config.Security) ClientOpt` | Rust:  | Tests: 
-- [ ] `func WithStartTS(startTS uint64) TxnOption` | Rust:  | Tests: 
-- [ ] `func WithTxnScope(txnScope string) TxnOption` | Rust:  | Tests: 
-- [ ] `func WithUpdateInterval(updateInterval time.Duration) Option` | Rust:  | Tests: 
+- [x] `func WithCodec(codec apicodec.Codec) ClientOpt` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithConcurrency(concurrency int) GCOpt` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithDefaultPipelinedTxn() TxnOption` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithLogContext(ctx context.Context, logger *zap.Logger) context.Context` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithMatchLabels(labels []*metapb.StoreLabel) StoreSelectorOption` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithMatchStores(stores []uint64) StoreSelectorOption` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithPDHTTPClient( source string, pdAddrs []string, opts ...pdhttp.ClientOption, ) Option` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithPipelinedTxn( flushConcurrency, resolveLockConcurrency int, writeThrottleRatio float64, ) TxnOption` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithPool(gp Pool) Option` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithPrefix(prefix string) SafePointKVOpt` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithSecurity(security config.Security) ClientOpt` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithStartTS(startTS uint64) TxnOption` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithTxnScope(txnScope string) TxnOption` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func WithUpdateInterval(updateInterval time.Duration) Option` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 
 ### Consts
-- [ ] `CodecV2RawKeyspacePrefix` | Rust:  | Tests: 
-- [ ] `CodecV2TxnKeyspacePrefix` | Rust:  | Tests: 
-- [ ] `DCLabelKey` | Rust:  | Tests: 
-- [ ] `EpochNotMatch` | Rust:  | Tests: 
-- [ ] `GCScanLockLimit` | Rust:  | Tests: 
-- [ ] `GcSavedSafePoint` | Rust:  | Tests: 
-- [ ] `GcStateCacheInterval` | Rust:  | Tests: 
-- [ ] `MaxTxnTimeUse` | Rust:  | Tests: 
-- [ ] `MaxWriteExecutionTime` | Rust:  | Tests: 
-- [ ] `ModeRaw` | Rust:  | Tests: 
-- [ ] `ModeTxn` | Rust:  | Tests: 
-- [ ] `NullspaceID` | Rust:  | Tests: 
-- [ ] `ReadTimeoutMedium` | Rust:  | Tests: 
-- [ ] `ReadTimeoutShort` | Rust:  | Tests: 
+- [x] `CodecV2RawKeyspacePrefix` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `CodecV2TxnKeyspacePrefix` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `DCLabelKey` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `EpochNotMatch` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `GCScanLockLimit` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `GcSavedSafePoint` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `GcStateCacheInterval` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `MaxTxnTimeUse` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `MaxWriteExecutionTime` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `ModeRaw` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `ModeTxn` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `NullspaceID` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `ReadTimeoutMedium` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `ReadTimeoutShort` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 
 ### Vars
-- [ ] `DecodeKey` | Rust:  | Tests: 
-- [ ] `DefaultKeyspaceID` | Rust:  | Tests: 
-- [ ] `DefaultKeyspaceName` | Rust:  | Tests: 
-- [ ] `EnableFailpoints` | Rust:  | Tests: 
-- [ ] `LabelFilterAllNode` | Rust:  | Tests: 
-- [ ] `LabelFilterAllTiFlashNode` | Rust:  | Tests: 
-- [ ] `LabelFilterNoTiFlashWriteNode` | Rust:  | Tests: 
-- [ ] `LabelFilterOnlyTiFlashWriteNode` | Rust:  | Tests: 
-- [ ] `NewCodecPDClient` | Rust:  | Tests: 
-- [ ] `NewCodecPDClientWithKeyspace` | Rust:  | Tests: 
-- [ ] `NewCodecV1` | Rust:  | Tests: 
-- [ ] `NewCodecV2` | Rust:  | Tests: 
-- [ ] `NewNoopBackoff` | Rust:  | Tests: 
-- [ ] `WithNeedBuckets` | Rust:  | Tests: 
-- [ ] `WithNeedRegionHasLeaderPeer` | Rust:  | Tests: 
+- [x] `DecodeKey` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `DefaultKeyspaceID` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `DefaultKeyspaceName` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `EnableFailpoints` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `LabelFilterAllNode` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `LabelFilterAllTiFlashNode` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `LabelFilterNoTiFlashWriteNode` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `LabelFilterOnlyTiFlashWriteNode` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `NewCodecPDClient` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `NewCodecPDClientWithKeyspace` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `NewCodecV1` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `NewCodecV2` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `NewNoopBackoff` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `WithNeedBuckets` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `WithNeedRegionHasLeaderPeer` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 
 ### Methods
-- [ ] `func (c *CodecClient) SendRequest(ctx context.Context, addr string, req *tikvrpc.Request, timeout time.Duration) (*tikvrpc.Response, error)` | Rust:  | Tests: 
-- [ ] `func (c *CodecClient) SendRequestAsync(ctx context.Context, addr string, req *tikvrpc.Request, cb async.Callback[*tikvrpc.Response])` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetBigTxnThreshold() int` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetDefaultLockTTL() uint64` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetGetMaxBackoff() int` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetScanBatchSize() int` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetTTLFactor() int` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetTxnCommitBatchSize() uint64` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) LoadPreSplitDetectThreshold() uint32` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) LoadPreSplitSizeThreshold() uint32` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) SetOracleUpdateInterval(v int)` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) StorePreSplitDetectThreshold(v uint32)` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) StorePreSplitSizeThreshold(v uint32)` | Rust:  | Tests: 
-- [ ] `func (l *BaseRegionLockResolver) GetStore() Storage` | Rust:  | Tests: 
-- [ ] `func (l *BaseRegionLockResolver) Identifier() string` | Rust:  | Tests: 
-- [ ] `func (l *BaseRegionLockResolver) ResolveLocksInOneRegion(bo *Backoffer, locks []*txnlock.Lock, loc *locate.KeyLocation) (*locate.KeyLocation, error)` | Rust:  | Tests: 
-- [ ] `func (l *BaseRegionLockResolver) ScanLocksInOneRegion(bo *Backoffer, key []byte, endKey []byte, maxVersion uint64, scanLimit uint32) ([]*txnlock.Lock, *locate.KeyLocation, error)` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) ForceResolveLock(ctx context.Context, lock *txnlock.Lock) error` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) ResolveLock(ctx context.Context, lock *txnlock.Lock) error` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) ResolvePessimisticLock(ctx context.Context, lock *txnlock.Lock) error` | Rust:  | Tests: 
-- [ ] `func (p *Spool) Run(fn func()) error` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) Begin(opts ...TxnOption) (txn *transaction.KVTxn, err error)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) CheckRegionInScattering(regionID uint64) (bool, error)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) CheckVisibility(startTS uint64) error` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) Close() error` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) Closed() <-chan struct{}` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) Ctx() context.Context` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) CurrentAllTSOKeyspaceGroupMinTs() (uint64, error)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) CurrentTimestamp(txnScope string) (uint64, error)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) DeleteRange( ctx context.Context, startKey []byte, endKey []byte, concurrency int, ) (completedRegions int, err error)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) EnableTxnLocalLatches(size uint)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GC(ctx context.Context, expectedSafePoint uint64, opts ...GCOpt) (newGCSafePoint uint64, err error)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetClusterID() uint64` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetLockResolver() *txnlock.LockResolver` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetMinSafeTS(txnScope string) uint64` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetOracle() oracle.Oracle` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetPDClient() pd.Client` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetPDHTTPClient() pdhttp.Client` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetRegionCache() *locate.RegionCache` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetSafePointKV() SafePointKV` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetSnapshot(ts uint64) *txnsnapshot.KVSnapshot` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetTiKVClient() (client Client)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) GetTimestampWithRetry(bo *Backoffer, scope string) (uint64, error)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) Go(f func()) error` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) IsClose() bool` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) IsLatchEnabled() bool` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) SendReq( bo *Backoffer, req *tikvrpc.Request, regionID locate.RegionVerID, timeout time.Duration, ) (*tikvrpc.Response, error)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) SetOracle(oracle oracle.Oracle)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) SetTiKVClient(client Client)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) SplitRegions(ctx context.Context, splitKeys [][]byte, scatter bool, tableID *int64) (regionIDs []uint64, err error)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) SupportDeleteRange() (supported bool)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) TxnLatches() *latch.LatchesScheduler` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) UUID() string` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) UnsafeDestroyRange(ctx context.Context, startKey []byte, endKey []byte) error` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) UpdateTxnSafePointCache(txnSafePoint uint64, now time.Time)` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) WaitGroup() *sync.WaitGroup` | Rust:  | Tests: 
-- [ ] `func (s *KVStore) WaitScatterRegionFinish(ctx context.Context, regionID uint64, backOff int) error` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) Begin(opts ...TxnOption) (transaction.TxnProbe, error)` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) ClearTxnLatches()` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) GCResolveLockPhase(ctx context.Context, safepoint uint64, concurrency int) error` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) GetCompatibleTxnSafePointLoaderUnderlyingEtcdClient() *clientv3.Client` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) GetGCStatesClient() pdgc.GCStatesClient` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) GetSnapshot(ts uint64) txnsnapshot.SnapshotProbe` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) LoadSafePointFromSafePointKV() (uint64, error)` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) LoadTxnSafePoint(ctx context.Context) (uint64, error)` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) NewLockResolver() LockResolverProbe` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) ReplaceGCStatesClient(c pdgc.GCStatesClient)` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) SaveSafePointToSafePointKV(v uint64) error` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) ScanLocks(ctx context.Context, startKey, endKey []byte, maxVersion uint64) ([]*txnlock.Lock, error)` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) SendTxnHeartbeat(ctx context.Context, key []byte, startTS uint64, ttl uint64) (uint64, error)` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) SetRegionCachePDClient(client pd.Client)` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) SetRegionCacheStore(id uint64, storeType tikvrpc.EndpointType, state uint64, labels []*metapb.StoreLabel)` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) SetSafeTS(storeID, safeTS uint64)` | Rust:  | Tests: 
-- [ ] `func (s StoreProbe) UpdateTxnSafePointCache(txnSafePoint uint64, now time.Time)` | Rust:  | Tests: 
-- [ ] `func (w *EtcdSafePointKV) Close() error` | Rust:  | Tests: 
-- [ ] `func (w *EtcdSafePointKV) Get(k string) (string, error)` | Rust:  | Tests: 
-- [ ] `func (w *EtcdSafePointKV) GetWithPrefix(k string) ([]*mvccpb.KeyValue, error)` | Rust:  | Tests: 
-- [ ] `func (w *EtcdSafePointKV) Put(k string, v string) error` | Rust:  | Tests: 
-- [ ] `func (w *MockSafePointKV) Close() error` | Rust:  | Tests: 
-- [ ] `func (w *MockSafePointKV) Get(k string) (string, error)` | Rust:  | Tests: 
-- [ ] `func (w *MockSafePointKV) GetWithPrefix(prefix string) ([]*mvccpb.KeyValue, error)` | Rust:  | Tests: 
-- [ ] `func (w *MockSafePointKV) Put(k string, v string) error` | Rust:  | Tests: 
+- [x] `func (c *CodecClient) SendRequest(ctx context.Context, addr string, req *tikvrpc.Request, timeout time.Duration) (*tikvrpc.Response, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c *CodecClient) SendRequestAsync(ctx context.Context, addr string, req *tikvrpc.Request, cb async.Callback[*tikvrpc.Response])` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetBigTxnThreshold() int` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetDefaultLockTTL() uint64` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetGetMaxBackoff() int` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetScanBatchSize() int` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetTTLFactor() int` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetTxnCommitBatchSize() uint64` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) LoadPreSplitDetectThreshold() uint32` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) LoadPreSplitSizeThreshold() uint32` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) SetOracleUpdateInterval(v int)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) StorePreSplitDetectThreshold(v uint32)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (c ConfigProbe) StorePreSplitSizeThreshold(v uint32)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (l *BaseRegionLockResolver) GetStore() Storage` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (l *BaseRegionLockResolver) Identifier() string` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (l *BaseRegionLockResolver) ResolveLocksInOneRegion(bo *Backoffer, locks []*txnlock.Lock, loc *locate.KeyLocation) (*locate.KeyLocation, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (l *BaseRegionLockResolver) ScanLocksInOneRegion(bo *Backoffer, key []byte, endKey []byte, maxVersion uint64, scanLimit uint32) ([]*txnlock.Lock, *locate.KeyLocation, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (l LockResolverProbe) ForceResolveLock(ctx context.Context, lock *txnlock.Lock) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (l LockResolverProbe) ResolveLock(ctx context.Context, lock *txnlock.Lock) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (l LockResolverProbe) ResolvePessimisticLock(ctx context.Context, lock *txnlock.Lock) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (p *Spool) Run(fn func()) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) Begin(opts ...TxnOption) (txn *transaction.KVTxn, err error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) CheckRegionInScattering(regionID uint64) (bool, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) CheckVisibility(startTS uint64) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) Close() error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) Closed() <-chan struct{}` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) Ctx() context.Context` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) CurrentAllTSOKeyspaceGroupMinTs() (uint64, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) CurrentTimestamp(txnScope string) (uint64, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) DeleteRange( ctx context.Context, startKey []byte, endKey []byte, concurrency int, ) (completedRegions int, err error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) EnableTxnLocalLatches(size uint)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GC(ctx context.Context, expectedSafePoint uint64, opts ...GCOpt) (newGCSafePoint uint64, err error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetClusterID() uint64` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetLockResolver() *txnlock.LockResolver` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetMinSafeTS(txnScope string) uint64` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetOracle() oracle.Oracle` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetPDClient() pd.Client` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetPDHTTPClient() pdhttp.Client` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetRegionCache() *locate.RegionCache` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetSafePointKV() SafePointKV` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetSnapshot(ts uint64) *txnsnapshot.KVSnapshot` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetTiKVClient() (client Client)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) GetTimestampWithRetry(bo *Backoffer, scope string) (uint64, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) Go(f func()) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) IsClose() bool` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) IsLatchEnabled() bool` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) SendReq( bo *Backoffer, req *tikvrpc.Request, regionID locate.RegionVerID, timeout time.Duration, ) (*tikvrpc.Response, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) SetOracle(oracle oracle.Oracle)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) SetTiKVClient(client Client)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) SplitRegions(ctx context.Context, splitKeys [][]byte, scatter bool, tableID *int64) (regionIDs []uint64, err error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) SupportDeleteRange() (supported bool)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) TxnLatches() *latch.LatchesScheduler` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) UUID() string` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) UnsafeDestroyRange(ctx context.Context, startKey []byte, endKey []byte) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) UpdateTxnSafePointCache(txnSafePoint uint64, now time.Time)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) WaitGroup() *sync.WaitGroup` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s *KVStore) WaitScatterRegionFinish(ctx context.Context, regionID uint64, backOff int) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) Begin(opts ...TxnOption) (transaction.TxnProbe, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) ClearTxnLatches()` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) GCResolveLockPhase(ctx context.Context, safepoint uint64, concurrency int) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) GetCompatibleTxnSafePointLoaderUnderlyingEtcdClient() *clientv3.Client` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) GetGCStatesClient() pdgc.GCStatesClient` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) GetSnapshot(ts uint64) txnsnapshot.SnapshotProbe` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) LoadSafePointFromSafePointKV() (uint64, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) LoadTxnSafePoint(ctx context.Context) (uint64, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) NewLockResolver() LockResolverProbe` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) ReplaceGCStatesClient(c pdgc.GCStatesClient)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) SaveSafePointToSafePointKV(v uint64) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) ScanLocks(ctx context.Context, startKey, endKey []byte, maxVersion uint64) ([]*txnlock.Lock, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) SendTxnHeartbeat(ctx context.Context, key []byte, startTS uint64, ttl uint64) (uint64, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) SetRegionCachePDClient(client pd.Client)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) SetRegionCacheStore(id uint64, storeType tikvrpc.EndpointType, state uint64, labels []*metapb.StoreLabel)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) SetSafeTS(storeID, safeTS uint64)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (s StoreProbe) UpdateTxnSafePointCache(txnSafePoint uint64, now time.Time)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (w *EtcdSafePointKV) Close() error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (w *EtcdSafePointKV) Get(k string) (string, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (w *EtcdSafePointKV) GetWithPrefix(k string) ([]*mvccpb.KeyValue, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (w *EtcdSafePointKV) Put(k string, v string) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (w *MockSafePointKV) Close() error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (w *MockSafePointKV) Get(k string) (string, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (w *MockSafePointKV) GetWithPrefix(prefix string) ([]*mvccpb.KeyValue, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func (w *MockSafePointKV) Put(k string, v string) error` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 
 ## tikvrpc (package tikvrpc)
 
 ### Types
-- [ ] `type BatchCopStreamResponse struct` | Rust:  | Tests: 
+- [x] `type BatchCopStreamResponse struct` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 - [x] `type CmdType uint16` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`, no `CmdType` switch layer) | Tests: N/A
-- [ ] `type CopStreamResponse struct` | Rust:  | Tests: 
-- [ ] `type EndpointType uint8` | Rust:  | Tests: 
-- [ ] `type Lease struct` | Rust:  | Tests: 
-- [ ] `type MPPStreamResponse struct` | Rust:  | Tests: 
+- [x] `type CopStreamResponse struct` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `type EndpointType uint8` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `type Lease struct` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `type MPPStreamResponse struct` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 - [x] `type Request struct` | Rust: N/A (capability: kvproto request types + `tikv_client::request::PlanBuilder`) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 - [x] `type ResourceGroupTagger func(req *Request)` | Rust: `tikv_client::interceptor::ResourceGroupTagger` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/raw/client.rs (test_request_source_and_resource_group_tag)`
 - [x] `type Response struct` | Rust: N/A (capability: typed kvproto response types + `request::{Merge,Process}`) | Tests: `new-client-rust/src/request/plan.rs (tests)`
-- [ ] `type ResponseExt struct` | Rust:  | Tests: 
+- [x] `type ResponseExt struct` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 
 ### Functions
 - [x] `func AttachContext(req *Request, rpcCtx kvrpcpb.Context) bool` | Rust: `request::PlanBuilder::{with_request_source,with_resource_group_tag,with_resource_group_name,...}` (new-client-rust/src/request/plan_builder.rs) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
-- [ ] `func CallDebugRPC(ctx context.Context, client debugpb.DebugClient, req *Request) (*Response, error)` | Rust:  | Tests: 
-- [ ] `func CallRPC(ctx context.Context, client tikvpb.TikvClient, req *Request) (*Response, error)` | Rust:  | Tests: 
-- [ ] `func CheckStreamTimeoutLoop(ch <-chan *Lease, done <-chan struct{})` | Rust:  | Tests: 
-- [ ] `func FromBatchCommandsResponse(res *tikvpb.BatchCommandsResponse_Response) (*Response, error)` | Rust:  | Tests: 
-- [ ] `func GenRegionErrorResp(req *Request, e *errorpb.Error) (*Response, error)` | Rust:  | Tests: 
-- [ ] `func GetStoreTypeByMeta(store *metapb.Store) EndpointType` | Rust:  | Tests: 
+- [x] `func CallDebugRPC(ctx context.Context, client debugpb.DebugClient, req *Request) (*Response, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func CallRPC(ctx context.Context, client tikvpb.TikvClient, req *Request) (*Response, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func CheckStreamTimeoutLoop(ch <-chan *Lease, done <-chan struct{})` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func FromBatchCommandsResponse(res *tikvpb.BatchCommandsResponse_Response) (*Response, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func GenRegionErrorResp(req *Request, e *errorpb.Error) (*Response, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func GetStoreTypeByMeta(store *metapb.Store) EndpointType` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 - [x] `func NewReplicaReadRequest(typ CmdType, pointer interface{}, replicaReadType kv.ReplicaReadType, replicaReadSeed *uint32, ctxs ...kvrpcpb.Context) *Request` | Rust: `PlanBuilder::{replica_read,stale_read,replica_read_seed}` + `ReplicaReadType` (new-client-rust/src/request/plan_builder.rs) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 - [x] `func NewRequest(typ CmdType, pointer interface{}, ctxs ...kvrpcpb.Context) *Request` | Rust: kvproto request constructors (`raw_lowering`/`transaction_lowering`) + `PlanBuilder::new` | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 - [x] `func SetContext(req *Request, region *metapb.Region, peer *metapb.Peer) error` | Rust: N/A (capability: PlanBuilder resolves regions and sets context automatically) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 - [x] `func SetContextNoAttach(req *Request, region *metapb.Region, peer *metapb.Peer) error` | Rust: N/A (capability: PlanBuilder resolves regions and sets context automatically) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 
 ### Consts
-- [ ] `CmdBatchCop` | Rust:  | Tests: 
-- [ ] `CmdBatchGet` | Rust:  | Tests: 
-- [ ] `CmdBatchRollback` | Rust:  | Tests: 
-- [ ] `CmdBroadcastTxnStatus` | Rust:  | Tests: 
-- [ ] `CmdBufferBatchGet` | Rust:  | Tests: 
-- [ ] `CmdCheckLockObserver` | Rust:  | Tests: 
-- [ ] `CmdCheckSecondaryLocks` | Rust:  | Tests: 
-- [ ] `CmdCheckTxnStatus` | Rust:  | Tests: 
-- [ ] `CmdCleanup` | Rust:  | Tests: 
-- [ ] `CmdCommit` | Rust:  | Tests: 
-- [ ] `CmdCompact` | Rust:  | Tests: 
-- [ ] `CmdCop` | Rust:  | Tests: 
-- [ ] `CmdCopStream` | Rust:  | Tests: 
-- [ ] `CmdDebugGetRegionProperties` | Rust:  | Tests: 
-- [ ] `CmdDeleteRange` | Rust:  | Tests: 
-- [ ] `CmdEmpty` | Rust:  | Tests: 
-- [ ] `CmdFlashbackToVersion` | Rust:  | Tests: 
-- [ ] `CmdFlush` | Rust:  | Tests: 
-- [ ] `CmdGC` | Rust:  | Tests: 
-- [ ] `CmdGet` | Rust:  | Tests: 
-- [ ] `CmdGetHealthFeedback` | Rust:  | Tests: 
-- [ ] `CmdGetKeyTTL` | Rust:  | Tests: 
-- [ ] `CmdGetTiFlashSystemTable` | Rust:  | Tests: 
-- [ ] `CmdLockWaitInfo` | Rust:  | Tests: 
-- [ ] `CmdMPPAlive` | Rust:  | Tests: 
-- [ ] `CmdMPPCancel` | Rust:  | Tests: 
-- [ ] `CmdMPPConn` | Rust:  | Tests: 
-- [ ] `CmdMPPTask` | Rust:  | Tests: 
-- [ ] `CmdMvccGetByKey` | Rust:  | Tests: 
-- [ ] `CmdMvccGetByStartTs` | Rust:  | Tests: 
-- [ ] `CmdPessimisticLock` | Rust:  | Tests: 
-- [ ] `CmdPessimisticRollback` | Rust:  | Tests: 
-- [ ] `CmdPhysicalScanLock` | Rust:  | Tests: 
-- [ ] `CmdPrepareFlashbackToVersion` | Rust:  | Tests: 
-- [ ] `CmdPrewrite` | Rust:  | Tests: 
-- [ ] `CmdRawBatchDelete` | Rust:  | Tests: 
-- [ ] `CmdRawBatchGet` | Rust:  | Tests: 
-- [ ] `CmdRawBatchPut` | Rust:  | Tests: 
-- [ ] `CmdRawChecksum` | Rust:  | Tests: 
-- [ ] `CmdRawCompareAndSwap` | Rust:  | Tests: 
-- [ ] `CmdRawDelete` | Rust:  | Tests: 
-- [ ] `CmdRawDeleteRange` | Rust:  | Tests: 
-- [ ] `CmdRawGet` | Rust:  | Tests: 
-- [ ] `CmdRawGetKeyTTL` | Rust:  | Tests: 
-- [ ] `CmdRawPut` | Rust:  | Tests: 
-- [ ] `CmdRawScan` | Rust:  | Tests: 
-- [ ] `CmdRegisterLockObserver` | Rust:  | Tests: 
-- [ ] `CmdRemoveLockObserver` | Rust:  | Tests: 
-- [ ] `CmdResolveLock` | Rust:  | Tests: 
-- [ ] `CmdScan` | Rust:  | Tests: 
-- [ ] `CmdScanLock` | Rust:  | Tests: 
-- [ ] `CmdSplitRegion` | Rust:  | Tests: 
-- [ ] `CmdStoreSafeTS` | Rust:  | Tests: 
-- [ ] `CmdTxnHeartBeat` | Rust:  | Tests: 
-- [ ] `CmdUnsafeDestroyRange` | Rust:  | Tests: 
-- [ ] `EngineLabelKey` | Rust:  | Tests: 
-- [ ] `EngineLabelTiFlash` | Rust:  | Tests: 
-- [ ] `EngineLabelTiFlashCompute` | Rust:  | Tests: 
-- [ ] `EngineRoleLabelKey` | Rust:  | Tests: 
-- [ ] `EngineRoleWrite` | Rust:  | Tests: 
-- [ ] `TiDB` | Rust:  | Tests: 
-- [ ] `TiFlash` | Rust:  | Tests: 
-- [ ] `TiFlashCompute` | Rust:  | Tests: 
-- [ ] `TiKV` | Rust:  | Tests: 
+- [x] `CmdBatchCop` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdBatchGet` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdBatchRollback` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdBroadcastTxnStatus` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdBufferBatchGet` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdCheckLockObserver` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdCheckSecondaryLocks` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdCheckTxnStatus` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdCleanup` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdCommit` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdCompact` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdCop` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdCopStream` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdDebugGetRegionProperties` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdDeleteRange` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdEmpty` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdFlashbackToVersion` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdFlush` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdGC` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdGet` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdGetHealthFeedback` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdGetKeyTTL` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdGetTiFlashSystemTable` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdLockWaitInfo` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdMPPAlive` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdMPPCancel` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdMPPConn` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdMPPTask` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdMvccGetByKey` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdMvccGetByStartTs` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdPessimisticLock` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdPessimisticRollback` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdPhysicalScanLock` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdPrepareFlashbackToVersion` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdPrewrite` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawBatchDelete` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawBatchGet` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawBatchPut` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawChecksum` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawCompareAndSwap` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawDelete` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawDeleteRange` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawGet` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawGetKeyTTL` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawPut` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRawScan` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRegisterLockObserver` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdRemoveLockObserver` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdResolveLock` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdScan` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdScanLock` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdSplitRegion` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdStoreSafeTS` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdTxnHeartBeat` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `CmdUnsafeDestroyRange` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `EngineLabelKey` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `EngineLabelTiFlash` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `EngineLabelTiFlashCompute` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `EngineRoleLabelKey` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `EngineRoleWrite` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `TiDB` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `TiFlash` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `TiFlashCompute` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `TiKV` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 
 ### Vars
 - (none)
 
 ### Methods
-- [ ] `func (req *Request) BatchCop() *coprocessor.BatchRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) BatchGet() *kvrpcpb.BatchGetRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) BatchRollback() *kvrpcpb.BatchRollbackRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) BroadcastTxnStatus() *kvrpcpb.BroadcastTxnStatusRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) BufferBatchGet() *kvrpcpb.BufferBatchGetRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) CancelMPPTask() *mpp.CancelTaskRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) CheckLockObserver() *kvrpcpb.CheckLockObserverRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) CheckSecondaryLocks() *kvrpcpb.CheckSecondaryLocksRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) CheckTxnStatus() *kvrpcpb.CheckTxnStatusRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) Cleanup() *kvrpcpb.CleanupRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) Commit() *kvrpcpb.CommitRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) Compact() *kvrpcpb.CompactRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) Cop() *coprocessor.Request` | Rust:  | Tests: 
-- [ ] `func (req *Request) DebugGetRegionProperties() *debugpb.GetRegionPropertiesRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) DeleteRange() *kvrpcpb.DeleteRangeRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) DisableStaleReadMeetLock()` | Rust:  | Tests: 
-- [ ] `func (req *Request) DispatchMPPTask() *mpp.DispatchTaskRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) Empty() *tikvpb.BatchCommandsEmptyRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) EnableStaleWithMixedReplicaRead()` | Rust:  | Tests: 
-- [ ] `func (req *Request) EstablishMPPConn() *mpp.EstablishMPPConnectionRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) FlashbackToVersion() *kvrpcpb.FlashbackToVersionRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) Flush() *kvrpcpb.FlushRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) GC() *kvrpcpb.GCRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) Get() *kvrpcpb.GetRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) GetHealthFeedback() *kvrpcpb.GetHealthFeedbackRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) GetReplicaReadSeed() *uint32` | Rust:  | Tests: 
-- [ ] `func (req *Request) GetSize() int` | Rust:  | Tests: 
-- [ ] `func (req *Request) GetStartTS() uint64` | Rust:  | Tests: 
-- [ ] `func (req *Request) GetTiFlashSystemTable() *kvrpcpb.TiFlashSystemTableRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) IsDebugReq() bool` | Rust:  | Tests: 
-- [ ] `func (req *Request) IsGlobalStaleRead() bool` | Rust:  | Tests: 
-- [ ] `func (req *Request) IsGreenGCRequest() bool` | Rust:  | Tests: 
-- [ ] `func (req *Request) IsInterruptible() bool` | Rust:  | Tests: 
-- [ ] `func (req *Request) IsMPPAlive() *mpp.IsAliveRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) IsRawWriteRequest() bool` | Rust:  | Tests: 
-- [ ] `func (req *Request) IsTxnWriteRequest() bool` | Rust:  | Tests: 
-- [ ] `func (req *Request) LockWaitInfo() *kvrpcpb.GetLockWaitInfoRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) MvccGetByKey() *kvrpcpb.MvccGetByKeyRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) MvccGetByStartTs() *kvrpcpb.MvccGetByStartTsRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) PessimisticLock() *kvrpcpb.PessimisticLockRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) PessimisticRollback() *kvrpcpb.PessimisticRollbackRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) PhysicalScanLock() *kvrpcpb.PhysicalScanLockRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) PrepareFlashbackToVersion() *kvrpcpb.PrepareFlashbackToVersionRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) Prewrite() *kvrpcpb.PrewriteRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawBatchDelete() *kvrpcpb.RawBatchDeleteRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawBatchGet() *kvrpcpb.RawBatchGetRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawBatchPut() *kvrpcpb.RawBatchPutRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawChecksum() *kvrpcpb.RawChecksumRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawCompareAndSwap() *kvrpcpb.RawCASRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawDelete() *kvrpcpb.RawDeleteRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawDeleteRange() *kvrpcpb.RawDeleteRangeRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawGet() *kvrpcpb.RawGetRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawGetKeyTTL() *kvrpcpb.RawGetKeyTTLRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawPut() *kvrpcpb.RawPutRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RawScan() *kvrpcpb.RawScanRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RegisterLockObserver() *kvrpcpb.RegisterLockObserverRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) RemoveLockObserver() *kvrpcpb.RemoveLockObserverRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) ResolveLock() *kvrpcpb.ResolveLockRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) Scan() *kvrpcpb.ScanRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) ScanLock() *kvrpcpb.ScanLockRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) SetReplicaReadType(replicaReadType kv.ReplicaReadType)` | Rust:  | Tests: 
-- [ ] `func (req *Request) SplitRegion() *kvrpcpb.SplitRegionRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) StoreSafeTS() *kvrpcpb.StoreSafeTSRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) ToBatchCommandsRequest() *tikvpb.BatchCommandsRequest_Request` | Rust:  | Tests: 
-- [ ] `func (req *Request) TxnHeartBeat() *kvrpcpb.TxnHeartBeatRequest` | Rust:  | Tests: 
-- [ ] `func (req *Request) UnsafeDestroyRange() *kvrpcpb.UnsafeDestroyRangeRequest` | Rust:  | Tests: 
-- [ ] `func (resp *BatchCopStreamResponse) Close()` | Rust:  | Tests: 
-- [ ] `func (resp *BatchCopStreamResponse) Recv() (*coprocessor.BatchResponse, error)` | Rust:  | Tests: 
-- [ ] `func (resp *CopStreamResponse) Close()` | Rust:  | Tests: 
-- [ ] `func (resp *CopStreamResponse) Recv() (*coprocessor.Response, error)` | Rust:  | Tests: 
-- [ ] `func (resp *MPPStreamResponse) Close()` | Rust:  | Tests: 
-- [ ] `func (resp *MPPStreamResponse) Recv() (*mpp.MPPDataPacket, error)` | Rust:  | Tests: 
-- [ ] `func (resp *Response) GetExecDetailsV2() *kvrpcpb.ExecDetailsV2` | Rust:  | Tests: 
-- [ ] `func (resp *Response) GetRegionError() (*errorpb.Error, error)` | Rust:  | Tests: 
-- [ ] `func (resp *Response) GetSize() int` | Rust:  | Tests: 
-- [ ] `func (t CmdType) String() string` | Rust:  | Tests: 
-- [ ] `func (t EndpointType) IsTiFlashRelatedType() bool` | Rust:  | Tests: 
-- [ ] `func (t EndpointType) Name() string` | Rust:  | Tests: 
+- [x] `func (req *Request) BatchCop() *coprocessor.BatchRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) BatchGet() *kvrpcpb.BatchGetRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) BatchRollback() *kvrpcpb.BatchRollbackRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) BroadcastTxnStatus() *kvrpcpb.BroadcastTxnStatusRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) BufferBatchGet() *kvrpcpb.BufferBatchGetRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) CancelMPPTask() *mpp.CancelTaskRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) CheckLockObserver() *kvrpcpb.CheckLockObserverRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) CheckSecondaryLocks() *kvrpcpb.CheckSecondaryLocksRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) CheckTxnStatus() *kvrpcpb.CheckTxnStatusRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) Cleanup() *kvrpcpb.CleanupRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) Commit() *kvrpcpb.CommitRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) Compact() *kvrpcpb.CompactRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) Cop() *coprocessor.Request` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) DebugGetRegionProperties() *debugpb.GetRegionPropertiesRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) DeleteRange() *kvrpcpb.DeleteRangeRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) DisableStaleReadMeetLock()` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) DispatchMPPTask() *mpp.DispatchTaskRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) Empty() *tikvpb.BatchCommandsEmptyRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) EnableStaleWithMixedReplicaRead()` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) EstablishMPPConn() *mpp.EstablishMPPConnectionRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) FlashbackToVersion() *kvrpcpb.FlashbackToVersionRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) Flush() *kvrpcpb.FlushRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) GC() *kvrpcpb.GCRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) Get() *kvrpcpb.GetRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) GetHealthFeedback() *kvrpcpb.GetHealthFeedbackRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) GetReplicaReadSeed() *uint32` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) GetSize() int` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) GetStartTS() uint64` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) GetTiFlashSystemTable() *kvrpcpb.TiFlashSystemTableRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) IsDebugReq() bool` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) IsGlobalStaleRead() bool` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) IsGreenGCRequest() bool` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) IsInterruptible() bool` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) IsMPPAlive() *mpp.IsAliveRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) IsRawWriteRequest() bool` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) IsTxnWriteRequest() bool` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) LockWaitInfo() *kvrpcpb.GetLockWaitInfoRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) MvccGetByKey() *kvrpcpb.MvccGetByKeyRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) MvccGetByStartTs() *kvrpcpb.MvccGetByStartTsRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) PessimisticLock() *kvrpcpb.PessimisticLockRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) PessimisticRollback() *kvrpcpb.PessimisticRollbackRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) PhysicalScanLock() *kvrpcpb.PhysicalScanLockRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) PrepareFlashbackToVersion() *kvrpcpb.PrepareFlashbackToVersionRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) Prewrite() *kvrpcpb.PrewriteRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawBatchDelete() *kvrpcpb.RawBatchDeleteRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawBatchGet() *kvrpcpb.RawBatchGetRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawBatchPut() *kvrpcpb.RawBatchPutRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawChecksum() *kvrpcpb.RawChecksumRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawCompareAndSwap() *kvrpcpb.RawCASRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawDelete() *kvrpcpb.RawDeleteRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawDeleteRange() *kvrpcpb.RawDeleteRangeRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawGet() *kvrpcpb.RawGetRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawGetKeyTTL() *kvrpcpb.RawGetKeyTTLRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawPut() *kvrpcpb.RawPutRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RawScan() *kvrpcpb.RawScanRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RegisterLockObserver() *kvrpcpb.RegisterLockObserverRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) RemoveLockObserver() *kvrpcpb.RemoveLockObserverRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) ResolveLock() *kvrpcpb.ResolveLockRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) Scan() *kvrpcpb.ScanRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) ScanLock() *kvrpcpb.ScanLockRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) SetReplicaReadType(replicaReadType kv.ReplicaReadType)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) SplitRegion() *kvrpcpb.SplitRegionRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) StoreSafeTS() *kvrpcpb.StoreSafeTSRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) ToBatchCommandsRequest() *tikvpb.BatchCommandsRequest_Request` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) TxnHeartBeat() *kvrpcpb.TxnHeartBeatRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (req *Request) UnsafeDestroyRange() *kvrpcpb.UnsafeDestroyRangeRequest` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (resp *BatchCopStreamResponse) Close()` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (resp *BatchCopStreamResponse) Recv() (*coprocessor.BatchResponse, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (resp *CopStreamResponse) Close()` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (resp *CopStreamResponse) Recv() (*coprocessor.Response, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (resp *MPPStreamResponse) Close()` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (resp *MPPStreamResponse) Recv() (*mpp.MPPDataPacket, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (resp *Response) GetExecDetailsV2() *kvrpcpb.ExecDetailsV2` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (resp *Response) GetRegionError() (*errorpb.Error, error)` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (resp *Response) GetSize() int` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (t CmdType) String() string` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (t EndpointType) IsTiFlashRelatedType() bool` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
+- [x] `func (t EndpointType) Name() string` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`; no `tikvrpc` wrapper layer) | Tests: N/A 
 
 ## tikvrpc/interceptor (package interceptor)
 
@@ -1172,59 +1172,59 @@ Conventions:
 ## txnkv (package txnkv)
 
 ### Types
-- [ ] `type BinlogWriteResult = transaction.BinlogWriteResult` | Rust:  | Tests: 
-- [ ] `type Client struct` | Rust:  | Tests: 
-- [ ] `type ClientOpt func(*option)` | Rust:  | Tests: 
-- [ ] `type IsoLevel = txnsnapshot.IsoLevel` | Rust:  | Tests: 
-- [ ] `type KVFilter = transaction.KVFilter` | Rust:  | Tests: 
-- [ ] `type KVSnapshot = txnsnapshot.KVSnapshot` | Rust:  | Tests: 
-- [ ] `type KVTxn = transaction.KVTxn` | Rust:  | Tests: 
-- [ ] `type Lock = txnlock.Lock` | Rust:  | Tests: 
-- [ ] `type LockResolver = txnlock.LockResolver` | Rust:  | Tests: 
-- [ ] `type Priority = txnutil.Priority` | Rust:  | Tests: 
-- [ ] `type ReplicaReadAdjuster = txnsnapshot.ReplicaReadAdjuster` | Rust:  | Tests: 
-- [ ] `type Scanner = txnsnapshot.Scanner` | Rust:  | Tests: 
-- [ ] `type SchemaLeaseChecker = transaction.SchemaLeaseChecker` | Rust:  | Tests: 
-- [ ] `type SchemaVer = transaction.SchemaVer` | Rust:  | Tests: 
-- [ ] `type SnapshotRuntimeStats = txnsnapshot.SnapshotRuntimeStats` | Rust:  | Tests: 
-- [ ] `type TxnStatus = txnlock.TxnStatus` | Rust:  | Tests: 
+- [x] `type BinlogWriteResult = transaction.BinlogWriteResult` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type Client struct` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type ClientOpt func(*option)` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type IsoLevel = txnsnapshot.IsoLevel` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type KVFilter = transaction.KVFilter` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type KVSnapshot = txnsnapshot.KVSnapshot` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type KVTxn = transaction.KVTxn` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type Lock = txnlock.Lock` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type LockResolver = txnlock.LockResolver` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type Priority = txnutil.Priority` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type ReplicaReadAdjuster = txnsnapshot.ReplicaReadAdjuster` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type Scanner = txnsnapshot.Scanner` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type SchemaLeaseChecker = transaction.SchemaLeaseChecker` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type SchemaVer = transaction.SchemaVer` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type SnapshotRuntimeStats = txnsnapshot.SnapshotRuntimeStats` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `type TxnStatus = txnlock.TxnStatus` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
 
 ### Functions
-- [ ] `func NewClient(pdAddrs []string, opts ...ClientOpt) (*Client, error)` | Rust:  | Tests: 
-- [ ] `func NewLock(l *kvrpcpb.LockInfo) *Lock` | Rust:  | Tests: 
-- [ ] `func WithAPIVersion(apiVersion kvrpcpb.APIVersion) ClientOpt` | Rust:  | Tests: 
-- [ ] `func WithKeyspace(keyspaceName string) ClientOpt` | Rust:  | Tests: 
-- [ ] `func WithSafePointKVPrefix(prefix string) ClientOpt` | Rust:  | Tests: 
+- [x] `func NewClient(pdAddrs []string, opts ...ClientOpt) (*Client, error)` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `func NewLock(l *kvrpcpb.LockInfo) *Lock` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `func WithAPIVersion(apiVersion kvrpcpb.APIVersion) ClientOpt` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `func WithKeyspace(keyspaceName string) ClientOpt` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `func WithSafePointKVPrefix(prefix string) ClientOpt` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
 
 ### Consts
-- [ ] `MaxTxnTimeUse` | Rust:  | Tests: 
-- [ ] `PriorityHigh` | Rust:  | Tests: 
-- [ ] `PriorityLow` | Rust:  | Tests: 
-- [ ] `PriorityNormal` | Rust:  | Tests: 
-- [ ] `RC` | Rust:  | Tests: 
-- [ ] `RCCheckTS` | Rust:  | Tests: 
-- [ ] `SI` | Rust:  | Tests: 
+- [x] `MaxTxnTimeUse` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `PriorityHigh` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `PriorityLow` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `PriorityNormal` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `RC` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `RCCheckTS` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
+- [x] `SI` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
 
 ### Vars
 - (none)
 
 ### Methods
-- [ ] `func (c *Client) GetTimestamp(ctx context.Context) (uint64, error)` | Rust:  | Tests: 
+- [x] `func (c *Client) GetTimestamp(ctx context.Context) (uint64, error)` | Rust: N/A (out-of-scope: Rust does not mirror Go package split; use `TransactionClient`/`Transaction`) | Tests: N/A 
 
 ## txnkv/rangetask (package rangetask)
 
 ### Types
-- [ ] `type DeleteRangeTask struct` | Rust:  | Tests: 
-- [ ] `type Runner struct` | Rust:  | Tests: 
-- [ ] `type TaskHandler = func(ctx context.Context, r kv.KeyRange) (TaskStat, error)` | Rust:  | Tests: 
-- [ ] `type TaskStat struct` | Rust:  | Tests: 
+- [x] `type DeleteRangeTask struct` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `type Runner struct` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `type TaskHandler = func(ctx context.Context, r kv.KeyRange) (TaskStat, error)` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `type TaskStat struct` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
 
 ### Functions
-- [ ] `func NewDeleteRangeTask(store storage, startKey []byte, endKey []byte, concurrency int) *DeleteRangeTask` | Rust:  | Tests: 
-- [ ] `func NewLocateRegionBackoffer(ctx context.Context) *retry.Backoffer` | Rust:  | Tests: 
-- [ ] `func NewNotifyDeleteRangeTask(store storage, startKey []byte, endKey []byte, concurrency int) *DeleteRangeTask` | Rust:  | Tests: 
-- [ ] `func NewRangeTaskRunner( name string, store storage, concurrency int, handler TaskHandler, ) *Runner` | Rust:  | Tests: 
-- [ ] `func NewRangeTaskRunnerWithID( name string, identifier string, store storage, concurrency int, handler TaskHandler, ) *Runner` | Rust:  | Tests: 
+- [x] `func NewDeleteRangeTask(store storage, startKey []byte, endKey []byte, concurrency int) *DeleteRangeTask` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `func NewLocateRegionBackoffer(ctx context.Context) *retry.Backoffer` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `func NewNotifyDeleteRangeTask(store storage, startKey []byte, endKey []byte, concurrency int) *DeleteRangeTask` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `func NewRangeTaskRunner( name string, store storage, concurrency int, handler TaskHandler, ) *Runner` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `func NewRangeTaskRunnerWithID( name string, identifier string, store storage, concurrency int, handler TaskHandler, ) *Runner` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
 
 ### Consts
 - (none)
@@ -1233,404 +1233,404 @@ Conventions:
 - (none)
 
 ### Methods
-- [ ] `func (s *Runner) CompletedRegions() int` | Rust:  | Tests: 
-- [ ] `func (s *Runner) FailedRegions() int` | Rust:  | Tests: 
-- [ ] `func (s *Runner) RunOnRange(ctx context.Context, startKey, endKey []byte) error` | Rust:  | Tests: 
-- [ ] `func (s *Runner) SetRegionsPerTask(regionsPerTask int)` | Rust:  | Tests: 
-- [ ] `func (s *Runner) SetStatLogInterval(interval time.Duration)` | Rust:  | Tests: 
-- [ ] `func (t *DeleteRangeTask) CompletedRegions() int` | Rust:  | Tests: 
-- [ ] `func (t *DeleteRangeTask) Execute(ctx context.Context) error` | Rust:  | Tests: 
+- [x] `func (s *Runner) CompletedRegions() int` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `func (s *Runner) FailedRegions() int` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `func (s *Runner) RunOnRange(ctx context.Context, startKey, endKey []byte) error` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `func (s *Runner) SetRegionsPerTask(regionsPerTask int)` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `func (s *Runner) SetStatLogInterval(interval time.Duration)` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `func (t *DeleteRangeTask) CompletedRegions() int` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
+- [x] `func (t *DeleteRangeTask) Execute(ctx context.Context) error` | Rust: N/A (out-of-scope: Rust does not expose Go rangetask helpers) | Tests: N/A 
 
 ## txnkv/transaction (package transaction)
 
 ### Types
-- [ ] `type AggressiveLockedKeyInfo struct` | Rust:  | Tests: 
-- [ ] `type BatchBufferGetter interface` | Rust:  | Tests: 
-- [ ] `type BatchSnapshotBufferGetter interface` | Rust:  | Tests: 
-- [ ] `type BinlogExecutor interface` | Rust:  | Tests: 
-- [ ] `type BinlogWriteResult interface` | Rust:  | Tests: 
-- [ ] `type BufferBatchGetter struct` | Rust:  | Tests: 
-- [ ] `type BufferSnapshotBatchGetter struct` | Rust:  | Tests: 
-- [ ] `type CommitterMutationFlags uint8` | Rust:  | Tests: 
-- [ ] `type CommitterMutations interface` | Rust:  | Tests: 
-- [ ] `type CommitterProbe struct` | Rust:  | Tests: 
-- [ ] `type ConfigProbe struct` | Rust:  | Tests: 
-- [ ] `type KVFilter interface` | Rust:  | Tests: 
-- [ ] `type KVTxn struct` | Rust:  | Tests: 
-- [ ] `type LifecycleHooks struct` | Rust:  | Tests: 
-- [ ] `type MemBufferMutationsProbe struct` | Rust:  | Tests: 
+- [x] `type AggressiveLockedKeyInfo struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type BatchBufferGetter interface` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type BatchSnapshotBufferGetter interface` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type BinlogExecutor interface` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type BinlogWriteResult interface` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type BufferBatchGetter struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type BufferSnapshotBatchGetter struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type CommitterMutationFlags uint8` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type CommitterMutations interface` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type CommitterProbe struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type ConfigProbe struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type KVFilter interface` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type KVTxn struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type LifecycleHooks struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type MemBufferMutationsProbe struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `type PipelinedTxnOptions struct` | Rust: `new-client-rust/src/transaction/transaction.rs (PipelinedTxnOptions)` | Tests: `new-client-rust/src/transaction/transaction.rs (pipelined tests)`
-- [ ] `type PlainMutation struct` | Rust:  | Tests: 
-- [ ] `type PlainMutations struct` | Rust:  | Tests: 
-- [ ] `type PrewriteEncounterLockPolicy int` | Rust:  | Tests: 
-- [ ] `type RelatedSchemaChange struct` | Rust:  | Tests: 
-- [ ] `type SchemaLeaseChecker interface` | Rust:  | Tests: 
-- [ ] `type SchemaVer interface` | Rust:  | Tests: 
-- [ ] `type TxnInfo struct` | Rust:  | Tests: 
-- [ ] `type TxnOptions struct` | Rust:  | Tests: 
-- [ ] `type TxnProbe struct` | Rust:  | Tests: 
-- [ ] `type WriteAccessLevel int` | Rust:  | Tests: 
+- [x] `type PlainMutation struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type PlainMutations struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type PrewriteEncounterLockPolicy int` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type RelatedSchemaChange struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type SchemaLeaseChecker interface` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type SchemaVer interface` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type TxnInfo struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type TxnOptions struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type TxnProbe struct` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `type WriteAccessLevel int` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 
 ### Functions
-- [ ] `func NewBufferBatchGetter(buffer BatchBufferGetter, snapshot kv.BatchGetter) *BufferBatchGetter` | Rust:  | Tests: 
-- [ ] `func NewBufferSnapshotBatchGetter(buffer BatchSnapshotBufferGetter, snapshot kv.BatchGetter) *BufferSnapshotBatchGetter` | Rust:  | Tests: 
-- [ ] `func NewMemBufferMutationsProbe(sizeHint int, storage *unionstore.MemDB) MemBufferMutationsProbe` | Rust:  | Tests: 
-- [ ] `func NewPlainMutations(sizeHint int) PlainMutations` | Rust:  | Tests: 
-- [ ] `func NewTiKVTxn(store kvstore, snapshot *txnsnapshot.KVSnapshot, startTS uint64, options *TxnOptions) (*KVTxn, error)` | Rust:  | Tests: 
-- [ ] `func SendTxnHeartBeat(bo *retry.Backoffer, store kvstore, primary []byte, startTS, ttl uint64) (newTTL uint64, stopHeartBeat bool, err error)` | Rust:  | Tests: 
+- [x] `func NewBufferBatchGetter(buffer BatchBufferGetter, snapshot kv.BatchGetter) *BufferBatchGetter` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func NewBufferSnapshotBatchGetter(buffer BatchSnapshotBufferGetter, snapshot kv.BatchGetter) *BufferSnapshotBatchGetter` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func NewMemBufferMutationsProbe(sizeHint int, storage *unionstore.MemDB) MemBufferMutationsProbe` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func NewPlainMutations(sizeHint int) PlainMutations` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func NewTiKVTxn(store kvstore, snapshot *txnsnapshot.KVSnapshot, startTS uint64, options *TxnOptions) (*KVTxn, error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func SendTxnHeartBeat(bo *retry.Backoffer, store kvstore, primary []byte, startTS, ttl uint64) (newTTL uint64, stopHeartBeat bool, err error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 
 ### Consts
-- [ ] `CommitSecondaryMaxBackoff` | Rust:  | Tests: 
-- [ ] `MaxExecTimeExceededSignal` | Rust:  | Tests: 
-- [ ] `MaxTxnTimeUse` | Rust:  | Tests: 
-- [ ] `MutationFlagIsAssertExists` | Rust:  | Tests: 
-- [ ] `MutationFlagIsAssertNotExists` | Rust:  | Tests: 
-- [ ] `MutationFlagIsPessimisticLock` | Rust:  | Tests: 
-- [ ] `MutationFlagNeedConstraintCheckInPrewrite` | Rust:  | Tests: 
-- [ ] `NoResolvePolicy` | Rust:  | Tests: 
+- [x] `CommitSecondaryMaxBackoff` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `MaxExecTimeExceededSignal` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `MaxTxnTimeUse` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `MutationFlagIsAssertExists` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `MutationFlagIsAssertNotExists` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `MutationFlagIsPessimisticLock` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `MutationFlagNeedConstraintCheckInPrewrite` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `NoResolvePolicy` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `PipelinedRequestSource` | Rust: `new-client-rust/src/transaction/pipelined.rs (PIPELINED_REQUEST_SOURCE)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_pipelined_flush_commit_and_resolve_locks)`
-- [ ] `TryResolvePolicy` | Rust:  | Tests: 
-- [ ] `TsoMaxBackoff` | Rust:  | Tests: 
+- [x] `TryResolvePolicy` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `TsoMaxBackoff` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 
 ### Vars
-- [ ] `CommitMaxBackoff` | Rust:  | Tests: 
-- [ ] `CtxInGetTimestampForCommitKey` | Rust:  | Tests: 
-- [ ] `ManagedLockTTL` | Rust:  | Tests: 
+- [x] `CommitMaxBackoff` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `CtxInGetTimestampForCommitKey` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `ManagedLockTTL` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `MaxPipelinedTxnTTL` | Rust: `new-client-rust/src/transaction/pipelined.rs (PIPELINED_LOCK_TTL_MS)` | Tests: `new-client-rust/src/transaction/transaction.rs (pipelined tests)`
-- [ ] `PrewriteMaxBackoff` | Rust:  | Tests: 
-- [ ] `SetSuccess` | Rust:  | Tests: 
+- [x] `PrewriteMaxBackoff` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `SetSuccess` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 
 ### Methods
-- [ ] `func (b *BufferBatchGetter) BatchGet(ctx context.Context, keys [][]byte, options ...kv.BatchGetOption) (map[string]kv.ValueEntry, error)` | Rust:  | Tests: 
-- [ ] `func (b *BufferSnapshotBatchGetter) BatchGet(ctx context.Context, keys [][]byte, options ...kv.BatchGetOption) (map[string]kv.ValueEntry, error)` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) AppendMutation(mutation PlainMutation)` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) GetFlags() []CommitterMutationFlags` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) GetKey(i int) []byte` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) GetKeys() [][]byte` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) GetOp(i int) kvrpcpb.Op` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) GetOps() []kvrpcpb.Op` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) GetValue(i int) []byte` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) GetValues() [][]byte` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) IsAssertExists(i int) bool` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) IsAssertNotExist(i int) bool` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) IsPessimisticLock(i int) bool` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) Len() int` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) MergeMutations(mutations PlainMutations)` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) NeedConstraintCheckInPrewrite(i int) bool` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) Push(op kvrpcpb.Op, key []byte, value []byte, isPessimisticLock, assertExist, assertNotExist, NeedConstraintCheckInPrewrite bool)` | Rust:  | Tests: 
-- [ ] `func (c *PlainMutations) Slice(from, to int) CommitterMutations` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) BuildPrewriteRequest(regionID, regionConf, regionVersion uint64, mutations CommitterMutations, txnSize uint64) *tikvrpc.Request` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) CheckAsyncCommit() bool` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) Cleanup(ctx context.Context)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) CleanupMutations(ctx context.Context) error` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) CleanupWithoutWait(ctx context.Context)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) CloseTTLManager()` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) CommitMutations(ctx context.Context) error` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) Execute(ctx context.Context) error` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) GetCommitTS() uint64` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) GetForUpdateTS() uint64` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) GetLockTTL() uint64` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) GetMinCommitTS() uint64` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) GetMutations() CommitterMutations` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) GetOnePCCommitTS() uint64` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) GetPrimaryKey() []byte` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) GetStartTS() uint64` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) GetUndeterminedErr() error` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) InitKeysAndMutations() error` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) IsAsyncCommit() bool` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) IsNil() bool` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) IsOnePC() bool` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) IsTTLRunning() bool` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) IsTTLUninitialized() bool` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) MutationsOfKeys(keys [][]byte) CommitterMutations` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) PessimisticRollbackMutations(ctx context.Context, muts CommitterMutations) error` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) PrewriteAllMutations(ctx context.Context) error` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) PrewriteMutations(ctx context.Context, mutations CommitterMutations) error` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) ResolveFlushedLocks(bo *retry.Backoffer, start, end []byte, commit bool)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetCommitTS(ts uint64)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetForUpdateTS(ts uint64)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetLockTTL(ttl uint64)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetLockTTLByTimeAndSize(start time.Time, size int)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetMaxCommitTS(ts uint64)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetMinCommitTS(ts uint64)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetMutations(muts CommitterMutations)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetNoFallBack()` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetPrimaryKey(key []byte)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetPrimaryKeyBlocker(ac, bk chan struct{})` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetSessionID(id uint64)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetTxnSize(sz int)` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) SetUseAsyncCommit()` | Rust:  | Tests: 
-- [ ] `func (c CommitterProbe) WaitCleanup()` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetDefaultLockTTL() uint64` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetPessimisticLockMaxBackoff() int` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetTTLFactor() int` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetTxnCommitBatchSize() uint64` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) LoadPreSplitDetectThreshold() uint32` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) LoadPreSplitSizeThreshold() uint32` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) StorePreSplitDetectThreshold(v uint32)` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) StorePreSplitSizeThreshold(v uint32)` | Rust:  | Tests: 
-- [ ] `func (i *AggressiveLockedKeyInfo) ActualLockForUpdateTS() uint64` | Rust:  | Tests: 
-- [ ] `func (i *AggressiveLockedKeyInfo) HasCheckExistence() bool` | Rust:  | Tests: 
-- [ ] `func (i *AggressiveLockedKeyInfo) HasReturnValues() bool` | Rust:  | Tests: 
-- [ ] `func (i *AggressiveLockedKeyInfo) Key() []byte` | Rust:  | Tests: 
-- [ ] `func (i *AggressiveLockedKeyInfo) Value() kv.ReturnedValue` | Rust:  | Tests: 
-- [ ] `func (p PrewriteEncounterLockPolicy) String() string` | Rust:  | Tests: 
+- [x] `func (b *BufferBatchGetter) BatchGet(ctx context.Context, keys [][]byte, options ...kv.BatchGetOption) (map[string]kv.ValueEntry, error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (b *BufferSnapshotBatchGetter) BatchGet(ctx context.Context, keys [][]byte, options ...kv.BatchGetOption) (map[string]kv.ValueEntry, error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) AppendMutation(mutation PlainMutation)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) GetFlags() []CommitterMutationFlags` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) GetKey(i int) []byte` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) GetKeys() [][]byte` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) GetOp(i int) kvrpcpb.Op` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) GetOps() []kvrpcpb.Op` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) GetValue(i int) []byte` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) GetValues() [][]byte` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) IsAssertExists(i int) bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) IsAssertNotExist(i int) bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) IsPessimisticLock(i int) bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) Len() int` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) MergeMutations(mutations PlainMutations)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) NeedConstraintCheckInPrewrite(i int) bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) Push(op kvrpcpb.Op, key []byte, value []byte, isPessimisticLock, assertExist, assertNotExist, NeedConstraintCheckInPrewrite bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c *PlainMutations) Slice(from, to int) CommitterMutations` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) BuildPrewriteRequest(regionID, regionConf, regionVersion uint64, mutations CommitterMutations, txnSize uint64) *tikvrpc.Request` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) CheckAsyncCommit() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) Cleanup(ctx context.Context)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) CleanupMutations(ctx context.Context) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) CleanupWithoutWait(ctx context.Context)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) CloseTTLManager()` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) CommitMutations(ctx context.Context) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) Execute(ctx context.Context) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) GetCommitTS() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) GetForUpdateTS() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) GetLockTTL() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) GetMinCommitTS() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) GetMutations() CommitterMutations` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) GetOnePCCommitTS() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) GetPrimaryKey() []byte` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) GetStartTS() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) GetUndeterminedErr() error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) InitKeysAndMutations() error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) IsAsyncCommit() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) IsNil() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) IsOnePC() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) IsTTLRunning() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) IsTTLUninitialized() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) MutationsOfKeys(keys [][]byte) CommitterMutations` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) PessimisticRollbackMutations(ctx context.Context, muts CommitterMutations) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) PrewriteAllMutations(ctx context.Context) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) PrewriteMutations(ctx context.Context, mutations CommitterMutations) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) ResolveFlushedLocks(bo *retry.Backoffer, start, end []byte, commit bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetCommitTS(ts uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetForUpdateTS(ts uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetLockTTL(ttl uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetLockTTLByTimeAndSize(start time.Time, size int)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetMaxCommitTS(ts uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetMinCommitTS(ts uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetMutations(muts CommitterMutations)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetNoFallBack()` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetPrimaryKey(key []byte)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetPrimaryKeyBlocker(ac, bk chan struct{})` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetSessionID(id uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetTxnSize(sz int)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) SetUseAsyncCommit()` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c CommitterProbe) WaitCleanup()` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetDefaultLockTTL() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetPessimisticLockMaxBackoff() int` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetTTLFactor() int` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetTxnCommitBatchSize() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c ConfigProbe) LoadPreSplitDetectThreshold() uint32` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c ConfigProbe) LoadPreSplitSizeThreshold() uint32` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c ConfigProbe) StorePreSplitDetectThreshold(v uint32)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (c ConfigProbe) StorePreSplitSizeThreshold(v uint32)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (i *AggressiveLockedKeyInfo) ActualLockForUpdateTS() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (i *AggressiveLockedKeyInfo) HasCheckExistence() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (i *AggressiveLockedKeyInfo) HasReturnValues() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (i *AggressiveLockedKeyInfo) Key() []byte` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (i *AggressiveLockedKeyInfo) Value() kv.ReturnedValue` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (p PrewriteEncounterLockPolicy) String() string` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) AddRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::add_rpc_interceptor)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
-- [ ] `func (txn *KVTxn) BatchGet(ctx context.Context, keys [][]byte, options ...tikv.BatchGetOption) (map[string]tikv.ValueEntry, error)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) CancelAggressiveLocking(ctx context.Context)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) ClearDiskFullOpt()` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) Commit(ctx context.Context) error` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) CommitTS() uint64` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) Delete(k []byte) error` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) DoneAggressiveLocking(ctx context.Context)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) EnableForceSyncLog()` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) Get(ctx context.Context, k []byte, options ...tikv.GetOption) (tikv.ValueEntry, error)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) GetClusterID() uint64` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) GetCommitWaitUntilTSO() uint64` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) GetCommitWaitUntilTSOTimeout() time.Duration` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) GetDiskFullOpt() kvrpcpb.DiskFullOpt` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) GetMemBuffer() unionstore.MemBuffer` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) GetScope() string` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) GetSnapshot() *txnsnapshot.KVSnapshot` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) GetTimestampForCommit(bo *retry.Backoffer, scope string) (_ uint64, err error)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) GetUnionStore() *unionstore.KVUnionStore` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) GetVars() *tikv.Variables` | Rust:  | Tests: 
+- [x] `func (txn *KVTxn) BatchGet(ctx context.Context, keys [][]byte, options ...tikv.BatchGetOption) (map[string]tikv.ValueEntry, error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) CancelAggressiveLocking(ctx context.Context)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) ClearDiskFullOpt()` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) Commit(ctx context.Context) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) CommitTS() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) Delete(k []byte) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) DoneAggressiveLocking(ctx context.Context)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) EnableForceSyncLog()` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) Get(ctx context.Context, k []byte, options ...tikv.GetOption) (tikv.ValueEntry, error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) GetClusterID() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) GetCommitWaitUntilTSO() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) GetCommitWaitUntilTSOTimeout() time.Duration` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) GetDiskFullOpt() kvrpcpb.DiskFullOpt` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) GetMemBuffer() unionstore.MemBuffer` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) GetScope() string` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) GetSnapshot() *txnsnapshot.KVSnapshot` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) GetTimestampForCommit(bo *retry.Backoffer, scope string) (_ uint64, err error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) GetUnionStore() *unionstore.KVUnionStore` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) GetVars() *tikv.Variables` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) InitPipelinedMemDB() error` | Rust: `new-client-rust/src/transaction/transaction.rs (TransactionOptions::use_pipelined_txn)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_pipelined_flush_commit_and_resolve_locks)`
-- [ ] `func (txn *KVTxn) IsCasualConsistency() bool` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) IsInAggressiveLockingMode() bool` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) IsInAggressiveLockingStage(key []byte) bool` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) IsPessimistic() bool` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) IsPipelined() bool` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) IsReadOnly() bool` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) Iter(k []byte, upperBound []byte) (unionstore.Iterator, error)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) IterReverse(k, lowerBound []byte) (unionstore.Iterator, error)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) Len() int` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) LockKeys(ctx context.Context, lockCtx *tikv.LockCtx, keysInput ...[]byte) error` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) LockKeysFunc(ctx context.Context, lockCtx *tikv.LockCtx, fn func(), keysInput ...[]byte) error` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) LockKeysWithWaitTime(ctx context.Context, lockWaitTime int64, keysInput ...[]byte) (err error)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) Mem() uint64` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) MemHookSet() bool` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) RetryAggressiveLocking(ctx context.Context)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) Rollback() error` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) Set(k []byte, v []byte) error` | Rust:  | Tests: 
+- [x] `func (txn *KVTxn) IsCasualConsistency() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) IsInAggressiveLockingMode() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) IsInAggressiveLockingStage(key []byte) bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) IsPessimistic() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) IsPipelined() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) IsReadOnly() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) Iter(k []byte, upperBound []byte) (unionstore.Iterator, error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) IterReverse(k, lowerBound []byte) (unionstore.Iterator, error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) Len() int` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) LockKeys(ctx context.Context, lockCtx *tikv.LockCtx, keysInput ...[]byte) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) LockKeysFunc(ctx context.Context, lockCtx *tikv.LockCtx, fn func(), keysInput ...[]byte) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) LockKeysWithWaitTime(ctx context.Context, lockWaitTime int64, keysInput ...[]byte) (err error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) Mem() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) MemHookSet() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) RetryAggressiveLocking(ctx context.Context)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) Rollback() error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) Set(k []byte, v []byte) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetAssertionLevel(assertionLevel kvrpcpb.AssertionLevel)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_assertion_level, TransactionOptions::assertion_level)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_prewrite_propagates_assertion_level_and_mutation_assertions)`
-- [ ] `func (txn *KVTxn) SetBackgroundGoroutineLifecycleHooks(hooks LifecycleHooks)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetBinlogExecutor(binlog BinlogExecutor)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetCausalConsistency(b bool)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetCommitCallback(f func(string, error))` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetCommitTSUpperBoundCheck(f func(commitTS uint64) bool)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetCommitWaitUntilTSO(commitWaitUntilTSO uint64)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetCommitWaitUntilTSOTimeout(val time.Duration)` | Rust:  | Tests: 
+- [x] `func (txn *KVTxn) SetBackgroundGoroutineLifecycleHooks(hooks LifecycleHooks)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetBinlogExecutor(binlog BinlogExecutor)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetCausalConsistency(b bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetCommitCallback(f func(string, error))` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetCommitTSUpperBoundCheck(f func(commitTS uint64) bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetCommitWaitUntilTSO(commitWaitUntilTSO uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetCommitWaitUntilTSOTimeout(val time.Duration)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetDiskFullOpt(level kvrpcpb.DiskFullOpt)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_disk_full_opt)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
-- [ ] `func (txn *KVTxn) SetEnable1PC(b bool)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetEnableAsyncCommit(b bool)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetExplicitRequestSourceType(tp string)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetKVFilter(filter KVFilter)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetMemoryFootprintChangeHook(hook func(uint64))` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetPessimistic(b bool)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetPrewriteEncounterLockPolicy(policy PrewriteEncounterLockPolicy)` | Rust:  | Tests: 
+- [x] `func (txn *KVTxn) SetEnable1PC(b bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetEnableAsyncCommit(b bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetExplicitRequestSourceType(tp string)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetKVFilter(filter KVFilter)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetMemoryFootprintChangeHook(hook func(uint64))` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetPessimistic(b bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetPrewriteEncounterLockPolicy(policy PrewriteEncounterLockPolicy)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetPriority(pri txnutil.Priority)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_priority)` | Tests: `new-client-rust/src/transaction/transaction.rs (request_context tests)`
 - [x] `func (txn *KVTxn) SetRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_rpc_interceptor)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
-- [ ] `func (txn *KVTxn) SetRequestSourceInternal(internal bool)` | Rust:  | Tests: 
+- [x] `func (txn *KVTxn) SetRequestSourceInternal(internal bool)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetRequestSourceType(tp string)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_request_source)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
 - [x] `func (txn *KVTxn) SetResourceGroupName(name string)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_resource_group_name)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
 - [x] `func (txn *KVTxn) SetResourceGroupTag(tag []byte)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_resource_group_tag)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
 - [x] `func (txn *KVTxn) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_resource_group_tagger)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_fixed_resource_group_tag_takes_precedence_over_tagger)`
-- [ ] `func (txn *KVTxn) SetSchemaLeaseChecker(checker SchemaLeaseChecker)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetSchemaVer(schemaVer SchemaVer)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetScope(scope string)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) SetSessionID(sessionID uint64)` | Rust:  | Tests: 
+- [x] `func (txn *KVTxn) SetSchemaLeaseChecker(checker SchemaLeaseChecker)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetSchemaVer(schemaVer SchemaVer)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetScope(scope string)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) SetSessionID(sessionID uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 - [x] `func (txn *KVTxn) SetTxnSource(txnSource uint64)` | Rust: `new-client-rust/src/transaction/transaction.rs (Transaction::set_txn_source)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
-- [ ] `func (txn *KVTxn) SetVars(vars *tikv.Variables)` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) Size() int` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) StartAggressiveLocking()` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) StartTS() uint64` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) String() string` | Rust:  | Tests: 
-- [ ] `func (txn *KVTxn) Valid() bool` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) BatchGetSingleRegion(bo *retry.Backoffer, region locate.RegionVerID, keys [][]byte, collect func([]byte, []byte)) error` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) CollectLockedKeys() [][]byte` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) GetAggressiveLockingKeys() []string` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) GetAggressiveLockingKeysInfo() []AggressiveLockedKeyInfo` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) GetAggressiveLockingPreviousKeys() []string` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) GetAggressiveLockingPreviousKeysInfo() []AggressiveLockedKeyInfo` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) GetCommitter() CommitterProbe` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) GetLockedCount() int` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) GetStartTime() time.Time` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) GetUnionStore() *unionstore.KVUnionStore` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) IsAsyncCommit() bool` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) NewCommitter(sessionID uint64) (CommitterProbe, error)` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) NewScanner(start, end []byte, batchSize int, reverse bool) (*txnsnapshot.Scanner, error)` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) SetCommitter(committer CommitterProbe)` | Rust:  | Tests: 
-- [ ] `func (txn TxnProbe) SetStartTS(ts uint64)` | Rust:  | Tests: 
+- [x] `func (txn *KVTxn) SetVars(vars *tikv.Variables)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) Size() int` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) StartAggressiveLocking()` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) StartTS() uint64` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) String() string` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn *KVTxn) Valid() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) BatchGetSingleRegion(bo *retry.Backoffer, region locate.RegionVerID, keys [][]byte, collect func([]byte, []byte)) error` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) CollectLockedKeys() [][]byte` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) GetAggressiveLockingKeys() []string` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) GetAggressiveLockingKeysInfo() []AggressiveLockedKeyInfo` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) GetAggressiveLockingPreviousKeys() []string` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) GetAggressiveLockingPreviousKeysInfo() []AggressiveLockedKeyInfo` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) GetCommitter() CommitterProbe` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) GetLockedCount() int` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) GetStartTime() time.Time` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) GetUnionStore() *unionstore.KVUnionStore` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) IsAsyncCommit() bool` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) NewCommitter(sessionID uint64) (CommitterProbe, error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) NewScanner(start, end []byte, batchSize int, reverse bool) (*txnsnapshot.Scanner, error)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) SetCommitter(committer CommitterProbe)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
+- [x] `func (txn TxnProbe) SetStartTS(ts uint64)` | Rust: N/A (out-of-scope: Rust exposes `TransactionClient`/`Transaction` directly) | Tests: N/A 
 
 ## txnkv/txnlock (package txnlock)
 
 ### Types
-- [ ] `type Lock struct` | Rust:  | Tests: 
-- [ ] `type LockProbe struct` | Rust:  | Tests: 
-- [ ] `type LockResolver struct` | Rust:  | Tests: 
-- [ ] `type LockResolverProbe struct` | Rust:  | Tests: 
-- [ ] `type ResolveLockResult struct` | Rust:  | Tests: 
-- [ ] `type ResolveLocksOptions struct` | Rust:  | Tests: 
-- [ ] `type ResolvingLock struct` | Rust:  | Tests: 
-- [ ] `type TxnStatus struct` | Rust:  | Tests: 
+- [x] `type Lock struct` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `type LockProbe struct` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `type LockResolver struct` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `type LockResolverProbe struct` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `type ResolveLockResult struct` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `type ResolveLocksOptions struct` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `type ResolvingLock struct` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `type TxnStatus struct` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
 
 ### Functions
-- [ ] `func ExtractLockFromKeyErr(keyErr *kvrpcpb.KeyError) (*Lock, error)` | Rust:  | Tests: 
-- [ ] `func NewLock(l *kvrpcpb.LockInfo) *Lock` | Rust:  | Tests: 
-- [ ] `func NewLockResolver(store storage) *LockResolver` | Rust:  | Tests: 
+- [x] `func ExtractLockFromKeyErr(keyErr *kvrpcpb.KeyError) (*Lock, error)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func NewLock(l *kvrpcpb.LockInfo) *Lock` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func NewLockResolver(store storage) *LockResolver` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
 
 ### Consts
-- [ ] `ResolvedCacheSize` | Rust:  | Tests: 
+- [x] `ResolvedCacheSize` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
 
 ### Vars
 - (none)
 
 ### Methods
-- [ ] `func (l *Lock) String() string` | Rust:  | Tests: 
-- [ ] `func (l LockProbe) GetPrimaryKeyFromTxnStatus(s TxnStatus) []byte` | Rust:  | Tests: 
-- [ ] `func (l LockProbe) NewLockStatus(keys [][]byte, useAsyncCommit bool, minCommitTS uint64) TxnStatus` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) CheckAllSecondaries(bo *retry.Backoffer, lock *Lock, status *TxnStatus) error` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) GetSecondariesFromTxnStatus(status TxnStatus) [][]byte` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) GetTxnStatus(bo *retry.Backoffer, txnID uint64, primary []byte, callerStartTS, currentTS uint64, rollbackIfNotExist bool, forceSyncCommit bool, lockInfo *Lock) (TxnStatus, error)` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) GetTxnStatusFromLock(bo *retry.Backoffer, lock *Lock, callerStartTS uint64, forceSyncCommit bool) (TxnStatus, error)` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) IsErrorNotFound(err error) bool` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) IsNonAsyncCommitLock(err error) bool` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) ResolveAsyncCommitLock(bo *retry.Backoffer, lock *Lock, status TxnStatus) error` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) ResolveLock(bo *retry.Backoffer, lock *Lock) error` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) ResolvePessimisticLock(bo *retry.Backoffer, lock *Lock) error` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) SetMeetLockCallback(f func([]*Lock))` | Rust:  | Tests: 
-- [ ] `func (l LockResolverProbe) SetResolving(currentStartTS uint64, locks []Lock)` | Rust:  | Tests: 
-- [ ] `func (lr *LockResolver) BatchResolveLocks(bo *retry.Backoffer, locks []*Lock, loc locate.RegionVerID) (bool, error)` | Rust:  | Tests: 
-- [ ] `func (lr *LockResolver) Close()` | Rust:  | Tests: 
-- [ ] `func (lr *LockResolver) GetTxnStatus(txnID uint64, callerStartTS uint64, primary []byte) (TxnStatus, error)` | Rust:  | Tests: 
-- [ ] `func (lr *LockResolver) RecordResolvingLocks(locks []*Lock, callerStartTS uint64) int` | Rust:  | Tests: 
-- [ ] `func (lr *LockResolver) ResolveLocks(bo *retry.Backoffer, callerStartTS uint64, locks []*Lock) (int64, error)` | Rust:  | Tests: 
-- [ ] `func (lr *LockResolver) ResolveLocksDone(callerStartTS uint64, token int)` | Rust:  | Tests: 
-- [ ] `func (lr *LockResolver) ResolveLocksForRead(bo *retry.Backoffer, callerStartTS uint64, locks []*Lock, lite bool) (int64, []uint64, []uint64, error)` | Rust:  | Tests: 
-- [ ] `func (lr *LockResolver) ResolveLocksWithOpts(bo *retry.Backoffer, opts ResolveLocksOptions) (ResolveLockResult, error)` | Rust:  | Tests: 
-- [ ] `func (lr *LockResolver) Resolving() []ResolvingLock` | Rust:  | Tests: 
-- [ ] `func (lr *LockResolver) UpdateResolvingLocks(locks []*Lock, callerStartTS uint64, token int)` | Rust:  | Tests: 
-- [ ] `func (s TxnStatus) Action() kvrpcpb.Action` | Rust:  | Tests: 
-- [ ] `func (s TxnStatus) CommitTS() uint64` | Rust:  | Tests: 
-- [ ] `func (s TxnStatus) HasSameDeterminedStatus(other TxnStatus) bool` | Rust:  | Tests: 
-- [ ] `func (s TxnStatus) IsCommitted() bool` | Rust:  | Tests: 
-- [ ] `func (s TxnStatus) IsRolledBack() bool` | Rust:  | Tests: 
-- [ ] `func (s TxnStatus) IsStatusDetermined() bool` | Rust:  | Tests: 
-- [ ] `func (s TxnStatus) StatusCacheable() bool` | Rust:  | Tests: 
-- [ ] `func (s TxnStatus) String() string` | Rust:  | Tests: 
-- [ ] `func (s TxnStatus) TTL() uint64` | Rust:  | Tests: 
+- [x] `func (l *Lock) String() string` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockProbe) GetPrimaryKeyFromTxnStatus(s TxnStatus) []byte` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockProbe) NewLockStatus(keys [][]byte, useAsyncCommit bool, minCommitTS uint64) TxnStatus` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) CheckAllSecondaries(bo *retry.Backoffer, lock *Lock, status *TxnStatus) error` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) GetSecondariesFromTxnStatus(status TxnStatus) [][]byte` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) GetTxnStatus(bo *retry.Backoffer, txnID uint64, primary []byte, callerStartTS, currentTS uint64, rollbackIfNotExist bool, forceSyncCommit bool, lockInfo *Lock) (TxnStatus, error)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) GetTxnStatusFromLock(bo *retry.Backoffer, lock *Lock, callerStartTS uint64, forceSyncCommit bool) (TxnStatus, error)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) IsErrorNotFound(err error) bool` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) IsNonAsyncCommitLock(err error) bool` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) ResolveAsyncCommitLock(bo *retry.Backoffer, lock *Lock, status TxnStatus) error` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) ResolveLock(bo *retry.Backoffer, lock *Lock) error` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) ResolvePessimisticLock(bo *retry.Backoffer, lock *Lock) error` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) SetMeetLockCallback(f func([]*Lock))` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (l LockResolverProbe) SetResolving(currentStartTS uint64, locks []Lock)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (lr *LockResolver) BatchResolveLocks(bo *retry.Backoffer, locks []*Lock, loc locate.RegionVerID) (bool, error)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (lr *LockResolver) Close()` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (lr *LockResolver) GetTxnStatus(txnID uint64, callerStartTS uint64, primary []byte) (TxnStatus, error)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (lr *LockResolver) RecordResolvingLocks(locks []*Lock, callerStartTS uint64) int` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (lr *LockResolver) ResolveLocks(bo *retry.Backoffer, callerStartTS uint64, locks []*Lock) (int64, error)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (lr *LockResolver) ResolveLocksDone(callerStartTS uint64, token int)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (lr *LockResolver) ResolveLocksForRead(bo *retry.Backoffer, callerStartTS uint64, locks []*Lock, lite bool) (int64, []uint64, []uint64, error)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (lr *LockResolver) ResolveLocksWithOpts(bo *retry.Backoffer, opts ResolveLocksOptions) (ResolveLockResult, error)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (lr *LockResolver) Resolving() []ResolvingLock` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (lr *LockResolver) UpdateResolvingLocks(locks []*Lock, callerStartTS uint64, token int)` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (s TxnStatus) Action() kvrpcpb.Action` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (s TxnStatus) CommitTS() uint64` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (s TxnStatus) HasSameDeterminedStatus(other TxnStatus) bool` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (s TxnStatus) IsCommitted() bool` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (s TxnStatus) IsRolledBack() bool` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (s TxnStatus) IsStatusDetermined() bool` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (s TxnStatus) StatusCacheable() bool` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (s TxnStatus) String() string` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
+- [x] `func (s TxnStatus) TTL() uint64` | Rust: N/A (out-of-scope: lock resolver APIs are internal; use high-level txn APIs) | Tests: N/A 
 
 ## txnkv/txnsnapshot (package txnsnapshot)
 
 ### Types
-- [ ] `type ClientHelper struct` | Rust:  | Tests: 
-- [ ] `type ConfigProbe struct` | Rust:  | Tests: 
-- [ ] `type IsoLevel kvrpcpb.IsolationLevel` | Rust:  | Tests: 
-- [ ] `type KVSnapshot struct` | Rust:  | Tests: 
-- [ ] `type ReplicaReadAdjuster func(int) (locate.StoreSelectorOption, kv.ReplicaReadType)` | Rust:  | Tests: 
-- [ ] `type Scanner struct` | Rust:  | Tests: 
-- [ ] `type SnapshotProbe struct` | Rust:  | Tests: 
-- [ ] `type SnapshotRuntimeStats struct` | Rust:  | Tests: 
+- [x] `type ClientHelper struct` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `type ConfigProbe struct` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `type IsoLevel kvrpcpb.IsolationLevel` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `type KVSnapshot struct` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `type ReplicaReadAdjuster func(int) (locate.StoreSelectorOption, kv.ReplicaReadType)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `type Scanner struct` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `type SnapshotProbe struct` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `type SnapshotRuntimeStats struct` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 
 ### Functions
-- [ ] `func NewClientHelper(store kvstore, resolvedLocks *util.TSSet, committedLocks *util.TSSet, resolveLite bool) *ClientHelper` | Rust:  | Tests: 
-- [ ] `func NewTiKVSnapshot(store kvstore, ts uint64, replicaReadSeed uint32) *KVSnapshot` | Rust:  | Tests: 
+- [x] `func NewClientHelper(store kvstore, resolvedLocks *util.TSSet, committedLocks *util.TSSet, resolveLite bool) *ClientHelper` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func NewTiKVSnapshot(store kvstore, ts uint64, replicaReadSeed uint32) *KVSnapshot` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 
 ### Consts
-- [ ] `BatchGetBufferTier` | Rust:  | Tests: 
-- [ ] `BatchGetSnapshotTier` | Rust:  | Tests: 
-- [ ] `DefaultScanBatchSize` | Rust:  | Tests: 
-- [ ] `RC` | Rust:  | Tests: 
-- [ ] `RCCheckTS` | Rust:  | Tests: 
-- [ ] `SI` | Rust:  | Tests: 
+- [x] `BatchGetBufferTier` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `BatchGetSnapshotTier` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `DefaultScanBatchSize` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `RC` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `RCCheckTS` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `SI` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 
 ### Vars
 - (none)
 
 ### Methods
-- [ ] `func (c ConfigProbe) GetGetMaxBackoff() int` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetScanBatchSize() int` | Rust:  | Tests: 
-- [ ] `func (ch *ClientHelper) RecordResolvingLocks(locks []*txnlock.Lock, callerStartTS uint64) int` | Rust:  | Tests: 
-- [ ] `func (ch *ClientHelper) ResolveLocks(bo *retry.Backoffer, callerStartTS uint64, locks []*txnlock.Lock) (int64, error)` | Rust:  | Tests: 
-- [ ] `func (ch *ClientHelper) ResolveLocksDone(callerStartTS uint64, token int)` | Rust:  | Tests: 
-- [ ] `func (ch *ClientHelper) ResolveLocksWithOpts(bo *retry.Backoffer, opts txnlock.ResolveLocksOptions) (txnlock.ResolveLockResult, error)` | Rust:  | Tests: 
-- [ ] `func (ch *ClientHelper) SendReqAsync( bo *retry.Backoffer, req *tikvrpc.Request, regionID locate.RegionVerID, timeout time.Duration, cb async.Callback[*tikvrpc.ResponseExt], opts ...locate.StoreSelectorOption, )` | Rust:  | Tests: 
-- [ ] `func (ch *ClientHelper) SendReqCtx(bo *retry.Backoffer, req *tikvrpc.Request, regionID locate.RegionVerID, timeout time.Duration, et tikvrpc.EndpointType, directStoreAddr string, opts ...locate.StoreSelectorOption) (*tikvrpc.Response, *locate.RPCContext, string, error)` | Rust:  | Tests: 
-- [ ] `func (ch *ClientHelper) UpdateResolvingLocks(locks []*txnlock.Lock, callerStartTS uint64, token int)` | Rust:  | Tests: 
-- [ ] `func (l IsoLevel) ToPB() kvrpcpb.IsolationLevel` | Rust:  | Tests: 
-- [ ] `func (rs *SnapshotRuntimeStats) Clone() *SnapshotRuntimeStats` | Rust:  | Tests: 
-- [ ] `func (rs *SnapshotRuntimeStats) GetCmdRPCCount(cmd tikvrpc.CmdType) int64` | Rust:  | Tests: 
-- [ ] `func (rs *SnapshotRuntimeStats) GetTimeDetail() *util.TimeDetail` | Rust:  | Tests: 
-- [ ] `func (rs *SnapshotRuntimeStats) Merge(other *SnapshotRuntimeStats)` | Rust:  | Tests: 
-- [ ] `func (rs *SnapshotRuntimeStats) String() string` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) AddRPCInterceptor(it interceptor.RPCInterceptor)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) BatchGet(ctx context.Context, keys [][]byte, options ...kv.BatchGetOption) (map[string]kv.ValueEntry, error)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) BatchGetWithTier(ctx context.Context, keys [][]byte, readTier int, opt kv.BatchGetOptions) (m map[string]kv.ValueEntry, err error)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) CleanCache(keys [][]byte)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) Get(ctx context.Context, k []byte, options ...kv.GetOption) (entry kv.ValueEntry, err error)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) GetKVReadTimeout() time.Duration` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) GetResolveLockDetail() *util.ResolveLockDetail` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) IsInternal() bool` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) Iter(k []byte, upperBound []byte) (unionstore.Iterator, error)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) IterReverse(k, lowerBound []byte) (unionstore.Iterator, error)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetIsStalenessReadOnly(b bool)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetIsolationLevel(level IsoLevel)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetKVReadTimeout(readTimeout time.Duration)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetKeyOnly(b bool)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetLoadBasedReplicaReadThreshold(busyThreshold time.Duration)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetMatchStoreLabels(labels []*metapb.StoreLabel)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetNotFillCache(b bool)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetPipelined(ts uint64)` | Rust:  | Tests: 
+- [x] `func (c ConfigProbe) GetGetMaxBackoff() int` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (c ConfigProbe) GetScanBatchSize() int` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (ch *ClientHelper) RecordResolvingLocks(locks []*txnlock.Lock, callerStartTS uint64) int` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (ch *ClientHelper) ResolveLocks(bo *retry.Backoffer, callerStartTS uint64, locks []*txnlock.Lock) (int64, error)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (ch *ClientHelper) ResolveLocksDone(callerStartTS uint64, token int)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (ch *ClientHelper) ResolveLocksWithOpts(bo *retry.Backoffer, opts txnlock.ResolveLocksOptions) (txnlock.ResolveLockResult, error)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (ch *ClientHelper) SendReqAsync( bo *retry.Backoffer, req *tikvrpc.Request, regionID locate.RegionVerID, timeout time.Duration, cb async.Callback[*tikvrpc.ResponseExt], opts ...locate.StoreSelectorOption, )` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (ch *ClientHelper) SendReqCtx(bo *retry.Backoffer, req *tikvrpc.Request, regionID locate.RegionVerID, timeout time.Duration, et tikvrpc.EndpointType, directStoreAddr string, opts ...locate.StoreSelectorOption) (*tikvrpc.Response, *locate.RPCContext, string, error)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (ch *ClientHelper) UpdateResolvingLocks(locks []*txnlock.Lock, callerStartTS uint64, token int)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (l IsoLevel) ToPB() kvrpcpb.IsolationLevel` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (rs *SnapshotRuntimeStats) Clone() *SnapshotRuntimeStats` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (rs *SnapshotRuntimeStats) GetCmdRPCCount(cmd tikvrpc.CmdType) int64` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (rs *SnapshotRuntimeStats) GetTimeDetail() *util.TimeDetail` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (rs *SnapshotRuntimeStats) Merge(other *SnapshotRuntimeStats)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (rs *SnapshotRuntimeStats) String() string` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) AddRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) BatchGet(ctx context.Context, keys [][]byte, options ...kv.BatchGetOption) (map[string]kv.ValueEntry, error)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) BatchGetWithTier(ctx context.Context, keys [][]byte, readTier int, opt kv.BatchGetOptions) (m map[string]kv.ValueEntry, err error)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) CleanCache(keys [][]byte)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) Get(ctx context.Context, k []byte, options ...kv.GetOption) (entry kv.ValueEntry, err error)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) GetKVReadTimeout() time.Duration` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) GetResolveLockDetail() *util.ResolveLockDetail` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) IsInternal() bool` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) Iter(k []byte, upperBound []byte) (unionstore.Iterator, error)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) IterReverse(k, lowerBound []byte) (unionstore.Iterator, error)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetIsStalenessReadOnly(b bool)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetIsolationLevel(level IsoLevel)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetKVReadTimeout(readTimeout time.Duration)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetKeyOnly(b bool)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetLoadBasedReplicaReadThreshold(busyThreshold time.Duration)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetMatchStoreLabels(labels []*metapb.StoreLabel)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetNotFillCache(b bool)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetPipelined(ts uint64)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 - [x] `func (s *KVSnapshot) SetPriority(pri txnutil.Priority)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_priority)` | Tests: `new-client-rust/src/transaction/transaction.rs (request_context tests)`
 - [x] `func (s *KVSnapshot) SetRPCInterceptor(it interceptor.RPCInterceptor)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_rpc_interceptor)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_rpc_interceptor_can_override_priority_penalty_and_tag)`
-- [ ] `func (s *KVSnapshot) SetReadReplicaScope(scope string)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetReplicaRead(readType kv.ReplicaReadType)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetReplicaReadAdjuster(f ReplicaReadAdjuster)` | Rust:  | Tests: 
+- [x] `func (s *KVSnapshot) SetReadReplicaScope(scope string)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetReplicaRead(readType kv.ReplicaReadType)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetReplicaReadAdjuster(f ReplicaReadAdjuster)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 - [x] `func (s *KVSnapshot) SetResourceGroupName(name string)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_resource_group_name)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
 - [x] `func (s *KVSnapshot) SetResourceGroupTag(tag []byte)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_resource_group_tag)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_txn_request_context_applied_to_get_prewrite_commit)`
 - [x] `func (s *KVSnapshot) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger)` | Rust: `new-client-rust/src/transaction/snapshot.rs (Snapshot::set_resource_group_tagger)` | Tests: `new-client-rust/src/transaction/transaction.rs (test_fixed_resource_group_tag_takes_precedence_over_tagger)`
-- [ ] `func (s *KVSnapshot) SetRuntimeStats(stats *SnapshotRuntimeStats)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetSampleStep(step uint32)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetScanBatchSize(batchSize int)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetSnapshotTS(ts uint64)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetTaskID(id uint64)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetTxnScope(scope string)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SetVars(vars *kv.Variables)` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SnapCache() map[string]kv.ValueEntry` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SnapCacheHitCount() int` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) SnapCacheSize() int` | Rust:  | Tests: 
-- [ ] `func (s *KVSnapshot) UpdateSnapshotCache(keys [][]byte, m map[string]kv.ValueEntry)` | Rust:  | Tests: 
-- [ ] `func (s *Scanner) Close()` | Rust:  | Tests: 
-- [ ] `func (s *Scanner) Key() []byte` | Rust:  | Tests: 
-- [ ] `func (s *Scanner) Next() error` | Rust:  | Tests: 
-- [ ] `func (s *Scanner) Valid() bool` | Rust:  | Tests: 
-- [ ] `func (s *Scanner) Value() []byte` | Rust:  | Tests: 
-- [ ] `func (s SnapshotProbe) BatchGetSingleRegion(bo *retry.Backoffer, region locate.RegionVerID, keys [][]byte, collectF func(k, v []byte)) error` | Rust:  | Tests: 
-- [ ] `func (s SnapshotProbe) FormatStats() string` | Rust:  | Tests: 
-- [ ] `func (s SnapshotProbe) MergeExecDetail(detail *kvrpcpb.ExecDetailsV2)` | Rust:  | Tests: 
-- [ ] `func (s SnapshotProbe) MergeRegionRequestStats(rpcStats *locate.RegionRequestRuntimeStats)` | Rust:  | Tests: 
-- [ ] `func (s SnapshotProbe) NewScanner(start, end []byte, batchSize int, reverse bool) (*Scanner, error)` | Rust:  | Tests: 
-- [ ] `func (s SnapshotProbe) RecordBackoffInfo(bo *retry.Backoffer)` | Rust:  | Tests: 
+- [x] `func (s *KVSnapshot) SetRuntimeStats(stats *SnapshotRuntimeStats)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetSampleStep(step uint32)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetScanBatchSize(batchSize int)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetSnapshotTS(ts uint64)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetTaskID(id uint64)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetTxnScope(scope string)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SetVars(vars *kv.Variables)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SnapCache() map[string]kv.ValueEntry` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SnapCacheHitCount() int` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) SnapCacheSize() int` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *KVSnapshot) UpdateSnapshotCache(keys [][]byte, m map[string]kv.ValueEntry)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *Scanner) Close()` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *Scanner) Key() []byte` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *Scanner) Next() error` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *Scanner) Valid() bool` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s *Scanner) Value() []byte` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s SnapshotProbe) BatchGetSingleRegion(bo *retry.Backoffer, region locate.RegionVerID, keys [][]byte, collectF func(k, v []byte)) error` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s SnapshotProbe) FormatStats() string` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s SnapshotProbe) MergeExecDetail(detail *kvrpcpb.ExecDetailsV2)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s SnapshotProbe) MergeRegionRequestStats(rpcStats *locate.RegionRequestRuntimeStats)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s SnapshotProbe) NewScanner(start, end []byte, batchSize int, reverse bool) (*Scanner, error)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
+- [x] `func (s SnapshotProbe) RecordBackoffInfo(bo *retry.Backoffer)` | Rust: N/A (out-of-scope: snapshot APIs exposed as `TransactionClient::snapshot` / `Snapshot`) | Tests: N/A 
 
 ## txnkv/txnutil (package txnutil)
 
 ### Types
-- [ ] `type Priority kvrpcpb.CommandPri` | Rust:  | Tests: 
+- [x] `type Priority kvrpcpb.CommandPri` | Rust: N/A (out-of-scope: Rust does not expose Go txnutil helpers) | Tests: N/A 
 
 ### Functions
 - (none)
 
 ### Consts
-- [ ] `PriorityHigh` | Rust:  | Tests: 
-- [ ] `PriorityLow` | Rust:  | Tests: 
-- [ ] `PriorityNormal` | Rust:  | Tests: 
+- [x] `PriorityHigh` | Rust: N/A (out-of-scope: Rust does not expose Go txnutil helpers) | Tests: N/A 
+- [x] `PriorityLow` | Rust: N/A (out-of-scope: Rust does not expose Go txnutil helpers) | Tests: N/A 
+- [x] `PriorityNormal` | Rust: N/A (out-of-scope: Rust does not expose Go txnutil helpers) | Tests: N/A 
 
 ### Vars
 - (none)
 
 ### Methods
-- [ ] `func (p Priority) ToPB() kvrpcpb.CommandPri` | Rust:  | Tests: 
+- [x] `func (p Priority) ToPB() kvrpcpb.CommandPri` | Rust: N/A (out-of-scope: Rust does not expose Go txnutil helpers) | Tests: N/A 
 
 ## util (package util)
 

@@ -9,14 +9,14 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- tikv/tikvrpc/txnkv：public API mapping + out-of-scope（按 checklist 渐进，优先入口与核心类型）
-  - 计划：
-    - 先收敛 `tikv`/`txnkv`/`tikvrpc` 的 still-relevant public 面：入口类型/构造/关键 option（其余逐步标注 out-of-scope）
-    - Go `tikvrpc.{CmdType,Request,Response}` 继续以 `request::PlanBuilder` 替代；txnkv 子包映射到 `TransactionClient`/`Transaction`
-
 # 待做工作
 
 # 已完成工作
+
+- tikv/tikvrpc/txnkv：public API mapping + out-of-scope（按 checklist 渐进，优先入口与核心类型）
+  - 关键决策：`tikvrpc.{CmdType,Request,Response}` 不做 Go 风格 wrapper；以 `request::PlanBuilder`/typed kvproto request 覆盖能力；`txnkv` 不复刻 Go 包结构，统一映射到 `TransactionClient`/`Transaction`
+  - 文件：`.codex/progress/parity-checklist.md`，`.codex/progress/daemon.md`
+  - 备注：后续继续收敛剩余包（`config/rawkv/kv/util`）的 public vs capability-only vs out-of-scope
 
 - new-client-rust 基线 + API 轮廓：Raw/Txn 客户端、PD/region cache、request plan/PlanBuilder、Keyspace、Error/RequestContext、proto/gen（可编译可测试）
   - 关键决策：以 `client-rust` 为起点迁移；对外 API Rust-idiomatic（`Config`/`TransactionOptions`/`RetryOptions` 显式配置，替代 Go 全局 config/ctx）
