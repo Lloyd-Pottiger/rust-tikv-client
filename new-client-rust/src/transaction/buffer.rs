@@ -147,7 +147,7 @@ impl Buffer {
             .await?
             .into_iter()
             .map(|pair| pair.into())
-            .collect::<HashMap<Key, Value>>();
+            .collect::<BTreeMap<Key, Value>>();
 
         // override using local data
         for (k, m) in mutation_range {
@@ -169,17 +169,18 @@ impl Buffer {
             }
         }
 
-        let mut res = results
-            .into_iter()
-            .map(|(k, v)| KvPair::new(k, v))
-            .collect::<Vec<_>>();
-
-        // TODO: use `BTreeMap` instead of `HashMap` to avoid sorting.
-        if reverse {
-            res.sort_unstable_by(|a, b| b.key().cmp(a.key()));
+        let res = if reverse {
+            results
+                .into_iter()
+                .rev()
+                .map(|(k, v)| KvPair::new(k, v))
+                .collect::<Vec<_>>()
         } else {
-            res.sort_unstable_by(|a, b| a.key().cmp(b.key()));
-        }
+            results
+                .into_iter()
+                .map(|(k, v)| KvPair::new(k, v))
+                .collect::<Vec<_>>()
+        };
 
         Ok(res.into_iter().take(limit as usize))
     }

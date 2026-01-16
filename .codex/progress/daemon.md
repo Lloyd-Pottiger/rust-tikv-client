@@ -9,11 +9,10 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- txn/buffer：`scan_and_fetch` 使用 `BTreeMap` 去重并保持有序，移除排序 TODO
+- raw/requests：补齐 `test_raw_scan` 返回 keys 的断言，清理 FIXME
   - 计划：
-    - 将 `HashMap<Key,Value>` 替换为 `BTreeMap<Key,Value>`（保持 key order）
-    - reverse/forward 两分支不再排序，仅按迭代方向收集
-    - `cargo test` 验证（关注 txn buffer scan 相关用例）
+    - 为 `test_raw_scan` 增加 key 序列断言（同时覆盖 keyspace disable/enable 两种 case）
+    - `cargo test` 验证
 
 # 待做工作
 
@@ -30,7 +29,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
     - 针对热点路径做 micro 优化并补齐单测
 
 - cleanup：清理剩余非 generated TODO/FIXME（小项为主），并补齐对应测试
-  - 范围：`util/iter.rs`（Iterator 语义）、`raw/requests.rs`（keys 测试）、`request/plan.rs`（backoff TODO）、`pd/timestamp.rs`（可调参数/stream 结束语义）、`kv/bound_range.rs`（Eq clone FIXME）
+  - 范围：`util/iter.rs`（Iterator 语义）、`request/plan.rs`（backoff TODO）、`pd/timestamp.rs`（可调参数/stream 结束语义）、`kv/bound_range.rs`（Eq clone FIXME）
 
 # 已完成工作
 
@@ -83,3 +82,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - progress：刷新 `.codex/progress/gap-analysis.md`（清理过期陈述并提炼非 generated TODO/FIXME 作为缺口）
   - 关键决策：gap-analysis 只跟踪“能力/协议/对外可用性”，签名级跟踪仍以 checklist 为准
   - 文件：`.codex/progress/{gap-analysis.md,daemon.md}`
+
+- txn/buffer：`scan_and_fetch` 使用 `BTreeMap` 去重并保持有序，移除排序 TODO
+  - 关键决策：以有序 map 保证 scan 结果 determinism，避免额外排序开销
+  - 文件：`new-client-rust/src/transaction/buffer.rs`，`.codex/progress/daemon.md`
