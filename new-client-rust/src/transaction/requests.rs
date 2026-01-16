@@ -721,7 +721,8 @@ impl Shardable for kvrpcpb::ScanLockRequest {
 impl HasNextBatch for kvrpcpb::ScanLockResponse {
     fn has_next_batch(&self) -> Option<(Vec<u8>, Vec<u8>)> {
         self.locks.last().map(|lock| {
-            // TODO: if last key is larger or equal than ScanLockRequest.end_key, return None.
+            // `ScanLockResponse` doesn't carry the original `ScanLockRequest.end_key`. The caller
+            // should stop when the computed start_key reaches the request end_key.
             let mut start_key: Vec<u8> = lock.key.clone();
             start_key.push(0);
             (start_key, vec![])
@@ -730,6 +731,10 @@ impl HasNextBatch for kvrpcpb::ScanLockResponse {
 }
 
 impl NextBatch for kvrpcpb::ScanLockRequest {
+    fn end_key(&self) -> &[u8] {
+        self.end_key.as_slice()
+    }
+
     fn next_batch(&mut self, range: (Vec<u8>, Vec<u8>)) {
         self.start_key = range.0;
     }

@@ -96,6 +96,11 @@ pub trait HasNextBatch {
 
 // NextBatch use to change start key of request by result of `has_next_batch`.
 pub trait NextBatch {
+    /// Returns the exclusive end key of the scan range.
+    ///
+    /// Empty means the scan is unbounded.
+    fn end_key(&self) -> &[u8];
+
     fn next_batch(&mut self, _range: (Vec<u8>, Vec<u8>));
 }
 
@@ -130,6 +135,10 @@ impl<Req: KvRequest + Shardable> Shardable for Dispatch<Req> {
 }
 
 impl<Req: KvRequest + NextBatch> NextBatch for Dispatch<Req> {
+    fn end_key(&self) -> &[u8] {
+        self.request.end_key()
+    }
+
     fn next_batch(&mut self, range: (Vec<u8>, Vec<u8>)) {
         self.request.next_batch(range);
     }

@@ -923,10 +923,12 @@ where
 
             // Prepare next batch bounds, but do not advance `inner` until we have successfully
             // cleaned the current batch. Otherwise a retry could skip unresolved locks.
+            let end_key = inner.end_key();
             let next_range = match scan_lock_resp.has_next_batch() {
                 Some(range) if region.contains(range.0.as_ref()) => Some(range),
                 _ => None,
-            };
+            }
+            .filter(|(start_key, _)| end_key.is_empty() || start_key.as_slice() < end_key);
 
             let mut locks = scan_lock_resp.take_locks();
             if locks.is_empty() {
@@ -1265,6 +1267,78 @@ mod test {
         let result = plan.execute().await?;
         assert_eq!(result.resolved_locks, 1);
         assert_eq!(check_txn_status_calls.load(Ordering::SeqCst), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_stops_at_end_key() -> Result<()> {
+        let scan_lock_calls = Arc::new(AtomicUsize::new(0));
+        let scan_lock_calls_for_hook = scan_lock_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req| {
+                if req.downcast_ref::<kvrpcpb::ScanLockRequest>().is_some() {
+                    let call = scan_lock_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    let mut resp = kvrpcpb::ScanLockResponse::default();
+                    if call == 0 {
+                        resp.locks.push(kvrpcpb::LockInfo {
+                            key: vec![1],
+                            primary_lock: vec![1],
+                            lock_version: 42,
+                            lock_type: kvrpcpb::Op::Put as i32,
+                            ..Default::default()
+                        });
+                    }
+                    return Ok(Box::new(resp));
+                }
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    // Always treat the txn as rolled back so cleanup can proceed.
+                    return Ok(Box::new(kvrpcpb::CheckTxnStatusResponse::default()));
+                }
+                if req.downcast_ref::<kvrpcpb::ResolveLockRequest>().is_some() {
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()));
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let store = pd_client
+            .clone()
+            .map_region_to_store(MockPdClient::region1())
+            .await?;
+
+        let mut scan_lock = kvrpcpb::ScanLockRequest::default();
+        scan_lock.start_key = vec![1];
+        scan_lock.end_key = vec![1, 0];
+        scan_lock.max_version = 0;
+        scan_lock.limit = 1;
+
+        let mut inner = Dispatch {
+            request: scan_lock,
+            kv_client: None,
+        };
+        inner.apply_store(&store)?;
+
+        let plan = CleanupLocks {
+            inner,
+            ctx: ResolveLocksContext::default(),
+            options: ResolveLocksOptions {
+                async_commit_only: false,
+                batch_size: 1,
+            },
+            store: Some(store),
+            pd_client,
+            keyspace: Keyspace::Disable,
+            backoff: Backoff::no_backoff(),
+            request_context: RequestContext::default(),
+        };
+
+        let result = plan.execute().await?;
+        assert_eq!(result.resolved_locks, 1);
+        assert_eq!(scan_lock_calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 }

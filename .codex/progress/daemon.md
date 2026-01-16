@@ -16,7 +16,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - cleanup：清理剩余非 generated TODO/FIXME（小项为主），并补齐对应测试
   - 计划：
     - `transaction/lock.rs`：LockResolver 的 pd_client TODO（结构调整或明确暂不做的理由）
-    - `transaction/requests.rs`：ScanLockRequest shard 末尾 key TODO + 单测
     - `pd/cluster.rs`：store meta 字段校验 TODO（明确必要字段或补齐校验）
 
 # 已完成工作
@@ -39,3 +38,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：EpochNotMatch 仅在“本地 epoch ahead of TiKV”时触发 backoff；CleanupLocks 遇到 `ResolveLockError` 不推进 next_batch，sleep 后重扫当前 range
   - 测试：新增单测覆盖 CleanupLocks 的 backoff-retry 语义；`cargo test` 通过
   - 文件：`new-client-rust/src/request/plan.rs`，`.codex/progress/daemon.md`
+
+- transaction/requests：收敛 ScanLock next-batch 的 end_key 语义，避免尾部空扫/越界
+  - 关键决策：为 `NextBatch` 增加 `end_key()`，由 CleanupLocks 在计算 next_range 时过滤 `start_key >= end_key`；`ScanLockResponse::has_next_batch()` 仅负责生成 next start_key
+  - 测试：新增单测覆盖 end_key 边界（next start == end_key 时不再发起下一次 ScanLock）
+  - 文件：`new-client-rust/src/{request/shard.rs,transaction/requests.rs,request/plan.rs}`，`.codex/progress/daemon.md`
