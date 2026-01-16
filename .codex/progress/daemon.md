@@ -9,14 +9,13 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- build：增加 `cargo test --all-features --no-run` 作为 feature 组合编译验证（覆盖 `integration-tests`）
+- progress：刷新 `.codex/progress/gap-analysis.md`（resolve-lock-lite、pipelined、resource control 等已完成项）并整理剩余 TODO/FIXME（仅保留真实缺口）
   - 计划：
-    - `cargo test --all-features --no-run`
-    - 失败则做最小修复（cfg/依赖/feature gate），不做无关重构
+    - 更新 “已具备/仍缺/不完整点” 三段，清理过期陈述（例如 lite resolve lock）
+    - 从 `rg TODO|FIXME new-client-rust/src` 提炼真实缺口（generated/* 不计）
+    - 与 `.codex/progress/parity-checklist.md` scope policy 对齐（capability-only/out-of-scope 不当缺口）
 
 # 待做工作
-
-- progress：刷新 `.codex/progress/gap-analysis.md`（resolve-lock-lite、pipelined、resource control 等已完成项）并整理剩余 TODO/FIXME（仅保留真实缺口）
 
 # 已完成工作
 
@@ -61,3 +60,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - txn/gc：校准并注释 ScanLock batch size（对齐 client-go `GCScanLockLimit=ResolvedCacheSize/2`），并去重默认值来源
   - 关键决策：以 `ResolveLocksOptions::default().batch_size` 作为唯一默认值，并在 `transaction/lock.rs` 注释 client-go 来源
   - 文件：`new-client-rust/src/transaction/{client.rs,lock.rs}`，`.codex/progress/daemon.md`
+
+- build：增加 `cargo test --all-features --no-run` 作为 feature 组合编译验证（覆盖 `integration-tests`）
+  - 结果：`cargo test --all-features --no-run` 通过（integration/failpoint test bin 可编译）
+  - 文件：`.codex/progress/daemon.md`
