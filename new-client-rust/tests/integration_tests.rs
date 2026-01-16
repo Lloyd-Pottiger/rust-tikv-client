@@ -12,6 +12,7 @@
 
 mod common;
 use common::*;
+use fail::FailScenario;
 use futures::prelude::*;
 use rand::seq::IteratorRandom;
 use rand::thread_rng;
@@ -132,8 +133,7 @@ async fn txn_crud() -> Result<()> {
     // Read again from TiKV
     let mut snapshot = client.snapshot(
         client.current_timestamp().await?,
-        // TODO needed because pessimistic does not check locks (#235)
-        TransactionOptions::new_optimistic(),
+        TransactionOptions::new_pessimistic(),
     );
     let batch_get_res: HashMap<Key, Value> = snapshot
         .batch_get(vec!["foo".to_owned(), "bar".to_owned()])
@@ -145,6 +145,46 @@ async fn txn_crud() -> Result<()> {
         Some(Value::from("foo".to_owned())).as_ref()
     );
     assert_eq!(batch_get_res.get(&Key::from("bar".to_owned())), None);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_pessimistic_snapshot_checks_locks() -> Result<()> {
+    init().await?;
+    let scenario = FailScenario::setup();
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    // Write a committed value first. If snapshots incorrectly ignore locks, they may return this
+    // stale value instead of reporting the lock.
+    {
+        let mut txn = client.begin_optimistic().await?;
+        txn.put("k".to_owned(), "v0".to_owned()).await?;
+        txn.commit().await?;
+    }
+
+    fail::cfg("after-prewrite", "return").unwrap();
+    defer! {{
+        fail::cfg("after-prewrite", "off").unwrap();
+    }}
+
+    // Create an uncommitted prewrite lock by failing the commit after prewrite.
+    let mut lock_txn = client.begin_optimistic().await?;
+    lock_txn.put("k".to_owned(), "v1".to_owned()).await?;
+    assert!(lock_txn.commit().await.is_err());
+
+    let mut snapshot = client.snapshot(
+        client.current_timestamp().await?,
+        TransactionOptions::new_pessimistic().no_resolve_locks(),
+    );
+    let err = snapshot.get("k".to_owned()).await.unwrap_err();
+    assert!(matches!(err, Error::ResolveLockError(_)));
+
+    let _ = lock_txn.rollback().await;
+    scenario.teardown();
     Ok(())
 }
 

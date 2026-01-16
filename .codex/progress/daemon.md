@@ -9,11 +9,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- correctness：修复 pessimistic snapshot 不做 lock 检查（tests 里已有 TODO #235）
-  - 步骤：
-    - 明确语义：pessimistic snapshot/read-path 是否应 resolve/check locks
-    - 补齐实现与单测（对齐 optimistic 行为或按 client-go 语义）
-    - 集成测：复现并防回归（锁存在时读/写行为）
+- （无）
 
 # 待做工作
 
@@ -36,3 +32,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - bugfix：txn get retry 遵循 `no_resolve_regions`；raw batch_scan each_limit 语义 + backoff 一致；stale-read 增加安全时间戳 API `TransactionClient::current_min_timestamp()`（PD GetMinTs）
   - tests：补齐 txn 协议关键路径集成测（1PC/pipelined/replica/stale），并用 GetMinTs 等待 safe-ts 使 stale-read 用例稳定
   - 文件：`new-client-rust/src/{transaction/transaction.rs,raw/client.rs,trace.rs}`，`new-client-rust/src/pd/{cluster.rs,retry.rs,client.rs}`，`new-client-rust/src/transaction/client.rs`，`new-client-rust/src/region_cache.rs`，`new-client-rust/tests/integration_tests.rs`
+
+- correctness：pessimistic snapshot 读路径 lock-check（移除 tests TODO #235）
+  - 关键决策：用 failpoint `after-prewrite` 构造 prewrite lock；snapshot 侧用 `no_resolve_locks()` 断言“会报锁而不是读旧值”
+  - 改动：`txn_crud` snapshot 改为 `TransactionOptions::new_pessimistic()`；新增 `txn_pessimistic_snapshot_checks_locks`
+  - 文件：`new-client-rust/tests/integration_tests.rs`
