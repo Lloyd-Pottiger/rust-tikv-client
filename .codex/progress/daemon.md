@@ -9,11 +9,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- ci：为 new-client-rust 增加基础 CI（fmt/test/clippy + feature matrix）
+- review：对照整体工作目标复盘当前实现，产出下一阶段待做（优先级排序 + 可执行步骤）
   - 计划：
-    - 新增 GitHub Actions：`cargo fmt --check` / `cargo test` / `cargo clippy --all-targets`
-    - 覆盖 `--no-default-features` + `--features integration-tests --no-run` 的编译矩阵
-    - CI 仅做 compile-only 的 integration-tests（不依赖真实集群）
+    - 复查 `.codex/progress/{gap-analysis,parity-checklist,parity-map}.md` 与 README/doc
+    - 跑一遍 `make -C new-client-rust check`（或等价 cargo 命令）确保可复现
+    - 识别剩余工程缺口（例如：CI/bench/tracing/公开 API 文档），拆成具体任务加入「待做工作」
 
 # 待做工作
 
@@ -70,3 +70,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 产出：`new-client-rust/doc/architecture.md`（分层、核心模块、关键数据流、错误/重试、并发模型、测试策略）
   - 文档对齐：README + crate-level docs（`new-client-rust/src/lib.rs`）修正旧的模块/命名引用，并加入口
   - 验证：`cargo test`（含 doctest）通过
+
+- ci：为 new-client-rust 增加基础 CI（fmt/test/clippy + feature matrix）
+  - 产出：新增 `.github/workflows/new-client-rust.yml`
+  - 覆盖：default/`--no-default-features` + `--features integration-tests --no-run`
