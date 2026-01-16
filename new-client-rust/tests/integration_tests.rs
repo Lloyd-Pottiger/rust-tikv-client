@@ -1081,6 +1081,50 @@ async fn raw_checksum() -> Result<()> {
 
     let got = client.checksum(..).await?;
     assert_eq!(got, expected);
+
+    let start = 100u32.to_be_bytes().to_vec();
+    let end_exclusive = 200u32.to_be_bytes().to_vec();
+    let end_inclusive = 200u32.to_be_bytes().to_vec();
+
+    // [start, end)
+    let mut expected = tikv_client::RawChecksum::default();
+    for (key, value) in &pairs[100..200] {
+        let mut crc = 0u64;
+        crc = crc64_update(crc, &table, &keyspace_prefix);
+        crc = crc64_update(crc, &table, key);
+        crc = crc64_update(crc, &table, value);
+
+        expected.crc64_xor ^= crc;
+        expected.total_kvs += 1;
+        expected.total_bytes += (keyspace_prefix.len() + key.len() + value.len()) as u64;
+    }
+    assert_eq!(
+        client.checksum(start.clone()..end_exclusive).await?,
+        expected
+    );
+
+    // [start, end]
+    let mut expected = tikv_client::RawChecksum::default();
+    for (key, value) in &pairs[100..=200] {
+        let mut crc = 0u64;
+        crc = crc64_update(crc, &table, &keyspace_prefix);
+        crc = crc64_update(crc, &table, key);
+        crc = crc64_update(crc, &table, value);
+
+        expected.crc64_xor ^= crc;
+        expected.total_kvs += 1;
+        expected.total_bytes += (keyspace_prefix.len() + key.len() + value.len()) as u64;
+    }
+    assert_eq!(
+        client.checksum(start.clone()..=end_inclusive).await?,
+        expected
+    );
+
+    // Empty range must not issue any RPCs.
+    assert_eq!(
+        client.checksum(start.clone()..start.clone()).await?,
+        tikv_client::RawChecksum::default()
+    );
     Ok(())
 }
 

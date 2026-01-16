@@ -17,6 +17,10 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- tests：扩展 raw_checksum 集成测试，覆盖子区间范围语义（start/end bound 编码回归）
+  - 覆盖：`[start,end)` / `[start,end]` / 空区间（start==end）语义
+  - 文件：`new-client-rust/tests/integration_tests.rs`，`.codex/progress/daemon.md`
+
 - infra：把 raw_checksum 纳入 integration-test-smoke（确保端到端 checksum 覆盖可一键跑）
   - 文件：`new-client-rust/Makefile`，`.codex/progress/daemon.md`
 
