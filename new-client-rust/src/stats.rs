@@ -97,11 +97,19 @@ mod imp {
         lazy_static::initialize(&TIKV_REQUEST_COUNTER_VEC);
         lazy_static::initialize(&TIKV_FAILED_REQUEST_DURATION_HISTOGRAM_VEC);
         lazy_static::initialize(&TIKV_FAILED_REQUEST_COUNTER_VEC);
+        lazy_static::initialize(&BACKOFF_SLEEP_DURATION_HISTOGRAM_VEC);
         lazy_static::initialize(&PD_REQUEST_DURATION_HISTOGRAM_VEC);
         lazy_static::initialize(&PD_REQUEST_COUNTER_VEC);
         lazy_static::initialize(&PD_FAILED_REQUEST_DURATION_HISTOGRAM_VEC);
         lazy_static::initialize(&PD_FAILED_REQUEST_COUNTER_VEC);
         lazy_static::initialize(&PD_TSO_BATCH_SIZE_HISTOGRAM);
+    }
+
+    pub(crate) fn observe_backoff_sleep(kind: &'static str, duration: Duration) {
+        ensure_metrics_registered();
+        BACKOFF_SLEEP_DURATION_HISTOGRAM_VEC
+            .with_label_values(&[kind])
+            .observe(duration_to_sec(duration));
     }
 
     lazy_static::lazy_static! {
@@ -126,6 +134,12 @@ mod imp {
         static ref TIKV_FAILED_REQUEST_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
             "tikv_failed_request_total",
             "Total number of failed requests sent to TiKV",
+            &["type"]
+        )
+        .unwrap();
+        static ref BACKOFF_SLEEP_DURATION_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
+            "tikv_backoff_sleep_duration_seconds",
+            "Bucketed histogram of TiKV client backoff sleep duration",
             &["type"]
         )
         .unwrap();
@@ -192,6 +206,9 @@ mod imp {
 
     #[allow(dead_code)]
     pub fn observe_tso_batch(_batch_size: usize) {}
+
+    #[allow(dead_code)]
+    pub(crate) fn observe_backoff_sleep(_kind: &'static str, _duration: std::time::Duration) {}
 
     #[allow(dead_code)]
     pub(crate) fn ensure_metrics_registered() {}

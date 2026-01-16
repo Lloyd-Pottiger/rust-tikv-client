@@ -339,6 +339,7 @@ where
                         handle_region_error(pd_client.clone(), e, region_store).await?;
                     // don't sleep if we have resolved the region error
                     if !region_error_resolved {
+                        crate::stats::observe_backoff_sleep("region", duration);
                         sleep(duration).await;
                     }
                     Self::single_plan_handler(
@@ -383,6 +384,7 @@ where
         }
         match backoff.next_delay_duration() {
             Some(duration) => {
+                crate::stats::observe_backoff_sleep("grpc", duration);
                 sleep(duration).await;
                 Self::single_plan_handler(
                     pd_client,
@@ -614,6 +616,7 @@ where
                 }
                 Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
                     Some(duration) => {
+                        crate::stats::observe_backoff_sleep("grpc", duration);
                         sleep(duration).await;
                         continue;
                     }
@@ -785,6 +788,7 @@ where
                 return match clone.backoff.next_delay_duration() {
                     None => Err(Error::ResolveLockError(live_locks)),
                     Some(delay_duration) => {
+                        crate::stats::observe_backoff_sleep("lock", delay_duration);
                         sleep(delay_duration).await;
                         Ok(reroute_to_leader::<P::Result>())
                     }
@@ -799,6 +803,7 @@ where
             match clone.backoff.next_delay_duration() {
                 None => return Err(Error::ResolveLockError(live_locks)),
                 Some(delay_duration) => {
+                    crate::stats::observe_backoff_sleep("lock", delay_duration);
                     sleep(delay_duration).await;
                     result = clone.inner.execute().await?;
                 }

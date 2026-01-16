@@ -9,18 +9,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- metrics：补齐 metrics package 最小可用集（Init/Register + 核心 counters/histograms）
-  - 计划：
-    - 提供 `metrics::register()`/`metrics::gather_as_text()` 等稳定 API
-    - 渐进补齐关键 backoff/txn 指标（优先 lock/region/rpc）
-    - 补单测：feature off 编译 + 指标可 gather
-
-# 待做工作
-
 - Parity checklist：metrics/trace/interceptor 区域回填
   - 计划：
     - `go run ./tools/client-go-api-inventory` 刷新 checklist
     - 逐条标注 public/capability-only/out-of-scope（按 scope policy）
+
+# 待做工作
 
 # 已完成工作
 
@@ -82,3 +76,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：提供全局 hook（IsCategoryEnabled/TraceEventFn）；txn 关键路径发出少量 `trace_event`（默认关闭）
   - 文件：`new-client-rust/src/{trace.rs,transaction/{transaction.rs,lock.rs}}`
   - 测试：新增 trace hook 单测；复用 PlanBuilder trace 字段透传断言
+
+- metrics：补齐 metrics package 最小可用集（Init/Register + 核心 counters/histograms）
+  - 关键决策：提供 `metrics::register()`；新增 backoff sleep histogram（lock/region/grpc）并在关键 sleep 点埋点
+  - 文件：`new-client-rust/src/{metrics.rs,stats.rs,request/plan.rs}`
+  - 测试：新增 metrics gather 单测（prometheus on/off 都可运行）
