@@ -18,16 +18,15 @@
 //! objects via the [`Config`] and [`TransactionOptions`] structs. Using some options, you can take
 //! over parts of the protocols (such as retrying failed messages) yourself.
 //!
-//! The lowest level of abstraction is to create and send gRPC messages directly to TiKV (and PD)
-//! nodes. The `tikv-client-store` and `tikv-client-pd` crates make this easier than using the
-//! protobuf definitions and a gRPC library directly, but give you the same level of control.
+//! The lowest public abstraction is to create and execute a [`request::PlanBuilder`] over typed
+//! kvproto request/response types (see [`kvrpcpb`]). Plans reuse the same sharding/retry/merge
+//! machinery used by the high-level clients, but keep request/response types explicit.
 //!
-//! In between these levels of abstraction, you can send and receive individual messages to the TiKV
-//! cluster, but take advantage of library code for common operations such as resolving data to
-//! regions and thus nodes in the cluster, or retrying failed messages. This can be useful for
-//! testing a TiKV cluster or for some advanced use cases. See the [`request`] module for
-//! this API, and [`raw::lowering`] and [`transaction::lowering`] for
-//! convenience methods for creating request objects.
+//! Convenience helpers for constructing kvproto requests live in [`raw_lowering`] and
+//! [`transaction_lowering`].
+//!
+//! For an implementation-oriented overview (module boundaries and request flow), see
+//! `doc/architecture.md` in this repo.
 //!
 //! ## Choosing an API
 //!

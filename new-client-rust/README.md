@@ -6,6 +6,8 @@ This is the new Rust TiKV client implementation in this repo.
 
 **Roadmap:** `doc/client-go-v2-parity-roadmap.md`.
 
+**Architecture:** `doc/architecture.md`.
+
 This crate provides an easy-to-use client for [TiKV](https://github.com/tikv/tikv), a distributed,
 transactional key-value database written in Rust.
 
@@ -33,24 +35,28 @@ The general flow of using the client crate is to create either a raw or transact
 
 Raw mode:
 
-```rust
-use tikv_client::RawClient;
-
+```rust,no_run
+# use tikv_client::{RawClient, Result};
+# async fn example() -> Result<()> {
 let client = RawClient::new(vec!["127.0.0.1:2379"]).await?;
 client.put("key".to_owned(), "value".to_owned()).await?;
-let value = client.get("key".to_owned()).await?;
+let _value = client.get("key".to_owned()).await?;
+# Ok(())
+# }
 ```
 
 Transactional mode:
 
-```rust
-use tikv_client::TransactionClient;
-
+```rust,no_run
+# use tikv_client::{Result, TransactionClient};
+# async fn example() -> Result<()> {
 let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
 let mut txn = txn_client.begin_optimistic().await?;
 txn.put("key".to_owned(), "value".to_owned()).await?;
-let value = txn.get("key".to_owned()).await?;
+let _value = txn.get("key".to_owned()).await?;
 txn.commit().await?;
+# Ok(())
+# }
 ```
 
 Since the TiKV client provides an async API, you'll need to use an async runtime (we currently only support Tokio). See [getting-started.md](getting-started.md) for a complete example.
@@ -59,9 +65,12 @@ Since the TiKV client provides an async API, you'll need to use an async runtime
 
 The TiKV Rust client supports several levels of abstraction. The most convenient way to use the client is via `RawClient` and `TransactionClient`. This gives a very high-level API which mostly abstracts over the distributed nature of the store and has sensible defaults for all protocols. This interface can be configured, primarily when creating the client or transaction objects via the `Config` and `TransactionOptions` structs. Using some options, you can take over parts of the protocols (such as retrying failed messages) yourself.
 
-The lowest level of abstraction is to create and send gRPC messages directly to TiKV (and PD) nodes. The `tikv-client-store` and `tikv-client-pd` crates make this easier than using the protobuf definitions and a gRPC library directly, but give you the same level of control.
+The lowest public abstraction is to create and execute a `request::PlanBuilder` over typed kvproto
+requests/responses. Plans reuse the same sharding/retry/lock-resolve/merge machinery used by the
+high-level clients, but keep request/response types explicit.
 
-In between these levels of abstraction, you can send and receive individual messages to the TiKV cluster, but take advantage of library code for common operations such as resolving data to regions and thus nodes in the cluster, or retrying failed messages. This can be useful for testing a TiKV cluster or for some advanced use cases. See the `client_rust::request` module for this API, and `client_rust::raw::lowering` and `client_rust::transaction::lowering` for convenience methods for creating request objects.
+See `tikv_client::raw_lowering` and `tikv_client::transaction_lowering` for convenience helpers to
+construct kvproto request objects.
 
 The rest of this document describes only the `RawClient`/`TransactionClient` APIs.
 
@@ -116,7 +125,8 @@ We welcome your contributions! Contributing code is great, we also appreciate fi
 
 ## Building and testing
 
-We use the standard Cargo workflows, e.g., `cargo build` to build and `cargo test/nextest` to run unit tests. You will need to use a nightly Rust toolchain to build and run tests. Could use [nextest](https://nexte.st/index.html) to speed up ut, install nextest first.
+We use the standard Cargo workflows, e.g., `cargo build` and `cargo test`. For faster test runs we
+recommend [nextest](https://nexte.st/index.html):
 
 ```
 cargo install cargo-nextest --locked

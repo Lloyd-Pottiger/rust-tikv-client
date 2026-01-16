@@ -9,11 +9,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- docs：补齐核心抽象/模块边界/关键流程的架构文档（便于后续迭代与评审）
+- ci：为 new-client-rust 增加基础 CI（fmt/test/clippy + feature matrix）
   - 计划：
-    - 产出 `new-client-rust/doc/architecture.md`：模块划分、核心对象/数据流（PD/RegionCache/PlanBuilder/Txn）
-    - 补齐关键实现注释（为什么这么做/不变式/失败模式），并在 README/guide 中加入口
-    - `cargo fmt && cargo test` 校验文档/示例
+    - 新增 GitHub Actions：`cargo fmt --check` / `cargo test` / `cargo clippy --all-targets`
+    - 覆盖 `--no-default-features` + `--features integration-tests --no-run` 的编译矩阵
+    - CI 仅做 compile-only 的 integration-tests（不依赖真实集群）
 
 # 待做工作
 
@@ -65,3 +65,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 测试：新增 `kv::key` repr cast roundtrip；新增 truncate-keyspace(short key)；`cargo test` 通过
   - 文件：`new-client-rust/src/{compat.rs,kv/{key,codec}.rs,request/keyspace.rs}`，`.codex/progress/daemon.md`
   - 验证：`cargo fmt && cargo test && cargo clippy --all-targets`
+
+- docs：补齐核心抽象/模块边界/关键流程的架构文档（便于后续迭代与评审）
+  - 产出：`new-client-rust/doc/architecture.md`（分层、核心模块、关键数据流、错误/重试、并发模型、测试策略）
+  - 文档对齐：README + crate-level docs（`new-client-rust/src/lib.rs`）修正旧的模块/命名引用，并加入口
+  - 验证：`cargo test`（含 doctest）通过
