@@ -18,7 +18,7 @@ transactional key-value database written in Rust.
 This crate lets you connect to a TiKV cluster and use either a transactional or raw (simple get/put
 style without transactional consistency guarantees) API to access and update your data.
 
-Status: parity work is in progress; APIs may change until parity work stabilizes.
+Status: client-go v2 parity achieved; hardening ongoing (APIs may still evolve).
 
 ## Getting started
 

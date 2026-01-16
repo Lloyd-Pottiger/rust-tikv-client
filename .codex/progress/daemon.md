@@ -17,6 +17,10 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- docs：补齐 RawChecksum/RawClient::checksum 文档语义，并刷新 README 状态描述
+  - 关键点：明确 checksum=CRC64-ECMA(encoded_key||value) xor 聚合；API v2 下 encoded_key 含 keyspace 前缀
+  - 文件：`new-client-rust/src/raw/{mod.rs,client.rs}`，`new-client-rust/README.md`，`.codex/progress/daemon.md`
+
 - tests：补齐 RawClient::checksum 端到端集成测试（crc64_xor/total_kvs/total_bytes）并用 tiup 验证
   - 关键点：对齐 TiKV/Go 的 CRC64-ECMA 语义；API v2 keyspace 下 checksum 计算包含 raw key 前缀 `[b'r',0,0,0]`
   - 验证：`tiup playground` + `cargo test --features integration-tests raw_checksum` 通过

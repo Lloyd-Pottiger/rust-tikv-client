@@ -644,6 +644,11 @@ impl<PdC: PdClient> Client<PdC> {
     ///
     /// The checksum is computed by TiKV and aggregated client-side across regions.
     ///
+    /// TiKV uses the CRC64-ECMA algorithm and computes `CRC64(key || value)` for each key/value
+    /// pair, then xors all per-pair checksums within the range. In API v2 keyspace mode, `key`
+    /// refers to the encoded key bytes stored in TiKV (including the 4-byte keyspace prefix).
+    /// `total_bytes` is the sum of `len(encoded_key) + len(value)` across pairs.
+    ///
     /// # Examples
     /// ```rust,no_run
     /// # use tikv_client::{RawClient, RawChecksum, IntoOwnedRange};
