@@ -9,7 +9,16 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
+- txn/gc：校准并注释 `SCAN_LOCK_BATCH_SIZE=1024`（来源 client-go `GCScanLockLimit=ResolvedCacheSize/2`），并评估是否应下沉到 `ResolveLocksOptions` 默认值
+  - 计划：
+    - 在 `transaction/client.rs` / `transaction/lock.rs` 注释来源与语义（与 client-go 一致）
+    - 去重：优先以 `ResolveLocksOptions::default().batch_size` 作为默认值，避免重复常量
+    - `cargo test` 验证
+
 # 待做工作
+
+- progress：刷新 `.codex/progress/gap-analysis.md`（resolve-lock-lite、pipelined、resource control 等已完成项）并整理剩余 TODO/FIXME（仅保留真实缺口）
+- build：增加 `cargo test --all-features --no-run` 作为 feature 组合编译验证（覆盖 `integration-tests`）
 
 # 已完成工作
 
@@ -45,3 +54,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：clippy 仅做最小修复；递归 handler 保留签名用 allow 标注；同时覆盖 default 与 `--no-default-features` 的 clippy
   - 结果：`cargo fmt --check`，`cargo test`，`cargo test --no-default-features`，`cargo clippy --all-targets`，`cargo clippy --all-targets --no-default-features` 均通过
   - 文件：`new-client-rust/src/{common/errors.rs,interceptor.rs,lib.rs,request/plan.rs,request/plan_builder.rs,transaction/{latch.rs,pipelined.rs,transaction.rs}}`，`.codex/progress/daemon.md`
+
+- txn/cleanup_locks：修复 `ScanLockRequest` range shard（apply_shard 设置 end_key）并补齐跨 region 的单测
+  - 关键决策：按 `region_stream_for_range` 的 intersection 设置 per-region `end_key`（避免 ScanLock 跨 region 触发 RegionError）
+  - 测试：新增单测覆盖 multi-region range 的 shard 结果（end_key 被截断到 region end）
+  - 文件：`new-client-rust/src/transaction/requests.rs`，`.codex/progress/daemon.md`

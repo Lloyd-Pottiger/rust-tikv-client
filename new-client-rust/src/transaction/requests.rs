@@ -710,6 +710,7 @@ impl Shardable for kvrpcpb::ScanLockRequest {
 
     fn apply_shard(&mut self, shard: Self::Shard) {
         self.start_key = shard.0;
+        self.end_key = shard.1;
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
@@ -1083,6 +1084,36 @@ mod tests {
     use crate::request::ResponseWithShard;
     use crate::request::Shardable;
     use crate::KvPair;
+
+    #[tokio::test]
+    async fn test_scan_lock_request_range_shards_set_end_key() {
+        let pd = Arc::new(MockPdClient::default());
+        // This range spans region1 ([..10)) and region2 ([10..250,250)).
+        let req = super::new_scan_lock_request(vec![1], vec![12], 42, 128);
+
+        let shards = req.shards(&pd).collect::<Vec<_>>().await;
+        assert_eq!(shards.len(), 2);
+
+        let (range1, region1) = shards[0].as_ref().unwrap().clone();
+        assert_eq!(region1.id(), 1);
+        assert_eq!(range1.0, vec![1]);
+        assert_eq!(range1.1, vec![10]);
+
+        let mut r1 = req.clone();
+        r1.apply_shard(range1.clone());
+        assert_eq!(r1.start_key, range1.0);
+        assert_eq!(r1.end_key, range1.1);
+
+        let (range2, region2) = shards[1].as_ref().unwrap().clone();
+        assert_eq!(region2.id(), 2);
+        assert_eq!(range2.0, vec![10]);
+        assert_eq!(range2.1, vec![12]);
+
+        let mut r2 = req.clone();
+        r2.apply_shard(range2.clone());
+        assert_eq!(r2.start_key, range2.0);
+        assert_eq!(r2.end_key, range2.1);
+    }
 
     #[tokio::test]
     async fn test_prewrite_txn_size_is_region_key_count_and_retry_disables_lite() {
