@@ -291,7 +291,9 @@ impl PdRpcClient<TikvConnect, Cluster> {
         PdRpcClient::new(
             config.clone(),
             |security_mgr| TikvConnect::new(security_mgr, config.timeout),
-            |security_mgr| RetryClient::connect(pd_endpoints, security_mgr, config.timeout),
+            |security_mgr| {
+                RetryClient::connect(pd_endpoints, security_mgr, config.timeout, config.pd_retry)
+            },
             enable_codec,
         )
         .await

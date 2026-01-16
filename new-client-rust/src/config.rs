@@ -6,6 +6,25 @@ use std::time::Duration;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct PdRetryConfig {
+    pub reconnect_interval: Duration,
+    pub max_reconnect_attempts: usize,
+    pub leader_change_retry: usize,
+}
+
+impl Default for PdRetryConfig {
+    fn default() -> Self {
+        Self {
+            reconnect_interval: Duration::from_secs(1),
+            max_reconnect_attempts: 5,
+            leader_change_retry: 10,
+        }
+    }
+}
+
 /// The configuration for either a [`RawClient`](crate::RawClient) or a
 /// [`TransactionClient`](crate::TransactionClient).
 ///
@@ -20,6 +39,7 @@ pub struct Config {
     pub key_path: Option<PathBuf>,
     pub timeout: Duration,
     pub keyspace: Option<String>,
+    pub pd_retry: PdRetryConfig,
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -32,6 +52,7 @@ impl Default for Config {
             key_path: None,
             timeout: DEFAULT_REQUEST_TIMEOUT,
             keyspace: None,
+            pd_retry: PdRetryConfig::default(),
         }
     }
 }
@@ -100,6 +121,12 @@ impl Config {
     #[must_use]
     pub fn with_keyspace(mut self, keyspace: &str) -> Self {
         self.keyspace = Some(keyspace.to_owned());
+        self
+    }
+
+    #[must_use]
+    pub fn with_pd_retry_config(mut self, pd_retry: PdRetryConfig) -> Self {
+        self.pd_retry = pd_retry;
         self
     }
 }

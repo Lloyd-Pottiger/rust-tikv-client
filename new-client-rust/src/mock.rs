@@ -40,6 +40,7 @@ pub async fn pd_rpc_client() -> PdRpcClient<MockKvConnect, MockCluster> {
             futures::future::ok(RetryClient::new_with_cluster(
                 sm,
                 config.timeout,
+                config.pd_retry,
                 MockCluster,
             ))
         },
