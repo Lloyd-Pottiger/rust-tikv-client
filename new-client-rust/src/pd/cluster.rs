@@ -43,6 +43,10 @@ macro_rules! pd_request {
 
 // These methods make a single attempt to make a request.
 impl Cluster {
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
     pub async fn get_region(
         &mut self,
         key: Vec<u8>,

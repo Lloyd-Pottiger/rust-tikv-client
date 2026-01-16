@@ -139,6 +139,10 @@ impl RetryClient<Cluster> {
             timeout,
         })
     }
+
+    pub(crate) async fn cluster_id(&self) -> u64 {
+        self.cluster.read().await.0.id()
+    }
 }
 
 #[async_trait]

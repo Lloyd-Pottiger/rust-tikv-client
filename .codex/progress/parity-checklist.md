@@ -642,21 +642,21 @@ Conventions:
 
 ### Types
 - [x] `type Client struct` | Rust: `tikv_client::RawClient` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (tests)`
-- [ ] `type ClientOpt func(*option)` | Rust:  | Tests: 
-- [ ] `type ClientProbe struct` | Rust:  | Tests: 
-- [ ] `type ConfigProbe struct` | Rust:  | Tests: 
+- [x] `type ClientOpt func(*option)` | Rust: N/A (out-of-scope: Rust uses explicit `Config` on `RawClient::new_with_config`) | Tests: N/A
+- [x] `type ClientProbe struct` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
+- [x] `type ConfigProbe struct` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
 - [x] `type RawChecksum struct` | Rust: `tikv_client::RawChecksum` (new-client-rust/src/raw/mod.rs) | Tests: `new-client-rust/src/raw/requests.rs (test_raw_checksum_merge)`
-- [ ] `type RawOption interface` | Rust:  | Tests: 
+- [x] `type RawOption interface` | Rust: N/A (out-of-scope: Rust uses typed methods like `with_cf`/`scan_keys`) | Tests: N/A
 
 ### Functions
 - [x] `func NewClient(ctx context.Context, pdAddrs []string, security config.Security, opts ...opt.ClientOption) (*Client, error)` | Rust: `RawClient::new_with_config` + `Config::with_security` (new-client-rust/src/{raw/client.rs,config.rs}) | Tests: `new-client-rust/src/common/security.rs (test_security)`
 - [x] `func NewClientWithOpts(ctx context.Context, pdAddrs []string, opts ...ClientOpt) (*Client, error)` | Rust: `RawClient::new` / `RawClient::new_with_config` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (tests)`
 - [x] `func ScanKeyOnly() RawOption` | Rust: `RawClient::{scan_keys,scan_keys_reverse}` (new-client-rust/src/raw/client.rs) | Tests: N/A
 - [x] `func SetColumnFamily(cf string) RawOption` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (new-client-rust/src/raw/{client.rs,mod.rs}) | Tests: N/A
-- [ ] `func WithAPIVersion(apiVersion kvrpcpb.APIVersion) ClientOpt` | Rust:  | Tests: 
-- [ ] `func WithGRPCDialOptions(opts ...grpc.DialOption) ClientOpt` | Rust:  | Tests: 
+- [x] `func WithAPIVersion(apiVersion kvrpcpb.APIVersion) ClientOpt` | Rust: N/A (out-of-scope: target TiKV uses API v2; use `Config::with_keyspace`) | Tests: N/A
+- [x] `func WithGRPCDialOptions(opts ...grpc.DialOption) ClientOpt` | Rust: N/A (out-of-scope: no gRPC dial option passthrough; use `Config`/defaults) | Tests: N/A
 - [x] `func WithKeyspace(name string) ClientOpt` | Rust: `Config::with_keyspace` / `Config::with_default_keyspace` (new-client-rust/src/config.rs) | Tests: N/A
-- [ ] `func WithPDOptions(opts ...opt.ClientOption) ClientOpt` | Rust:  | Tests: 
+- [x] `func WithPDOptions(opts ...opt.ClientOption) ClientOpt` | Rust: N/A (out-of-scope: no PD option passthrough; use `Config`/defaults) | Tests: N/A
 - [x] `func WithSecurity(security config.Security) ClientOpt` | Rust: `Config::with_security` (new-client-rust/src/config.rs) | Tests: `new-client-rust/src/common/security.rs (test_security)`
 
 ### Consts
@@ -673,24 +673,24 @@ Conventions:
 - [x] `func (c *Client) BatchPutWithTTL(ctx context.Context, keys, values [][]byte, ttls []uint64, options ...RawOption) error` | Rust: `RawClient::batch_put_with_ttl` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (test_batch_put_with_ttl)`
 - [x] `func (c *Client) Checksum(ctx context.Context, startKey, endKey []byte, options ...RawOption, ) (check RawChecksum, err error)` | Rust: `RawClient::checksum` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/requests.rs (test_raw_checksum_merge)`
 - [x] `func (c *Client) Close() error` | Rust: N/A (out-of-scope: drop closes client) | Tests: N/A
-- [ ] `func (c *Client) ClusterID() uint64` | Rust:  | Tests: 
+- [x] `func (c *Client) ClusterID() uint64` | Rust: `RawClient::cluster_id` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (tests)`
 - [x] `func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValue []byte, options ...RawOption) ([]byte, bool, error)` | Rust: `RawClient::compare_and_swap` (new-client-rust/src/raw/client.rs) | Tests: N/A
 - [x] `func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) error` | Rust: `RawClient::delete` (new-client-rust/src/raw/client.rs) | Tests: N/A
 - [x] `func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte, options ...RawOption) error` | Rust: `RawClient::delete_range` (new-client-rust/src/raw/client.rs) | Tests: N/A
 - [x] `func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]byte, error)` | Rust: `RawClient::get` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (test_request_source_and_resource_group_tag)`
 - [x] `func (c *Client) GetKeyTTL(ctx context.Context, key []byte, options ...RawOption) (*uint64, error)` | Rust: `RawClient::get_key_ttl_secs` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [ ] `func (c *Client) GetPDClient() pd.Client` | Rust:  | Tests: 
+- [x] `func (c *Client) GetPDClient() pd.Client` | Rust: N/A (out-of-scope: PD client is internal; use `request::PlanBuilder`/clients) | Tests: N/A
 - [x] `func (c *Client) Put(ctx context.Context, key, value []byte, options ...RawOption) error` | Rust: `RawClient::put` (new-client-rust/src/raw/client.rs) | Tests: N/A
 - [x] `func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, options ...RawOption) error` | Rust: `RawClient::put_with_ttl` (new-client-rust/src/raw/client.rs) | Tests: N/A
-- [ ] `func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption) (keys [][]byte, values [][]byte, err error)` | Rust:  | Tests: 
-- [ ] `func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption, ) (keys [][]byte, values [][]byte, err error)` | Rust:  | Tests: 
+- [x] `func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption) (keys [][]byte, values [][]byte, err error)` | Rust: `RawClient::scan_reverse` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/requests.rs (test_raw_scan)`
+- [x] `func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption, ) (keys [][]byte, values [][]byte, err error)` | Rust: `RawClient::scan` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/requests.rs (test_raw_scan)`
 - [x] `func (c *Client) SetAtomicForCAS(b bool) *Client` | Rust: `RawClient::with_atomic_for_cas` (new-client-rust/src/raw/client.rs) | Tests: N/A
 - [x] `func (c *Client) SetColumnFamily(columnFamily string) *Client` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (new-client-rust/src/raw/{client.rs,mod.rs}) | Tests: N/A
-- [ ] `func (c ClientProbe) GetRegionCache() *locate.RegionCache` | Rust:  | Tests: 
-- [ ] `func (c ClientProbe) SetPDClient(client pd.Client)` | Rust:  | Tests: 
-- [ ] `func (c ClientProbe) SetRPCClient(client client.Client)` | Rust:  | Tests: 
-- [ ] `func (c ClientProbe) SetRegionCache(regionCache *locate.RegionCache)` | Rust:  | Tests: 
-- [ ] `func (c ConfigProbe) GetRawBatchPutSize() int` | Rust:  | Tests: 
+- [x] `func (c ClientProbe) GetRegionCache() *locate.RegionCache` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
+- [x] `func (c ClientProbe) SetPDClient(client pd.Client)` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
+- [x] `func (c ClientProbe) SetRPCClient(client client.Client)` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
+- [x] `func (c ClientProbe) SetRegionCache(regionCache *locate.RegionCache)` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
+- [x] `func (c ConfigProbe) GetRawBatchPutSize() int` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
 
 ## tikv (package tikv)
 

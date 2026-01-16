@@ -48,6 +48,7 @@ const MAX_RAW_KV_SCAN_LIMIT: u32 = 10240;
 /// The returned results of raw request methods are [`Future`](std::future::Future)s that must be
 /// awaited to execute.
 pub struct Client<PdC: PdClient = PdRpcClient> {
+    cluster_id: u64,
     rpc: Arc<PdC>,
     cf: Option<ColumnFamily>,
     backoff: Backoff,
@@ -60,6 +61,7 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
 impl<PdC: PdClient> Clone for Client<PdC> {
     fn clone(&self) -> Self {
         Self {
+            cluster_id: self.cluster_id,
             rpc: self.rpc.clone(),
             cf: self.cf.clone(),
             backoff: self.backoff.clone(),
@@ -119,6 +121,7 @@ impl Client<PdRpcClient> {
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let rpc =
             Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), enable_codec).await?);
+        let cluster_id = rpc.cluster_id().await;
         let keyspace = match config.keyspace {
             Some(keyspace) => {
                 let keyspace = rpc.load_keyspace(&keyspace).await?;
@@ -129,6 +132,7 @@ impl Client<PdRpcClient> {
             None => Keyspace::Disable,
         };
         Ok(Client {
+            cluster_id,
             rpc,
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,
@@ -165,6 +169,7 @@ impl Client<PdRpcClient> {
     #[must_use]
     pub fn with_cf(&self, cf: ColumnFamily) -> Self {
         Client {
+            cluster_id: self.cluster_id,
             rpc: self.rpc.clone(),
             cf: Some(cf),
             backoff: self.backoff.clone(),
@@ -195,6 +200,7 @@ impl Client<PdRpcClient> {
     #[must_use]
     pub fn with_backoff(&self, backoff: Backoff) -> Self {
         Client {
+            cluster_id: self.cluster_id,
             rpc: self.rpc.clone(),
             cf: self.cf.clone(),
             backoff,
@@ -214,6 +220,7 @@ impl Client<PdRpcClient> {
     #[must_use]
     pub fn with_atomic_for_cas(&self) -> Self {
         Client {
+            cluster_id: self.cluster_id,
             rpc: self.rpc.clone(),
             cf: self.cf.clone(),
             backoff: self.backoff.clone(),
@@ -225,6 +232,12 @@ impl Client<PdRpcClient> {
 }
 
 impl<PdC: PdClient> Client<PdC> {
+    /// Returns the PD cluster ID this client is connected to.
+    #[must_use]
+    pub fn cluster_id(&self) -> u64 {
+        self.cluster_id
+    }
+
     /// Set `kvrpcpb::Context.request_source` for all requests created by this client.
     #[must_use]
     pub fn with_request_source(&self, source: impl Into<String>) -> Self {
@@ -1109,6 +1122,22 @@ mod tests {
     use crate::proto::kvrpcpb;
     use crate::Result;
 
+    #[test]
+    fn test_cluster_id_accessor() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            cluster_id: 42,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        assert_eq!(client.cluster_id(), 42);
+    }
+
     #[tokio::test]
     async fn test_batch_put_with_ttl() -> Result<()> {
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
@@ -1124,6 +1153,7 @@ mod tests {
             },
         )));
         let client = Client {
+            cluster_id: 0,
             rpc: pd_client,
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
@@ -1158,6 +1188,7 @@ mod tests {
             },
         )));
         let client = Client {
+            cluster_id: 0,
             rpc: pd_client,
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
@@ -1227,6 +1258,7 @@ mod tests {
         )));
 
         let client = Client {
+            cluster_id: 0,
             rpc: pd_client,
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,

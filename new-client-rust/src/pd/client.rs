@@ -296,6 +296,10 @@ impl PdRpcClient<TikvConnect, Cluster> {
         )
         .await
     }
+
+    pub(crate) async fn cluster_id(&self) -> u64 {
+        self.pd.cluster_id().await
+    }
 }
 
 impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {

@@ -9,9 +9,20 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
+- config/kv/util：收敛剩余导出符号（Rust mapping / capability-only / out-of-scope），清空 checklist 未标注项
+  - 计划：
+    - `config`：PD/TiKV client config / batch policy / ParsePath 等标注 out-of-scope（Rust 侧显式 `Config`/builder 替代）
+    - `kv`：将 `ReplicaReadType` 常量/方法映射到 `ReplicaReadType`；`KeyFlags/FlagsOp` 映射到 `transaction::{KeyFlags,FlagsOp}`；其余 internal helper 标注 capability-only/out-of-scope
+    - `util/*`：context/execdetails/pd interceptor/async/codec/redact 多数标注 out-of-scope；必要时补最小 Rust helper（如 `RateLimit/TSSet`）并加单测
+
 # 待做工作
 
 # 已完成工作
+
+- rawkv：补齐剩余 public API（Scan/ReverseScan/ClusterID）+ option/probe 取舍，并更新 checklist
+  - 关键决策：不复刻 Go `RawOption`/functional options；改为 `Config` + chainable builder（`with_cf/with_request_source/...`）；`GetPDClient/Probe` 等保持 out-of-scope
+  - 代码：增加 `RawClient::cluster_id()`（初始化时从 PD 缓存），并补齐单测
+  - 文件：`new-client-rust/src/{raw/client.rs,pd/{client,retry,cluster}.rs}`，`.codex/progress/parity-checklist.md`，`.codex/progress/daemon.md`
 
 - tikv/tikvrpc/txnkv：public API mapping + out-of-scope（按 checklist 渐进，优先入口与核心类型）
   - 关键决策：`tikvrpc.{CmdType,Request,Response}` 不做 Go 风格 wrapper；以 `request::PlanBuilder`/typed kvproto request 覆盖能力；`txnkv` 不复刻 Go 包结构，统一映射到 `TransactionClient`/`Transaction`
