@@ -9,3 +9,5 @@ client-rust/
 .DS_Store
 .idea/
 .vscode/
+
+.codex
