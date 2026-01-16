@@ -50,5 +50,8 @@ jobs:
       - name: Compile Integration Tests
         run: cargo test --features integration-tests --no-run
 
+      - name: Compile (test-util plan bench)
+        run: cargo check --features test-util --bench plan
+
       - name: Compile (tracing feature)
         run: cargo test --features tracing --no-run
