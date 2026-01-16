@@ -31,7 +31,7 @@ tikv-client = { path = "/path/to/tikv-client" }
 
 ### Prerequisites
 
-- [`rust`](https://www.rust-lang.org/) >= `1.56.1`, required for `hashbrown-v0.12.1`
+- [`rust`](https://www.rust-lang.org/): use the pinned toolchain in `rust-toolchain.toml` (currently `1.84.1`)
 
 The general flow of using the client crate is to create either a raw or transaction client object (which can be configured) then send commands using the client object, or use it to create transactions objects. In the latter case, the transaction is built up using various commands and then committed (or rolled back).
 

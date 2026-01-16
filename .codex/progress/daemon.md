@@ -51,3 +51,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：crate 根目录化（统一构建/CI/文档入口）；移除仅对旧子目录有意义的 repo hygiene 文件（`OWNERS*`/`.gitignore` 等）；CI 统一为 `.github/workflows/ci.yml`（push `main`）
   - 校验：`make check`，`make unit-test`
   - 文件：`Cargo.toml`，`Makefile`，`README.md`，`.github/workflows/ci.yml`，`doc/*`，`src/*`，`tests/*`，`proto*`，`proto-build/*`，`.codex/progress/*`，并删除 `task_plan.md/findings.md/progress.md`
+
+- infra/docs：强化 rustdoc guardrail（Makefile `RUSTDOCFLAGS=-Dwarnings` + CI 运行 `make doc`），并修正文档中的 Rust toolchain 要求
+  - 校验：`make doc`（-Dwarnings）通过
+  - 文件：`Makefile`，`.github/workflows/ci.yml`，`README.md`，`.codex/progress/daemon.md`

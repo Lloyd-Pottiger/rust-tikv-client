@@ -1,4 +1,5 @@
 export RUSTFLAGS=-Dwarnings
+export RUSTDOCFLAGS=-Dwarnings
 
 .PHONY: default check unit-test generate integration-test integration-test-txn integration-test-raw integration-test-smoke test doc tiup tiup-up tiup-down tiup-clean all clean
 
