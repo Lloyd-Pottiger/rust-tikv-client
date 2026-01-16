@@ -42,8 +42,8 @@ use tikv_client::{Backoff, BoundRange, RetryOptions, Transaction};
 const NUM_PEOPLE: u32 = 100;
 const NUM_TRNASFER: u32 = 100;
 
-// Go's `hash/crc64` uses a reflected (LSB-first) CRC table. This polynomial matches
-// `crc64.ECMA` and is used by TiKV raw checksum.
+// TiKV raw checksum uses CRC64 with the reflected ECMA polynomial, and the common init/xorout
+// of all 1s (i.e. start with `!0` and finalize with `!crc`).
 const CRC64_ECMA_POLY: u64 = 0xC96C5795D7870F42;
 
 fn crc64_ecma_table() -> [u64; 256] {
@@ -1069,10 +1069,11 @@ async fn raw_checksum() -> Result<()> {
 
     let mut expected = tikv_client::RawChecksum::default();
     for (key, value) in &pairs {
-        let mut crc = 0u64;
+        let mut crc = !0u64;
         crc = crc64_update(crc, &table, &keyspace_prefix);
         crc = crc64_update(crc, &table, key);
         crc = crc64_update(crc, &table, value);
+        crc = !crc;
 
         expected.crc64_xor ^= crc;
         expected.total_kvs += 1;
@@ -1089,10 +1090,11 @@ async fn raw_checksum() -> Result<()> {
     // [start, end)
     let mut expected = tikv_client::RawChecksum::default();
     for (key, value) in &pairs[100..200] {
-        let mut crc = 0u64;
+        let mut crc = !0u64;
         crc = crc64_update(crc, &table, &keyspace_prefix);
         crc = crc64_update(crc, &table, key);
         crc = crc64_update(crc, &table, value);
+        crc = !crc;
 
         expected.crc64_xor ^= crc;
         expected.total_kvs += 1;
@@ -1106,10 +1108,11 @@ async fn raw_checksum() -> Result<()> {
     // [start, end]
     let mut expected = tikv_client::RawChecksum::default();
     for (key, value) in &pairs[100..=200] {
-        let mut crc = 0u64;
+        let mut crc = !0u64;
         crc = crc64_update(crc, &table, &keyspace_prefix);
         crc = crc64_update(crc, &table, key);
         crc = crc64_update(crc, &table, value);
+        crc = !crc;
 
         expected.crc64_xor ^= crc;
         expected.total_kvs += 1;

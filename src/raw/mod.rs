@@ -24,7 +24,8 @@ mod requests;
 /// Returned by [`Client::checksum`](crate::RawClient::checksum).
 ///
 /// Semantics:
-/// - `crc64_xor` is the xor of `CRC64-ECMA(key || value)` for every key/value pair in the range.
+/// - `crc64_xor` is the xor of `CRC64-ECMA(key || value)` for every key/value pair in the range
+///   (with init and xorout of all 1s: start with `!0` and finalize with `!crc`).
 ///   For API v2 keyspace, `key` is the *encoded* key (including the 4-byte keyspace prefix).
 /// - `total_kvs` is the number of key/value pairs included in the checksum.
 /// - `total_bytes` is the sum of `len(encoded_key) + len(value)` for all pairs in the range.

@@ -43,3 +43,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：对本 repo（带 CI/bench/integration）视为应用型工程，锁定依赖版本以稳定 Rust toolchain 兼容性
   - 校验：`make check`，`make unit-test`
   - 文件：`Cargo.lock`，`.gitignore`，`Cargo.toml`，`.codex/progress/daemon.md`
+
+- tests/docs：修复 raw_checksum 集成测试期望值（CRC64 init/xorout 与 TiKV 对齐）
+  - 根因：TiKV raw checksum 的 `CRC64(key||value)` 使用 init=~0 且 xorout=~0（否则 crc64_xor 会偏差）
+  - 校验：`make tiup-up` + `cargo test --features integration-tests raw_checksum` + `make tiup-down`
+  - 文件：`tests/integration_tests.rs`，`src/raw/{mod.rs,client.rs}`，`.codex/progress/daemon.md`
