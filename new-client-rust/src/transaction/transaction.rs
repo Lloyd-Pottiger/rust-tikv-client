@@ -1785,9 +1785,7 @@ const PD_TS_LOGICAL_BITS: u64 = 18;
 /// The default safe window for async commit / 1PC max commit TS.
 ///
 /// This is aligned with `client-go`'s default `tikv-client.async-commit.safe-window` (2s).
-///
-/// TODO: make it configurable (either via `Config` or `TransactionOptions`), matching client-go.
-const ASYNC_COMMIT_SAFE_WINDOW: Duration = Duration::from_secs(2);
+const DEFAULT_MAX_COMMIT_TS_SAFE_WINDOW: Duration = Duration::from_secs(2);
 
 /// Optimistic or pessimistic transaction.
 #[derive(Clone, PartialEq, Debug)]
@@ -1823,6 +1821,11 @@ pub struct TransactionOptions {
     check_level: CheckLevel,
     /// Controls TiKV assertion enforcement (`kvrpcpb::Mutation.assertion`).
     assertion_level: kvrpcpb::AssertionLevel,
+    /// Safe window added to current timestamp when computing `max_commit_ts` for async commit / 1PC.
+    ///
+    /// This is a control-plane knob for the async-commit / 1PC protocol. If set too small, TiKV may
+    /// reject prewrite due to `max_commit_ts` constraints.
+    max_commit_ts_safe_window: Duration,
     #[doc(hidden)]
     heartbeat_option: HeartbeatOption,
     pipelined: Option<PipelinedTxnOptions>,
@@ -1897,6 +1900,7 @@ impl TransactionOptions {
             retry_options: RetryOptions::default_optimistic(),
             check_level: CheckLevel::Panic,
             assertion_level: kvrpcpb::AssertionLevel::Off,
+            max_commit_ts_safe_window: DEFAULT_MAX_COMMIT_TS_SAFE_WINDOW,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
             pipelined: None,
         }
@@ -1914,6 +1918,7 @@ impl TransactionOptions {
             retry_options: RetryOptions::default_pessimistic(),
             check_level: CheckLevel::Panic,
             assertion_level: kvrpcpb::AssertionLevel::Off,
+            max_commit_ts_safe_window: DEFAULT_MAX_COMMIT_TS_SAFE_WINDOW,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
             pipelined: None,
         }
@@ -1983,6 +1988,16 @@ impl TransactionOptions {
     #[must_use]
     pub fn stale_read(mut self, stale_read: bool) -> TransactionOptions {
         self.stale_read = stale_read;
+        self
+    }
+
+    /// Configure the safe window used to compute `max_commit_ts` for async commit / 1PC.
+    ///
+    /// TiKV uses `max_commit_ts` to bound how far in the future a transaction is allowed to commit.
+    /// A safe window helps avoid commit TS violations due to clock skew / scheduling delays.
+    #[must_use]
+    pub fn max_commit_ts_safe_window(mut self, safe_window: Duration) -> TransactionOptions {
+        self.max_commit_ts_safe_window = safe_window;
         self
     }
 
@@ -2127,7 +2142,11 @@ impl<PdC: PdClient> Committer<PdC> {
 
     fn max_commit_ts(&self, elapsed_ms: u64) -> u64 {
         let current_ts = Self::add_physical_ms(self.start_version.version(), elapsed_ms);
-        let safe_window_ms = ASYNC_COMMIT_SAFE_WINDOW.as_millis() as u64;
+        let safe_window_ms = self
+            .options
+            .max_commit_ts_safe_window
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
         Self::add_physical_ms(current_ts, safe_window_ms)
     }
 
@@ -2811,6 +2830,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_commit_fallback_to_2pc_when_min_commit_ts_is_zero() -> Result<(), io::Error>
     {
+        let expected_safe_window = Duration::from_millis(1234);
         let commit_reqs: Arc<Mutex<Vec<Vec<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
         let prewrite_fields: Arc<Mutex<Option<(u64, u64)>>> = Arc::new(Mutex::new(None));
 
@@ -2836,7 +2856,9 @@ mod tests {
         let mut txn = Transaction::new(
             Timestamp::default(),
             pd_client,
-            TransactionOptions::new_optimistic().use_async_commit(),
+            TransactionOptions::new_optimistic()
+                .use_async_commit()
+                .max_commit_ts_safe_window(expected_safe_window),
             Keyspace::Disable,
             RequestContext::default(),
             None,
@@ -2866,7 +2888,7 @@ mod tests {
         assert!(min_commit_ts > Timestamp::default().version());
         assert!(max_commit_ts > 0);
         let max_commit_ts_physical_ms = max_commit_ts >> super::PD_TS_LOGICAL_BITS;
-        assert!(max_commit_ts_physical_ms >= super::ASYNC_COMMIT_SAFE_WINDOW.as_millis() as u64);
+        assert!(max_commit_ts_physical_ms >= expected_safe_window.as_millis() as u64);
 
         Ok(())
     }

@@ -9,11 +9,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- Config parity：将 async-commit safe window 做成可配置项（对齐 client-go 默认 2s）
+- tikvrpc public wrapper：决定是否需要对外暴露 “按命令构造请求/响应” 的 Rust 层（或坚持 `request::PlanBuilder` 作为低层 API）
   - 计划：
-    - `TransactionOptions` 新增 `async_commit_safe_window`（默认 2s）
-    - 2PC `max_commit_ts` 计算使用该值；补齐单测断言
-    - checklist 回填对应条目并补文档备注
+    - 明确最小 public surface（不引入巨型 enum/trait 层级）
+    - 为 interceptor/metrics/trace 预留稳定 hook（label + context）
+    - 先给出 RFC 风格草案与最小 PoC（不阻塞后续补齐）
 
 # 待做工作
 
@@ -21,11 +21,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 计划：
     - 优先 `tikvrpc/interceptor` 与 `ResourceGroupTagger` 周边；其余 `tikvrpc::{Request,CmdType,...}` 先给出 Rust 侧替代策略并标注
     - `tikv` 包中明显为调试/探针/Go 可见性产物的符号，按 scope policy 标注为 capability-only 或 out-of-scope
-
-- tikvrpc public wrapper：决定是否需要对外暴露 “按命令构造请求/响应” 的 Rust 层（或坚持 `request::PlanBuilder` 作为低层 API）
-  - 计划：
-    - 明确最小 public surface（不引入巨型 enum/trait 层级）
-    - 为 interceptor/metrics/trace 预留稳定 hook（label + context）
 
 - metrics/trace：补齐 feature-gate 策略与最小 public API（对齐 client-go 导出包语义）
   - 计划：
@@ -58,3 +53,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - Parity checklist 回填（第 1 批）：`config` / `config-retry` / `rawkv` + `tikvrpc(interceptor)` 关键 hook
   - 关键决策：全局 config/ctx 注入类 API 标注 out-of-scope（Rust 以显式 opts + client builder 取代）
   - 文件：`.codex/progress/parity-checklist.md`
+
+- Config parity：async-commit/1PC `max_commit_ts` safe window 可配置（默认 2s）
+  - 关键决策：以 `TransactionOptions::max_commit_ts_safe_window(Duration)` 暴露；`max_commit_ts` 计算改用该值（ms 转换做饱和）
+  - 文件：`new-client-rust/src/transaction/transaction.rs`，`.codex/progress/{parity-checklist.md,gap-analysis.md,parity-map.md}`
+  - 测试：复用 async-commit fallback 单测覆盖自定义 safe window

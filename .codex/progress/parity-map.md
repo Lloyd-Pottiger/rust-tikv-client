@@ -52,7 +52,7 @@
 
 ## 剩余 gap（当前视角，按优先级）
 
-- `config`/`retry`：大量 Go 侧 knobs 尚未映射到 Rust 的 `Config`/`TransactionOptions`（例如 async-commit safe window 等需可配置）。
+- `config`/`retry`：大量 Go 侧 knobs 尚未映射到 Rust 的 `Config`/`TransactionOptions`（例如 grpc keepalive / store liveness / backoff cfg 等）。
 - `tikvrpc`：若需要对外暴露“按命令类型构造请求/响应”的公共层，需要设计 Rust-y wrapper；当前以 `request` 作为低层 API。
 - `metrics`/`trace`：目前未对齐 client-go 的导出 metrics/trace API；需要明确 feature-gate 策略与最小 public surface。
 - `util/*` 与 `txnkv/*` 子包：多数属于实现细节/调试工具；需要逐项判定 public vs capability-only，并在 checklist 标注。

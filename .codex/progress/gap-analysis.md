@@ -23,7 +23,6 @@
 - `util/*`、`txnkv/*` 子包：大量 Go 导出符号属于实现细节/调试/测试工具（Rust 需逐项判定 public vs capability-only，并在 checklist 标注）。
 
 ### Protocol/detail gaps（可直接落任务）
-- async-commit safe window 目前常量化（`new-client-rust/src/transaction/transaction.rs`），需要可配置并对齐 client-go。
 - lite resolve lock 目前 disabled（`new-client-rust/src/transaction/requests.rs`）。
 - lock resolver/backoff 等实现细节存在 TODO/FIXME（见 `rg TODO|FIXME new-client-rust/src`）。
 

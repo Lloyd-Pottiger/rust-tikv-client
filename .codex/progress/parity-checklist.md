@@ -12,7 +12,7 @@ Conventions:
 ## config (package config)
 
 ### Types
-- [x] `type AsyncCommit struct` | Rust: `tikv_client::TransactionOptions::use_async_commit` (new-client-rust/src/transaction/transaction.rs) | Tests: `new-client-rust/src/transaction/transaction.rs (test_async_commit_fallback_to_2pc_when_min_commit_ts_is_zero, test_async_commit_uses_min_commit_ts_when_available)`
+- [x] `type AsyncCommit struct` | Rust: `tikv_client::TransactionOptions::{use_async_commit,max_commit_ts_safe_window}` (new-client-rust/src/transaction/transaction.rs) | Tests: `new-client-rust/src/transaction/transaction.rs (test_async_commit_fallback_to_2pc_when_min_commit_ts_is_zero, test_async_commit_uses_min_commit_ts_when_available)`
 - [x] `type Config struct` | Rust: `tikv_client::Config` (new-client-rust/src/config.rs) | Tests: N/A
 - [ ] `type CoprocessorCache struct` | Rust:  | Tests: 
 - [ ] `type PDClient struct` | Rust:  | Tests: 
@@ -1876,4 +1876,3 @@ Conventions:
 
 ### Methods
 - (none)
-
