@@ -15,7 +15,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 - cleanup：清理剩余非 generated TODO/FIXME（小项为主），并补齐对应测试
   - 计划：
-    - `request/plan.rs`：logger 传递/拆分错误处理/backoff TODO 收敛 + 单测
     - `transaction/lock.rs`：LockResolver 的 pd_client TODO（结构调整或明确暂不做的理由）
     - `transaction/requests.rs`：ScanLockRequest shard 末尾 key TODO + 单测
     - `pd/cluster.rs`：store meta 字段校验 TODO（明确必要字段或补齐校验）
@@ -35,3 +34,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：region entry 持有原子 TTL（idle TTL，近过期才 refresh，含 jitter）；`get_region_by_id` in-flight 标记从 region index 锁拆出；empty end_key 视为 +inf 修复 overlap；TTL 通过 `Config::{region_cache_ttl,region_cache_ttl_jitter}` 可控
   - 测试：新增 overlap(tail region) 与强制 TTL 过期 reload 用例；`cargo test` 通过
   - 文件：`new-client-rust/src/{region_cache.rs,config.rs,pd/client.rs}`，`.codex/progress/daemon.md`
+
+- request/plan：清理 TODO（unknown region error 日志、EpochNotMatch 立即 retry、CleanupLocks ResolveLockError backoff）并补齐单测
+  - 关键决策：EpochNotMatch 仅在“本地 epoch ahead of TiKV”时触发 backoff；CleanupLocks 遇到 `ResolveLockError` 不推进 next_batch，sleep 后重扫当前 range
+  - 测试：新增单测覆盖 CleanupLocks 的 backoff-retry 语义；`cargo test` 通过
+  - 文件：`new-client-rust/src/request/plan.rs`，`.codex/progress/daemon.md`

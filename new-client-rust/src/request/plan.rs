@@ -454,8 +454,7 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
     {
         Err(Error::RegionError(Box::new(e)))
     } else {
-        // TODO: pass the logger around
-        // info!("unknwon region error: {:?}", e);
+        debug!("handle_region_error: unknown region error: {:?}", e);
         pd_client.invalidate_region_cache(ver_id).await;
         if let Ok(store_id) = store_id {
             pd_client.invalidate_store_cache(store_id).await;
@@ -499,9 +498,10 @@ pub(crate) async fn on_region_epoch_not_match<PdC: PdClient>(
             }
         }
     }
-    // TODO: finer grained processing
+    // We are behind TiKV's region epoch (or the mismatch is from a split/merge). Invalidate our
+    // cached region and retry immediately to re-shard on the new region layout.
     pd_client.invalidate_region_cache(ver_id).await;
-    Ok(false)
+    Ok(true)
 }
 
 impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
@@ -905,6 +905,7 @@ where
             .with_request_context(self.request_context.clone());
         let region = &self.store.as_ref().unwrap().region_with_leader;
         let mut has_more_batch = true;
+        let mut backoff = self.backoff.clone();
 
         while has_more_batch {
             let mut scan_lock_resp = inner.execute().await?;
@@ -920,21 +921,20 @@ where
                 return Ok(result);
             }
 
-            // Iterate to next batch of inner.
-            match scan_lock_resp.has_next_batch() {
-                Some(range) if region.contains(range.0.as_ref()) => {
-                    debug!("CleanupLocks::execute, next range:{:?}", range);
-                    inner.next_batch(range);
-                }
-                _ => has_more_batch = false,
-            }
+            // Prepare next batch bounds, but do not advance `inner` until we have successfully
+            // cleaned the current batch. Otherwise a retry could skip unresolved locks.
+            let next_range = match scan_lock_resp.has_next_batch() {
+                Some(range) if region.contains(range.0.as_ref()) => Some(range),
+                _ => None,
+            };
 
             let mut locks = scan_lock_resp.take_locks();
             if locks.is_empty() {
                 break;
             }
+            let mut next_has_more_batch = next_range.is_some();
             if locks.len() < self.options.batch_size as usize {
-                has_more_batch = false;
+                next_has_more_batch = false;
             }
 
             if self.options.async_commit_only {
@@ -942,6 +942,16 @@ where
                     .into_iter()
                     .filter(|l| l.use_async_commit)
                     .collect::<Vec<_>>();
+            }
+            if locks.is_empty() {
+                if next_has_more_batch {
+                    if let Some(range) = next_range {
+                        debug!("CleanupLocks::execute, next range:{:?}", range);
+                        inner.next_batch(range);
+                    }
+                }
+                has_more_batch = next_has_more_batch;
+                continue;
             }
             debug!("CleanupLocks::execute, meet locks:{}", locks.len());
 
@@ -958,6 +968,15 @@ where
                 Ok(()) => {
                     result.resolved_locks += lock_size;
                 }
+                Err(Error::ResolveLockError(live_locks)) => match backoff.next_delay_duration() {
+                    Some(delay_duration) => {
+                        crate::stats::observe_backoff_sleep("lock", delay_duration);
+                        sleep(delay_duration).await;
+                        // Retry scanning the same range; do not advance `inner`.
+                        continue;
+                    }
+                    None => return Err(Error::ResolveLockError(live_locks)),
+                },
                 Err(Error::ExtractedErrors(mut errors)) => {
                     // Propagate errors to `retry_multi_region` for retry.
                     if let Error::RegionError(e) = errors.pop().unwrap() {
@@ -972,10 +991,13 @@ where
                 }
             }
 
-            // TODO: improve backoff
-            // if self.backoff.is_none() {
-            //     return Err(Error::ResolveLockError);
-            // }
+            if next_has_more_batch {
+                if let Some(range) = next_range {
+                    debug!("CleanupLocks::execute, next range:{:?}", range);
+                    inner.next_batch(range);
+                }
+            }
+            has_more_batch = next_has_more_batch;
         }
 
         Ok(result)
@@ -1087,10 +1109,14 @@ impl<Resp: HasRegionError, Shard> HasRegionError for ResponseWithShard<Resp, Sha
 
 #[cfg(test)]
 mod test {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
     use futures::stream::BoxStream;
     use futures::stream::{self};
 
     use super::*;
+    use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb::BatchGetResponse;
 
@@ -1142,5 +1168,103 @@ mod test {
             read_routing: ReadRouting::default(),
         };
         assert!(plan.execute().await.is_err())
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_backoff_on_resolve_lock_error() -> Result<()> {
+        let check_txn_status_calls = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_calls_for_hook = check_txn_status_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req| {
+                if req.downcast_ref::<kvrpcpb::ScanLockRequest>().is_some() {
+                    let mut resp = kvrpcpb::ScanLockResponse::default();
+                    resp.locks.push(kvrpcpb::LockInfo {
+                        key: vec![1],
+                        primary_lock: vec![1],
+                        lock_version: 42,
+                        lock_type: kvrpcpb::Op::Put as i32,
+                        ..Default::default()
+                    });
+                    return Ok(Box::new(resp));
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckSecondaryLocksRequest>()
+                    .is_some()
+                {
+                    let mut resp = kvrpcpb::CheckSecondaryLocksResponse::default();
+                    // Force `fallback_2pc=true` so GC path re-checks txn status.
+                    resp.locks.push(kvrpcpb::LockInfo {
+                        use_async_commit: false,
+                        ..Default::default()
+                    });
+                    return Ok(Box::new(resp));
+                }
+
+                if req.downcast_ref::<kvrpcpb::ResolveLockRequest>().is_some() {
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()));
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    let call = check_txn_status_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    if call < 2 {
+                        let mut resp = kvrpcpb::CheckTxnStatusResponse::default();
+                        resp.lock_ttl = 1;
+                        resp.commit_version = 0;
+                        resp.action = kvrpcpb::Action::NoAction as i32;
+                        resp.lock_info = Some(kvrpcpb::LockInfo {
+                            lock_version: 42,
+                            secondaries: vec![vec![2]],
+                            ..Default::default()
+                        });
+                        return Ok(Box::new(resp));
+                    }
+                    return Ok(Box::new(kvrpcpb::CheckTxnStatusResponse::default()));
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let store = pd_client
+            .clone()
+            .map_region_to_store(MockPdClient::region1())
+            .await?;
+
+        let mut scan_lock = kvrpcpb::ScanLockRequest::default();
+        scan_lock.start_key = vec![1];
+        scan_lock.end_key = vec![10];
+        scan_lock.max_version = 0;
+        scan_lock.limit = 2;
+
+        let mut inner = Dispatch {
+            request: scan_lock,
+            kv_client: None,
+        };
+        inner.apply_store(&store)?;
+
+        let plan = CleanupLocks {
+            inner,
+            ctx: ResolveLocksContext::default(),
+            options: ResolveLocksOptions {
+                async_commit_only: false,
+                batch_size: 2,
+            },
+            store: Some(store),
+            pd_client,
+            keyspace: Keyspace::Disable,
+            // One retry, 0ms delay.
+            backoff: Backoff::no_jitter_backoff(0, 0, 1),
+            request_context: RequestContext::default(),
+        };
+
+        let result = plan.execute().await?;
+        assert_eq!(result.resolved_locks, 1);
+        assert_eq!(check_txn_status_calls.load(Ordering::SeqCst), 3);
+        Ok(())
     }
 }
