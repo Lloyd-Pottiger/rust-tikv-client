@@ -42,6 +42,33 @@ use tikv_client::{Backoff, BoundRange, RetryOptions, Transaction};
 const NUM_PEOPLE: u32 = 100;
 const NUM_TRNASFER: u32 = 100;
 
+// Go's `hash/crc64` uses a reflected (LSB-first) CRC table. This polynomial matches
+// `crc64.ECMA` and is used by TiKV raw checksum.
+const CRC64_ECMA_POLY: u64 = 0xC96C5795D7870F42;
+
+fn crc64_ecma_table() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    for (i, slot) in table.iter_mut().enumerate() {
+        let mut crc = i as u64;
+        for _ in 0..8 {
+            crc = if (crc & 1) != 0 {
+                (crc >> 1) ^ CRC64_ECMA_POLY
+            } else {
+                crc >> 1
+            };
+        }
+        *slot = crc;
+    }
+    table
+}
+
+fn crc64_update(mut crc: u64, table: &[u64; 256], data: &[u8]) -> u64 {
+    for &b in data {
+        crc = table[((crc as u8) ^ b) as usize] ^ (crc >> 8);
+    }
+    crc
+}
+
 #[tokio::test]
 #[serial]
 async fn txn_get_timestamp() -> Result<()> {
@@ -1009,6 +1036,51 @@ async fn raw_ttl() -> Result<()> {
         "unexpected ttl for key2 after batch_put_with_ttl: {ttl2:?}"
     );
 
+    Ok(())
+}
+
+/// Tests raw checksum API end-to-end.
+#[tokio::test]
+#[serial]
+async fn raw_checksum() -> Result<()> {
+    init().await?;
+    let client =
+        RawClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace()).await?;
+
+    // Empty range should report an empty checksum.
+    assert_eq!(
+        client.checksum(..).await?,
+        tikv_client::RawChecksum::default()
+    );
+
+    // Populate deterministic data.
+    const COUNT: u32 = 1024;
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..COUNT)
+        .map(|i| (i.to_be_bytes().to_vec(), format!("value@{i}").into_bytes()))
+        .collect();
+    client.batch_put(pairs.iter().cloned()).await?;
+
+    // Expected checksum is xor(CRC64(key||value)) over all pairs.
+    //
+    // TiKV API v2 stores raw keys with a 4-byte keyspace prefix.
+    // DEFAULT keyspace is id=0, so the prefix is `[b'r', 0, 0, 0]`.
+    let keyspace_prefix = [b'r', 0, 0, 0];
+    let table = crc64_ecma_table();
+
+    let mut expected = tikv_client::RawChecksum::default();
+    for (key, value) in &pairs {
+        let mut crc = 0u64;
+        crc = crc64_update(crc, &table, &keyspace_prefix);
+        crc = crc64_update(crc, &table, key);
+        crc = crc64_update(crc, &table, value);
+
+        expected.crc64_xor ^= crc;
+        expected.total_kvs += 1;
+        expected.total_bytes += (keyspace_prefix.len() + key.len() + value.len()) as u64;
+    }
+
+    let got = client.checksum(..).await?;
+    assert_eq!(got, expected);
     Ok(())
 }
 

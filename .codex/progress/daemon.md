@@ -17,6 +17,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- tests：补齐 RawClient::checksum 端到端集成测试（crc64_xor/total_kvs/total_bytes）并用 tiup 验证
+  - 关键点：对齐 TiKV/Go 的 CRC64-ECMA 语义；API v2 keyspace 下 checksum 计算包含 raw key 前缀 `[b'r',0,0,0]`
+  - 验证：`tiup playground` + `cargo test --features integration-tests raw_checksum` 通过
+  - 文件：`new-client-rust/tests/integration_tests.rs`，`.codex/progress/daemon.md`
+
 - core：Rust TiKV client（new-client-rust）对齐 client-go(v2) 能力与对外 API 能力
   - 关键决策：Rust public API 以显式 `Config/TransactionOptions` 为入口；低层以 `request::PlanBuilder` + typed kvproto 覆盖能力；不复刻 Go `tikvrpc` mega-wrapper
   - 覆盖：Raw/Txn/PD/RegionCache/Plan；2PC/async-commit/1PC/pipelined/local-latches；replica+stale read；resource control/trace/metrics hooks；keyspace
