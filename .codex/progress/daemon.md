@@ -55,3 +55,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - infra/docs：强化 rustdoc guardrail（Makefile `RUSTDOCFLAGS=-Dwarnings` + CI 运行 `make doc`），并修正文档中的 Rust toolchain 要求
   - 校验：`make doc`（-Dwarnings）通过
   - 文件：`Makefile`，`.github/workflows/ci.yml`，`README.md`，`.codex/progress/daemon.md`
+
+- review：复核整体工作目标达成情况（parity artifacts + 扫描 `todo!/unimplemented!` + 本地 check/test/doc）
+  - 结果：parity-checklist 无未完成项；非 generated 代码无 `todo!/unimplemented!`；`make check/unit-test/doc` 通过；无需新增待做
+  - 文件：`.codex/progress/daemon.md`
