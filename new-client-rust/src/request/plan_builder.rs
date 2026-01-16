@@ -31,6 +31,9 @@ use crate::store::SetRegionError;
 use crate::transaction::HasLocks;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
+use crate::CommandPriority;
+use crate::DiskFullOpt;
+use crate::ReplicaReadType;
 use crate::RequestContext;
 use crate::Result;
 
@@ -54,16 +57,161 @@ impl PlanBuilderPhase for Targetted {}
 impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
     pub fn new(pd_client: Arc<PdC>, keyspace: Keyspace, mut request: Req) -> Self {
         request.set_api_version(keyspace.api_version());
+        // Mirror the default client behavior by ensuring a non-empty request_source, but do not
+        // override an explicitly-set one (e.g. applied by `RawClient` / `TransactionClient`).
+        {
+            let ctx = request.context_mut();
+            if ctx.request_source.is_empty() {
+                ctx.request_source = "unknown".to_owned();
+            }
+        }
+        let request_context = RequestContext::default();
         PlanBuilder {
             pd_client,
             plan: Dispatch {
                 request,
                 kv_client: None,
             },
-            request_context: RequestContext::default(),
+            request_context,
             read_routing: ReadRouting::default(),
             phantom: PhantomData,
         }
+    }
+
+    /// Set `kvrpcpb::Context.request_source` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_request_source(mut self, source: impl Into<String>) -> Self {
+        self.request_context = self.request_context.with_request_source(source);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self.read_routing = self
+            .read_routing
+            .clone()
+            .with_request_source(self.request_context.request_source());
+        self
+    }
+
+    /// Set `kvrpcpb::Context.resource_group_tag` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_resource_group_tag(mut self, tag: impl Into<Vec<u8>>) -> Self {
+        self.request_context = self.request_context.with_resource_group_tag(tag);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.resource_group_name` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_resource_group_name(mut self, name: impl Into<String>) -> Self {
+        self.request_context = self.request_context.with_resource_group_name(name);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self
+    }
+
+    /// Set `kvrpcpb::Context.priority` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_priority(mut self, priority: CommandPriority) -> Self {
+        self.request_context = self.request_context.with_priority(priority);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self
+    }
+
+    /// Set `kvrpcpb::Context.disk_full_opt` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_disk_full_opt(mut self, disk_full_opt: DiskFullOpt) -> Self {
+        self.request_context = self.request_context.with_disk_full_opt(disk_full_opt);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self
+    }
+
+    /// Set `kvrpcpb::Context.txn_source` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_txn_source(mut self, txn_source: u64) -> Self {
+        self.request_context = self.request_context.with_txn_source(txn_source);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.override_priority` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_resource_control_override_priority(mut self, override_priority: u64) -> Self {
+        self.request_context = self
+            .request_context
+            .with_resource_control_override_priority(override_priority);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self
+    }
+
+    /// Set `kvrpcpb::Context.resource_control_context.penalty` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_resource_control_penalty(
+        mut self,
+        penalty: impl Into<crate::resource_manager::Consumption>,
+    ) -> Self {
+        self.request_context = self.request_context.with_resource_control_penalty(penalty);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self
+    }
+
+    /// Set a resource group tagger for all requests executed by this plan.
+    ///
+    /// If a fixed resource group tag is set via [`with_resource_group_tag`](Self::with_resource_group_tag),
+    /// it takes precedence over this tagger.
+    #[must_use]
+    pub fn with_resource_group_tagger(
+        mut self,
+        tagger: impl Fn(&crate::interceptor::RpcContextInfo, &crate::kvrpcpb::Context) -> Vec<u8>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.request_context = self
+            .request_context
+            .with_resource_group_tagger(Arc::new(tagger));
+        self
+    }
+
+    /// Replace the RPC interceptor chain for all requests executed by this plan.
+    #[must_use]
+    pub fn with_rpc_interceptor(
+        mut self,
+        interceptor: Arc<dyn crate::interceptor::RpcInterceptor>,
+    ) -> Self {
+        let mut chain = crate::interceptor::RpcInterceptorChain::new();
+        chain.link(interceptor);
+        self.request_context = self.request_context.with_rpc_interceptors(chain);
+        self
+    }
+
+    /// Add an RPC interceptor for all requests executed by this plan.
+    ///
+    /// If another interceptor with the same name exists, it is replaced.
+    #[must_use]
+    pub fn with_added_rpc_interceptor(
+        mut self,
+        interceptor: Arc<dyn crate::interceptor::RpcInterceptor>,
+    ) -> Self {
+        self.request_context = self.request_context.add_rpc_interceptor(interceptor);
+        self
+    }
+
+    /// Configure where snapshot reads are sent (leader/follower/learner...).
+    #[must_use]
+    pub fn replica_read(mut self, replica_read: ReplicaReadType) -> Self {
+        self.read_routing.set_replica_read(replica_read);
+        self
+    }
+
+    /// Enable/disable *stale reads* for this plan.
+    #[must_use]
+    pub fn stale_read(mut self, stale_read: bool) -> Self {
+        self.read_routing.set_stale_read(stale_read);
+        self
+    }
+
+    /// Configure the deterministic seed for replica selection (when applicable).
+    #[must_use]
+    pub fn replica_read_seed(mut self, seed: u32) -> Self {
+        self.read_routing.set_seed(seed);
+        self
     }
 }
 
@@ -251,6 +399,90 @@ where
             read_routing: self.read_routing,
             phantom: PhantomData,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::mock::MockKvClient;
+    use crate::mock::MockPdClient;
+    use crate::proto::kvrpcpb;
+    use crate::request::CollectSingle;
+    use crate::Backoff;
+    use crate::Result;
+
+    #[tokio::test]
+    async fn test_plan_builder_request_context_and_interceptors() -> Result<()> {
+        let expected_source = "unit-test".to_owned();
+        let expected_group_name = "unit-test-group".to_owned();
+        let expected_dynamic_tag = vec![9_u8];
+
+        let interceptor_called = Arc::new(AtomicBool::new(false));
+        let interceptor_called_cloned = interceptor_called.clone();
+
+        let interceptor =
+            crate::interceptor::rpc_interceptor("unit_test.interceptor", move |info, ctx| {
+                assert_eq!(info.label, "raw_get");
+                interceptor_called_cloned.store(true, Ordering::SeqCst);
+                // Interceptors run after `RequestContext` fields have been applied.
+                ctx.request_source = "from-interceptor".to_owned();
+            });
+
+        let hook_expected_group_name = expected_group_name.clone();
+        let hook_expected_dynamic_tag = expected_dynamic_tag.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type in plan builder context test");
+                };
+                let ctx = req.context.as_ref().expect("context should be set");
+                assert_eq!(ctx.request_source, "from-interceptor");
+                assert_eq!(ctx.resource_group_tag, hook_expected_dynamic_tag);
+                let resource_ctl_ctx = ctx
+                    .resource_control_context
+                    .as_ref()
+                    .expect("resource_control_context should be set");
+                assert_eq!(
+                    resource_ctl_ctx.resource_group_name,
+                    hook_expected_group_name
+                );
+
+                let resp = kvrpcpb::RawGetResponse {
+                    not_found: true,
+                    ..Default::default()
+                };
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut req = kvrpcpb::RawGetRequest::default();
+        // Choose a key in `MockPdClient::region1`.
+        req.key = vec![5];
+
+        let plan = PlanBuilder::new(pd_client, Keyspace::Disable, req)
+            .with_request_source(expected_source.clone())
+            .with_resource_group_name(expected_group_name.clone())
+            .with_resource_group_tagger(move |info, ctx| {
+                // Tagger runs before interceptors.
+                assert_eq!(info.label, "raw_get");
+                assert_eq!(ctx.request_source, format!("leader_{expected_source}"));
+                expected_dynamic_tag.clone()
+            })
+            .with_added_rpc_interceptor(interceptor)
+            .retry_multi_region(Backoff::no_backoff())
+            .merge(CollectSingle)
+            .post_process_default()
+            .plan();
+
+        let value = plan.execute().await?;
+        assert!(value.is_none());
+        assert!(interceptor_called.load(Ordering::SeqCst));
+        Ok(())
     }
 }
 

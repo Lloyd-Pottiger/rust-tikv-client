@@ -9,18 +9,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- tikvrpc public wrapper：决定是否需要对外暴露 “按命令构造请求/响应” 的 Rust 层（或坚持 `request::PlanBuilder` 作为低层 API）
-  - 计划：
-    - 明确最小 public surface（不引入巨型 enum/trait 层级）
-    - 为 interceptor/metrics/trace 预留稳定 hook（label + context）
-    - 先给出 RFC 风格草案与最小 PoC（不阻塞后续补齐）
-
-# 待做工作
-
 - Parity checklist 回填（继续）：补齐 `tikv` / `tikvrpc` 其余 entrypoints（标注 capability-only vs public）
   - 计划：
-    - 优先 `tikvrpc/interceptor` 与 `ResourceGroupTagger` 周边；其余 `tikvrpc::{Request,CmdType,...}` 先给出 Rust 侧替代策略并标注
-    - `tikv` 包中明显为调试/探针/Go 可见性产物的符号，按 scope policy 标注为 capability-only 或 out-of-scope
+    - `tikvrpc`：将 `AttachContext/NewReplicaReadRequest/...` 映射到 `request::PlanBuilder`（见 PoC），并在 checklist 标注
+    - `tikv`：优先对外真正有用的控制面/入口；其余按 scope policy 标注 capability-only 或 out-of-scope
+
+# 待做工作
 
 - metrics/trace：补齐 feature-gate 策略与最小 public API（对齐 client-go 导出包语义）
   - 计划：
@@ -58,3 +52,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：以 `TransactionOptions::max_commit_ts_safe_window(Duration)` 暴露；`max_commit_ts` 计算改用该值（ms 转换做饱和）
   - 文件：`new-client-rust/src/transaction/transaction.rs`，`.codex/progress/{parity-checklist.md,gap-analysis.md,parity-map.md}`
   - 测试：复用 async-commit fallback 单测覆盖自定义 safe window
+
+- tikvrpc public wrapper：以 `request::PlanBuilder` 作为 Rust 侧低层 API（替代 Go `CmdType/Request/Response`）
+  - 关键决策：不引入巨型 enum；提供 PlanBuilder 的 context 注入 + replica/stale read builder，使低层调用具备与 client-go `tikvrpc` 等价的控制面能力
+  - 文件：`new-client-rust/src/request/{plan_builder.rs,read_routing.rs}`，`new-client-rust/doc/tikvrpc-public-wrapper.md`
+  - 测试：新增 PlanBuilder request_context/interceptor 注入测试

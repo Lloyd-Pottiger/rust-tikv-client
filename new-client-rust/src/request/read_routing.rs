@@ -41,6 +41,18 @@ impl ReadRouting {
         }
     }
 
+    pub(crate) fn set_replica_read(&mut self, replica_read: ReplicaReadType) {
+        self.replica_read = replica_read;
+    }
+
+    pub(crate) fn set_stale_read(&mut self, stale_read: bool) {
+        self.stale_read = stale_read;
+    }
+
+    pub(crate) fn set_seed(&mut self, seed: u32) {
+        self.seed = seed;
+    }
+
     pub(crate) fn with_request_source(mut self, request_source: Option<Arc<str>>) -> Self {
         self.input_request_source = request_source;
         self
