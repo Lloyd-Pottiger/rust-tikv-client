@@ -89,6 +89,11 @@ impl Cluster {
         self.tso.clone().get_timestamp().await
     }
 
+    pub async fn get_min_ts(&mut self, timeout: Duration) -> Result<pdpb::GetMinTsResponse> {
+        let req = pd_request!(self.id, pdpb::GetMinTsRequest);
+        req.send(&mut self.client, timeout).await
+    }
+
     pub async fn update_safepoint(
         &mut self,
         safepoint: u64,
@@ -471,6 +476,16 @@ impl PdMessage for pdpb::GetAllStoresRequest {
 }
 
 #[async_trait]
+impl PdMessage for pdpb::GetMinTsRequest {
+    type Client = pdpb::pd_client::PdClient<Channel>;
+    type Response = pdpb::GetMinTsResponse;
+
+    async fn rpc(req: Request<Self>, client: &mut Self::Client) -> GrpcResult<Self::Response> {
+        Ok(client.get_min_ts(req).await?.into_inner())
+    }
+}
+
+#[async_trait]
 impl PdMessage for pdpb::UpdateGcSafePointRequest {
     type Client = pdpb::pd_client::PdClient<Channel>;
     type Response = pdpb::UpdateGcSafePointResponse;
@@ -507,6 +522,12 @@ impl PdResponse for pdpb::GetRegionResponse {
 }
 
 impl PdResponse for pdpb::GetAllStoresResponse {
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+impl PdResponse for pdpb::GetMinTsResponse {
     fn header(&self) -> Option<&pdpb::ResponseHeader> {
         self.header.as_ref()
     }

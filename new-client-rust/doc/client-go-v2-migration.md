@@ -57,6 +57,8 @@ Retry and routing are configured via `TransactionOptions` (builder-style). Examp
   `TransactionOptions::new_pessimistic().no_resolve_regions()`
 - Configure replica/stale read routing for snapshot reads:
   `TransactionOptions::new_optimistic().replica_read(...).stale_read(true)`
+- For stale reads, use a PD-provided safe timestamp (`GetMinTs`) via
+  `TransactionClient::current_min_timestamp()` and pass it to `snapshot(...)`.
 
 ```rust,no_run
 # use tikv_client::{Result, TransactionClient, TransactionOptions};
@@ -69,6 +71,19 @@ let mut txn = txn_client
 
 txn.put("k".to_owned(), "v".to_owned()).await?;
 txn.commit().await?;
+# Ok(())
+# }
+```
+
+Stale snapshot read:
+
+```rust,no_run
+# use tikv_client::{Result, TransactionClient, TransactionOptions};
+# async fn example() -> Result<()> {
+let client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
+let ts = client.current_min_timestamp().await?;
+let mut snapshot = client.snapshot(ts, TransactionOptions::new_optimistic().stale_read(true));
+let _ = snapshot.get("k".to_owned()).await?;
 # Ok(())
 # }
 ```

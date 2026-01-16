@@ -3544,6 +3544,10 @@ mod tests {
             Ok(Timestamp::default())
         }
 
+        async fn get_min_ts(self: Arc<Self>) -> crate::Result<Timestamp> {
+            Ok(Timestamp::default())
+        }
+
         async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> crate::Result<bool> {
             unimplemented!()
         }

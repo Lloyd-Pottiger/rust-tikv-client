@@ -499,6 +499,10 @@ mod test {
             todo!()
         }
 
+        async fn get_min_ts(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
+            todo!()
+        }
+
         async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
             todo!()
         }

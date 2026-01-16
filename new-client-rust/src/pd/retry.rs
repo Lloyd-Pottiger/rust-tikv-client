@@ -40,6 +40,8 @@ pub trait RetryClientTrait {
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp>;
 
+    async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp>;
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<bool>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
@@ -210,6 +212,15 @@ impl RetryClientTrait for RetryClient<Cluster> {
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
         retry!(self, self.retry_config, "get_timestamp", |cluster| cluster
             .get_timestamp())
+    }
+
+    async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+        retry_mut!(self, self.retry_config, "get_min_ts", |cluster| async {
+            cluster.get_min_ts(self.timeout).await.and_then(|resp| {
+                resp.timestamp
+                    .ok_or_else(|| crate::internal_err!("missing timestamp in PD GetMinTsResponse"))
+            })
+        })
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<bool> {

@@ -348,6 +348,30 @@ impl Client {
         self.pd.clone().get_timestamp().await
     }
 
+    /// Retrieve a minimum timestamp from PD (`GetMinTs`).
+    ///
+    /// This timestamp is a control-plane value intended for *stale reads* (replica reads that may
+    /// be slightly behind the leader). A common pattern is:
+    /// 1) write data and get a commit timestamp
+    /// 2) wait until `current_min_timestamp >= commit_ts`
+    /// 3) perform a stale snapshot read at `current_min_timestamp`
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use tikv_client::{Result, TransactionClient, TransactionOptions};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
+    /// let ts = client.current_min_timestamp().await?;
+    /// let mut snapshot = client.snapshot(ts, TransactionOptions::new_optimistic().stale_read(true));
+    /// let _ = snapshot.get("k".to_owned()).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn current_min_timestamp(&self) -> Result<Timestamp> {
+        self.pd.clone().get_min_ts().await
+    }
+
     /// Request garbage collection (GC) of the TiKV cluster.
     ///
     /// GC deletes MVCC records whose timestamp is lower than the given `safepoint`. We must guarantee

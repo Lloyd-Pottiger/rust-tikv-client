@@ -206,6 +206,10 @@ impl PdClient for MockPdClient {
         Ok(Timestamp::default())
     }
 
+    async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+        Ok(Timestamp::default())
+    }
+
     async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
         unimplemented!()
     }

@@ -31,6 +31,7 @@ use tikv_client::KvPair;
 use tikv_client::RawClient;
 use tikv_client::ReplicaReadType;
 use tikv_client::Result;
+use tikv_client::TimestampExt;
 use tikv_client::TransactionClient;
 use tikv_client::TransactionOptions;
 use tikv_client::Value;
@@ -1746,26 +1747,23 @@ async fn txn_stale_read_snapshot_get() -> Result<()> {
     txn.put(key.clone(), value.clone()).await?;
     let commit_ts = txn.commit().await?.expect("commit timestamp");
 
-    // Stale reads are served from a non-leader replica when possible; use an old-enough timestamp
-    // and retry to wait for replicas to catch up to `commit_ts`.
-    for _ in 0..30 {
-        let mut snapshot = client.snapshot(
-            commit_ts.clone(),
-            TransactionOptions::new_optimistic().stale_read(true),
-        );
-        match snapshot.get(key.clone()).await {
-            Ok(Some(v)) => {
-                assert_eq!(v, value.clone().into_bytes());
-                return Ok(());
-            }
-            Ok(None) => {}
-            Err(_) => {}
+    // Stale reads require a read-ts that is <= the cluster's safe-ts. PD's `GetMinTs` provides a
+    // conservative timestamp across all TSO groups; wait until it is >= `commit_ts`.
+    let mut stale_ts = None;
+    for _ in 0..120 {
+        let ts = client.current_min_timestamp().await?;
+        if ts.version() >= commit_ts.version() {
+            stale_ts = Some(ts);
+            break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    let stale_ts = stale_ts.ok_or_else(|| {
+        Error::StringError("GetMinTs did not reach commit_ts within timeout".to_owned())
+    })?;
 
     let mut snapshot = client.snapshot(
-        commit_ts,
+        stale_ts,
         TransactionOptions::new_optimistic().stale_read(true),
     );
     assert_eq!(snapshot.get(key).await?, Some(value.into_bytes()));
