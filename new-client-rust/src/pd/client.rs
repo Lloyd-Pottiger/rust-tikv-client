@@ -386,8 +386,8 @@ pub mod test {
     fn test_group_keys_by_region() {
         let client = MockPdClient::default();
 
-        // FIXME This only works if the keys are in order of regions. Not sure if
-        // that is a reasonable constraint.
+        // NOTE: `group_keys_by_region` only batches consecutive keys that belong to the same
+        // region. For optimal batching, callers should pre-group keys by region.
         let tasks: Vec<Key> = vec![
             vec![1].into(),
             vec![2].into(),

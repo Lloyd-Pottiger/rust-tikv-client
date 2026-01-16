@@ -9,9 +9,10 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- pd/client(test)：澄清 `group_keys_by_region` 的输入约束，移除测试中的 FIXME
+- pd/timestamp：澄清 MAX_PENDING_COUNT/stream termination TODO，并补齐最小单测（或降级为注释）
   - 计划：
-    - 将 “keys 需要按 region 顺序” 说明改为 NOTE（强调 batching 最优而非 correctness 依赖）
+    - 处理 `pd/timestamp.rs` 的 TODO：要么变为可配置（Config/internal opts），要么明确为经验值并解释理由
+    - 处理 TSO stream 结束日志：明确是正常退出/错误退出两类（避免误报）
     - `cargo test` 验证
 
 # 待做工作
@@ -98,3 +99,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - kv/bound_range：澄清 `PartialEq<(Bound<T>, Bound<T>)>` 的 clone 约束，移除 FIXME（保持 API 不变）
   - 关键决策：此 impl 主要服务 doc/test；tuple 借用导致需要 clone（不做无意义优化）
   - 文件：`new-client-rust/src/kv/bound_range.rs`，`.codex/progress/daemon.md`
+
+- pd/client(test)：澄清 `group_keys_by_region` 的输入约束，移除测试中的 FIXME
+  - 关键决策：强调 batching 最优输入约束，而非 correctness 依赖
+  - 文件：`new-client-rust/src/pd/client.rs`，`.codex/progress/daemon.md`
