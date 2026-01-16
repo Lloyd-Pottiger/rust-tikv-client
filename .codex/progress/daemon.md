@@ -17,6 +17,17 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- tests：清零 integration/failpoint 剩余 TODO/FIXME，补齐缺失用例并稳定断言
+  - 关键决策：cleanup_locks 的 rollback/region-error 走 MockPd/MockKv 单测覆盖（避免依赖真实集群触发 region error 的不稳定）
+  - 改动：`raw_write_million` 恢复 batch_scan(each_limit) 断言并校验等价 `scan`；`txn_pessimistic_delete` 恢复 insert 场景并用非保留 key；`txn_bank_transfer` 增加更稳健的 RetryOptions；移除 failpoint tests TODO；新增 cleanup_locks rollback/region-error 单测
+  - 文件：`new-client-rust/tests/integration_tests.rs`，`new-client-rust/tests/failpoint_tests.rs`，`new-client-rust/src/request/plan.rs`
+  - 备注：用 tiup playground 实测 `txn_pessimistic_delete/raw_write_million/txn_bank_transfer` 通过
+
+- review：对齐「整体工作目标」vs 当前实现，识别剩余缺口并拆解任务
+  - 发现：core/infra/parity 已覆盖；剩余缺口集中在 tests 文件内的 TODO/FIXME（未断言的 batch_scan each_limit、pessimistic delete 的 insert 行为、cleanup_locks async-commit 的 rollback/region-error 覆盖）
+  - 决策：优先用确定性的 unit tests 覆盖 rollback/region-error（避免依赖真实集群触发 region error 的不稳定）；integration tests 只保留稳定、端到端语义校验
+  - 文件：`.codex/progress/daemon.md`
+
 - core：new-client-rust 基线 + client-go(v2) 能力对齐（Raw/Txn/PD/RegionCache/Plan）
   - 关键决策：Rust public API 走显式 `Config/Options`；低层以 `request::PlanBuilder` + typed kvproto 组合；不复刻 Go tikvrpc mega-wrapper
   - 覆盖：2PC/async-commit/1PC/pipelined/local-latches；replica+stale read 路由；resource control/trace/metrics hooks

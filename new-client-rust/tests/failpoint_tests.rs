@@ -226,10 +226,6 @@ async fn txn_cleanup_async_commit_locks() -> Result<()> {
         assert_eq!(count_locks(&client).await?, 0);
     }
 
-    // TODO: test rollback
-
-    // TODO: test region error
-
     scenario.teardown();
     Ok(())
 }

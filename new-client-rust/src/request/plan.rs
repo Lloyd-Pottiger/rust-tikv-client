@@ -1144,6 +1144,7 @@ impl<Resp: HasRegionError, Shard> HasRegionError for ResponseWithShard<Resp, Sha
 mod test {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
 
     use futures::stream::BoxStream;
     use futures::stream::{self};
@@ -1370,6 +1371,191 @@ mod test {
         let result = plan.execute().await?;
         assert_eq!(result.resolved_locks, 1);
         assert_eq!(scan_lock_calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_async_commit_only_can_rollback_when_fallback_2pc() -> Result<()> {
+        let check_txn_status_calls = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_calls_for_hook = check_txn_status_calls.clone();
+        let resolve_lock_requests = Arc::new(Mutex::new(Vec::new()));
+        let resolve_lock_requests_for_hook = resolve_lock_requests.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req| {
+                if req.downcast_ref::<kvrpcpb::ScanLockRequest>().is_some() {
+                    let mut resp = kvrpcpb::ScanLockResponse::default();
+                    resp.locks.push(kvrpcpb::LockInfo {
+                        key: vec![1],
+                        primary_lock: vec![1],
+                        lock_version: 42,
+                        lock_type: kvrpcpb::Op::Put as i32,
+                        use_async_commit: true,
+                        ..Default::default()
+                    });
+                    return Ok(Box::new(resp));
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckSecondaryLocksRequest>()
+                    .is_some()
+                {
+                    let mut resp = kvrpcpb::CheckSecondaryLocksResponse::default();
+                    // Force `fallback_2pc=true` so the GC path re-checks txn status and can roll
+                    // the txn back.
+                    resp.locks.push(kvrpcpb::LockInfo {
+                        use_async_commit: false,
+                        ..Default::default()
+                    });
+                    return Ok(Box::new(resp));
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    let call = check_txn_status_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        let mut resp = kvrpcpb::CheckTxnStatusResponse::default();
+                        resp.lock_ttl = 1;
+                        resp.commit_version = 0;
+                        resp.action = kvrpcpb::Action::NoAction as i32;
+                        resp.lock_info = Some(kvrpcpb::LockInfo {
+                            lock_version: 42,
+                            use_async_commit: true,
+                            secondaries: vec![vec![2]],
+                            ..Default::default()
+                        });
+                        return Ok(Box::new(resp));
+                    }
+                    // Treat the txn as rolled back (no lock_info / commit_version=0).
+                    return Ok(Box::new(kvrpcpb::CheckTxnStatusResponse::default()));
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    if !req.txn_infos.is_empty() {
+                        resolve_lock_requests_for_hook
+                            .lock()
+                            .unwrap()
+                            .push(req.clone());
+                    }
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()));
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let store = pd_client
+            .clone()
+            .map_region_to_store(MockPdClient::region1())
+            .await?;
+
+        let mut scan_lock = kvrpcpb::ScanLockRequest::default();
+        scan_lock.start_key = vec![1];
+        scan_lock.end_key = vec![10];
+        scan_lock.max_version = 0;
+        scan_lock.limit = 2;
+
+        let mut inner = Dispatch {
+            request: scan_lock,
+            kv_client: None,
+        };
+        inner.apply_store(&store)?;
+
+        let plan = CleanupLocks {
+            inner,
+            ctx: ResolveLocksContext::default(),
+            options: ResolveLocksOptions {
+                async_commit_only: true,
+                // Stop after the first batch by making it larger than the mocked response size.
+                batch_size: 2,
+            },
+            store: Some(store),
+            pd_client,
+            keyspace: Keyspace::Disable,
+            backoff: Backoff::no_backoff(),
+            request_context: RequestContext::default(),
+        };
+
+        let result = plan.execute().await?;
+        assert_eq!(result.resolved_locks, 1);
+
+        let requests = resolve_lock_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].txn_infos.len(), 1);
+        assert_eq!(requests[0].txn_infos[0].txn, 42);
+        assert_eq!(requests[0].txn_infos[0].status, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_retries_on_region_error_from_batch_resolve_lock() -> Result<()> {
+        let resolve_lock_calls = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_calls_for_hook = resolve_lock_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req| {
+                if req.downcast_ref::<kvrpcpb::ScanLockRequest>().is_some() {
+                    let mut resp = kvrpcpb::ScanLockResponse::default();
+                    resp.locks.push(kvrpcpb::LockInfo {
+                        key: vec![1],
+                        primary_lock: vec![1],
+                        lock_version: 42,
+                        lock_type: kvrpcpb::Op::Put as i32,
+                        use_async_commit: true,
+                        ..Default::default()
+                    });
+                    return Ok(Box::new(resp));
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    // Always treat the txn as rolled back so cleanup can proceed.
+                    return Ok(Box::new(kvrpcpb::CheckTxnStatusResponse::default()));
+                }
+
+                if req.downcast_ref::<kvrpcpb::ResolveLockRequest>().is_some() {
+                    let call = resolve_lock_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        let mut resp = kvrpcpb::ResolveLockResponse::default();
+                        resp.region_error = Some(errorpb::Error::default());
+                        return Ok(Box::new(resp));
+                    }
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()));
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut scan_lock = kvrpcpb::ScanLockRequest::default();
+        scan_lock.start_key = vec![1];
+        scan_lock.end_key = vec![10];
+        scan_lock.max_version = 0;
+        scan_lock.limit = 2;
+
+        let ctx = ResolveLocksContext::default();
+        let options = ResolveLocksOptions {
+            async_commit_only: true,
+            // Stop after the first batch by making it larger than the mocked response size.
+            batch_size: 2,
+        };
+
+        let plan =
+            crate::request::PlanBuilder::new(pd_client.clone(), Keyspace::Disable, scan_lock)
+                .cleanup_locks(ctx, options, Backoff::no_backoff(), Keyspace::Disable)
+                // One retry with 0ms delay.
+                .retry_multi_region(Backoff::no_jitter_backoff(0, 0, 1))
+                .extract_error()
+                .merge(crate::request::Collect)
+                .plan();
+
+        let result = plan.execute().await?;
+        assert_eq!(result.resolved_locks, 1);
+        assert_eq!(resolve_lock_calls.load(Ordering::SeqCst), 2);
         Ok(())
     }
 }
