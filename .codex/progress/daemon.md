@@ -9,24 +9,33 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- 整体目标复审：按最新 `client-go/` 刷新 parity 状态并列出剩余 gap（仅保留 still-relevant 的 public API/能力点）
+- Config parity：将 async-commit safe window 做成可配置项（对齐 client-go 默认 2s）
   - 计划：
-    - 基于 `go run ./tools/client-go-api-inventory` 输出核对 `.codex/progress/{client-go-api-inventory,parity-checklist}.md`
-    - 给出 Rust 侧 scope policy（哪些坚持能力即可、哪些需要 1:1 public API）
-    - 将剩余 gap 拆成小任务，补齐到本文件「待做工作」，并开始最高优先级项
+    - `TransactionOptions` 新增 `async_commit_safe_window`（默认 2s）
+    - 2PC `max_commit_ts` 计算使用该值；补齐单测断言
+    - checklist 回填对应条目并补文档备注
 
 # 待做工作
 
-- Parity 范围收敛：明确哪些 `client-go` public package/符号需要在 Rust 侧暴露（哪些仅保证能力但不做 1:1 API）
+- Parity checklist 回填（继续）：补齐 `tikv` / `tikvrpc` 其余 entrypoints（标注 capability-only vs public）
   - 计划：
-    - 按 package 粗分：core entrypoints / 事务协议 / 工具包（metrics/trace/util）
-    - 给出 “Rust-y” 替代策略（例如避免全局 config；builder/显式 opts；feature-gate metrics）
-    - 更新 `.codex/progress/parity-map.md` 的 scope policy，并同步修订 checklist（标注/删去 out-of-scope）
+    - 优先 `tikvrpc/interceptor` 与 `ResourceGroupTagger` 周边；其余 `tikvrpc::{Request,CmdType,...}` 先给出 Rust 侧替代策略并标注
+    - `tikv` 包中明显为调试/探针/Go 可见性产物的符号，按 scope policy 标注为 capability-only 或 out-of-scope
 
-- Parity checklist 回填（核心包优先）：`config` / `config/retry` / `rawkv` / `tikv` / `tikvrpc`
+- tikvrpc public wrapper：决定是否需要对外暴露 “按命令构造请求/响应” 的 Rust 层（或坚持 `request::PlanBuilder` 作为低层 API）
   - 计划：
-    - 逐包把已实现的 Rust path + Tests 回填到 `.codex/progress/parity-checklist.md`（优先 entrypoints + txn/read/write/options）
-    - 对仍缺失但确定需要的 API，拆成可实现的小任务并移到「正在进行的工作」
+    - 明确最小 public surface（不引入巨型 enum/trait 层级）
+    - 为 interceptor/metrics/trace 预留稳定 hook（label + context）
+
+- metrics/trace：补齐 feature-gate 策略与最小 public API（对齐 client-go 导出包语义）
+  - 计划：
+    - prometheus/tracing 依赖改为可选 feature
+    - 先对齐核心 counters/histograms（可渐进补齐）
+
+- Protocol TODO：lite resolve lock / lock resolver backoff / retry 参数校准
+  - 计划：
+    - 逐 TODO/FIXME 立项（从 `.codex/progress/gap-analysis.md` + `rg TODO|FIXME new-client-rust/src`）
+    - 每项补单测与行为对齐说明
 
 # 已完成工作
 
@@ -41,3 +50,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - Txn 细节 parity + 工具链：assertion API 与 KeyError→Error 映射、pessimistic lock options、KeyFlags(prewrite-only)、checklist regen merge
   - 关键决策：prewrite-only(`Op_CheckNotExists`) 不进入 commit/rollback；commit primary 必须来自需 commit keys；inventory 工具 regen 不覆盖已回填 checklist
   - 测试：覆盖 assertion/lock options/force-lock、prewrite-only no-commit、primary 重新选择等
+
+- Parity 范围收敛：补齐 scope policy + 刷新 gap（仅保留 still-relevant 能力点）
+  - 关键决策：checklist 每条落入 public / capability-only / out-of-scope 三类；Go `testutils` 不纳入 parity 追踪（工具层面剔除）
+  - 文件：`.codex/progress/{parity-map.md,gap-analysis.md,client-go-api-inventory.md}`，`tools/client-go-api-inventory/main.go`
+
+- Parity checklist 回填（第 1 批）：`config` / `config-retry` / `rawkv` + `tikvrpc(interceptor)` 关键 hook
+  - 关键决策：全局 config/ctx 注入类 API 标注 out-of-scope（Rust 以显式 opts + client builder 取代）
+  - 文件：`.codex/progress/parity-checklist.md`

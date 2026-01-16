@@ -12,26 +12,26 @@ Conventions:
 ## config (package config)
 
 ### Types
-- [ ] `type AsyncCommit struct` | Rust:  | Tests: 
-- [ ] `type Config struct` | Rust:  | Tests: 
+- [x] `type AsyncCommit struct` | Rust: `tikv_client::TransactionOptions::use_async_commit` (new-client-rust/src/transaction/transaction.rs) | Tests: `new-client-rust/src/transaction/transaction.rs (test_async_commit_fallback_to_2pc_when_min_commit_ts_is_zero, test_async_commit_uses_min_commit_ts_when_available)`
+- [x] `type Config struct` | Rust: `tikv_client::Config` (new-client-rust/src/config.rs) | Tests: N/A
 - [ ] `type CoprocessorCache struct` | Rust:  | Tests: 
 - [ ] `type PDClient struct` | Rust:  | Tests: 
-- [ ] `type PessimisticTxn struct` | Rust:  | Tests: 
-- [ ] `type Security struct` | Rust:  | Tests: 
+- [x] `type PessimisticTxn struct` | Rust: `tikv_client::TransactionClient::begin_pessimistic` + `tikv_client::TransactionOptions::new_pessimistic` (new-client-rust/src/transaction/{client,transaction}.rs) | Tests: N/A
+- [x] `type Security struct` | Rust: `tikv_client::Config::with_security` + `tikv_client::SecurityManager` (new-client-rust/src/{config.rs,common/security.rs}) | Tests: `new-client-rust/src/common/security.rs (test_security)`
 - [ ] `type TiKVClient struct` | Rust:  | Tests: 
-- [ ] `type TxnLocalLatches struct` | Rust:  | Tests: 
+- [x] `type TxnLocalLatches struct` | Rust: `tikv_client::TransactionClient::with_txn_local_latches` (new-client-rust/src/transaction/client.rs) | Tests: `new-client-rust/src/transaction/latch.rs (tests)`
 
 ### Functions
-- [ ] `func DefaultConfig() Config` | Rust:  | Tests: 
+- [x] `func DefaultConfig() Config` | Rust: `Config::default()` (new-client-rust/src/config.rs) | Tests: N/A
 - [ ] `func DefaultPDClient() PDClient` | Rust:  | Tests: 
 - [ ] `func DefaultTiKVClient() TiKVClient` | Rust:  | Tests: 
 - [ ] `func DefaultTxnLocalLatches() TxnLocalLatches` | Rust:  | Tests: 
-- [ ] `func GetGlobalConfig() *Config` | Rust:  | Tests: 
+- [x] `func GetGlobalConfig() *Config` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
 - [ ] `func GetTxnScopeFromConfig() string` | Rust:  | Tests: 
-- [ ] `func NewSecurity(sslCA, sslCert, sslKey string, verityCN []string) Security` | Rust:  | Tests: 
+- [x] `func NewSecurity(sslCA, sslCert, sslKey string, verityCN []string) Security` | Rust: `Config::with_security` + `SecurityManager::load` (new-client-rust/src/{config.rs,common/security.rs}) | Tests: `new-client-rust/src/common/security.rs (test_security)`
 - [ ] `func ParsePath(path string) (etcdAddrs []string, disableGC bool, keyspaceName string, err error)` | Rust:  | Tests: 
-- [ ] `func StoreGlobalConfig(config *Config)` | Rust:  | Tests: 
-- [ ] `func UpdateGlobal(f func(conf *Config)) func()` | Rust:  | Tests: 
+- [x] `func StoreGlobalConfig(config *Config)` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
+- [x] `func UpdateGlobal(f func(conf *Config)) func()` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
 
 ### Consts
 - [ ] `BatchPolicyBasic` | Rust:  | Tests: 
@@ -54,29 +54,29 @@ Conventions:
 - [ ] `func (config *TiKVClient) GetGrpcKeepAliveTimeout() time.Duration` | Rust:  | Tests: 
 - [ ] `func (config *TiKVClient) Valid() error` | Rust:  | Tests: 
 - [ ] `func (p *PDClient) Valid() error` | Rust:  | Tests: 
-- [ ] `func (s *Security) ToTLSConfig() (tlsConfig *tls.Config, err error)` | Rust:  | Tests: 
+- [x] `func (s *Security) ToTLSConfig() (tlsConfig *tls.Config, err error)` | Rust: `SecurityManager::load` (new-client-rust/src/common/security.rs) | Tests: `new-client-rust/src/common/security.rs (test_security)`
 
 ## config/retry (package retry)
 
 ### Types
-- [ ] `type BackoffFnCfg struct` | Rust:  | Tests: 
-- [ ] `type Backoffer struct` | Rust:  | Tests: 
-- [ ] `type Config struct` | Rust:  | Tests: 
+- [x] `type BackoffFnCfg struct` | Rust: `tikv_client::Backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (test_*)`
+- [x] `type Backoffer struct` | Rust: N/A (capability: request retries via `tikv_client::request::PlanBuilder` + `RetryOptions`) | Tests: `new-client-rust/src/request/mod.rs (test_region_retry)`
+- [x] `type Config struct` | Rust: `tikv_client::RetryOptions` (new-client-rust/src/request/mod.rs) | Tests: `new-client-rust/src/request/mod.rs (test_region_retry)`
 
 ### Functions
 - [ ] `func IsFakeRegionError(err *errorpb.Error) bool` | Rust:  | Tests: 
 - [ ] `func MayBackoffForRegionError(regionErr *errorpb.Error, bo *Backoffer) error` | Rust:  | Tests: 
-- [ ] `func NewBackoffFnCfg(base, cap, jitter int) *BackoffFnCfg` | Rust:  | Tests: 
+- [x] `func NewBackoffFnCfg(base, cap, jitter int) *BackoffFnCfg` | Rust: `Backoff::{no_jitter_backoff,full_jitter_backoff,equal_jitter_backoff,decorrelated_jitter_backoff}` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (tests)`
 - [ ] `func NewBackoffer(ctx context.Context, maxSleep int) *Backoffer` | Rust:  | Tests: 
 - [ ] `func NewBackofferWithVars(ctx context.Context, maxSleep int, vars *kv.Variables) *Backoffer` | Rust:  | Tests: 
 - [ ] `func NewConfig(name string, metric *prometheus.Observer, backoffFnCfg *BackoffFnCfg, err error) *Config` | Rust:  | Tests: 
-- [ ] `func NewNoopBackoff(ctx context.Context) *Backoffer` | Rust:  | Tests: 
+- [x] `func NewNoopBackoff(ctx context.Context) *Backoffer` | Rust: `Backoff::no_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (test_no_jitter_backoff)`
 
 ### Consts
-- [ ] `DecorrJitter` | Rust:  | Tests: 
-- [ ] `EqualJitter` | Rust:  | Tests: 
-- [ ] `FullJitter` | Rust:  | Tests: 
-- [ ] `NoJitter` | Rust:  | Tests: 
+- [x] `DecorrJitter` | Rust: `Backoff::decorrelated_jitter_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (tests)`
+- [x] `EqualJitter` | Rust: `Backoff::equal_jitter_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (tests)`
+- [x] `FullJitter` | Rust: `Backoff::full_jitter_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (tests)`
+- [x] `NoJitter` | Rust: `Backoff::no_jitter_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (test_no_jitter_backoff)`
 
 ### Vars
 - [ ] `BoCommitTSLag` | Rust:  | Tests: 
@@ -641,82 +641,56 @@ Conventions:
 ## rawkv (package rawkv)
 
 ### Types
-- [ ] `type Client struct` | Rust:  | Tests: 
+- [x] `type Client struct` | Rust: `tikv_client::RawClient` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (tests)`
 - [ ] `type ClientOpt func(*option)` | Rust:  | Tests: 
 - [ ] `type ClientProbe struct` | Rust:  | Tests: 
 - [ ] `type ConfigProbe struct` | Rust:  | Tests: 
-- [ ] `type RawChecksum struct` | Rust:  | Tests: 
+- [x] `type RawChecksum struct` | Rust: `tikv_client::RawChecksum` (new-client-rust/src/raw/mod.rs) | Tests: `new-client-rust/src/raw/requests.rs (test_raw_checksum_merge)`
 - [ ] `type RawOption interface` | Rust:  | Tests: 
 
 ### Functions
-- [ ] `func NewClient(ctx context.Context, pdAddrs []string, security config.Security, opts ...opt.ClientOption) (*Client, error)` | Rust:  | Tests: 
-- [ ] `func NewClientWithOpts(ctx context.Context, pdAddrs []string, opts ...ClientOpt) (*Client, error)` | Rust:  | Tests: 
-- [ ] `func ScanKeyOnly() RawOption` | Rust:  | Tests: 
-- [ ] `func SetColumnFamily(cf string) RawOption` | Rust:  | Tests: 
+- [x] `func NewClient(ctx context.Context, pdAddrs []string, security config.Security, opts ...opt.ClientOption) (*Client, error)` | Rust: `RawClient::new_with_config` + `Config::with_security` (new-client-rust/src/{raw/client.rs,config.rs}) | Tests: `new-client-rust/src/common/security.rs (test_security)`
+- [x] `func NewClientWithOpts(ctx context.Context, pdAddrs []string, opts ...ClientOpt) (*Client, error)` | Rust: `RawClient::new` / `RawClient::new_with_config` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (tests)`
+- [x] `func ScanKeyOnly() RawOption` | Rust: `RawClient::{scan_keys,scan_keys_reverse}` (new-client-rust/src/raw/client.rs) | Tests: N/A
+- [x] `func SetColumnFamily(cf string) RawOption` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (new-client-rust/src/raw/{client.rs,mod.rs}) | Tests: N/A
 - [ ] `func WithAPIVersion(apiVersion kvrpcpb.APIVersion) ClientOpt` | Rust:  | Tests: 
 - [ ] `func WithGRPCDialOptions(opts ...grpc.DialOption) ClientOpt` | Rust:  | Tests: 
-- [ ] `func WithKeyspace(name string) ClientOpt` | Rust:  | Tests: 
+- [x] `func WithKeyspace(name string) ClientOpt` | Rust: `Config::with_keyspace` / `Config::with_default_keyspace` (new-client-rust/src/config.rs) | Tests: N/A
 - [ ] `func WithPDOptions(opts ...opt.ClientOption) ClientOpt` | Rust:  | Tests: 
-- [ ] `func WithSecurity(security config.Security) ClientOpt` | Rust:  | Tests: 
+- [x] `func WithSecurity(security config.Security) ClientOpt` | Rust: `Config::with_security` (new-client-rust/src/config.rs) | Tests: `new-client-rust/src/common/security.rs (test_security)`
 
 ### Consts
 - (none)
 
 ### Vars
-- [ ] `ErrMaxScanLimitExceeded` | Rust:  | Tests: 
-- [ ] `MaxRawKVScanLimit` | Rust:  | Tests: 
+- [x] `ErrMaxScanLimitExceeded` | Rust: `Error::MaxScanLimitExceeded` (new-client-rust/src/common/errors.rs) | Tests: N/A
+- [x] `MaxRawKVScanLimit` | Rust: `MAX_RAW_KV_SCAN_LIMIT` (new-client-rust/src/raw/client.rs) | Tests: N/A
 
 ### Methods
-- [ ] `func (c *Client) BatchDelete(ctx context.Context, keys [][]byte, options ...RawOption) error` | Rust:  | Tests: 
-- [ ] `func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOption) ([][]byte, error)` | Rust:  | Tests: 
-- [ ] `func (c *Client) BatchPut(ctx context.Context, keys, values [][]byte, options ...RawOption) error` | Rust:  | Tests: 
-- [ ] `func (c *Client) BatchPutWithTTL(ctx context.Context, keys, values [][]byte, ttls []uint64, options ...RawOption) error` | Rust:  | Tests: 
-- [ ] `func (c *Client) Checksum(ctx context.Context, startKey, endKey []byte, options ...RawOption, ) (check RawChecksum, err error)` | Rust:  | Tests: 
-- [ ] `func (c *Client) Close() error` | Rust:  | Tests: 
+- [x] `func (c *Client) BatchDelete(ctx context.Context, keys [][]byte, options ...RawOption) error` | Rust: `RawClient::batch_delete` (new-client-rust/src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOption) ([][]byte, error)` | Rust: `RawClient::batch_get` (new-client-rust/src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) BatchPut(ctx context.Context, keys, values [][]byte, options ...RawOption) error` | Rust: `RawClient::batch_put` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (test_batch_put_with_ttl)`
+- [x] `func (c *Client) BatchPutWithTTL(ctx context.Context, keys, values [][]byte, ttls []uint64, options ...RawOption) error` | Rust: `RawClient::batch_put_with_ttl` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (test_batch_put_with_ttl)`
+- [x] `func (c *Client) Checksum(ctx context.Context, startKey, endKey []byte, options ...RawOption, ) (check RawChecksum, err error)` | Rust: `RawClient::checksum` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/requests.rs (test_raw_checksum_merge)`
+- [x] `func (c *Client) Close() error` | Rust: N/A (out-of-scope: drop closes client) | Tests: N/A
 - [ ] `func (c *Client) ClusterID() uint64` | Rust:  | Tests: 
-- [ ] `func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValue []byte, options ...RawOption) ([]byte, bool, error)` | Rust:  | Tests: 
-- [ ] `func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) error` | Rust:  | Tests: 
-- [ ] `func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte, options ...RawOption) error` | Rust:  | Tests: 
-- [ ] `func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]byte, error)` | Rust:  | Tests: 
-- [ ] `func (c *Client) GetKeyTTL(ctx context.Context, key []byte, options ...RawOption) (*uint64, error)` | Rust:  | Tests: 
+- [x] `func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValue []byte, options ...RawOption) ([]byte, bool, error)` | Rust: `RawClient::compare_and_swap` (new-client-rust/src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) error` | Rust: `RawClient::delete` (new-client-rust/src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte, options ...RawOption) error` | Rust: `RawClient::delete_range` (new-client-rust/src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]byte, error)` | Rust: `RawClient::get` (new-client-rust/src/raw/client.rs) | Tests: `new-client-rust/src/raw/client.rs (test_request_source_and_resource_group_tag)`
+- [x] `func (c *Client) GetKeyTTL(ctx context.Context, key []byte, options ...RawOption) (*uint64, error)` | Rust: `RawClient::get_key_ttl_secs` (new-client-rust/src/raw/client.rs) | Tests: N/A
 - [ ] `func (c *Client) GetPDClient() pd.Client` | Rust:  | Tests: 
-- [ ] `func (c *Client) Put(ctx context.Context, key, value []byte, options ...RawOption) error` | Rust:  | Tests: 
-- [ ] `func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, options ...RawOption) error` | Rust:  | Tests: 
+- [x] `func (c *Client) Put(ctx context.Context, key, value []byte, options ...RawOption) error` | Rust: `RawClient::put` (new-client-rust/src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, options ...RawOption) error` | Rust: `RawClient::put_with_ttl` (new-client-rust/src/raw/client.rs) | Tests: N/A
 - [ ] `func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption) (keys [][]byte, values [][]byte, err error)` | Rust:  | Tests: 
 - [ ] `func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption, ) (keys [][]byte, values [][]byte, err error)` | Rust:  | Tests: 
-- [ ] `func (c *Client) SetAtomicForCAS(b bool) *Client` | Rust:  | Tests: 
-- [ ] `func (c *Client) SetColumnFamily(columnFamily string) *Client` | Rust:  | Tests: 
+- [x] `func (c *Client) SetAtomicForCAS(b bool) *Client` | Rust: `RawClient::with_atomic_for_cas` (new-client-rust/src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) SetColumnFamily(columnFamily string) *Client` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (new-client-rust/src/raw/{client.rs,mod.rs}) | Tests: N/A
 - [ ] `func (c ClientProbe) GetRegionCache() *locate.RegionCache` | Rust:  | Tests: 
 - [ ] `func (c ClientProbe) SetPDClient(client pd.Client)` | Rust:  | Tests: 
 - [ ] `func (c ClientProbe) SetRPCClient(client client.Client)` | Rust:  | Tests: 
 - [ ] `func (c ClientProbe) SetRegionCache(regionCache *locate.RegionCache)` | Rust:  | Tests: 
 - [ ] `func (c ConfigProbe) GetRawBatchPutSize() int` | Rust:  | Tests: 
-
-## testutils (package testutils)
-
-### Types
-- [ ] `type Cluster = cluster.Cluster` | Rust:  | Tests: 
-- [ ] `type CoprRPCHandler = mocktikv.CoprRPCHandler` | Rust:  | Tests: 
-- [ ] `type ErrLocked = mocktikv.ErrLocked` | Rust:  | Tests: 
-- [ ] `type MVCCPair = mocktikv.Pair` | Rust:  | Tests: 
-- [ ] `type MVCCStore = mocktikv.MVCCStore` | Rust:  | Tests: 
-- [ ] `type MockClient = mocktikv.RPCClient` | Rust:  | Tests: 
-- [ ] `type MockCluster = mocktikv.Cluster` | Rust:  | Tests: 
-- [ ] `type RPCSession = mocktikv.Session` | Rust:  | Tests: 
-
-### Functions
-- [ ] `func NewMockTiKV(path string, coprHandler CoprRPCHandler) (*MockClient, *MockCluster, pd.Client, error)` | Rust:  | Tests: 
-
-### Consts
-- (none)
-
-### Vars
-- [ ] `BootstrapWithMultiRegions` | Rust:  | Tests: 
-- [ ] `BootstrapWithMultiStores` | Rust:  | Tests: 
-- [ ] `BootstrapWithSingleStore` | Rust:  | Tests: 
-
-### Methods
-- (none)
 
 ## tikv (package tikv)
 
@@ -959,7 +933,7 @@ Conventions:
 - [ ] `type Lease struct` | Rust:  | Tests: 
 - [ ] `type MPPStreamResponse struct` | Rust:  | Tests: 
 - [ ] `type Request struct` | Rust:  | Tests: 
-- [ ] `type ResourceGroupTagger func(req *Request)` | Rust:  | Tests: 
+- [x] `type ResourceGroupTagger func(req *Request)` | Rust: `tikv_client::interceptor::ResourceGroupTagger` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/raw/client.rs (test_request_source_and_resource_group_tag)`
 - [ ] `type Response struct` | Rust:  | Tests: 
 - [ ] `type ResponseExt struct` | Rust:  | Tests: 
 
@@ -1129,17 +1103,17 @@ Conventions:
 
 ### Types
 - [ ] `type MockInterceptorManager struct` | Rust:  | Tests: 
-- [ ] `type RPCInterceptor interface` | Rust:  | Tests: 
-- [ ] `type RPCInterceptorChain struct` | Rust:  | Tests: 
+- [x] `type RPCInterceptor interface` | Rust: `tikv_client::interceptor::RpcInterceptor` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/raw/client.rs (test_request_source_and_resource_group_tag)`
+- [x] `type RPCInterceptorChain struct` | Rust: `tikv_client::interceptor::RpcInterceptorChain` (new-client-rust/src/interceptor.rs) | Tests: N/A
 - [ ] `type RPCInterceptorFunc func(target string, req *tikvrpc.Request) (*tikvrpc.Response, error)` | Rust:  | Tests: 
 
 ### Functions
 - [ ] `func ChainRPCInterceptors(first RPCInterceptor, rest ...RPCInterceptor) RPCInterceptor` | Rust:  | Tests: 
 - [ ] `func GetRPCInterceptorFromCtx(ctx context.Context) RPCInterceptor` | Rust:  | Tests: 
 - [ ] `func NewMockInterceptorManager() *MockInterceptorManager` | Rust:  | Tests: 
-- [ ] `func NewRPCInterceptor(name string, fn func(next RPCInterceptorFunc) RPCInterceptorFunc) RPCInterceptor` | Rust:  | Tests: 
-- [ ] `func NewRPCInterceptorChain() *RPCInterceptorChain` | Rust:  | Tests: 
-- [ ] `func WithRPCInterceptor(ctx context.Context, interceptor RPCInterceptor) context.Context` | Rust:  | Tests: 
+- [x] `func NewRPCInterceptor(name string, fn func(next RPCInterceptorFunc) RPCInterceptorFunc) RPCInterceptor` | Rust: `tikv_client::interceptor::rpc_interceptor` (new-client-rust/src/interceptor.rs) | Tests: N/A
+- [x] `func NewRPCInterceptorChain() *RPCInterceptorChain` | Rust: `RpcInterceptorChain::new` (new-client-rust/src/interceptor.rs) | Tests: N/A
+- [x] `func WithRPCInterceptor(ctx context.Context, interceptor RPCInterceptor) context.Context` | Rust: N/A (out-of-scope: configure on client via `with_rpc_interceptor`) | Tests: N/A
 
 ### Consts
 - (none)
@@ -1148,8 +1122,8 @@ Conventions:
 - (none)
 
 ### Methods
-- [ ] `func (c *RPCInterceptorChain) Len() int` | Rust:  | Tests: 
-- [ ] `func (c *RPCInterceptorChain) Link(it RPCInterceptor) *RPCInterceptorChain` | Rust:  | Tests: 
+- [x] `func (c *RPCInterceptorChain) Len() int` | Rust: `RpcInterceptorChain::len` (new-client-rust/src/interceptor.rs) | Tests: N/A
+- [x] `func (c *RPCInterceptorChain) Link(it RPCInterceptor) *RPCInterceptorChain` | Rust: `RpcInterceptorChain::link` (new-client-rust/src/interceptor.rs) | Tests: N/A
 - [ ] `func (c *RPCInterceptorChain) Name() string` | Rust:  | Tests: 
 - [ ] `func (c *RPCInterceptorChain) Wrap(next RPCInterceptorFunc) RPCInterceptorFunc` | Rust:  | Tests: 
 - [ ] `func (m *MockInterceptorManager) BeginCount() int` | Rust:  | Tests: 

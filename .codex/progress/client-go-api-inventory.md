@@ -691,32 +691,6 @@ Regenerate:
 - `func (c ClientProbe) SetRegionCache(regionCache *locate.RegionCache)`
 - `func (c ConfigProbe) GetRawBatchPutSize() int`
 
-## testutils (package testutils)
-
-### Types
-- `type Cluster = cluster.Cluster`
-- `type CoprRPCHandler = mocktikv.CoprRPCHandler`
-- `type ErrLocked = mocktikv.ErrLocked`
-- `type MVCCPair = mocktikv.Pair`
-- `type MVCCStore = mocktikv.MVCCStore`
-- `type MockClient = mocktikv.RPCClient`
-- `type MockCluster = mocktikv.Cluster`
-- `type RPCSession = mocktikv.Session`
-
-### Functions
-- `func NewMockTiKV(path string, coprHandler CoprRPCHandler) (*MockClient, *MockCluster, pd.Client, error)`
-
-### Consts
-- (none)
-
-### Vars
-- `BootstrapWithMultiRegions`
-- `BootstrapWithMultiStores`
-- `BootstrapWithSingleStore`
-
-### Methods
-- (none)
-
 ## tikv (package tikv)
 
 ### Types

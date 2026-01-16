@@ -177,6 +177,8 @@ func shouldSkipPackage(relImportPath string) bool {
 		return true
 	case strings.HasPrefix(relImportPath, "examples/"):
 		return true
+	case relImportPath == "testutils":
+		return true
 	case strings.HasPrefix(relImportPath, "testutils/"):
 		return true
 	default:
