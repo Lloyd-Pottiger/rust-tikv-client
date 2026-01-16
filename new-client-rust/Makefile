@@ -13,6 +13,11 @@ INTEGRATION_TEST_ARGS := --features "integration-tests" --test-threads 1
 
 RUN_INTEGRATION_TEST := cargo nextest run ${NEXTEST_ARGS} --all ${INTEGRATION_TEST_ARGS}
 
+# Fallback commands when `cargo nextest` isn't installed.
+CARGO_TEST_UNIT := cargo test --workspace --no-default-features --lib --tests
+CARGO_TEST_INTEGRATION := cargo test --workspace --features "integration-tests" --tests
+CARGO_TEST_INTEGRATION_RUNNER_ARGS := -- --test-threads 1
+
 TIUP_PID_FILE := target/tiup-playground.pid
 TIUP_LOG_FILE := target/tiup-playground.log
 
@@ -27,15 +32,27 @@ check: generate
 	cargo clippy --all-targets --features "${ALL_FEATURES}" -- -D clippy::all
 
 unit-test: generate
-	cargo nextest run ${NEXTEST_ARGS} --all --no-default-features
+	@if cargo nextest --version >/dev/null 2>&1; then \
+		cargo nextest run ${NEXTEST_ARGS} --all --no-default-features; \
+	else \
+		$(CARGO_TEST_UNIT); \
+	fi
 
 integration-test: integration-test-txn integration-test-raw
 
 integration-test-txn: generate
-	$(RUN_INTEGRATION_TEST) txn_
+	@if cargo nextest --version >/dev/null 2>&1; then \
+		$(RUN_INTEGRATION_TEST) txn_; \
+	else \
+		$(CARGO_TEST_INTEGRATION) txn_ $(CARGO_TEST_INTEGRATION_RUNNER_ARGS); \
+	fi
 
 integration-test-raw: generate
-	$(RUN_INTEGRATION_TEST) raw_
+	@if cargo nextest --version >/dev/null 2>&1; then \
+		$(RUN_INTEGRATION_TEST) raw_; \
+	else \
+		$(CARGO_TEST_INTEGRATION) raw_ $(CARGO_TEST_INTEGRATION_RUNNER_ARGS); \
+	fi
 
 integration-test-smoke: generate
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests txn_crud -- --test-threads 1

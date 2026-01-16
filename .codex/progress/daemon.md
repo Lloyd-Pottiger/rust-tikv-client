@@ -9,11 +9,19 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- （无）
+- docs：补齐/校验 rustdoc（示例可编译、doc build 稳定）
+  - 步骤：
+    - `cargo doc --workspace --no-deps` 本地过一遍并修复 rustdoc warnings/链接
+    - 为关键 public API（Config/TransactionOptions/Replica+Stale read/Resource control）补齐最小示例
+    - （可选）CI 加一个 `cargo doc` job 防回归
 
 # 待做工作
 
-- （无）
+- hardening：处理/清理 `src/proptests/*`（当前整体被注释禁用）
+  - 步骤：
+    - 决定保留策略：要么恢复为纯单测/无需集群的 proptest；要么直接删除该目录
+    - 若保留：补齐策略函数与 gating（避免默认依赖 PD/TiKV）
+    - 补齐文档说明（何时跑、如何跑）
 
 # 已完成工作
 
@@ -37,3 +45,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：用 failpoint `after-prewrite` 构造 prewrite lock；snapshot 侧用 `no_resolve_locks()` 断言“会报锁而不是读旧值”
   - 改动：`txn_crud` snapshot 改为 `TransactionOptions::new_pessimistic()`；新增 `txn_pessimistic_snapshot_checks_locks`
   - 文件：`new-client-rust/tests/integration_tests.rs`
+
+- infra：Makefile 在未安装 `cargo nextest` 时回退到 `cargo test`
+  - 关键决策：保持 nextest 优先；无 nextest 时用 `cargo test --workspace` 跑 unit/integration 的等价子集（不引入额外工具依赖）
+  - 改动：`unit-test`/`integration-test-{txn,raw}` 增加 nextest 探测与 fallback
+  - 文件：`new-client-rust/Makefile`
