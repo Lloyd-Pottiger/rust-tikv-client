@@ -77,9 +77,11 @@ pub trait RpcInterceptor: Send + Sync + 'static {
 pub type RpcInterceptorFunc =
     Arc<dyn Fn(&RpcContextInfo, &mut kvrpcpb::Context) + Send + Sync + 'static>;
 
+type BeforeSendFn = dyn Fn(&RpcContextInfo, &mut kvrpcpb::Context) + Send + Sync + 'static;
+
 struct FnRpcInterceptor {
     name: Arc<str>,
-    f: Box<dyn Fn(&RpcContextInfo, &mut kvrpcpb::Context) + Send + Sync + 'static>,
+    f: Box<BeforeSendFn>,
 }
 
 impl RpcInterceptor for FnRpcInterceptor {
@@ -166,7 +168,7 @@ impl RpcInterceptor for RpcInterceptorChain {
     }
 
     fn wrap(self: Arc<Self>, next: RpcInterceptorFunc) -> RpcInterceptorFunc {
-        RpcInterceptorChain::wrap(&*self, next)
+        RpcInterceptorChain::wrap(&self, next)
     }
 }
 
@@ -264,6 +266,34 @@ impl RpcInterceptor for MockInterceptor {
     }
 }
 
+/// A request-scoped resource group tagger.
+///
+/// If a fixed resource group tag is set on the client, it takes precedence over this tagger.
+pub type ResourceGroupTagger =
+    Arc<dyn Fn(&RpcContextInfo, &kvrpcpb::Context) -> Vec<u8> + Send + Sync + 'static>;
+
+/// Create an interceptor which sets `Context.resource_control_context.override_priority` if it is unset.
+///
+/// This matches client-go's behavior of only providing a default override priority when the caller
+/// didn't set one explicitly (e.g. for runaway query deprioritization).
+#[must_use]
+pub fn override_priority_if_unset(override_priority: u64) -> Arc<dyn RpcInterceptor> {
+    rpc_interceptor(
+        "resource_control.override_priority_if_unset",
+        move |_, ctx| {
+            let Some(resource_control_context) = ctx.resource_control_context.as_mut() else {
+                return;
+            };
+            if resource_control_context.resource_group_name.is_empty() {
+                return;
+            }
+            if resource_control_context.override_priority == 0 {
+                resource_control_context.override_priority = override_priority;
+            }
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,32 +348,4 @@ mod tests {
         let mut ctx = kvrpcpb::Context::default();
         wrapped(&info, &mut ctx);
     }
-}
-
-/// A request-scoped resource group tagger.
-///
-/// If a fixed resource group tag is set on the client, it takes precedence over this tagger.
-pub type ResourceGroupTagger =
-    Arc<dyn Fn(&RpcContextInfo, &kvrpcpb::Context) -> Vec<u8> + Send + Sync + 'static>;
-
-/// Create an interceptor which sets `Context.resource_control_context.override_priority` if it is unset.
-///
-/// This matches client-go's behavior of only providing a default override priority when the caller
-/// didn't set one explicitly (e.g. for runaway query deprioritization).
-#[must_use]
-pub fn override_priority_if_unset(override_priority: u64) -> Arc<dyn RpcInterceptor> {
-    rpc_interceptor(
-        "resource_control.override_priority_if_unset",
-        move |_, ctx| {
-            let Some(resource_control_context) = ctx.resource_control_context.as_mut() else {
-                return;
-            };
-            if resource_control_context.resource_group_name.is_empty() {
-                return;
-            }
-            if resource_control_context.override_priority == 0 {
-                resource_control_context.override_priority = override_priority;
-            }
-        },
-    )
 }

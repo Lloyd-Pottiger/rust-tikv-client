@@ -426,97 +426,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::any::Any;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-
-    use super::*;
-    use crate::mock::MockKvClient;
-    use crate::mock::MockPdClient;
-    use crate::proto::kvrpcpb;
-    use crate::request::CollectSingle;
-    use crate::Backoff;
-    use crate::Result;
-
-    #[tokio::test]
-    async fn test_plan_builder_request_context_and_interceptors() -> Result<()> {
-        let expected_source = "unit-test".to_owned();
-        let expected_group_name = "unit-test-group".to_owned();
-        let expected_dynamic_tag = vec![9_u8];
-        let expected_trace_id = vec![1_u8, 2, 3, 4];
-        let expected_trace_flags = 0x1234_u64;
-
-        let interceptor_called = Arc::new(AtomicBool::new(false));
-        let interceptor_called_cloned = interceptor_called.clone();
-
-        let interceptor =
-            crate::interceptor::rpc_interceptor("unit_test.interceptor", move |info, ctx| {
-                assert_eq!(info.label, "raw_get");
-                interceptor_called_cloned.store(true, Ordering::SeqCst);
-                // Interceptors run after `RequestContext` fields have been applied.
-                ctx.request_source = "from-interceptor".to_owned();
-            });
-
-        let hook_expected_group_name = expected_group_name.clone();
-        let hook_expected_dynamic_tag = expected_dynamic_tag.clone();
-        let hook_expected_trace_id = expected_trace_id.clone();
-        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
-            move |req: &dyn Any| {
-                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
-                    unreachable!("unexpected request type in plan builder context test");
-                };
-                let ctx = req.context.as_ref().expect("context should be set");
-                assert_eq!(ctx.request_source, "from-interceptor");
-                assert_eq!(ctx.resource_group_tag, hook_expected_dynamic_tag);
-                assert_eq!(ctx.trace_id, hook_expected_trace_id);
-                assert_eq!(ctx.trace_control_flags, expected_trace_flags);
-                let resource_ctl_ctx = ctx
-                    .resource_control_context
-                    .as_ref()
-                    .expect("resource_control_context should be set");
-                assert_eq!(
-                    resource_ctl_ctx.resource_group_name,
-                    hook_expected_group_name
-                );
-
-                let resp = kvrpcpb::RawGetResponse {
-                    not_found: true,
-                    ..Default::default()
-                };
-                Ok(Box::new(resp) as Box<dyn Any>)
-            },
-        )));
-
-        let mut req = kvrpcpb::RawGetRequest::default();
-        // Choose a key in `MockPdClient::region1`.
-        req.key = vec![5];
-
-        let plan = PlanBuilder::new(pd_client, Keyspace::Disable, req)
-            .with_request_source(expected_source.clone())
-            .with_resource_group_name(expected_group_name.clone())
-            .with_trace_id(expected_trace_id)
-            .with_trace_control_flags(expected_trace_flags)
-            .with_resource_group_tagger(move |info, ctx| {
-                // Tagger runs before interceptors.
-                assert_eq!(info.label, "raw_get");
-                assert_eq!(ctx.request_source, format!("leader_{expected_source}"));
-                expected_dynamic_tag.clone()
-            })
-            .with_added_rpc_interceptor(interceptor)
-            .retry_multi_region(Backoff::no_backoff())
-            .merge(CollectSingle)
-            .post_process_default()
-            .plan();
-
-        let value = plan.execute().await?;
-        assert!(value.is_none());
-        assert!(interceptor_called.load(Ordering::SeqCst));
-        Ok(())
-    }
-}
-
 impl<PdC: PdClient, R: KvRequest> PlanBuilder<PdC, Dispatch<R>, NoTarget> {
     /// Target the request at a single region; caller supplies the store to target.
     pub async fn single_region_with_store(
@@ -610,4 +519,95 @@ fn set_single_region_store<PdC: PdClient, R: KvRequest>(
 pub trait SingleKey {
     #[allow(clippy::ptr_arg)]
     fn key(&self) -> &Vec<u8>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::mock::MockKvClient;
+    use crate::mock::MockPdClient;
+    use crate::proto::kvrpcpb;
+    use crate::request::CollectSingle;
+    use crate::Backoff;
+    use crate::Result;
+
+    #[tokio::test]
+    async fn test_plan_builder_request_context_and_interceptors() -> Result<()> {
+        let expected_source = "unit-test".to_owned();
+        let expected_group_name = "unit-test-group".to_owned();
+        let expected_dynamic_tag = vec![9_u8];
+        let expected_trace_id = vec![1_u8, 2, 3, 4];
+        let expected_trace_flags = 0x1234_u64;
+
+        let interceptor_called = Arc::new(AtomicBool::new(false));
+        let interceptor_called_cloned = interceptor_called.clone();
+
+        let interceptor =
+            crate::interceptor::rpc_interceptor("unit_test.interceptor", move |info, ctx| {
+                assert_eq!(info.label, "raw_get");
+                interceptor_called_cloned.store(true, Ordering::SeqCst);
+                // Interceptors run after `RequestContext` fields have been applied.
+                ctx.request_source = "from-interceptor".to_owned();
+            });
+
+        let hook_expected_group_name = expected_group_name.clone();
+        let hook_expected_dynamic_tag = expected_dynamic_tag.clone();
+        let hook_expected_trace_id = expected_trace_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type in plan builder context test");
+                };
+                let ctx = req.context.as_ref().expect("context should be set");
+                assert_eq!(ctx.request_source, "from-interceptor");
+                assert_eq!(ctx.resource_group_tag, hook_expected_dynamic_tag);
+                assert_eq!(ctx.trace_id, hook_expected_trace_id);
+                assert_eq!(ctx.trace_control_flags, expected_trace_flags);
+                let resource_ctl_ctx = ctx
+                    .resource_control_context
+                    .as_ref()
+                    .expect("resource_control_context should be set");
+                assert_eq!(
+                    resource_ctl_ctx.resource_group_name,
+                    hook_expected_group_name
+                );
+
+                let resp = kvrpcpb::RawGetResponse {
+                    not_found: true,
+                    ..Default::default()
+                };
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut req = kvrpcpb::RawGetRequest::default();
+        // Choose a key in `MockPdClient::region1`.
+        req.key = vec![5];
+
+        let plan = PlanBuilder::new(pd_client, Keyspace::Disable, req)
+            .with_request_source(expected_source.clone())
+            .with_resource_group_name(expected_group_name.clone())
+            .with_trace_id(expected_trace_id)
+            .with_trace_control_flags(expected_trace_flags)
+            .with_resource_group_tagger(move |info, ctx| {
+                // Tagger runs before interceptors.
+                assert_eq!(info.label, "raw_get");
+                assert_eq!(ctx.request_source, format!("leader_{expected_source}"));
+                expected_dynamic_tag.clone()
+            })
+            .with_added_rpc_interceptor(interceptor)
+            .retry_multi_region(Backoff::no_backoff())
+            .merge(CollectSingle)
+            .post_process_default()
+            .plan();
+
+        let value = plan.execute().await?;
+        assert!(value.is_none());
+        assert!(interceptor_called.load(Ordering::SeqCst));
+        Ok(())
+    }
 }

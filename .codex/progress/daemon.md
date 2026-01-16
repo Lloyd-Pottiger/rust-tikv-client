@@ -9,12 +9,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- 验证与收尾：fmt/clippy + feature 组合（no-default-features）构建/测试
-  - 计划：
-    - `cargo fmt --check`
-    - `cargo test` / `cargo test --no-default-features`
-    - `cargo clippy`（必要时做最小修复，不做无关重构）
-
 # 待做工作
 
 # 已完成工作
@@ -46,3 +40,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：trace ctx helper（ContextWithTraceID/TraceIDFromContext/GetTraceControlFlags）不引入 Go-style context，统一映射到 `PlanBuilder::{with_trace_id,with_trace_control}` 并标注 out-of-scope；Prometheus 可选依赖，禁用 `prometheus` 时 stats no-op；metrics 不 1:1 暴露 Go 的 label/handle（统一标注 out-of-scope），仅保留 `metrics::{register,gather_as_text}`
   - 文件：`new-client-rust/src/{interceptor.rs,trace.rs,metrics.rs,stats.rs,request/plan.rs,request/plan_builder.rs,request_context.rs}`，`.codex/progress/{parity-checklist.md,parity-map.md,gap-analysis.md,client-go-api-inventory.md}`，`tools/client-go-api-inventory/main.go`
   - 测试：`new-client-rust/src/metrics.rs (gather_contains_core_metrics)` 先打点再 gather（避免空 vec 不输出导致 flaky），`--no-default-features` 可编译可测试
+
+- 验证与收尾：fmt/clippy + feature 组合（no-default-features）构建/测试
+  - 关键决策：clippy 仅做最小修复；递归 handler 保留签名用 allow 标注；同时覆盖 default 与 `--no-default-features` 的 clippy
+  - 结果：`cargo fmt --check`，`cargo test`，`cargo test --no-default-features`，`cargo clippy --all-targets`，`cargo clippy --all-targets --no-default-features` 均通过
+  - 文件：`new-client-rust/src/{common/errors.rs,interceptor.rs,lib.rs,request/plan.rs,request/plan_builder.rs,transaction/{latch.rs,pipelined.rs,transaction.rs}}`，`.codex/progress/daemon.md`

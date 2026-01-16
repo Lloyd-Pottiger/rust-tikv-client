@@ -135,6 +135,7 @@ where
     P::Result: HasKeyErrors + HasRegionError,
 {
     // A plan may involve multiple shards
+    #[allow(clippy::too_many_arguments)]
     #[async_recursion]
     async fn single_plan_handler(
         pd_client: Arc<PdC>,
@@ -186,6 +187,7 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[async_recursion]
     async fn single_shard_handler(
         pd_client: Arc<PdC>,
@@ -231,7 +233,7 @@ where
         let current_replica_kind = replica_kind_for_peer(leader_peer, &read_peer.target_peer);
         let request_source_override = match read_routing.request_source() {
             None => None,
-            Some(input) if input.is_empty() => None,
+            Some("") => None,
             Some(input) => {
                 let base_peer = read_routing.select_peer_for_request_source(&region)?;
                 let base_replica_kind = replica_kind_for_peer(leader_peer, &base_peer.target_peer);

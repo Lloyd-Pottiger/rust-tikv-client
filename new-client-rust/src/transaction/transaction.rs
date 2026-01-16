@@ -2631,13 +2631,13 @@ mod tests {
                 };
                 let call = lock_calls_cloned.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(req.wait_timeout, 123);
-                assert_eq!(req.check_existence, true);
-                assert_eq!(req.lock_only_if_exists, true);
+                assert!(req.check_existence);
+                assert!(req.lock_only_if_exists);
                 assert_eq!(
                     req.wake_up_mode,
                     kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeNormal as i32
                 );
-                assert_eq!(req.return_values, false);
+                assert!(!req.return_values);
                 assert_eq!(req.min_commit_ts, req.for_update_ts.saturating_add(1));
                 if call == 0 {
                     assert!(req.is_first_lock);
@@ -3152,7 +3152,8 @@ mod tests {
     ) -> Result<(), io::Error> {
         let input_request_source = "unit-test-source";
 
-        let calls: Arc<Mutex<Vec<(bool, String, Vec<u8>, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        type CallLog = Vec<(bool, String, Vec<u8>, u64)>;
+        let calls: Arc<Mutex<CallLog>> = Arc::new(Mutex::new(Vec::new()));
         let calls_cloned = calls.clone();
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_cloned = call_count.clone();

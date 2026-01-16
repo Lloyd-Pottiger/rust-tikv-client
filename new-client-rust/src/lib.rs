@@ -169,12 +169,6 @@ pub use crate::raw::RawChecksum;
 #[doc(inline)]
 pub use crate::request::RetryOptions;
 #[doc(inline)]
-pub use crate::timestamp::Timestamp;
-#[doc(inline)]
-pub use crate::timestamp::TimestampExt;
-#[doc(inline)]
-pub use crate::timestamp::GLOBAL_TXN_SCOPE;
-#[doc(inline)]
 pub use crate::timestamp::compose_ts;
 #[doc(inline)]
 pub use crate::timestamp::extract_logical;
@@ -188,6 +182,12 @@ pub use crate::timestamp::get_time_from_ts;
 pub use crate::timestamp::lower_limit_start_ts;
 #[doc(inline)]
 pub use crate::timestamp::time_to_ts;
+#[doc(inline)]
+pub use crate::timestamp::Timestamp;
+#[doc(inline)]
+pub use crate::timestamp::TimestampExt;
+#[doc(inline)]
+pub use crate::timestamp::GLOBAL_TXN_SCOPE;
 #[doc(inline)]
 pub use crate::transaction::lowering as transaction_lowering;
 #[doc(inline)]

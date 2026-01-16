@@ -448,6 +448,19 @@ impl Error {
     }
 }
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! internal_err {
+    ($e:expr) => ({
+        $crate::Error::InternalError {
+            message: format!("[{}:{}]: {}", file!(), line!(),  $e)
+        }
+    });
+    ($f:tt, $($arg:expr),+) => ({
+        internal_err!(format!($f, $($arg),+))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,17 +607,4 @@ mod tests {
         assert!(Error::UndeterminedError(Box::new(Error::Unimplemented)).is_undetermined());
         assert!(!Error::Unimplemented.is_undetermined());
     }
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! internal_err {
-    ($e:expr) => ({
-        $crate::Error::InternalError {
-            message: format!("[{}:{}]: {}", file!(), line!(),  $e)
-        }
-    });
-    ($f:tt, $($arg:expr),+) => ({
-        internal_err!(format!($f, $($arg),+))
-    });
 }

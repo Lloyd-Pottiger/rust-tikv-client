@@ -127,6 +127,7 @@ impl PipelinedTxnState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn maybe_flush<PdC: crate::pd::PdClient>(
         &mut self,
         pd_client: Arc<PdC>,
@@ -155,6 +156,7 @@ impl PipelinedTxnState {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn flush_all<PdC: crate::pd::PdClient>(
         &mut self,
         pd_client: Arc<PdC>,
@@ -196,6 +198,7 @@ impl PipelinedTxnState {
         Some((start.into(), end.into()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_flush<PdC: crate::pd::PdClient>(
         &mut self,
         pd_client: Arc<PdC>,
@@ -229,8 +232,7 @@ impl PipelinedTxnState {
         self.update_flushed_range(min_key, max_key);
 
         let mutations = std::mem::take(&mut self.mutable)
-            .into_iter()
-            .map(|(_, m)| m)
+            .into_values()
             .collect::<Vec<_>>();
 
         let pipelined_ctx = request_context.with_request_source(PIPELINED_REQUEST_SOURCE);
@@ -239,8 +241,6 @@ impl PipelinedTxnState {
         let lock_backoff = retry_options.lock_backoff.clone();
         let region_backoff = retry_options.region_backoff.clone();
         let flush_concurrency = self.opts.flush_concurrency_limit();
-        let assertion_level = assertion_level;
-
         let handle = tokio::spawn(async move {
             if cancelled.load(Ordering::Acquire) {
                 return Ok(());

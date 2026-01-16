@@ -262,9 +262,7 @@ impl Latches {
                 break;
             }
         }
-        let Some(i) = idx_in_waiting else {
-            return None;
-        };
+        let i = idx_in_waiting?;
         let next = inner.waiting.remove(i);
 
         // Stale detection: if the max_commit_ts for this key is newer than the waiting txn's
@@ -481,13 +479,12 @@ mod tests {
 
         let sched2 = sched.clone();
         let t2 = tokio::spawn(async move {
-            let g2 = sched2
+            sched2
                 .lock(
                     15,
                     vec![b"d".to_vec(), b"e".to_vec(), b"a".to_vec(), b"c".to_vec()],
                 )
-                .await;
-            g2
+                .await
         });
 
         // Commit txn1 and release.
