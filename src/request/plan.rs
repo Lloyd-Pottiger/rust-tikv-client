@@ -2,6 +2,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
@@ -350,6 +351,34 @@ where
             Ok(vec![Err(Error::MultipleKeyErrors(e))])
         } else if let Some(e) = resp.region_error() {
             debug!("single_shard_handler:execute: region error: {:?}", e);
+            if e.data_is_not_ready.is_some() && region_store.stale_read {
+                // `data_is_not_ready` indicates the target peer's safe-ts has not caught up enough
+                // to serve a stale read at the requested read-ts. This is not a region-metadata
+                // issue, so do not invalidate region/store caches; instead, wait and retry.
+                //
+                // NOTE: default region backoff is ~1.5s total, which is often insufficient for
+                // newly-started clusters / CI environments to advance safe-ts.
+                const MAX_RETRIES: usize = 120;
+                const SLEEP: Duration = Duration::from_millis(200);
+
+                if attempt >= MAX_RETRIES {
+                    return Err(Error::RegionError(Box::new(e)));
+                }
+
+                crate::stats::observe_backoff_sleep("stale_read_not_ready", SLEEP);
+                sleep(SLEEP).await;
+                return Self::single_plan_handler(
+                    pd_client,
+                    plan,
+                    backoff,
+                    permits,
+                    preserve_region_results,
+                    request_context.clone(),
+                    read_routing,
+                    attempt + 1,
+                )
+                .await;
+            }
             match backoff.next_delay_duration() {
                 Some(duration) => {
                     let region_error_resolved =

@@ -131,11 +131,19 @@ impl ReadRouting {
             // non-leader replicas. If no replica exists, it falls back to leader.
             let mut replicas = followers;
             replicas.extend(learners);
-            let target =
+            let target = if attempt == 0 {
                 pick_peer(&replicas, region.id(), self.seed, attempt).unwrap_or_else(|| {
                     // `leader` has already been validated to exist.
                     leader.clone()
-                });
+                })
+            } else {
+                // Retry fallback: after a failed stale-read attempt, prefer leader to reduce the
+                // chance of repeatedly hitting `RegionError.data_is_not_ready` on lagging replicas.
+                //
+                // Note: we still keep `Context.stale_read=true` so the server can apply stale-read
+                // semantics even when the leader serves the request.
+                leader.clone()
+            };
             return Ok(ReadPeer {
                 target_peer: target,
                 replica_read: false,
