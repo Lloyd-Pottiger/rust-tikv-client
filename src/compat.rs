@@ -1,65 +1,57 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-//! This module contains utility types and functions for making the transition
-//! from futures 0.1 to 1.0 easier.
+//! Internal async/stream helpers.
+//!
+//! Historically this module existed to smooth a futures 0.1→0.3 migration; today it contains a
+//! small helper used to build fallible streams from async state machines.
 
-use std::pin::Pin;
+use futures::stream;
+use futures::Future;
+use futures::Stream;
 
-use futures::prelude::*;
-use futures::ready;
-use futures::task::Context;
-use futures::task::Poll;
-
-/// A future implementing a tail-recursive loop.
+/// Create a fallible stream by repeatedly invoking `func` with a state.
 ///
-/// Created by the `loop_fn` function.
-#[derive(Debug)]
-#[must_use = "futures do nothing unless polled"]
-pub struct LoopFn<A, F> {
-    future: A,
-    func: F,
-    errored: bool,
-}
-
-pub fn stream_fn<S, T, A, F, E>(initial_state: S, mut func: F) -> LoopFn<A, F>
+/// `func` should return an async computation that yields:
+/// - `Ok(Some((next_state, item)))` to emit `item` and continue with `next_state`
+/// - `Ok(None)` to end the stream
+/// - `Err(e)` to emit the error once and then end the stream
+pub fn stream_fn<S, T, A, F, E>(initial_state: S, func: F) -> impl Stream<Item = Result<T, E>>
 where
     F: FnMut(S) -> A,
     A: Future<Output = Result<Option<(S, T)>, E>>,
 {
-    LoopFn {
-        future: func(initial_state),
-        func,
-        errored: false,
-    }
-}
+    stream::unfold(
+        (Some(initial_state), func),
+        |(state, mut func)| async move {
+            let state = state?;
 
-impl<S, T, A, F, E> Stream for LoopFn<A, F>
-where
-    F: FnMut(S) -> A,
-    A: Future<Output = Result<Option<(S, T)>, E>>,
-{
-    type Item = Result<T, E>;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if self.errored {
-            return Poll::Ready(None);
-        }
-        // SAFETY: `self` is pinned for the duration of this call. We never move `self` itself.
-        // We manually pin-project `future` to poll it. We only replace `future` after it has
-        // completed (`Poll::Ready`), which allows dropping the previous future in place without
-        // moving it while pinned.
-        unsafe {
-            let this = Pin::get_unchecked_mut(self);
-            match ready!(Pin::new_unchecked(&mut this.future).poll(cx)) {
-                Err(e) => {
-                    this.errored = true;
-                    Poll::Ready(Some(Err(e)))
-                }
-                Ok(None) => Poll::Ready(None),
-                Ok(Some((s, t))) => {
-                    this.future = (this.func)(s);
-                    Poll::Ready(Some(Ok(t)))
-                }
+            match func(state).await {
+                Ok(Some((next_state, item))) => Some((Ok(item), (Some(next_state), func))),
+                Ok(None) => None,
+                Err(err) => Some((Err(err), (None, func))),
             }
-        }
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn stream_fn_emits_error_once_then_ends() {
+        let stream = stream_fn(0usize, |state| async move {
+            match state {
+                0 => Ok(Some((1, "ok"))),
+                1 => Err("boom"),
+                _ => unreachable!("stream ends after error"),
+            }
+        });
+        futures::pin_mut!(stream);
+
+        assert_eq!(stream.next().await, Some(Ok("ok")));
+        assert_eq!(stream.next().await, Some(Err("boom")));
+        assert_eq!(stream.next().await, None);
     }
 }

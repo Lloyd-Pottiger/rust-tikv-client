@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::ptr;
 
 use crate::internal_err;
 use crate::Result;
@@ -83,16 +82,7 @@ pub fn decode_bytes_in_place(data: &mut Vec<u8>, desc: bool) -> Result<()> {
             return Err(internal_err!("unexpected EOF, original key = {:?}", data));
         };
 
-        // SAFETY: This is equivalent to C's `memmove`. Source and destination are within the
-        // allocation (`marker_offset` bounds-checked above, and we only move `ENC_GROUP_SIZE`
-        // bytes). The regions may overlap, which is why we use `ptr::copy`.
-        unsafe {
-            ptr::copy(
-                data.as_ptr().add(read_offset),
-                data.as_mut_ptr().add(write_offset),
-                ENC_GROUP_SIZE,
-            );
-        }
+        data.copy_within(read_offset..marker_offset, write_offset);
         write_offset += ENC_GROUP_SIZE;
         // everytime make ENC_GROUP_SIZE + 1 elements as a decode unit
         read_offset += ENC_GROUP_SIZE + 1;
@@ -119,11 +109,7 @@ pub fn decode_bytes_in_place(data: &mut Vec<u8>, desc: bool) -> Result<()> {
             if &data[write_offset - pad_size..write_offset] != padding_slice {
                 return Err(internal_err!("invalid key padding"));
             }
-            // SAFETY: We only shrink the vector. Bytes `[0..write_offset-pad_size)` have been
-            // copied from the original initialized data, and the padding was validated above.
-            unsafe {
-                data.set_len(write_offset - pad_size);
-            }
+            data.truncate(write_offset - pad_size);
             if desc {
                 for k in data {
                     *k = !*k;
