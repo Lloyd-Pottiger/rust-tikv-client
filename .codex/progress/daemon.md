@@ -9,21 +9,21 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- docs：补齐 “client-go v2 → new-client-rust” 迁移指南（Rust public API 视角）
-  - 步骤：
-    - 对照：Raw/Txn/Config/Retry/trace/metrics 的等价入口与示例
-    - 明确：capability-only / out-of-scope 的替代方案与理由
-    - 验证：rustdoc examples `cargo test -p tikv-client`
-
-# 待做工作
-
 - integration-tests：补齐关键协议路径的集成测试覆盖（真实 TiKV/PD）
   - 步骤：
     - txn：async-commit / 1PC / pipelined flush / lock resolver（最小可重复 case）
     - read：replica read / stale read 路由（Context 注入 + 结果一致性）
     - harness：纳入 `make integration-test-smoke`（保持可重复、可清理）
 
+# 待做工作
+
+- （无）
+
 # 已完成工作
+
+- docs：补齐 “client-go v2 → new-client-rust” 迁移指南（Rust public API 视角）
+  - 产出：迁移文档（核心入口/配置/观测/低层 request plan）；明确 capability-only/out-of-scope 的差异与替代方式
+  - 文件：`new-client-rust/doc/client-go-v2-migration.md`，`new-client-rust/README.md`
 
 - ci：CI 增加 `test-util` bench 编译覆盖（避免 plan bench 漂移）
   - 产出：workflow 增加 `cargo check --features test-util --bench plan`，保证 plan bench 变更能在 CI 里被编译捕获

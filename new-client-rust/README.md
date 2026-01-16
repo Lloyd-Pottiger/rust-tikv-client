@@ -8,6 +8,8 @@ This is the new Rust TiKV client implementation in this repo.
 
 **Architecture:** `doc/architecture.md`.
 
+**Migration guide:** `doc/client-go-v2-migration.md`.
+
 This crate provides an easy-to-use client for [TiKV](https://github.com/tikv/tikv), a distributed,
 transactional key-value database written in Rust.
 
