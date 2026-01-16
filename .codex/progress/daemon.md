@@ -17,67 +17,16 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
-- docs：新增统一的开发者指南入口（test/bench/tiup）
-  - 关键决策：把 Makefile/README 分散的命令整理到 `doc/development.md`，README 保留概览并链接到单一入口
-  - 文件：`new-client-rust/doc/development.md`，`new-client-rust/README.md`
+- core：Rust TiKV client（new-client-rust）对齐 client-go(v2) 能力与对外 API 能力
+  - 关键决策：Rust public API 以显式 `Config/TransactionOptions` 为入口；低层以 `request::PlanBuilder` + typed kvproto 覆盖能力；不复刻 Go `tikvrpc` mega-wrapper
+  - 覆盖：Raw/Txn/PD/RegionCache/Plan；2PC/async-commit/1PC/pipelined/local-latches；replica+stale read；resource control/trace/metrics hooks；keyspace
+  - 文件：`new-client-rust/src/{raw,transaction,request,pd,store}/*`，`new-client-rust/src/{region_cache.rs,replica_read.rs,request_context.rs,lib.rs}`
+  - 跟踪：`.codex/progress/{client-go-api-inventory.md,parity-checklist.md,parity-map.md,gap-analysis.md}`，`new-client-rust/doc/{architecture.md,client-go-v2-parity-roadmap.md}`
 
-- safety：梳理关键 unsafe 并补齐回归单测
-  - 结论：当前非 generated 代码的 `unsafe {}` 均已带 `// SAFETY:` 合同说明（pin projection / Vec prepend+truncate / codec memmove / repr(transparent) cast）
-  - tests：新增 keyspace prepend+pretruncate round-trip 单测，覆盖 `ptr::copy` + `set_len` 相关路径
-  - 文件：`new-client-rust/src/request/keyspace.rs`
+- correctness：hardening + 协议行为回归测试（避免“猜测正确性”）
+  - 关键点：stale-read 引入 PD `GetMinTs` + `TransactionClient::current_min_timestamp()`；pessimistic snapshot 读路径 lock-check；cleanup_locks rollback/region-error 单测；清理残留 `todo!/unimplemented!` 与死测试模块
+  - 文件：`new-client-rust/src/{transaction/*.rs,request/plan.rs,request/keyspace.rs,raw/client.rs,mock.rs}`，`new-client-rust/tests/*`
 
-- hardening：清理 new-client-rust 残留的 `todo!/unimplemented!`（避免隐藏 panic）
-  - 关键决策：mock 层用显式 `Ok/Err(Error::Unimplemented)` 替代 panic；keyspace mock 返回 Enabled meta 以便 test-util 可用
-  - 改动：MockPdClient/ReplicaReadPdClient/RegionCache test mock 补齐 `update_safepoint/update_leader/load_keyspace/get_store/...` 的返回
-  - 文件：`new-client-rust/src/mock.rs`，`new-client-rust/src/region_cache.rs`，`new-client-rust/src/transaction/transaction.rs`
-
-- tests：清零 integration/failpoint 剩余 TODO/FIXME，补齐缺失用例并稳定断言
-  - 关键决策：cleanup_locks 的 rollback/region-error 走 MockPd/MockKv 单测覆盖（避免依赖真实集群触发 region error 的不稳定）
-  - 改动：`raw_write_million` 恢复 batch_scan(each_limit) 断言并校验等价 `scan`；`txn_pessimistic_delete` 恢复 insert 场景并用非保留 key；`txn_bank_transfer` 增加更稳健的 RetryOptions；移除 failpoint tests TODO；新增 cleanup_locks rollback/region-error 单测
-  - 文件：`new-client-rust/tests/integration_tests.rs`，`new-client-rust/tests/failpoint_tests.rs`，`new-client-rust/src/request/plan.rs`
-  - 备注：用 tiup playground 实测 `txn_pessimistic_delete/raw_write_million/txn_bank_transfer` 通过
-
-- review：对齐「整体工作目标」vs 当前实现，识别剩余缺口并拆解任务
-  - 发现：core/infra/parity 已覆盖；剩余缺口集中在 tests 文件内的 TODO/FIXME（未断言的 batch_scan each_limit、pessimistic delete 的 insert 行为、cleanup_locks async-commit 的 rollback/region-error 覆盖）
-  - 决策：优先用确定性的 unit tests 覆盖 rollback/region-error（避免依赖真实集群触发 region error 的不稳定）；integration tests 只保留稳定、端到端语义校验
-  - 文件：`.codex/progress/daemon.md`
-
-- core：new-client-rust 基线 + client-go(v2) 能力对齐（Raw/Txn/PD/RegionCache/Plan）
-  - 关键决策：Rust public API 走显式 `Config/Options`；低层以 `request::PlanBuilder` + typed kvproto 组合；不复刻 Go tikvrpc mega-wrapper
-  - 覆盖：2PC/async-commit/1PC/pipelined/local-latches；replica+stale read 路由；resource control/trace/metrics hooks
-  - 文件：`new-client-rust/src/{raw,transaction,request,pd,store}/*`，`new-client-rust/src/{region_cache.rs,replica_read.rs,request_context.rs}`
-  - 跟踪：`.codex/progress/{parity-checklist.md,parity-map.md,gap-analysis.md,client-go-api-inventory.md}`，`new-client-rust/doc/client-go-v2-parity-roadmap.md`
-
-- infra：docs + CI + playground harness + benchmarks
-  - 产出：`doc/architecture.md` / `doc/client-go-v2-migration.md` / `doc/bench.md`；Makefile tiup-up/down + integration smoke；CI feature 编译覆盖（含 tracing + plan bench）
-  - 文件：`new-client-rust/doc/{architecture,client-go-v2-migration,bench}.md`，`new-client-rust/README.md`，`new-client-rust/Makefile`，`.github/workflows/new-client-rust.yml`，`new-client-rust/benches/*`，`new-client-rust/Cargo.toml`
-
-- correctness：hardening + bugfix + tests（避免“猜测正确性/性能”）
-  - hardening：去 panic 化、Backoff/TS helpers 校验、unsafe 合同化；补齐关键单测
-  - bugfix：txn get retry 遵循 `no_resolve_regions`；raw batch_scan each_limit 语义 + backoff 一致；stale-read 增加安全时间戳 API `TransactionClient::current_min_timestamp()`（PD GetMinTs）
-  - tests：补齐 txn 协议关键路径集成测（1PC/pipelined/replica/stale），并用 GetMinTs 等待 safe-ts 使 stale-read 用例稳定
-  - 文件：`new-client-rust/src/{transaction/transaction.rs,raw/client.rs,trace.rs}`，`new-client-rust/src/pd/{cluster.rs,retry.rs,client.rs}`，`new-client-rust/src/transaction/client.rs`，`new-client-rust/src/region_cache.rs`，`new-client-rust/tests/integration_tests.rs`
-
-- correctness：pessimistic snapshot 读路径 lock-check（移除 tests TODO #235）
-  - 关键决策：用 failpoint `after-prewrite` 构造 prewrite lock；snapshot 侧用 `no_resolve_locks()` 断言“会报锁而不是读旧值”
-  - 改动：`txn_crud` snapshot 改为 `TransactionOptions::new_pessimistic()`；新增 `txn_pessimistic_snapshot_checks_locks`
-  - 文件：`new-client-rust/tests/integration_tests.rs`
-
-- infra：Makefile 在未安装 `cargo nextest` 时回退到 `cargo test`
-  - 关键决策：保持 nextest 优先；无 nextest 时用 `cargo test --workspace` 跑 unit/integration 的等价子集（不引入额外工具依赖）
-  - 改动：`unit-test`/`integration-test-{txn,raw}` 增加 nextest 探测与 fallback
-  - 文件：`new-client-rust/Makefile`
-
-- docs：rustdoc build 清零 warnings + CI guardrail
-  - 关键决策：修复 crate 自身的 rustdoc warnings；kvproto 生成代码的 bare URL 通过局部 allow 隔离
-  - 改动：修复 broken intra-doc link / invalid HTML tag / redundant links；Makefile `doc` exclude 正确化；CI 增加 `RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps`
-  - 文件：`new-client-rust/src/{trace.rs,raw/client.rs,transaction/client.rs,kv/bound_range.rs,timestamp.rs,proto.rs}`，`new-client-rust/Makefile`，`.github/workflows/new-client-rust.yml`
-
-- hardening：清理禁用的 proptests 模块（避免“死代码”误导）
-  - 关键决策：删除长期禁用且依赖真实集群的 proptests，测试覆盖由 unit/integration tests 承担
-  - 改动：移除 `#[cfg(test)] mod proptests;` 与 `new-client-rust/src/proptests/*`
-  - 文件：`new-client-rust/src/lib.rs`
-
-- docs：刷新 parity artifacts，使其与当前 scope policy/实现一致
-  - 关键决策：把“剩余 gap”改为“差异/后续迭代点”，避免误导为功能缺口；结论聚焦 hardening 与 daemon.md
-  - 文件：`.codex/progress/parity-map.md`，`.codex/progress/gap-analysis.md`
+- infra：CI/docs/bench/devex（可复现的验证与开发入口）
+  - 产出：`doc/{architecture,bench,client-go-v2-migration,development}.md`；Makefile tiup playground + integration smoke；nextest 可选 fallback；rustdoc warnings 清零 + CI guardrail
+  - 文件：`new-client-rust/doc/*`，`new-client-rust/Makefile`，`new-client-rust/README.md`，`.github/workflows/new-client-rust.yml`，`new-client-rust/benches/*`
