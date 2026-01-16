@@ -54,22 +54,37 @@ impl RpcContextInfo {
 /// An RPC interceptor which can mutate the outgoing `kvrpcpb::Context`.
 pub trait RpcInterceptor: Send + Sync + 'static {
     /// A stable name used for de-duplication in [`RpcInterceptorChain`].
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     /// Called right before sending a request to a TiKV store.
     ///
     /// Implementations may mutate `ctx` (e.g. set resource control fields).
     fn before_send(&self, info: &RpcContextInfo, ctx: &mut kvrpcpb::Context);
+
+    /// Wrap another interceptor function (onion model).
+    ///
+    /// The default implementation runs [`before_send`](Self::before_send) and then calls `next`.
+    fn wrap(self: Arc<Self>, next: RpcInterceptorFunc) -> RpcInterceptorFunc {
+        let it = self;
+        Arc::new(move |info, ctx| {
+            it.before_send(info, ctx);
+            next(info, ctx);
+        })
+    }
 }
 
+/// A composable interceptor function.
+pub type RpcInterceptorFunc =
+    Arc<dyn Fn(&RpcContextInfo, &mut kvrpcpb::Context) + Send + Sync + 'static>;
+
 struct FnRpcInterceptor {
-    name: &'static str,
+    name: Arc<str>,
     f: Box<dyn Fn(&RpcContextInfo, &mut kvrpcpb::Context) + Send + Sync + 'static>,
 }
 
 impl RpcInterceptor for FnRpcInterceptor {
-    fn name(&self) -> &'static str {
-        self.name
+    fn name(&self) -> &str {
+        &self.name
     }
 
     fn before_send(&self, info: &RpcContextInfo, ctx: &mut kvrpcpb::Context) {
@@ -84,7 +99,7 @@ pub fn rpc_interceptor(
     f: impl Fn(&RpcContextInfo, &mut kvrpcpb::Context) + Send + Sync + 'static,
 ) -> Arc<dyn RpcInterceptor> {
     Arc::new(FnRpcInterceptor {
-        name,
+        name: Arc::<str>::from(name),
         f: Box::new(f),
     })
 }
@@ -99,6 +114,11 @@ impl RpcInterceptorChain {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        "interceptor-chain"
     }
 
     #[must_use]
@@ -121,10 +141,134 @@ impl RpcInterceptorChain {
         self.chain.push(it);
     }
 
-    pub(crate) fn apply(&self, info: &RpcContextInfo, ctx: &mut kvrpcpb::Context) {
-        for it in &self.chain {
-            it.before_send(info, ctx);
+    #[must_use]
+    pub fn wrap(&self, mut next: RpcInterceptorFunc) -> RpcInterceptorFunc {
+        for it in self.chain.iter().rev() {
+            next = it.clone().wrap(next);
         }
+        next
+    }
+
+    pub(crate) fn apply(&self, info: &RpcContextInfo, ctx: &mut kvrpcpb::Context) {
+        let noop: RpcInterceptorFunc = Arc::new(|_, _| {});
+        let wrapped = self.wrap(noop);
+        wrapped(info, ctx);
+    }
+}
+
+/// Create mock interceptors and keep execution counters/logs.
+#[derive(Clone, Default)]
+pub struct MockInterceptorManager {
+    inner: Arc<MockInterceptorManagerInner>,
+}
+
+#[derive(Default)]
+struct MockInterceptorManagerInner {
+    begin: std::sync::atomic::AtomicUsize,
+    end: std::sync::atomic::AtomicUsize,
+    exec_log: std::sync::Mutex<Vec<String>>,
+}
+
+impl MockInterceptorManager {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn create_mock_interceptor(&self, name: impl Into<String>) -> Arc<dyn RpcInterceptor> {
+        Arc::new(MockInterceptor {
+            name: Arc::<str>::from(name.into()),
+            inner: self.inner.clone(),
+        })
+    }
+
+    pub fn reset(&self) {
+        use std::sync::atomic::Ordering;
+
+        self.inner.begin.store(0, Ordering::SeqCst);
+        self.inner.end.store(0, Ordering::SeqCst);
+        *self.inner.exec_log.lock().unwrap() = Vec::new();
+    }
+
+    #[must_use]
+    pub fn begin_count(&self) -> usize {
+        use std::sync::atomic::Ordering;
+
+        self.inner.begin.load(Ordering::SeqCst)
+    }
+
+    #[must_use]
+    pub fn end_count(&self) -> usize {
+        use std::sync::atomic::Ordering;
+
+        self.inner.end.load(Ordering::SeqCst)
+    }
+
+    #[must_use]
+    pub fn exec_log(&self) -> Vec<String> {
+        self.inner.exec_log.lock().unwrap().clone()
+    }
+}
+
+struct MockInterceptor {
+    name: Arc<str>,
+    inner: Arc<MockInterceptorManagerInner>,
+}
+
+impl RpcInterceptor for MockInterceptor {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn before_send(&self, _info: &RpcContextInfo, _ctx: &mut kvrpcpb::Context) {}
+
+    fn wrap(self: Arc<Self>, next: RpcInterceptorFunc) -> RpcInterceptorFunc {
+        let name = self.name.to_string();
+        let inner = self.inner.clone();
+        Arc::new(move |info, ctx| {
+            use std::sync::atomic::Ordering;
+
+            inner.exec_log.lock().unwrap().push(name.clone());
+            inner.begin.fetch_add(1, Ordering::SeqCst);
+            next(info, ctx);
+            inner.end.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interceptor_chain_wrap_is_onion_order() {
+        let mgr = MockInterceptorManager::new();
+        let i1 = mgr.create_mock_interceptor("i1");
+        let i2 = mgr.create_mock_interceptor("i2");
+
+        let mut chain = RpcInterceptorChain::new();
+        chain.link(i1);
+        chain.link(i2);
+
+        let base_called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let base_called_cloned = base_called.clone();
+        let base: RpcInterceptorFunc = Arc::new(move |_, _| {
+            base_called_cloned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let wrapped = chain.wrap(base);
+
+        let info = RpcContextInfo {
+            label: "unit-test",
+            ..Default::default()
+        };
+        let mut ctx = kvrpcpb::Context::default();
+        wrapped(&info, &mut ctx);
+
+        assert_eq!(base_called.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(mgr.begin_count(), 2);
+        assert_eq!(mgr.end_count(), 2);
+        assert_eq!(mgr.exec_log(), vec!["i1".to_owned(), "i2".to_owned()]);
     }
 }
 
