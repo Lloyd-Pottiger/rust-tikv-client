@@ -64,12 +64,12 @@ Conventions:
 - [x] `type Config struct` | Rust: `tikv_client::RetryOptions` (new-client-rust/src/request/mod.rs) | Tests: `new-client-rust/src/request/mod.rs (test_region_retry)`
 
 ### Functions
-- [ ] `func IsFakeRegionError(err *errorpb.Error) bool` | Rust:  | Tests: 
-- [ ] `func MayBackoffForRegionError(regionErr *errorpb.Error, bo *Backoffer) error` | Rust:  | Tests: 
+- [x] `func IsFakeRegionError(err *errorpb.Error) bool` | Rust: N/A (capability: region error retry handled by `PlanBuilder` internal region handler) | Tests: `new-client-rust/src/request/mod.rs (test_region_retry)`
+- [x] `func MayBackoffForRegionError(regionErr *errorpb.Error, bo *Backoffer) error` | Rust: N/A (capability: region error retry handled by `PlanBuilder` + `RetryOptions`) | Tests: `new-client-rust/src/request/mod.rs (test_region_retry)`
 - [x] `func NewBackoffFnCfg(base, cap, jitter int) *BackoffFnCfg` | Rust: `Backoff::{no_jitter_backoff,full_jitter_backoff,equal_jitter_backoff,decorrelated_jitter_backoff}` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (tests)`
-- [ ] `func NewBackoffer(ctx context.Context, maxSleep int) *Backoffer` | Rust:  | Tests: 
-- [ ] `func NewBackofferWithVars(ctx context.Context, maxSleep int, vars *kv.Variables) *Backoffer` | Rust:  | Tests: 
-- [ ] `func NewConfig(name string, metric *prometheus.Observer, backoffFnCfg *BackoffFnCfg, err error) *Config` | Rust:  | Tests: 
+- [x] `func NewBackoffer(ctx context.Context, maxSleep int) *Backoffer` | Rust: N/A (out-of-scope: no Go-style Backoffer; use `RetryOptions` + `Backoff`) | Tests: N/A
+- [x] `func NewBackofferWithVars(ctx context.Context, maxSleep int, vars *kv.Variables) *Backoffer` | Rust: N/A (out-of-scope: no Go-style Backoffer/Variables) | Tests: N/A
+- [x] `func NewConfig(name string, metric *prometheus.Observer, backoffFnCfg *BackoffFnCfg, err error) *Config` | Rust: N/A (out-of-scope: no per-error backoff config object; use `RetryOptions`) | Tests: N/A
 - [x] `func NewNoopBackoff(ctx context.Context) *Backoffer` | Rust: `Backoff::no_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (test_no_jitter_backoff)`
 
 ### Consts
@@ -79,130 +79,130 @@ Conventions:
 - [x] `NoJitter` | Rust: `Backoff::no_jitter_backoff` (new-client-rust/src/backoff.rs) | Tests: `new-client-rust/src/backoff.rs (test_no_jitter_backoff)`
 
 ### Vars
-- [ ] `BoCommitTSLag` | Rust:  | Tests: 
-- [ ] `BoIsWitness` | Rust:  | Tests: 
-- [ ] `BoMaxRegionNotInitialized` | Rust:  | Tests: 
-- [ ] `BoMaxTsNotSynced` | Rust:  | Tests: 
-- [ ] `BoPDRPC` | Rust:  | Tests: 
-- [ ] `BoRegionMiss` | Rust:  | Tests: 
-- [ ] `BoRegionRecoveryInProgress` | Rust:  | Tests: 
-- [ ] `BoRegionScheduling` | Rust:  | Tests: 
-- [ ] `BoStaleCmd` | Rust:  | Tests: 
-- [ ] `BoTiFlashRPC` | Rust:  | Tests: 
-- [ ] `BoTiFlashServerBusy` | Rust:  | Tests: 
-- [ ] `BoTiKVDiskFull` | Rust:  | Tests: 
-- [ ] `BoTiKVRPC` | Rust:  | Tests: 
-- [ ] `BoTiKVServerBusy` | Rust:  | Tests: 
-- [ ] `BoTxnLock` | Rust:  | Tests: 
-- [ ] `BoTxnLockFast` | Rust:  | Tests: 
-- [ ] `BoTxnNotFound` | Rust:  | Tests: 
-- [ ] `TxnStartKey` | Rust:  | Tests: 
+- [x] `BoCommitTSLag` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoIsWitness` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoMaxRegionNotInitialized` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoMaxTsNotSynced` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoPDRPC` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoRegionMiss` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoRegionRecoveryInProgress` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoRegionScheduling` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoStaleCmd` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoTiFlashRPC` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoTiFlashServerBusy` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoTiKVDiskFull` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoTiKVRPC` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoTiKVServerBusy` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoTxnLock` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoTxnLockFast` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `BoTxnNotFound` | Rust: N/A (out-of-scope: no exported per-error backoff configs; use `RetryOptions`) | Tests: N/A
+- [x] `TxnStartKey` | Rust: N/A (out-of-scope: no Go-style context variables) | Tests: N/A
 
 ### Methods
-- [ ] `func (b *Backoffer) Backoff(cfg *Config, err error) error` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) BackoffWithCfgAndMaxSleep(cfg *Config, maxSleepMs int, err error) error` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) BackoffWithMaxSleepTxnLockFast(maxSleepMs int, err error) error` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) CheckKilled() error` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) Clone() *Backoffer` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) ErrorsNum() int` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) Fork() (*Backoffer, context.CancelFunc)` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) GetBackoffSleepMS() map[string]int` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) GetBackoffTimes() map[string]int` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) GetCtx() context.Context` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) GetTotalBackoffTimes() int` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) GetTotalSleep() int` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) GetTypes() []string` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) GetVars() *kv.Variables` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) Reset()` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) ResetMaxSleep(maxSleep int)` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) SetCtx(ctx context.Context)` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) String() string` | Rust:  | Tests: 
-- [ ] `func (b *Backoffer) UpdateUsingForked(forked *Backoffer)` | Rust:  | Tests: 
-- [ ] `func (c *Config) Base() int` | Rust:  | Tests: 
-- [ ] `func (c *Config) SetBackoffFnCfg(fnCfg *BackoffFnCfg)` | Rust:  | Tests: 
-- [ ] `func (c *Config) SetErrors(err error)` | Rust:  | Tests: 
-- [ ] `func (c *Config) String() string` | Rust:  | Tests: 
+- [x] `func (b *Backoffer) Backoff(cfg *Config, err error) error` | Rust: N/A (out-of-scope: no Go-style Backoffer; use `PlanBuilder` retries) | Tests: N/A
+- [x] `func (b *Backoffer) BackoffWithCfgAndMaxSleep(cfg *Config, maxSleepMs int, err error) error` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) BackoffWithMaxSleepTxnLockFast(maxSleepMs int, err error) error` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) CheckKilled() error` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) Clone() *Backoffer` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) ErrorsNum() int` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) Fork() (*Backoffer, context.CancelFunc)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) GetBackoffSleepMS() map[string]int` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) GetBackoffTimes() map[string]int` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) GetCtx() context.Context` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) GetTotalBackoffTimes() int` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) GetTotalSleep() int` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) GetTypes() []string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) GetVars() *kv.Variables` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) Reset()` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) ResetMaxSleep(maxSleep int)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) SetCtx(ctx context.Context)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) String() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (b *Backoffer) UpdateUsingForked(forked *Backoffer)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (c *Config) Base() int` | Rust: N/A (out-of-scope: no Go-style `retry::Config` object) | Tests: N/A
+- [x] `func (c *Config) SetBackoffFnCfg(fnCfg *BackoffFnCfg)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (c *Config) SetErrors(err error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (c *Config) String() string` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ## error (package error)
 
 ### Types
 - [x] `type ErrAssertionFailed struct` | Rust: `new-client-rust/src/common/errors.rs (AssertionFailedError, Error::AssertionFailed)` | Tests: `new-client-rust/src/common/errors.rs (key_error_assertion_failed_maps_to_assertion_failed)`
 - [x] `type ErrDeadlock struct` | Rust: `new-client-rust/src/common/errors.rs (DeadlockError, Error::Deadlock)` | Tests: `new-client-rust/src/common/errors.rs (key_error_deadlock_maps_to_deadlock)`
-- [ ] `type ErrEntryTooLarge struct` | Rust:  | Tests: 
-- [ ] `type ErrGCTooEarly struct` | Rust:  | Tests: 
+- [x] `type ErrEntryTooLarge struct` | Rust: N/A (out-of-scope: typed size-limit errors not exposed; surfaced as `Error`) | Tests: N/A
+- [x] `type ErrGCTooEarly struct` | Rust: N/A (out-of-scope: deprecated in Go; not exposed) | Tests: N/A
 - [x] `type ErrKeyExist struct` | Rust: `new-client-rust/src/common/errors.rs (KeyExistsError, Error::KeyExists)` | Tests: `new-client-rust/src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
-- [ ] `type ErrKeyTooLarge struct` | Rust:  | Tests: 
-- [ ] `type ErrLockOnlyIfExistsNoPrimaryKey struct` | Rust:  | Tests: 
-- [ ] `type ErrLockOnlyIfExistsNoReturnValue struct` | Rust:  | Tests: 
-- [ ] `type ErrPDServerTimeout struct` | Rust:  | Tests: 
-- [ ] `type ErrQueryInterruptedWithSignal struct` | Rust:  | Tests: 
+- [x] `type ErrKeyTooLarge struct` | Rust: N/A (out-of-scope: typed size-limit errors not exposed; surfaced as `Error`) | Tests: N/A
+- [x] `type ErrLockOnlyIfExistsNoPrimaryKey struct` | Rust: N/A (out-of-scope: Go lock-ctx validation error not exposed) | Tests: N/A
+- [x] `type ErrLockOnlyIfExistsNoReturnValue struct` | Rust: N/A (out-of-scope: Go lock-ctx validation error not exposed) | Tests: N/A
+- [x] `type ErrPDServerTimeout struct` | Rust: N/A (out-of-scope: PD timeouts surfaced as `Error::Grpc*` / internal errors) | Tests: N/A
+- [x] `type ErrQueryInterruptedWithSignal struct` | Rust: N/A (out-of-scope: TiDB integration error) | Tests: N/A
 - [x] `type ErrRetryable struct` | Rust: `new-client-rust/src/common/errors.rs (Error::Retryable)` | Tests: `new-client-rust/src/common/errors.rs (key_error_retryable_maps_to_retryable)`
-- [ ] `type ErrTokenLimit struct` | Rust:  | Tests: 
+- [x] `type ErrTokenLimit struct` | Rust: N/A (out-of-scope: token limiter error not exposed) | Tests: N/A
 - [x] `type ErrTxnAbortedByGC struct` | Rust: `new-client-rust/src/common/errors.rs (Error::TxnAborted)` | Tests: `new-client-rust/src/common/errors.rs (key_error_abort_maps_to_txn_aborted)`
-- [ ] `type ErrTxnTooLarge struct` | Rust:  | Tests: 
+- [x] `type ErrTxnTooLarge struct` | Rust: N/A (out-of-scope: typed txn-too-large error not exposed; surfaced as `Error`) | Tests: N/A
 - [x] `type ErrWriteConflict struct` | Rust: `new-client-rust/src/common/errors.rs (WriteConflictError, Error::WriteConflict)` | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
 - [x] `type ErrWriteConflictInLatch struct` | Rust: `new-client-rust/src/common/errors.rs (Error::WriteConflictInLatch)` | Tests: `new-client-rust/src/transaction/transaction.rs (latch tests)`
-- [ ] `type PDError struct` | Rust:  | Tests: 
+- [x] `type PDError struct` | Rust: N/A (out-of-scope: does not expose PD error wrapper types) | Tests: N/A
 
 ### Functions
-- [ ] `func ExtractDebugInfoStrFromKeyErr(keyErr *kvrpcpb.KeyError) string` | Rust:  | Tests: 
-- [ ] `func ExtractKeyErr(keyErr *kvrpcpb.KeyError) error` | Rust:  | Tests: 
+- [x] `func ExtractDebugInfoStrFromKeyErr(keyErr *kvrpcpb.KeyError) string` | Rust: N/A (out-of-scope: no JSON/redaction debug-info helper) | Tests: N/A
+- [x] `func ExtractKeyErr(keyErr *kvrpcpb.KeyError) error` | Rust: `tikv_client::Error::from(kvrpcpb::KeyError)` (new-client-rust/src/common/errors.rs) | Tests: `new-client-rust/src/common/errors.rs (key_error_*_maps_*)`
 - [x] `func IsErrKeyExist(err error) bool` | Rust: `new-client-rust/src/common/errors.rs (Error::is_key_exists)` | Tests: `new-client-rust/src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
-- [ ] `func IsErrNotFound(err error) bool` | Rust:  | Tests: 
+- [x] `func IsErrNotFound(err error) bool` | Rust: N/A (out-of-scope: not-found represented as `Option` in Rust APIs) | Tests: N/A
 - [x] `func IsErrWriteConflict(err error) bool` | Rust: `new-client-rust/src/common/errors.rs (Error::is_write_conflict)` | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
-- [ ] `func IsErrorCommitTSLag(err error) bool` | Rust:  | Tests: 
-- [ ] `func IsErrorUndetermined(err error) bool` | Rust:  | Tests: 
-- [ ] `func Log(err error)` | Rust:  | Tests: 
-- [ ] `func NewErrPDServerTimeout(msg string) error` | Rust:  | Tests: 
-- [ ] `func NewErrWriteConflict(conflict *kvrpcpb.WriteConflict) *ErrWriteConflict` | Rust:  | Tests: 
-- [ ] `func NewErrWriteConflictWithArgs(startTs, conflictTs, conflictCommitTs uint64, key []byte, reason kvrpcpb.WriteConflict_Reason) *ErrWriteConflict` | Rust:  | Tests: 
+- [x] `func IsErrorCommitTSLag(err error) bool` | Rust: N/A (out-of-scope: no explicit commit-ts-lag error) | Tests: N/A
+- [x] `func IsErrorUndetermined(err error) bool` | Rust: `tikv_client::Error::is_undetermined` (new-client-rust/src/common/errors.rs) | Tests: `new-client-rust/src/common/errors.rs (undetermined_error_query)`
+- [x] `func Log(err error)` | Rust: N/A (out-of-scope: use application logging/tracing) | Tests: N/A
+- [x] `func NewErrPDServerTimeout(msg string) error` | Rust: N/A (out-of-scope: PD timeouts surfaced as `Error::Grpc*` / internal errors) | Tests: N/A
+- [x] `func NewErrWriteConflict(conflict *kvrpcpb.WriteConflict) *ErrWriteConflict` | Rust: `WriteConflictError::from(kvrpcpb::WriteConflict)` + `Error::WriteConflict` (new-client-rust/src/common/errors.rs) | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`
+- [x] `func NewErrWriteConflictWithArgs(startTs, conflictTs, conflictCommitTs uint64, key []byte, reason kvrpcpb.WriteConflict_Reason) *ErrWriteConflict` | Rust: N/A (out-of-scope: construct `WriteConflictError` directly) | Tests: N/A
 
 ### Consts
-- [ ] `MismatchClusterID` | Rust:  | Tests: 
+- [x] `MismatchClusterID` | Rust: N/A (out-of-scope: no error string sentinel; surfaced as `Error`) | Tests: N/A
 
 ### Vars
-- [ ] `ErrBodyMissing` | Rust:  | Tests: 
-- [ ] `ErrCannotSetNilValue` | Rust:  | Tests: 
-- [ ] `ErrCommitTSLag` | Rust:  | Tests: 
-- [ ] `ErrInvalidTxn` | Rust:  | Tests: 
-- [ ] `ErrIsWitness` | Rust:  | Tests: 
-- [ ] `ErrLockAcquireFailAndNoWaitSet` | Rust:  | Tests: 
-- [ ] `ErrLockWaitTimeout` | Rust:  | Tests: 
-- [ ] `ErrNotExist` | Rust:  | Tests: 
-- [ ] `ErrQueryInterrupted` | Rust:  | Tests: 
-- [ ] `ErrRegionDataNotReady` | Rust:  | Tests: 
-- [ ] `ErrRegionFlashbackInProgress` | Rust:  | Tests: 
-- [ ] `ErrRegionFlashbackNotPrepared` | Rust:  | Tests: 
-- [ ] `ErrRegionNotInitialized` | Rust:  | Tests: 
-- [ ] `ErrRegionRecoveryInProgress` | Rust:  | Tests: 
-- [ ] `ErrRegionUnavailable` | Rust:  | Tests: 
-- [ ] `ErrResolveLockTimeout` | Rust:  | Tests: 
-- [ ] `ErrResultUndetermined` | Rust:  | Tests: 
-- [ ] `ErrTiDBShuttingDown` | Rust:  | Tests: 
-- [ ] `ErrTiFlashServerBusy` | Rust:  | Tests: 
-- [ ] `ErrTiFlashServerTimeout` | Rust:  | Tests: 
-- [ ] `ErrTiKVDiskFull` | Rust:  | Tests: 
-- [ ] `ErrTiKVMaxTimestampNotSynced` | Rust:  | Tests: 
-- [ ] `ErrTiKVServerBusy` | Rust:  | Tests: 
-- [ ] `ErrTiKVServerTimeout` | Rust:  | Tests: 
-- [ ] `ErrTiKVStaleCommand` | Rust:  | Tests: 
-- [ ] `ErrUnknown` | Rust:  | Tests: 
+- [x] `ErrBodyMissing` | Rust: N/A (out-of-scope: does not expose Go-style error sentinels) | Tests: N/A
+- [x] `ErrCannotSetNilValue` | Rust: N/A (out-of-scope: does not expose Go-style error sentinels) | Tests: N/A
+- [x] `ErrCommitTSLag` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrInvalidTxn` | Rust: N/A (out-of-scope: does not expose Go-style error sentinels) | Tests: N/A
+- [x] `ErrIsWitness` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrLockAcquireFailAndNoWaitSet` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrLockWaitTimeout` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrNotExist` | Rust: N/A (out-of-scope: not-found represented as `Option`) | Tests: N/A
+- [x] `ErrQueryInterrupted` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrRegionDataNotReady` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrRegionFlashbackInProgress` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrRegionFlashbackNotPrepared` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrRegionNotInitialized` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrRegionRecoveryInProgress` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrRegionUnavailable` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrResolveLockTimeout` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrResultUndetermined` | Rust: `Error::UndeterminedError` (new-client-rust/src/common/errors.rs) | Tests: `new-client-rust/src/common/errors.rs (undetermined_error_query)`
+- [x] `ErrTiDBShuttingDown` | Rust: N/A (out-of-scope: TiDB integration error) | Tests: N/A
+- [x] `ErrTiFlashServerBusy` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrTiFlashServerTimeout` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrTiKVDiskFull` | Rust: N/A (out-of-scope: disk-full surfaced as `Error`/gRPC status) | Tests: N/A
+- [x] `ErrTiKVMaxTimestampNotSynced` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrTiKVServerBusy` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrTiKVServerTimeout` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrTiKVStaleCommand` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `ErrUnknown` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Methods
 - [x] `func (d *ErrDeadlock) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for DeadlockError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_deadlock_maps_to_deadlock)`
-- [ ] `func (d *PDError) Error() string` | Rust:  | Tests: 
+- [x] `func (d *PDError) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (e *ErrAssertionFailed) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for AssertionFailedError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_assertion_failed_maps_to_assertion_failed)`
-- [ ] `func (e *ErrEntryTooLarge) Error() string` | Rust:  | Tests: 
-- [ ] `func (e *ErrGCTooEarly) Error() string` | Rust:  | Tests: 
-- [ ] `func (e *ErrKeyTooLarge) Error() string` | Rust:  | Tests: 
-- [ ] `func (e *ErrLockOnlyIfExistsNoPrimaryKey) Error() string` | Rust:  | Tests: 
-- [ ] `func (e *ErrLockOnlyIfExistsNoReturnValue) Error() string` | Rust:  | Tests: 
-- [ ] `func (e *ErrPDServerTimeout) Error() string` | Rust:  | Tests: 
-- [ ] `func (e *ErrTokenLimit) Error() string` | Rust:  | Tests: 
+- [x] `func (e *ErrEntryTooLarge) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (e *ErrGCTooEarly) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (e *ErrKeyTooLarge) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (e *ErrLockOnlyIfExistsNoPrimaryKey) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (e *ErrLockOnlyIfExistsNoReturnValue) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (e *ErrPDServerTimeout) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (e *ErrTokenLimit) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (e *ErrTxnAbortedByGC) Error() string` | Rust: `new-client-rust/src/common/errors.rs (Error::TxnAborted Display)` | Tests: `new-client-rust/src/common/errors.rs (key_error_abort_maps_to_txn_aborted)`
-- [ ] `func (e *ErrTxnTooLarge) Error() string` | Rust:  | Tests: 
+- [x] `func (e *ErrTxnTooLarge) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (e *ErrWriteConflictInLatch) Error() string` | Rust: `new-client-rust/src/common/errors.rs (Error::WriteConflictInLatch Display)` | Tests: `new-client-rust/src/transaction/latch.rs (tests)`
-- [ ] `func (e ErrQueryInterruptedWithSignal) Error() string` | Rust:  | Tests: 
+- [x] `func (e ErrQueryInterruptedWithSignal) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (k *ErrKeyExist) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for KeyExistsError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_already_exist_maps_to_key_exists)`
 - [x] `func (k *ErrRetryable) Error() string` | Rust: `new-client-rust/src/common/errors.rs (Error::Retryable Display)` | Tests: `new-client-rust/src/common/errors.rs (key_error_retryable_maps_to_retryable)`
 - [x] `func (k *ErrWriteConflict) Error() string` | Rust: `new-client-rust/src/common/errors.rs (impl Display for WriteConflictError)` | Tests: `new-client-rust/src/common/errors.rs (key_error_conflict_maps_to_write_conflict)`

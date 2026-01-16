@@ -9,21 +9,19 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- config/retry + error：对齐并标注 out-of-scope（按 checklist 渐进）
+- tikv/tikvrpc/txnkv：public API mapping + out-of-scope（按 checklist 渐进，优先入口与核心类型）
   - 计划：
-    - 对齐 retry/backoff config（Go Backoffer/Bo*）到 Rust `Backoff`/`RetryOptions`（不足则补齐）
-    - 对齐 error package：统一映射到 `tikv_client::Error`（补齐 still-relevant 的 query helpers / out-of-scope 标注）
+    - 先收敛 `tikv`/`txnkv`/`tikvrpc` 的 still-relevant public 面：入口类型/构造/关键 option（其余逐步标注 out-of-scope）
+    - Go `tikvrpc.{CmdType,Request,Response}` 继续以 `request::PlanBuilder` 替代；txnkv 子包映射到 `TransactionClient`/`Transaction`
 
 # 待做工作
-
-- tikv/tikvrpc/txnkv：public API mapping + out-of-scope（按 checklist 渐进，优先入口与核心类型）
 
 # 已完成工作
 
 - new-client-rust 基线 + API 轮廓：Raw/Txn 客户端、PD/region cache、request plan/PlanBuilder、Keyspace、Error/RequestContext、proto/gen（可编译可测试）
   - 关键决策：以 `client-rust` 为起点迁移；对外 API Rust-idiomatic（`Config`/`TransactionOptions`/`RetryOptions` 显式配置，替代 Go 全局 config/ctx）
   - 文件：`new-client-rust/src/{lib.rs,config.rs,raw/*,transaction/*,request/*,store/*,pd/*,region_cache.rs,request_context.rs,common/*,timestamp.rs}` + `new-client-rust/src/generated/*`，`.codex/progress/parity-checklist.md`
-  - 测试：`new-client-rust/src/timestamp.rs (tests)`
+  - 测试：`new-client-rust/src/timestamp.rs (tests)`，`new-client-rust/src/common/errors.rs (undetermined_error_query)`
 
 - Txn/协议对齐：async-commit/1PC、pipelined txn + local latches、replica/stale read、assertion/lock options、resolve-lock-lite + retry/backoff 校准、resource control tagger/interceptor
   - 关键决策：pipelined flush/resolve-lock 固定 request_source；stale-read meet-lock fallback leader；prewrite-only 不进入 commit/rollback；region retry attempt>0 时禁用 resolve-lock-lite

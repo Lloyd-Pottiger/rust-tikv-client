@@ -442,6 +442,10 @@ impl Error {
     pub fn is_assertion_failed(&self) -> bool {
         matches!(self, Error::AssertionFailed(_))
     }
+
+    pub fn is_undetermined(&self) -> bool {
+        matches!(self, Error::UndeterminedError(_))
+    }
 }
 
 #[cfg(test)]
@@ -583,6 +587,12 @@ mod tests {
             panic!("expected Error::TxnNotFound");
         };
         assert_eq!(start_ts, 7);
+    }
+
+    #[test]
+    fn undetermined_error_query() {
+        assert!(Error::UndeterminedError(Box::new(Error::Unimplemented)).is_undetermined());
+        assert!(!Error::Unimplemented.is_undetermined());
     }
 }
 
