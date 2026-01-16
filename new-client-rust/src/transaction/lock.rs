@@ -198,11 +198,18 @@ pub struct ResolveLocksOptions {
     pub batch_size: u32,
 }
 
+// Default scan lock limit used by GC / cleanup-locks.
+//
+// This matches client-go defaults:
+// - `GCScanLockLimit = txnlock.ResolvedCacheSize / 2` (client-go/tikv/gc.go)
+// - `ResolvedCacheSize = 2048` (client-go/txnkv/txnlock/lock_resolver.go)
+const DEFAULT_SCAN_LOCK_BATCH_SIZE: u32 = 1024;
+
 impl Default for ResolveLocksOptions {
     fn default() -> Self {
         Self {
             async_commit_only: false,
-            batch_size: 1024,
+            batch_size: DEFAULT_SCAN_LOCK_BATCH_SIZE,
         }
     }
 }
