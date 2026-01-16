@@ -17,6 +17,10 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- docs：刷新 parity artifacts（gap-analysis/roadmap）以匹配当前实现状态
+  - 文件：`.codex/progress/gap-analysis.md`，`new-client-rust/doc/client-go-v2-parity-roadmap.md`，`.codex/progress/daemon.md`
+  - 说明：清理过期 TODO/FIXME 快照；补齐验证命令与 milestone 状态口径
+
 - cleanup：清理剩余非 generated TODO/FIXME（LockResolver pd_client、PD members 字段校验），并补齐测试
   - 关键决策：`LockResolver` 泛型化并持有 `pd_client/keyspace`（避免 trait object 不可用）；PD 连接阶段显式校验 members/header/leader 关键字段避免 unwrap/panic
   - 测试：新增 `LockResolver::cleanup_locks` 单测；新增 PD members response 校验单测；修复 `DiskFullOpt` 断言的 `.into()` 推导歧义

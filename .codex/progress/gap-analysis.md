@@ -23,18 +23,13 @@
 - `util/*`、`txnkv/*` 子包：导出符号已在 checklist 完成 public vs capability-only vs out-of-scope 标注；后续缺口以 TODO/FIXME 形式跟踪（见下节）。
 
 ### Protocol/detail gaps（可直接落任务）
-- resolve-lock-lite 已实现并按 client-go 语义做 gating（region retry attempt>0 禁用等）；剩余缺口以代码 TODO/FIXME 为准。
-- 非 generated 代码 TODO/FIXME（当前快照，`rg TODO|FIXME new-client-rust/src --glob '!*/generated/*'`）：
-  - `new-client-rust/src/pd/retry.rs`：retry/backoff 参数仍是 cargo-cult，需要对齐 client-go 行为与压测结果。
-  - `new-client-rust/src/request/plan.rs`：backoff/细粒度处理仍有 TODO。
-  - `new-client-rust/src/region_cache.rs`：TTL 策略与性能点（锁/数据结构）仍有 TODO/FIXME。
-  - `new-client-rust/src/transaction/{buffer.rs,lock.rs,requests.rs}`：buffer 数据结构优化、LockResolver 结构收敛、ScanLock next-batch 边界优化。
-  - `new-client-rust/src/{kv/bound_range.rs,pd/{cluster.rs,timestamp.rs},raw/requests.rs,util/iter.rs}`：若干 correctness/性能/测试 TODO。
+- resolve-lock-lite 已实现并按 client-go 语义做 gating（region retry attempt>0 禁用等）；细节以单测与集成测试行为为准。
+- 非 generated 代码 TODO/FIXME：已清零（仅 kvproto 生成代码中仍含 TODO 注释，不作为实现缺口跟踪）。
 
 ## 已知实现不完整点（从代码注释确认）
 
-- 若干参数/算法仍带 “cargo-culted” TODO，需要逐步以 client-go 行为与压测结果校准（优先 `pd/retry.rs` 与 region cache 相关）。
 - integration tests 需要真实 PD/TiKV 集群（`cargo test --features integration-tests` + `$PD_ADDRS`）；当前已保证 `--all-features --no-run` 可编译。
+- 若需进一步校准 backoff/region cache 等性能行为，优先用 benchmark/压测驱动落任务（避免“cargo-culted knobs”）。
 
 ## 结论（策略建议）
 
