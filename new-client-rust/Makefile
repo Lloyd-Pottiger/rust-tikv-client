@@ -60,6 +60,7 @@ integration-test-smoke: generate
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests txn_pipelined_flush -- --test-threads 1
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests txn_replica_read_snapshot_get -- --test-threads 1
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests raw_req -- --test-threads 1
+	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests raw_checksum -- --test-threads 1
 
 test: unit-test integration-test
 

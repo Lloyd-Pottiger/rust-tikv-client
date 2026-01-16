@@ -17,6 +17,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- infra：把 raw_checksum 纳入 integration-test-smoke（确保端到端 checksum 覆盖可一键跑）
+  - 文件：`new-client-rust/Makefile`，`.codex/progress/daemon.md`
+
 - docs：补齐 RawChecksum/RawClient::checksum 文档语义，并刷新 README 状态描述
   - 关键点：明确 checksum=CRC64-ECMA(encoded_key||value) xor 聚合；API v2 下 encoded_key 含 keyspace 前缀
   - 文件：`new-client-rust/src/raw/{mod.rs,client.rs}`，`new-client-rust/README.md`，`.codex/progress/daemon.md`
