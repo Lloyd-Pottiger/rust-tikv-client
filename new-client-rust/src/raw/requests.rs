@@ -821,8 +821,10 @@ mod test {
             .plan();
         let scan = plan.execute().await.unwrap();
 
-        assert_eq!(scan.len(), 49);
-        // FIXME test the keys returned.
+        let expected = (1_u8..50)
+            .map(|i| KvPair(vec![i].into(), Vec::new()))
+            .collect::<Vec<_>>();
+        assert_eq!(scan, expected);
     }
 
     #[tokio::test]

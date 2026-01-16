@@ -9,9 +9,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- raw/requests：补齐 `test_raw_scan` 返回 keys 的断言，清理 FIXME
+- util/iter：完善 `FlatMapOk` 的 Iterator 语义（size_hint 等），清理 FIXME
   - 计划：
-    - 为 `test_raw_scan` 增加 key 序列断言（同时覆盖 keyspace disable/enable 两种 case）
+    - 实现 `size_hint`/`fold` 等必要方法（尽量与标准库 iterator 语义一致）
     - `cargo test` 验证
 
 # 待做工作
@@ -29,7 +29,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
     - 针对热点路径做 micro 优化并补齐单测
 
 - cleanup：清理剩余非 generated TODO/FIXME（小项为主），并补齐对应测试
-  - 范围：`util/iter.rs`（Iterator 语义）、`request/plan.rs`（backoff TODO）、`pd/timestamp.rs`（可调参数/stream 结束语义）、`kv/bound_range.rs`（Eq clone FIXME）
+  - 范围：`request/plan.rs`（backoff TODO）、`pd/timestamp.rs`（可调参数/stream 结束语义）、`kv/bound_range.rs`（Eq clone FIXME）
 
 # 已完成工作
 
@@ -86,3 +86,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - txn/buffer：`scan_and_fetch` 使用 `BTreeMap` 去重并保持有序，移除排序 TODO
   - 关键决策：以有序 map 保证 scan 结果 determinism，避免额外排序开销
   - 文件：`new-client-rust/src/transaction/buffer.rs`，`.codex/progress/daemon.md`
+
+- raw/requests：补齐 `test_raw_scan` 返回 keys 的断言，清理 FIXME
+  - 测试：覆盖 keyspace disable/enable 两种 case 的 key 序列断言
+  - 文件：`new-client-rust/src/raw/requests.rs`，`.codex/progress/daemon.md`
