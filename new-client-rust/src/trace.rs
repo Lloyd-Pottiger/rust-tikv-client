@@ -5,7 +5,7 @@
 //!
 //! ## `tracing` integration
 //!
-//! When built with the `tracing` Cargo feature, [`enable_tracing_events`] installs a global sink
+//! When built with the `tracing` Cargo feature, `enable_tracing_events` installs a global sink
 //! that forwards client-side trace events to the `tracing` ecosystem.
 
 use std::sync::OnceLock;

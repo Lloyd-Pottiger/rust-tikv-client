@@ -9,19 +9,15 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- docs：补齐/校验 rustdoc（示例可编译、doc build 稳定）
-  - 步骤：
-    - `cargo doc --workspace --no-deps` 本地过一遍并修复 rustdoc warnings/链接
-    - 为关键 public API（Config/TransactionOptions/Replica+Stale read/Resource control）补齐最小示例
-    - （可选）CI 加一个 `cargo doc` job 防回归
-
-# 待做工作
-
 - hardening：处理/清理 `src/proptests/*`（当前整体被注释禁用）
   - 步骤：
     - 决定保留策略：要么恢复为纯单测/无需集群的 proptest；要么直接删除该目录
     - 若保留：补齐策略函数与 gating（避免默认依赖 PD/TiKV）
     - 补齐文档说明（何时跑、如何跑）
+
+# 待做工作
+
+- （无）
 
 # 已完成工作
 
@@ -50,3 +46,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：保持 nextest 优先；无 nextest 时用 `cargo test --workspace` 跑 unit/integration 的等价子集（不引入额外工具依赖）
   - 改动：`unit-test`/`integration-test-{txn,raw}` 增加 nextest 探测与 fallback
   - 文件：`new-client-rust/Makefile`
+
+- docs：rustdoc build 清零 warnings + CI guardrail
+  - 关键决策：修复 crate 自身的 rustdoc warnings；kvproto 生成代码的 bare URL 通过局部 allow 隔离
+  - 改动：修复 broken intra-doc link / invalid HTML tag / redundant links；Makefile `doc` exclude 正确化；CI 增加 `RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps`
+  - 文件：`new-client-rust/src/{trace.rs,raw/client.rs,transaction/client.rs,kv/bound_range.rs,timestamp.rs,proto.rs}`，`new-client-rust/Makefile`，`.github/workflows/new-client-rust.yml`

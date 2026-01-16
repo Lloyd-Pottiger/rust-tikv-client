@@ -85,7 +85,7 @@ pub fn lower_limit_start_ts(now: SystemTime, max_txn_time_use: Duration) -> Resu
 
 /// A helper trait to convert a Timestamp to and from an u64.
 ///
-/// Currently the only implmentation of this trait is [`Timestamp`](Timestamp) in TiKV.
+/// Currently the only implementation of this trait is [`Timestamp`] in TiKV.
 /// It contains a physical part (first 46 bits) and a logical part (last 18 bits).
 pub trait TimestampExt: Sized {
     /// Convert the timestamp to u64.

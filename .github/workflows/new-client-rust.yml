@@ -55,3 +55,6 @@ jobs:
 
       - name: Compile (tracing feature)
         run: cargo test --features tracing --no-run
+
+      - name: Doc (no-deps)
+        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --workspace --exclude tikv-client-proto-build --no-deps

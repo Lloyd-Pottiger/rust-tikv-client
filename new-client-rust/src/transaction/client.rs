@@ -326,7 +326,7 @@ impl Client {
         Ok(self.new_transaction(timestamp, options))
     }
 
-    /// Create a new [`Snapshot`](Snapshot) at the given [`Timestamp`](Timestamp).
+    /// Create a new [`Snapshot`] at the given [`Timestamp`].
     pub fn snapshot(&self, timestamp: Timestamp, options: TransactionOptions) -> Snapshot {
         debug!("creating new snapshot");
         Snapshot::new(self.new_transaction(timestamp, options.read_only()))

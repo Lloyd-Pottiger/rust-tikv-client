@@ -180,7 +180,7 @@ impl Client<PdRpcClient> {
     }
 
     /// Set the [`Backoff`] strategy for retrying requests.
-    /// The default strategy is [`DEFAULT_REGION_BACKOFF`](crate::backoff::DEFAULT_REGION_BACKOFF).
+    /// The default strategy is [`DEFAULT_REGION_BACKOFF`].
     /// See [`Backoff`] for more information.
     /// # Examples
     /// ```rust,no_run
@@ -428,14 +428,16 @@ impl<PdC: PdClient> Client<PdC> {
     /// Retuning `Ok(None)` indicates the key does not exist in TiKV.
     ///
     /// # Examples
-    /// # use tikv_client::{Value, Config, RawClient};
+    /// ```rust,no_run
+    /// # use tikv_client::{Config, RawClient};
     /// # use futures::prelude::*;
     /// # futures::executor::block_on(async {
     /// # let client = RawClient::new(vec!["192.168.0.100"]).await.unwrap();
     /// let key = "TiKV".to_owned();
     /// let req = client.get_key_ttl_secs(key);
-    /// let result: Option<Value> = req.await.unwrap();
+    /// let result: Option<u64> = req.await.unwrap();
     /// # });
+    /// ```
     pub async fn get_key_ttl_secs(&self, key: impl Into<Key>) -> Result<Option<u64>> {
         debug!("invoking raw get_key_ttl_secs request");
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);

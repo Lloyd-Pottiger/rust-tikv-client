@@ -64,7 +64,7 @@ integration-test-smoke: generate
 test: unit-test integration-test
 
 doc:
-	cargo doc --workspace --exclude tikv-client-proto --document-private-items --no-deps
+	cargo doc --workspace --exclude tikv-client-proto-build --document-private-items --no-deps
 
 tiup-up:
 	@mkdir -p target

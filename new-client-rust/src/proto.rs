@@ -6,6 +6,7 @@
 pub use protos::*;
 
 #[allow(clippy::doc_lazy_continuation)]
+#[allow(rustdoc::bare_urls)] // generated kvproto comments include bare URLs
 mod protos {
     include!("generated/mod.rs");
 }
