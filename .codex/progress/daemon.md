@@ -33,3 +33,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 说明：当前仅保留 `kv::Key` 的 `#[repr(transparent)]` 引用转换 `unsafe`（零拷贝；已用单测约束）
   - 校验：`make check`，`make unit-test`
   - 文件：`src/{compat.rs,kv/codec.rs,request/keyspace.rs}`，`.codex/progress/daemon.md`
+
+- infra/tests：按 feature gate integration test binaries（避免 unit-test 构建/运行空测试）
+  - 关键点：为 `tests/{integration_tests,failpoint_tests}.rs` 增加/修正 `Cargo.toml [[test]] required-features=["integration-tests"]`
+  - 校验：`make check`，`make unit-test`
+  - 文件：`Cargo.toml`，`.codex/progress/daemon.md`
