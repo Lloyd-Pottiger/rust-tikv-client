@@ -141,9 +141,6 @@ pub mod test_util {
     pub use super::mock::MockPdClient;
 }
 
-#[cfg(test)]
-mod proptests;
-
 #[doc(inline)]
 pub use common::security::SecurityManager;
 #[doc(inline)]

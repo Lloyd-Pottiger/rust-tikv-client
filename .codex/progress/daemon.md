@@ -9,11 +9,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- hardening：处理/清理 `src/proptests/*`（当前整体被注释禁用）
+- docs：刷新 parity artifacts（`parity-map.md`/`gap-analysis.md`）使其与当前实现一致
   - 步骤：
-    - 决定保留策略：要么恢复为纯单测/无需集群的 proptest；要么直接删除该目录
-    - 若保留：补齐策略函数与 gating（避免默认依赖 PD/TiKV）
-    - 补齐文档说明（何时跑、如何跑）
+    - 复查 `.codex/progress/parity-map.md` 中“剩余 gap”段落是否仍准确；不准确则更新/移除
+    - 复查 `.codex/progress/gap-analysis.md` 的“仍缺/结论”段落，确保与当前 scope policy 一致
+    - 保持精简：只保留对后续迭代有指导意义的内容
 
 # 待做工作
 
@@ -51,3 +51,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：修复 crate 自身的 rustdoc warnings；kvproto 生成代码的 bare URL 通过局部 allow 隔离
   - 改动：修复 broken intra-doc link / invalid HTML tag / redundant links；Makefile `doc` exclude 正确化；CI 增加 `RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps`
   - 文件：`new-client-rust/src/{trace.rs,raw/client.rs,transaction/client.rs,kv/bound_range.rs,timestamp.rs,proto.rs}`，`new-client-rust/Makefile`，`.github/workflows/new-client-rust.yml`
+
+- hardening：清理禁用的 proptests 模块（避免“死代码”误导）
+  - 关键决策：删除长期禁用且依赖真实集群的 proptests，测试覆盖由 unit/integration tests 承担
+  - 改动：移除 `#[cfg(test)] mod proptests;` 与 `new-client-rust/src/proptests/*`
+  - 文件：`new-client-rust/src/lib.rs`
