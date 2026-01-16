@@ -9,9 +9,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- util/iter：完善 `FlatMapOk` 的 Iterator 语义（size_hint 等），清理 FIXME
+- kv/bound_range：澄清 `PartialEq<(Bound<T>, Bound<T>)>` 的 clone 约束，移除 FIXME（保持 API 不变）
   - 计划：
-    - 实现 `size_hint`/`fold` 等必要方法（尽量与标准库 iterator 语义一致）
+    - 将 FIXME 改为说明：此 impl 主要服务 doc/test；由于签名限制需要 clone（不做无意义优化）
     - `cargo test` 验证
 
 # 待做工作
@@ -29,7 +29,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
     - 针对热点路径做 micro 优化并补齐单测
 
 - cleanup：清理剩余非 generated TODO/FIXME（小项为主），并补齐对应测试
-  - 范围：`request/plan.rs`（backoff TODO）、`pd/timestamp.rs`（可调参数/stream 结束语义）、`kv/bound_range.rs`（Eq clone FIXME）
+  - 范围：`request/plan.rs`（backoff TODO）、`pd/timestamp.rs`（可调参数/stream 结束语义）
 
 # 已完成工作
 
@@ -90,3 +90,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - raw/requests：补齐 `test_raw_scan` 返回 keys 的断言，清理 FIXME
   - 测试：覆盖 keyspace disable/enable 两种 case 的 key 序列断言
   - 文件：`new-client-rust/src/raw/requests.rs`，`.codex/progress/daemon.md`
+
+- util/iter：完善 `FlatMapOk` 的 Iterator 语义（size_hint/FusedIterator）并补齐单测
+  - 测试：新增 size_hint 行为用例
+  - 文件：`new-client-rust/src/util/iter.rs`，`.codex/progress/daemon.md`

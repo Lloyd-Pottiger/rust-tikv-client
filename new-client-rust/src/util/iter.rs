@@ -30,7 +30,6 @@ pub struct FlatMapOk<U, F, Ti, E> {
     f: F,
 }
 
-// FIXME: implement other iterator methods like size_hint, etc.
 impl<
         T: IntoIterator<IntoIter = Ti>,
         U: Iterator<Item = std::result::Result<I, E>>,
@@ -62,6 +61,25 @@ impl<
             }
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.frontiter {
+            Some(Ok(inner)) => inner.size_hint(),
+            Some(Err(_)) => (1, Some(1)),
+            None => (0, None),
+        }
+    }
+}
+
+impl<
+        T: IntoIterator<IntoIter = Ti>,
+        U: Iterator<Item = std::result::Result<I, E>>,
+        F: FnMut(I) -> T,
+        Ti: Iterator<Item = T::Item>,
+        I,
+        E,
+    > std::iter::FusedIterator for FlatMapOk<U, F, Ti, E>
+{
 }
 
 #[cfg(test)]
@@ -96,5 +114,20 @@ mod test {
             result,
             vec![Ok(0), Ok(0), Ok(0), Err(()), Ok(2), Ok(2), Ok(2)]
         );
+    }
+
+    #[test]
+    fn test_size_hint_tracks_current_inner_iterator() {
+        let mut it = vec![Result::<i32, ()>::Ok(0)]
+            .into_iter()
+            .flat_map_ok(|_| vec![1, 2, 3].into_iter());
+
+        assert_eq!(it.size_hint(), (0, None));
+        assert_eq!(it.next(), Some(Ok(1)));
+        assert_eq!(it.size_hint(), (2, Some(2)));
+        assert_eq!(it.next(), Some(Ok(2)));
+        assert_eq!(it.size_hint(), (1, Some(1)));
+        assert_eq!(it.next(), Some(Ok(3)));
+        assert_eq!(it.next(), None);
     }
 }
