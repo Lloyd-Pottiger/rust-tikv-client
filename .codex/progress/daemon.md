@@ -38,3 +38,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键点：为 `tests/{integration_tests,failpoint_tests}.rs` 增加/修正 `Cargo.toml [[test]] required-features=["integration-tests"]`
   - 校验：`make check`，`make unit-test`
   - 文件：`Cargo.toml`，`.codex/progress/daemon.md`
+
+- infra：提交 `Cargo.lock` + 记录 MSRV（提升可复现构建；避免依赖/编译器漂移）
+  - 关键决策：对本 repo（带 CI/bench/integration）视为应用型工程，锁定依赖版本以稳定 Rust toolchain 兼容性
+  - 校验：`make check`，`make unit-test`
+  - 文件：`Cargo.lock`，`.gitignore`，`Cargo.toml`，`.codex/progress/daemon.md`

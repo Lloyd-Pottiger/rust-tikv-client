@@ -4,10 +4,8 @@ client-rust/
 
 # Rust build artifacts
 **/target/
-Cargo.lock
 
 # Editor / OS
 .DS_Store
 .idea/
 .vscode/
-
