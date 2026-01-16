@@ -163,6 +163,25 @@ make tiup-down
 make tiup-clean  # also removes target/tiup-playground.log
 ```
 
+## Client-side tracing
+
+This crate provides a small, TiKV-aligned trace hook API under `tikv_client::trace`. By default,
+client-side trace events are disabled.
+
+If your application uses the `tracing` ecosystem, enable the `tracing` feature and install the
+forwarder:
+
+```toml
+[dependencies]
+tikv-client = { path = "/path/to/new-client-rust", features = ["tracing"] }
+```
+
+```rust,ignore
+// In your application:
+tikv_client::trace::enable_tracing_events();
+// Then configure a subscriber/exporter (e.g. tracing-subscriber, tracing-opentelemetry).
+```
+
 ## Creating a PR
 
 We use a standard GitHub PR workflow. We run CI on every PR and require all PRs to build without warnings (including clippy and Rustfmt warnings), pass tests, have a DCO sign-off (use `-s` when you commit, the DCO bot will guide you through completing the DCO agreement for your first PR), and have at least one review. If any of this is difficult for you, don't worry about it and ask on the PR.

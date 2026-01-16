@@ -2,6 +2,11 @@
 //!
 //! TiKV supports attaching a trace id and a set of control flags to the per-request
 //! `kvrpcpb::Context`. This module provides a small, Rust-idiomatic representation of those flags.
+//!
+//! ## `tracing` integration
+//!
+//! When built with the `tracing` Cargo feature, [`enable_tracing_events`] installs a global sink
+//! that forwards client-side trace events to the `tracing` ecosystem.
 
 use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
@@ -110,6 +115,50 @@ pub fn trace_event(
     }
 }
 
+/// Enable emitting client-side trace events via the [`tracing`] ecosystem.
+///
+/// This installs a global [`TraceEventFn`] that forwards events to `tracing::event!`.
+/// If a sink is already registered via [`set_trace_event_fn`], it is preserved and invoked before
+/// the `tracing` sink.
+///
+/// Note: this does not configure a `tracing` subscriber. Applications should install a subscriber
+/// (e.g. `tracing_subscriber`) to collect/export events, optionally via OpenTelemetry.
+#[cfg(feature = "tracing")]
+pub fn enable_tracing_events() {
+    // If the user didn't configure any category filter, enable everything so trace events
+    // can be surfaced without additional plumbing.
+    {
+        let mut guard = lock_write(is_category_enabled_lock());
+        if guard.is_none() {
+            *guard = Some(Arc::new(|_| true));
+        }
+    }
+
+    let tracing_sink: TraceEventFn = Arc::new(|event: &TraceEvent| {
+        tracing::event!(
+            target: "tikv_client::trace",
+            tracing::Level::INFO,
+            category = event.category,
+            name = %event.name,
+            fields = ?event.fields,
+        );
+    });
+
+    let mut guard = lock_write(trace_event_lock());
+    match guard.take() {
+        None => {
+            *guard = Some(tracing_sink);
+        }
+        Some(prev) => {
+            let combined: TraceEventFn = Arc::new(move |event: &TraceEvent| {
+                (prev)(event);
+                (tracing_sink)(event);
+            });
+            *guard = Some(combined);
+        }
+    }
+}
+
 /// Trace control flags carried by `kvrpcpb::Context.trace_control_flags`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TraceControlFlags(pub u64);
@@ -159,5 +208,24 @@ mod tests {
             [("start_ts", TraceValue::U64(42))],
         );
         assert_eq!(events.lock().unwrap().as_slice(), ["prewrite.start"]);
+    }
+
+    #[cfg(feature = "tracing")]
+    #[test]
+    fn enable_tracing_events_preserves_existing_sink() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let events_cloned = events.clone();
+        set_is_category_enabled_fn(Some(Arc::new(|_| true)));
+        set_trace_event_fn(Some(Arc::new(move |e| {
+            events_cloned.lock().unwrap().push(e.name.clone());
+        })));
+
+        enable_tracing_events();
+        trace_event(
+            CATEGORY_TXN_2PC,
+            "commit.start",
+            std::iter::empty::<(String, TraceValue)>(),
+        );
+        assert_eq!(events.lock().unwrap().as_slice(), ["commit.start"]);
     }
 }

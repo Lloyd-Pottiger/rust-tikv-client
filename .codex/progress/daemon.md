@@ -9,19 +9,21 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- observability：补齐 Rust 生态 `tracing`/OpenTelemetry 对接（feature-gate）
-  - 步骤：
-    - 提供 `tracing` feature：将 `trace::trace_event` 以 `tracing::Event` 输出（保留现有 hook）
-    - 文档：如何启用 feature + 如何接到用户侧 subscriber/OTel
-
-# 待做工作
-
 - bench：增加基准测试与压测指引（避免“猜测性能”）
   - 步骤：
     - 增加 `benches/`（criterion）：keyspace encode/truncate、plan shard/merge 开销（mock 驱动）
     - 文档：如何跑 bench、如何解读、如何做 flamegraph（可选）
 
+# 待做工作
+
+- （无）
+
 # 已完成工作
+
+- observability：提供 `tracing` feature，将 client-side trace events 输出到 tracing
+  - 关键决策：保留现有 hook API；`enable_tracing_events()` 在不覆盖用户 sink 的前提下追加 tracing sink；默认无 filter 时启用全部 category
+  - 文档：README 增加启用方式；`src/trace.rs` 增加 feature 说明；CI 增加 `--features tracing --no-run` 编译覆盖
+  - 文件：`new-client-rust/src/trace.rs`，`new-client-rust/Cargo.toml`，`new-client-rust/README.md`，`.github/workflows/new-client-rust.yml`
 
 - integration-tests：补齐可重复运行的 TiUP playground 脚手架 + smoke suite
   - 产出：`make tiup-up/tiup-down/tiup-clean`（后台启动 + 日志落盘）；`make integration-test-smoke`（cargo test 跑 txn/raw 各 1 个）
