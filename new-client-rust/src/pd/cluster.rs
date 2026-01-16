@@ -198,7 +198,6 @@ impl Connection {
             } else {
                 cluster_id = Some(cid);
             }
-            // TODO: check all fields later?
 
             if members.is_none() {
                 members = Some(resp);
@@ -238,20 +237,70 @@ impl Connection {
             .get_members(pdpb::GetMembersRequest::default())
             .await?
             .into_inner();
-        if let Some(err) = resp
+        Self::validate_members_response(addr, &resp)?;
+        Ok((client, keyspace_client, resp))
+    }
+
+    fn validate_members_response(addr: &str, members: &pdpb::GetMembersResponse) -> Result<u64> {
+        let header = members
             .header
             .as_ref()
-            .and_then(|header| header.error.as_ref())
-        {
-            return Err(internal_err!("failed to get PD members, err {:?}", err));
-        }
-        if resp.leader.is_none() {
+            .ok_or_else(|| internal_err!("missing PD response header from {}", addr))?;
+        if let Some(err) = header.error.as_ref() {
             return Err(internal_err!(
-                "unexpected no PD leader in get member resp: {:?}",
-                resp
+                "failed to get PD members from {}, err {:?}",
+                addr,
+                err
             ));
         }
-        Ok((client, keyspace_client, resp))
+        if header.cluster_id == 0 {
+            return Err(internal_err!(
+                "PD response cluster_id is zero from {}",
+                addr
+            ));
+        }
+
+        let leader = members.leader.as_ref().ok_or_else(|| {
+            internal_err!(
+                "unexpected no PD leader in get member resp from {}: {:?}",
+                addr,
+                members
+            )
+        })?;
+        if leader.client_urls.is_empty() {
+            return Err(internal_err!(
+                "PD leader has empty client_urls in get member resp from {}",
+                addr
+            ));
+        }
+        if members.members.is_empty() {
+            return Err(internal_err!(
+                "PD members list is empty in get member resp from {}",
+                addr
+            ));
+        }
+        if !members
+            .members
+            .iter()
+            .any(|member| member.member_id == leader.member_id)
+        {
+            return Err(internal_err!(
+                "PD leader {} is not present in members list from {}",
+                leader.member_id,
+                addr
+            ));
+        }
+        for member in &members.members {
+            if member.client_urls.is_empty() {
+                return Err(internal_err!(
+                    "PD member {} has empty client_urls in get member resp from {}",
+                    member.member_id,
+                    addr
+                ));
+            }
+        }
+
+        Ok(header.cluster_id)
     }
 
     async fn try_connect(
@@ -454,5 +503,87 @@ impl PdResponse for pdpb::UpdateGcSafePointResponse {
 impl PdResponse for keyspacepb::LoadKeyspaceResponse {
     fn header(&self) -> &pdpb::ResponseHeader {
         self.header.as_ref().unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_member(member_id: u64, url: &str) -> pdpb::Member {
+        pdpb::Member {
+            member_id,
+            client_urls: vec![url.to_owned()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_members_response_ok() {
+        let leader = make_member(1, "127.0.0.1:2379");
+        let mut resp = pdpb::GetMembersResponse::default();
+        resp.header = Some(pdpb::ResponseHeader {
+            cluster_id: 42,
+            ..Default::default()
+        });
+        resp.leader = Some(leader.clone());
+        resp.members = vec![leader];
+        assert_eq!(
+            Connection::validate_members_response("pd", &resp).unwrap(),
+            42
+        );
+    }
+
+    #[test]
+    fn test_validate_members_response_missing_header() {
+        let leader = make_member(1, "127.0.0.1:2379");
+        let mut resp = pdpb::GetMembersResponse::default();
+        resp.leader = Some(leader.clone());
+        resp.members = vec![leader];
+        assert!(Connection::validate_members_response("pd", &resp).is_err());
+    }
+
+    #[test]
+    fn test_validate_members_response_missing_leader() {
+        let mut resp = pdpb::GetMembersResponse::default();
+        resp.header = Some(pdpb::ResponseHeader {
+            cluster_id: 42,
+            ..Default::default()
+        });
+        resp.members = vec![make_member(1, "127.0.0.1:2379")];
+        assert!(Connection::validate_members_response("pd", &resp).is_err());
+    }
+
+    #[test]
+    fn test_validate_members_response_leader_not_in_members() {
+        let leader = make_member(1, "127.0.0.1:2379");
+        let mut resp = pdpb::GetMembersResponse::default();
+        resp.header = Some(pdpb::ResponseHeader {
+            cluster_id: 42,
+            ..Default::default()
+        });
+        resp.leader = Some(leader);
+        resp.members = vec![make_member(2, "127.0.0.1:22379")];
+        assert!(Connection::validate_members_response("pd", &resp).is_err());
+    }
+
+    #[test]
+    fn test_validate_members_response_member_missing_urls() {
+        let leader = make_member(1, "127.0.0.1:2379");
+        let mut resp = pdpb::GetMembersResponse::default();
+        resp.header = Some(pdpb::ResponseHeader {
+            cluster_id: 42,
+            ..Default::default()
+        });
+        resp.leader = Some(leader.clone());
+        resp.members = vec![
+            leader,
+            pdpb::Member {
+                member_id: 2,
+                client_urls: Vec::new(),
+                ..Default::default()
+            },
+        ];
+        assert!(Connection::validate_members_response("pd", &resp).is_err());
     }
 }

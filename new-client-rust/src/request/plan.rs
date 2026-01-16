@@ -901,8 +901,12 @@ where
     async fn execute(&self) -> Result<Self::Result> {
         let mut result = CleanupLocksResult::default();
         let mut inner = self.inner.clone();
-        let mut lock_resolver = crate::transaction::LockResolver::new(self.ctx.clone())
-            .with_request_context(self.request_context.clone());
+        let mut lock_resolver = crate::transaction::LockResolver::new(
+            self.ctx.clone(),
+            self.pd_client.clone(),
+            self.keyspace,
+        )
+        .with_request_context(self.request_context.clone());
         let region = &self.store.as_ref().unwrap().region_with_leader;
         let mut has_more_batch = true;
         let mut backoff = self.backoff.clone();
@@ -959,12 +963,7 @@ where
 
             let lock_size = locks.len();
             match lock_resolver
-                .cleanup_locks(
-                    self.store.clone().unwrap(),
-                    locks,
-                    self.pd_client.clone(),
-                    self.keyspace,
-                )
+                .cleanup_locks(self.store.clone().unwrap(), locks)
                 .await
             {
                 Ok(()) => {

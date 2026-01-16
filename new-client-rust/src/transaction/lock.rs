@@ -242,15 +242,19 @@ impl ResolveLocksContext {
     }
 }
 
-pub struct LockResolver {
+pub struct LockResolver<PdC: PdClient> {
     ctx: ResolveLocksContext,
+    pd_client: Arc<PdC>,
+    keyspace: Keyspace,
     request_context: RequestContext,
 }
 
-impl LockResolver {
-    pub fn new(ctx: ResolveLocksContext) -> Self {
+impl<PdC: PdClient> LockResolver<PdC> {
+    pub fn new(ctx: ResolveLocksContext, pd_client: Arc<PdC>, keyspace: Keyspace) -> Self {
         Self {
             ctx,
+            pd_client,
+            keyspace,
             request_context: RequestContext::default(),
         }
     }
@@ -267,8 +271,6 @@ impl LockResolver {
         &mut self,
         store: RegionStore,
         locks: Vec<kvrpcpb::LockInfo>,
-        pd_client: Arc<impl PdClient>, // TODO: make pd_client a member of LockResolver
-        keyspace: Keyspace,
     ) -> Result<()> {
         if locks.is_empty() {
             return Ok(());
@@ -289,8 +291,6 @@ impl LockResolver {
             // Use currentTS = math.MaxUint64 means rollback the txn, no matter the lock is expired or not!
             let mut status = self
                 .check_txn_status(
-                    pd_client.clone(),
-                    keyspace,
                     txn_id,
                     l.primary_lock.clone(),
                     0,
@@ -305,12 +305,7 @@ impl LockResolver {
             // Then we need to check the secondary locks to determine the final status of the transaction.
             if let TransactionStatusKind::Locked(_, lock_info) = &status.kind {
                 let secondary_status = self
-                    .check_all_secondaries(
-                        pd_client.clone(),
-                        keyspace,
-                        lock_info.secondaries.clone(),
-                        txn_id,
-                    )
+                    .check_all_secondaries(lock_info.secondaries.clone(), txn_id)
                     .await?;
                 debug!(
                     "secondary status, txn_id:{}, commit_ts:{:?}, min_commit_version:{}, fallback_2pc:{}",
@@ -327,8 +322,6 @@ impl LockResolver {
                     debug!("fallback to 2pc, txn_id:{}, check_txn_status again", txn_id);
                     status = self
                         .check_txn_status(
-                            pd_client.clone(),
-                            keyspace,
                             txn_id,
                             l.primary_lock,
                             0,
@@ -377,7 +370,7 @@ impl LockResolver {
             txn_info_vec.push(txn_info);
         }
         let cleaned_region = self
-            .batch_resolve_locks(pd_client.clone(), keyspace, store.clone(), txn_info_vec)
+            .batch_resolve_locks(store.clone(), txn_info_vec)
             .await?;
         for txn_id in txn_ids {
             self.ctx
@@ -391,8 +384,6 @@ impl LockResolver {
     #[allow(clippy::too_many_arguments)]
     pub async fn check_txn_status(
         &mut self,
-        pd_client: Arc<impl PdClient>,
-        keyspace: Keyspace,
         txn_id: u64,
         primary: Vec<u8>,
         caller_start_ts: u64,
@@ -422,7 +413,7 @@ impl LockResolver {
             force_sync_commit,
             resolving_pessimistic_lock,
         ));
-        let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, req)
+        let plan = crate::request::PlanBuilder::new(self.pd_client.clone(), self.keyspace, req)
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .merge(CollectSingle)
             .extract_error()
@@ -430,7 +421,7 @@ impl LockResolver {
             .plan();
         let mut res: TransactionStatus = plan.execute().await?;
 
-        let current = pd_client.clone().get_timestamp().await?;
+        let current = self.pd_client.clone().get_timestamp().await?;
         res.check_ttl(current);
         let res = Arc::new(res);
         if res.is_cacheable() {
@@ -441,15 +432,13 @@ impl LockResolver {
 
     async fn check_all_secondaries(
         &mut self,
-        pd_client: Arc<impl PdClient>,
-        keyspace: Keyspace,
         keys: Vec<Vec<u8>>,
         txn_id: u64,
     ) -> Result<SecondaryLocksStatus> {
         let req = self
             .request_context
             .apply_to(new_check_secondary_locks_request(keys, txn_id));
-        let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, req)
+        let plan = crate::request::PlanBuilder::new(self.pd_client.clone(), self.keyspace, req)
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .extract_error()
             .merge(Collect)
@@ -459,8 +448,6 @@ impl LockResolver {
 
     async fn batch_resolve_locks(
         &mut self,
-        pd_client: Arc<impl PdClient>,
-        keyspace: Keyspace,
         store: RegionStore,
         txn_infos: Vec<TxnInfo>,
     ) -> Result<RegionVerId> {
@@ -468,7 +455,7 @@ impl LockResolver {
         let request = self
             .request_context
             .apply_to(requests::new_batch_resolve_lock_request(txn_infos.clone()));
-        let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
+        let plan = crate::request::PlanBuilder::new(self.pd_client.clone(), self.keyspace, request)
             .single_region_with_store(store.clone())
             .await?
             .extract_error()
@@ -487,6 +474,8 @@ pub trait HasLocks {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     use serial_test::serial;
 
@@ -494,6 +483,7 @@ mod tests {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::errorpb;
+    use crate::Key;
 
     #[rstest::rstest]
     #[case(Keyspace::Disable)]
@@ -547,5 +537,69 @@ mod tests {
         )
         .await
         .expect_err("should return error");
+    }
+
+    #[rstest::rstest]
+    #[case(Keyspace::Disable)]
+    #[case(Keyspace::Enable { keyspace_id: 0 })]
+    #[tokio::test]
+    #[serial]
+    async fn test_lock_resolver_cleanup_locks_uses_stored_pd_client(#[case] keyspace: Keyspace) {
+        let txn_id = 42_u64;
+        let commit_ts = 100_u64;
+        let primary_key = vec![1, 2, 3];
+
+        let check_count = Arc::new(AtomicUsize::new(0));
+        let batch_count = Arc::new(AtomicUsize::new(0));
+        let check_count_hook = check_count.clone();
+        let batch_count_hook = batch_count.clone();
+        let primary_key_hook = primary_key.clone();
+
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_count_hook.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.lock_ts, txn_id);
+                    assert_eq!(req.primary_key, primary_key_hook);
+                    assert_eq!(req.caller_start_ts, 0);
+                    assert_eq!(req.current_ts, u64::MAX);
+                    assert!(req.rollback_if_not_exist);
+                    assert!(!req.force_sync_commit);
+
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: commit_ts,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    batch_count_hook.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.txn_infos.len(), 1);
+                    assert_eq!(req.txn_infos[0].txn, txn_id);
+                    assert_eq!(req.txn_infos[0].status, commit_ts);
+                    let resp = kvrpcpb::ResolveLockResponse::default();
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                panic!("unexpected request type in LockResolver test");
+            },
+        )));
+
+        let key: Key = primary_key.clone().into();
+        let store = client.clone().store_for_key(&key).await.unwrap();
+
+        let mut lock_info = kvrpcpb::LockInfo::default();
+        lock_info.lock_version = txn_id;
+        lock_info.primary_lock = primary_key;
+        lock_info.lock_type = kvrpcpb::Op::Put as i32;
+
+        let mut resolver = LockResolver::new(ResolveLocksContext::default(), client, keyspace);
+        resolver
+            .cleanup_locks(store, vec![lock_info])
+            .await
+            .unwrap();
+
+        assert_eq!(check_count.load(Ordering::SeqCst), 1);
+        assert_eq!(batch_count.load(Ordering::SeqCst), 1);
     }
 }

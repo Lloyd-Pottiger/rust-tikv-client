@@ -3012,7 +3012,7 @@ mod tests {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
                     let ctx = req.context.as_ref().expect("missing context on GetRequest");
                     assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
-                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     let mut resp = kvrpcpb::GetResponse::default();
                     resp.not_found = true;
@@ -3023,7 +3023,7 @@ mod tests {
                         .as_ref()
                         .expect("missing context on PrewriteRequest");
                     assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
-                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
@@ -3032,7 +3032,7 @@ mod tests {
                         .as_ref()
                         .expect("missing context on CommitRequest");
                     assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
-                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
                 } else {
@@ -3716,7 +3716,7 @@ mod tests {
                         .as_ref()
                         .expect("missing context on FlushRequest");
                     assert_eq!(ctx.request_source, expected_source);
-                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     flush_generations_cloned
                         .lock()
@@ -3732,7 +3732,7 @@ mod tests {
                         .as_ref()
                         .expect("missing context on ResolveLockRequest");
                     assert_eq!(ctx.request_source, expected_source);
-                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     resolve_calls_cloned.fetch_add(1, Ordering::SeqCst);
                     Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
@@ -3798,7 +3798,7 @@ mod tests {
                         .as_ref()
                         .expect("missing context on FlushRequest");
                     assert_eq!(ctx.request_source, expected_source);
-                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
                     Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>)
@@ -3812,7 +3812,7 @@ mod tests {
                         .as_ref()
                         .expect("missing context on ResolveLockRequest");
                     assert_eq!(ctx.request_source, expected_source);
-                    assert_eq!(ctx.disk_full_opt, hook_disk_full_opt.into());
+                    assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     resolve_calls_cloned.fetch_add(1, Ordering::SeqCst);
                     Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)

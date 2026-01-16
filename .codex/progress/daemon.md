@@ -13,12 +13,15 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- cleanup：清理剩余非 generated TODO/FIXME（小项为主），并补齐对应测试
-  - 计划：
-    - `transaction/lock.rs`：LockResolver 的 pd_client TODO（结构调整或明确暂不做的理由）
-    - `pd/cluster.rs`：store meta 字段校验 TODO（明确必要字段或补齐校验）
+- （无）
 
 # 已完成工作
+
+- cleanup：清理剩余非 generated TODO/FIXME（LockResolver pd_client、PD members 字段校验），并补齐测试
+  - 关键决策：`LockResolver` 泛型化并持有 `pd_client/keyspace`（避免 trait object 不可用）；PD 连接阶段显式校验 members/header/leader 关键字段避免 unwrap/panic
+  - 测试：新增 `LockResolver::cleanup_locks` 单测；新增 PD members response 校验单测；修复 `DiskFullOpt` 断言的 `.into()` 推导歧义
+  - 文件：`new-client-rust/src/{transaction/lock.rs,request/plan.rs,pd/cluster.rs,raw/client.rs,transaction/transaction.rs}`，`.codex/progress/daemon.md`
+  - 验证：`cargo fmt`，`cargo test`，`cargo clippy --all-targets`
 
 - new-client-rust 基线 + parity artifacts：Raw/Txn 轮廓、Plan/PlanBuilder、Keyspace、Error/RequestContext、proto/gen；并建立 scope policy/out-of-scope 口径与进度产物
   - 关键决策：对外 API Rust-idiomatic（显式 `Config/Options`）；metrics/trace/interceptor 以能力导向映射，不复刻 Go context/helpers

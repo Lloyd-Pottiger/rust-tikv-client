@@ -1238,7 +1238,7 @@ mod tests {
                     let ctx = req.context.as_ref().expect("context should be set");
                     assert_eq!(ctx.request_source, hook_source);
                     assert_eq!(ctx.resource_group_tag, hook_tag);
-                    assert_eq!(ctx.disk_full_opt, expected_disk_full_opt.into());
+                    assert_eq!(ctx.disk_full_opt, i32::from(expected_disk_full_opt));
                     assert_eq!(ctx.txn_source, expected_txn_source);
                     let resource_ctl_ctx = ctx
                         .resource_control_context
