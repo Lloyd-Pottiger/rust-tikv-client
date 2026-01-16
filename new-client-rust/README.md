@@ -10,6 +10,8 @@ This is the new Rust TiKV client implementation in this repo.
 
 **Migration guide:** `doc/client-go-v2-migration.md`.
 
+**Development:** `doc/development.md`.
+
 This crate provides an easy-to-use client for [TiKV](https://github.com/tikv/tikv), a distributed,
 transactional key-value database written in Rust.
 
@@ -126,6 +128,8 @@ Important note: It is **not recommended or supported** to use both the raw and t
 We welcome your contributions! Contributing code is great, we also appreciate filing [issues](https://github.com/tikv/client-rust/issues/new) to identify bugs and provide feedback, adding tests or examples, and improvements to documentation.
 
 ## Building and testing
+
+See `doc/development.md` for a consolidated, CI-aligned development workflow.
 
 We use the standard Cargo workflows, e.g., `cargo build` and `cargo test`. For faster test runs we
 recommend [nextest](https://nexte.st/index.html):

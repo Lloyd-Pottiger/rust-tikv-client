@@ -13,10 +13,13 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- docs：补齐 crate-level “how to test/benchmark/tiup” 开发者指南（README/doc 分散，整理到单一入口）
-  - 计划：新增 `new-client-rust/doc/development.md`（fmt/clippy/unit/integration/doc/bench/tiup）；README 加链接；CI 不改
+- （无）
 
 # 已完成工作
+
+- docs：新增统一的开发者指南入口（test/bench/tiup）
+  - 关键决策：把 Makefile/README 分散的命令整理到 `doc/development.md`，README 保留概览并链接到单一入口
+  - 文件：`new-client-rust/doc/development.md`，`new-client-rust/README.md`
 
 - safety：梳理关键 unsafe 并补齐回归单测
   - 结论：当前非 generated 代码的 `unsafe {}` 均已带 `// SAFETY:` 合同说明（pin projection / Vec prepend+truncate / codec memmove / repr(transparent) cast）
