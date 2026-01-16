@@ -13,7 +13,6 @@ use tokio::time::sleep;
 
 use crate::pd::Cluster;
 use crate::pd::Connection;
-use crate::PdRetryConfig;
 use crate::proto::keyspacepb;
 use crate::proto::metapb;
 use crate::proto::pdpb::Timestamp;
@@ -23,6 +22,7 @@ use crate::region::RegionWithLeader;
 use crate::region::StoreId;
 use crate::stats::pd_stats;
 use crate::Error;
+use crate::PdRetryConfig;
 use crate::Result;
 use crate::SecurityManager;
 
@@ -165,14 +165,19 @@ impl RetryClientTrait for RetryClient<Cluster> {
     }
 
     async fn get_region_by_id(self: Arc<Self>, region_id: RegionId) -> Result<RegionWithLeader> {
-        retry_mut!(self, self.retry_config, "get_region_by_id", |cluster| async {
-            cluster
-                .get_region_by_id(region_id, self.timeout)
-                .await
-                .and_then(|resp| {
-                    region_from_response(resp, || Error::RegionNotFoundInResponse { region_id })
-                })
-        })
+        retry_mut!(
+            self,
+            self.retry_config,
+            "get_region_by_id",
+            |cluster| async {
+                cluster
+                    .get_region_by_id(region_id, self.timeout)
+                    .await
+                    .and_then(|resp| {
+                        region_from_response(resp, || Error::RegionNotFoundInResponse { region_id })
+                    })
+            }
+        )
     }
 
     async fn get_store(self: Arc<Self>, id: StoreId) -> Result<metapb::Store> {
@@ -194,16 +199,22 @@ impl RetryClientTrait for RetryClient<Cluster> {
     }
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
-        retry!(self, self.retry_config, "get_timestamp", |cluster| cluster.get_timestamp())
+        retry!(self, self.retry_config, "get_timestamp", |cluster| cluster
+            .get_timestamp())
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<bool> {
-        retry_mut!(self, self.retry_config, "update_gc_safepoint", |cluster| async {
-            cluster
-                .update_safepoint(safepoint, self.timeout)
-                .await
-                .map(|resp| resp.new_safe_point == safepoint)
-        })
+        retry_mut!(
+            self,
+            self.retry_config,
+            "update_gc_safepoint",
+            |cluster| async {
+                cluster
+                    .update_safepoint(safepoint, self.timeout)
+                    .await
+                    .map(|resp| resp.new_safe_point == safepoint)
+            }
+        )
     }
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
@@ -303,9 +314,7 @@ mod test {
                 max_reconnect_attempts: 2,
                 leader_change_retry: 1,
             };
-            retry!(client, cfg, "test", |_c| {
-                ready(Ok::<_, Error>(()))
-            })
+            retry!(client, cfg, "test", |_c| { ready(Ok::<_, Error>(())) })
         }
 
         executor::block_on(async {
@@ -395,7 +404,9 @@ mod test {
                 max_reconnect_attempts: 1,
                 leader_change_retry: 3,
             };
-            assert!(retry_max_err(client.clone(), max_retries, cfg).await.is_err());
+            assert!(retry_max_err(client.clone(), max_retries, cfg)
+                .await
+                .is_err());
             assert_eq!(
                 client.cluster.read().await.0.load(Ordering::SeqCst),
                 cfg.leader_change_retry

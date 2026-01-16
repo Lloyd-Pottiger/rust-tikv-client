@@ -40,9 +40,17 @@ pub struct Config {
     pub timeout: Duration,
     pub keyspace: Option<String>,
     pub pd_retry: PdRetryConfig,
+    /// Region cache TTL base (see `region_cache_ttl_jitter`).
+    pub region_cache_ttl: Duration,
+    /// Adds jitter to region cache TTL to avoid thundering herds.
+    ///
+    /// The real TTL is in range `[region_cache_ttl, region_cache_ttl + region_cache_ttl_jitter)`.
+    pub region_cache_ttl_jitter: Duration,
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_REGION_CACHE_TTL: Duration = Duration::from_secs(600);
+const DEFAULT_REGION_CACHE_TTL_JITTER: Duration = Duration::from_secs(60);
 
 impl Default for Config {
     fn default() -> Self {
@@ -53,6 +61,8 @@ impl Default for Config {
             timeout: DEFAULT_REQUEST_TIMEOUT,
             keyspace: None,
             pd_retry: PdRetryConfig::default(),
+            region_cache_ttl: DEFAULT_REGION_CACHE_TTL,
+            region_cache_ttl_jitter: DEFAULT_REGION_CACHE_TTL_JITTER,
         }
     }
 }
@@ -127,6 +137,24 @@ impl Config {
     #[must_use]
     pub fn with_pd_retry_config(mut self, pd_retry: PdRetryConfig) -> Self {
         self.pd_retry = pd_retry;
+        self
+    }
+
+    /// Configure the region cache TTL base and jitter.
+    ///
+    /// The cache is best-effort. A shorter TTL reduces staleness but increases PD load.
+    ///
+    /// # Examples
+    /// ```rust
+    /// # use tikv_client::Config;
+    /// # use std::time::Duration;
+    /// let config = Config::default()
+    ///     .with_region_cache_ttl(Duration::from_secs(300), Duration::from_secs(30));
+    /// ```
+    #[must_use]
+    pub fn with_region_cache_ttl(mut self, base: Duration, jitter: Duration) -> Self {
+        self.region_cache_ttl = base;
+        self.region_cache_ttl_jitter = jitter;
         self
     }
 }

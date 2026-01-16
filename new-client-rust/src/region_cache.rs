@@ -3,12 +3,16 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
+use rand::Rng;
+use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
 
-use crate::common::Error;
 use crate::pd::Cluster;
 use crate::pd::RetryClient;
 use crate::pd::RetryClientTrait;
@@ -21,13 +25,112 @@ use crate::region::StoreId;
 use crate::Key;
 use crate::Result;
 
-const MAX_RETRY_WAITING_CONCURRENT_REQUEST: usize = 4;
+/// The cached region entry along with its expiration timestamp.
+///
+/// `ttl_epoch_sec` is an epoch timestamp in seconds. It is updated on access (atomically) to
+/// approximate an "idle TTL" (hot regions stay cached).
+struct CachedRegion {
+    region: RegionWithLeader,
+    ttl_epoch_sec: AtomicI64,
+}
+
+impl CachedRegion {
+    fn new(region: RegionWithLeader, ttl_epoch_sec: i64) -> CachedRegion {
+        CachedRegion {
+            region,
+            ttl_epoch_sec: AtomicI64::new(ttl_epoch_sec),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RegionCacheTtl {
+    base_sec: i64,
+    jitter_sec: i64,
+}
+
+impl RegionCacheTtl {
+    fn new(base: Duration, jitter: Duration) -> RegionCacheTtl {
+        let base_sec = i64::try_from(base.as_secs()).unwrap_or(i64::MAX);
+        let jitter_sec = i64::try_from(jitter.as_secs()).unwrap_or(i64::MAX);
+        RegionCacheTtl {
+            base_sec,
+            jitter_sec,
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.base_sec > 0
+    }
+
+    fn next_ttl(self, now_epoch_sec: i64) -> i64 {
+        if !self.is_enabled() {
+            return i64::MAX;
+        }
+
+        let jitter = if self.jitter_sec > 0 {
+            rand::thread_rng().gen_range(0..self.jitter_sec)
+        } else {
+            0
+        };
+        now_epoch_sec
+            .saturating_add(self.base_sec)
+            .saturating_add(jitter)
+    }
+
+    /// Returns `true` if the TTL is still valid (and may refresh it); otherwise `false`.
+    fn check_and_refresh(self, ttl_epoch_sec: &AtomicI64, now_epoch_sec: i64) -> bool {
+        if !self.is_enabled() {
+            return true;
+        }
+
+        let mut new_ttl = 0;
+        loop {
+            let ttl = ttl_epoch_sec.load(Ordering::Relaxed);
+            if now_epoch_sec > ttl {
+                return false;
+            }
+
+            // Avoid refreshing TTL too frequently. We only refresh when it's within the base TTL
+            // window (the remaining time is <= base_sec).
+            if ttl > now_epoch_sec.saturating_add(self.base_sec) {
+                return true;
+            }
+
+            if new_ttl == 0 {
+                new_ttl = self.next_ttl(now_epoch_sec);
+            }
+
+            if ttl_epoch_sec
+                .compare_exchange(ttl, new_ttl, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+}
+
+fn now_epoch_sec() -> i64 {
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .unwrap_or(0)
+}
 
 struct RegionCacheMap {
     /// RegionVerID -> Region. It stores the concrete region caches.
     /// RegionVerID is the unique identifer of a region *across time*.
-    // TODO: does it need TTL?
-    ver_id_to_region: HashMap<RegionVerId, RegionWithLeader>,
+    ///
+    /// The entry is removed by explicit invalidation or replaced by `add_region`. Additionally, a
+    /// soft TTL is used to avoid keeping cold/stale regions forever.
+    ver_id_to_region: HashMap<RegionVerId, CachedRegion>,
     /// Start_key -> RegionVerID
     ///
     /// Invariant: there are no intersecting regions in the map at any time.
@@ -35,9 +138,6 @@ struct RegionCacheMap {
     /// RegionID -> RegionVerID. Note: regions with identical ID doesn't necessarily
     /// mean they are the same, they can be different regions across time.
     id_to_ver_id: HashMap<RegionId, RegionVerId>,
-    /// We don't want to spawn multiple queries querying a same region id. If a
-    /// request is on its way, others will wait for its completion.
-    on_my_way_id: HashMap<RegionId, Arc<Notify>>,
 }
 
 impl RegionCacheMap {
@@ -46,7 +146,6 @@ impl RegionCacheMap {
             ver_id_to_region: HashMap::new(),
             key_to_ver_id: BTreeMap::new(),
             id_to_ver_id: HashMap::new(),
-            on_my_way_id: HashMap::new(),
         }
     }
 }
@@ -54,15 +153,23 @@ impl RegionCacheMap {
 pub struct RegionCache<Client = RetryClient<Cluster>> {
     region_cache: RwLock<RegionCacheMap>,
     store_cache: RwLock<HashMap<StoreId, Store>>,
+    in_flight_region_by_id: Mutex<HashMap<RegionId, Arc<Notify>>>,
     inner_client: Arc<Client>,
+    ttl: RegionCacheTtl,
 }
 
 impl<Client> RegionCache<Client> {
-    pub fn new(inner_client: Arc<Client>) -> RegionCache<Client> {
+    pub fn new_with_ttl(
+        inner_client: Arc<Client>,
+        region_cache_ttl: Duration,
+        region_cache_ttl_jitter: Duration,
+    ) -> RegionCache<Client> {
         RegionCache {
             region_cache: RwLock::new(RegionCacheMap::new()),
             store_cache: RwLock::new(HashMap::new()),
+            in_flight_region_by_id: Mutex::new(HashMap::new()),
             inner_client,
+            ttl: RegionCacheTtl::new(region_cache_ttl, region_cache_ttl_jitter),
         }
     }
 }
@@ -70,56 +177,88 @@ impl<Client> RegionCache<Client> {
 impl<C: RetryClientTrait> RegionCache<C> {
     // Retrieve cache entry by key. If there's no entry, query PD and update cache.
     pub async fn get_region_by_key(&self, key: &Key) -> Result<RegionWithLeader> {
-        let region_cache_guard = self.region_cache.read().await;
-        let res = {
-            region_cache_guard
-                .key_to_ver_id
-                .range(..=key)
-                .next_back()
-                .map(|(x, y)| (x.clone(), y.clone()))
-        };
-
-        if let Some((_, candidate_region_ver_id)) = res {
-            let region = region_cache_guard
-                .ver_id_to_region
-                .get(&candidate_region_ver_id)
-                .unwrap();
-
-            if region.contains(key) {
-                return Ok(region.clone());
+        let now = now_epoch_sec();
+        {
+            let region_cache_guard = self.region_cache.read().await;
+            if let Some((_, candidate_ver_id)) =
+                region_cache_guard.key_to_ver_id.range(..=key).next_back()
+            {
+                if let Some(cached) = region_cache_guard.ver_id_to_region.get(candidate_ver_id) {
+                    if self.ttl.check_and_refresh(&cached.ttl_epoch_sec, now)
+                        && cached.region.contains(key)
+                    {
+                        return Ok(cached.region.clone());
+                    }
+                }
             }
         }
-        drop(region_cache_guard);
         self.read_through_region_by_key(key.clone()).await
     }
 
     // Retrieve cache entry by RegionId. If there's no entry, query PD and update cache.
     pub async fn get_region_by_id(&self, id: RegionId) -> Result<RegionWithLeader> {
-        for _ in 0..=MAX_RETRY_WAITING_CONCURRENT_REQUEST {
-            let region_cache_guard = self.region_cache.read().await;
-
-            // check cache
-            let ver_id = region_cache_guard.id_to_ver_id.get(&id);
-            if let Some(ver_id) = ver_id {
-                let region = region_cache_guard.ver_id_to_region.get(ver_id).unwrap();
-                return Ok(region.clone());
+        loop {
+            // Fast path: cache hit.
+            let now = now_epoch_sec();
+            {
+                let region_cache_guard = self.region_cache.read().await;
+                if let Some(ver_id) = region_cache_guard.id_to_ver_id.get(&id) {
+                    if let Some(cached) = region_cache_guard.ver_id_to_region.get(ver_id) {
+                        if self.ttl.check_and_refresh(&cached.ttl_epoch_sec, now) {
+                            return Ok(cached.region.clone());
+                        }
+                    }
+                }
             }
 
-            // check concurrent requests
-            let notify = region_cache_guard.on_my_way_id.get(&id).cloned();
-            let notified = notify.as_ref().map(|notify| notify.notified());
-            drop(region_cache_guard);
+            // Slow path: join an in-flight load, or become the loader.
+            let (notify, should_fetch) = {
+                let mut in_flight = self.in_flight_region_by_id.lock().await;
+                match in_flight.entry(id) {
+                    std::collections::hash_map::Entry::Occupied(e) => (e.get().clone(), false),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        let notify = Arc::new(Notify::new());
+                        e.insert(notify.clone());
+                        (notify, true)
+                    }
+                }
+            };
 
-            if let Some(n) = notified {
-                n.await;
+            if !should_fetch {
+                notify.notified().await;
                 continue;
-            } else {
-                return self.read_through_region_by_id(id).await;
             }
+
+            // Double-check after becoming the loader (another path may have filled the cache).
+            let now = now_epoch_sec();
+            {
+                let region_cache_guard = self.region_cache.read().await;
+                if let Some(ver_id) = region_cache_guard.id_to_ver_id.get(&id) {
+                    if let Some(cached) = region_cache_guard.ver_id_to_region.get(ver_id) {
+                        if self.ttl.check_and_refresh(&cached.ttl_epoch_sec, now) {
+                            let mut in_flight = self.in_flight_region_by_id.lock().await;
+                            in_flight.remove(&id);
+                            drop(in_flight);
+                            notify.notify_waiters();
+                            return Ok(cached.region.clone());
+                        }
+                    }
+                }
+            }
+
+            // Fetch from PD without holding any cache locks.
+            let fetched = self.inner_client.clone().get_region_by_id(id).await;
+            if let Ok(region) = &fetched {
+                self.add_region(region.clone()).await;
+            }
+
+            // Always clear the in-flight marker first, then wake waiters.
+            let mut in_flight = self.in_flight_region_by_id.lock().await;
+            in_flight.remove(&id);
+            drop(in_flight);
+            notify.notify_waiters();
+            return fetched;
         }
-        Err(Error::StringError(format!(
-            "Concurrent PD requests failed for {MAX_RETRY_WAITING_CONCURRENT_REQUEST} times"
-        )))
     }
 
     pub async fn get_store_by_id(&self, id: StoreId) -> Result<Store> {
@@ -137,28 +276,6 @@ impl<C: RetryClientTrait> RegionCache<C> {
         Ok(region)
     }
 
-    /// Force read through (query from PD) and update cache
-    async fn read_through_region_by_id(&self, id: RegionId) -> Result<RegionWithLeader> {
-        // put a notify to let others know the region id is being queried
-        let notify = Arc::new(Notify::new());
-        {
-            let mut region_cache_guard = self.region_cache.write().await;
-            region_cache_guard.on_my_way_id.insert(id, notify.clone());
-        }
-
-        let region = self.inner_client.clone().get_region_by_id(id).await?;
-        self.add_region(region.clone()).await;
-
-        // notify others
-        {
-            let mut region_cache_guard = self.region_cache.write().await;
-            notify.notify_waiters();
-            region_cache_guard.on_my_way_id.remove(&id);
-        }
-
-        Ok(region)
-    }
-
     async fn read_through_store_by_id(&self, id: StoreId) -> Result<Store> {
         let store = self.inner_client.clone().get_store(id).await?;
         self.store_cache.write().await.insert(id, store.clone());
@@ -166,8 +283,12 @@ impl<C: RetryClientTrait> RegionCache<C> {
     }
 
     pub async fn add_region(&self, region: RegionWithLeader) {
-        // FIXME: will it be the performance bottleneck?
+        // Keep the critical section small: `RwLock` is global for region index invariants, so we
+        // avoid any `.await` and do only local computations while holding it.
         let mut cache = self.region_cache.write().await;
+
+        let now = now_epoch_sec();
+        let ttl_epoch_sec = self.ttl.next_ttl(now);
 
         let end_key = region.end_key();
         let mut to_be_removed: HashSet<RegionVerId> = HashSet::new();
@@ -178,33 +299,55 @@ impl<C: RetryClientTrait> RegionCache<C> {
             }
         }
 
-        let mut search_range = {
-            if end_key.is_empty() {
-                cache.key_to_ver_id.range(..)
-            } else {
-                cache.key_to_ver_id.range(..end_key)
+        // Collect overlapped regions by scanning backwards from `end_key`. This relies on the
+        // invariant that cached regions are non-overlapping and ordered by their start key.
+        //
+        // NOTE: In TiKV an empty end_key means "+inf". We must treat it as always overlapping.
+        let region_start_key = region.region.start_key.as_slice();
+        let stale_start_keys = {
+            let mut stale_start_keys = Vec::new();
+            let mut search_range = {
+                if end_key.is_empty() {
+                    cache.key_to_ver_id.range(..)
+                } else {
+                    cache.key_to_ver_id.range(..end_key)
+                }
+            };
+            while let Some((start_key_in_cache, ver_id_in_cache)) = search_range.next_back() {
+                let Some(cached) = cache.ver_id_to_region.get(ver_id_in_cache) else {
+                    stale_start_keys.push(start_key_in_cache.clone());
+                    continue;
+                };
+                let end_key_in_cache = cached.region.region.end_key.as_slice();
+                let overlaps = end_key_in_cache.is_empty() || end_key_in_cache > region_start_key;
+                if overlaps {
+                    to_be_removed.insert(ver_id_in_cache.clone());
+                } else {
+                    break;
+                }
             }
+            stale_start_keys
         };
-        while let Some((_, ver_id_in_cache)) = search_range.next_back() {
-            let region_in_cache = cache.ver_id_to_region.get(ver_id_in_cache).unwrap();
-
-            if region_in_cache.region.end_key > region.region.start_key {
-                to_be_removed.insert(ver_id_in_cache.clone());
-            } else {
-                break;
-            }
+        for start_key in stale_start_keys {
+            cache.key_to_ver_id.remove(&start_key);
         }
 
         for ver_id in to_be_removed {
-            let region_to_remove = cache.ver_id_to_region.remove(&ver_id).unwrap();
-            cache.key_to_ver_id.remove(&region_to_remove.start_key());
-            cache.id_to_ver_id.remove(&region_to_remove.id());
+            let Some(region_to_remove) = cache.ver_id_to_region.remove(&ver_id) else {
+                continue;
+            };
+            let start_key = region_to_remove.region.start_key();
+            cache.key_to_ver_id.remove(&start_key);
+            cache.id_to_ver_id.remove(&region_to_remove.region.id());
         }
+        let ver_id = region.ver_id();
         cache
             .key_to_ver_id
-            .insert(region.start_key(), region.ver_id());
-        cache.id_to_ver_id.insert(region.id(), region.ver_id());
-        cache.ver_id_to_region.insert(region.ver_id(), region);
+            .insert(region.start_key(), ver_id.clone());
+        cache.id_to_ver_id.insert(region.id(), ver_id.clone());
+        cache
+            .ver_id_to_region
+            .insert(ver_id, CachedRegion::new(region, ttl_epoch_sec));
     }
 
     pub async fn update_leader(
@@ -214,8 +357,11 @@ impl<C: RetryClientTrait> RegionCache<C> {
     ) -> Result<()> {
         let mut cache = self.region_cache.write().await;
         let region_entry = cache.ver_id_to_region.get_mut(&ver_id);
-        if let Some(region) = region_entry {
-            region.leader = Some(leader);
+        if let Some(cached) = region_entry {
+            cached.region.leader = Some(leader);
+            cached
+                .ttl_epoch_sec
+                .store(self.ttl.next_ttl(now_epoch_sec()), Ordering::Relaxed);
         }
 
         Ok(())
@@ -225,8 +371,8 @@ impl<C: RetryClientTrait> RegionCache<C> {
         let mut cache = self.region_cache.write().await;
         let region_entry = cache.ver_id_to_region.get(&ver_id);
         if let Some(region) = region_entry {
-            let id = region.id();
-            let start_key = region.start_key();
+            let id = region.region.id();
+            let start_key = region.region.start_key();
             cache.ver_id_to_region.remove(&ver_id);
             cache.id_to_ver_id.remove(&id);
             cache.key_to_ver_id.remove(&start_key);
@@ -278,8 +424,10 @@ mod test {
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use tokio::sync::Mutex;
@@ -361,7 +509,11 @@ mod test {
     #[tokio::test]
     async fn cache_is_used() -> Result<()> {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(
+            retry_client.clone(),
+            Duration::from_secs(600),
+            Duration::from_secs(60),
+        );
         retry_client.regions.lock().await.insert(
             1,
             RegionWithLeader {
@@ -437,9 +589,46 @@ mod test {
     }
 
     #[tokio::test]
+    async fn cache_entry_expires_by_ttl() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(
+            retry_client.clone(),
+            Duration::from_secs(600),
+            Duration::ZERO,
+        );
+
+        let region1 = region(1, vec![], vec![10]);
+        retry_client.regions.lock().await.insert(1, region1);
+
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+        let ver_id = cache.get_region_by_id(1).await?.ver_id();
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 1);
+
+        // Force the cached entry to be expired, then verify it is reloaded from PD.
+        {
+            let guard = cache.region_cache.read().await;
+            let cached = guard
+                .ver_id_to_region
+                .get(&ver_id)
+                .expect("region must be cached after get_region_by_id");
+            cached
+                .ttl_epoch_sec
+                .store(super::now_epoch_sec() - 1, Ordering::Relaxed);
+        }
+
+        cache.get_region_by_id(1).await?;
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_add_disjoint_regions() {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(
+            retry_client.clone(),
+            Duration::from_secs(600),
+            Duration::from_secs(60),
+        );
         let region1 = region(1, vec![], vec![10]);
         let region2 = region(2, vec![10], vec![20]);
         let region3 = region(3, vec![30], vec![]);
@@ -458,7 +647,11 @@ mod test {
     #[tokio::test]
     async fn test_add_intersecting_regions() {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(
+            retry_client.clone(),
+            Duration::from_secs(600),
+            Duration::from_secs(60),
+        );
 
         cache.add_region(region(1, vec![], vec![10])).await;
         cache.add_region(region(2, vec![10], vec![20])).await;
@@ -494,9 +687,37 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_add_region_removes_overlapping_tail_region() {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(
+            retry_client.clone(),
+            Duration::from_secs(600),
+            Duration::from_secs(60),
+        );
+
+        let head = region(1, vec![], vec![30]);
+        let tail = region(2, vec![30], vec![]);
+        cache.add_region(head.clone()).await;
+        cache.add_region(tail).await;
+
+        // Simulate a split in the old tail region: the old `[30, +inf)` must be removed.
+        let mid = region(3, vec![50], vec![60]);
+        cache.add_region(mid.clone()).await;
+
+        let mut expected_cache: BTreeMap<Key, _> = BTreeMap::new();
+        expected_cache.insert(vec![].into(), head);
+        expected_cache.insert(vec![50].into(), mid);
+        assert(&cache, &expected_cache).await;
+    }
+
+    #[tokio::test]
     async fn test_get_region_by_key() -> Result<()> {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(
+            retry_client.clone(),
+            Duration::from_secs(600),
+            Duration::from_secs(60),
+        );
 
         let region1 = region(1, vec![], vec![10]);
         let region2 = region(2, vec![10], vec![20]);
@@ -531,7 +752,11 @@ mod test {
         expected_cache: &BTreeMap<Key, RegionWithLeader>,
     ) {
         let guard = cache.region_cache.read().await;
-        let mut actual_keys = guard.ver_id_to_region.values().collect::<Vec<_>>();
+        let mut actual_keys = guard
+            .ver_id_to_region
+            .values()
+            .map(|r| &r.region)
+            .collect::<Vec<_>>();
         let mut expected_keys = expected_cache.values().collect::<Vec<_>>();
         actual_keys.sort_by_cached_key(|r| r.id());
         expected_keys.sort_by_cached_key(|r| r.id());

@@ -333,7 +333,11 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             kv_client_cache,
             kv_connect: kv_connect(security_mgr),
             enable_codec,
-            region_cache: RegionCache::new(pd),
+            region_cache: RegionCache::new_with_ttl(
+                pd,
+                config.region_cache_ttl,
+                config.region_cache_ttl_jitter,
+            ),
         })
     }
 
