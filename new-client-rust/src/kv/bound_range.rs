@@ -180,7 +180,9 @@ impl RangeBounds<Key> for BoundRange {
     }
 }
 
-// FIXME `==` should not `clone`
+// Convenience `PartialEq` for doc/tests.
+//
+// The tuple is borrowed, so we need to `clone` to convert `T` into an owned `Key`.
 impl<T: Into<Key> + Clone> PartialEq<(Bound<T>, Bound<T>)> for BoundRange {
     fn eq(&self, other: &(Bound<T>, Bound<T>)) -> bool {
         self.from == convert_to_bound_key(other.0.clone())
