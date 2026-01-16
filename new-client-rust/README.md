@@ -156,6 +156,10 @@ For a small smoke suite (one raw + one txn test):
 make integration-test-smoke
 ```
 
+## Benchmarks
+
+See `doc/bench.md` for microbenchmarks (`cargo bench`) and optional flamegraph workflow.
+
 Stop and clean up the playground:
 
 ```

@@ -131,8 +131,16 @@ pub mod resource_manager {
     pub use crate::proto::resource_manager::*;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 mod mock;
+
+/// Test and benchmark utilities (feature-gated).
+#[cfg(feature = "test-util")]
+pub mod test_util {
+    pub use super::mock::MockKvClient;
+    pub use super::mock::MockPdClient;
+}
+
 #[cfg(test)]
 mod proptests;
 

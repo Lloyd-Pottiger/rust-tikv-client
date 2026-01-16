@@ -12,32 +12,32 @@ use async_trait::async_trait;
 use derive_new::new;
 
 use crate::pd::PdClient;
-use crate::pd::PdRpcClient;
-use crate::pd::RetryClient;
 use crate::proto::keyspacepb;
 use crate::proto::metapb::RegionEpoch;
 use crate::proto::metapb::{self};
 use crate::region::RegionId;
 use crate::region::RegionWithLeader;
-use crate::store::KvConnect;
 use crate::store::RegionStore;
 use crate::store::Request;
 use crate::store::{KvClient, Store};
-use crate::Config;
 use crate::Error;
 use crate::Key;
 use crate::Result;
 use crate::Timestamp;
 
+#[cfg(test)]
+use crate::store::KvConnect;
+
 /// Create a `PdRpcClient` with it's internals replaced with mocks so that the
 /// client can be tested without doing any RPC calls.
-pub async fn pd_rpc_client() -> PdRpcClient<MockKvConnect, MockCluster> {
-    let config = Config::default();
-    PdRpcClient::new(
+#[cfg(test)]
+pub async fn pd_rpc_client() -> crate::pd::PdRpcClient<MockKvConnect, MockCluster> {
+    let config = crate::Config::default();
+    crate::pd::PdRpcClient::new(
         config.clone(),
         |_| MockKvConnect,
         |sm| {
-            futures::future::ok(RetryClient::new_with_cluster(
+            futures::future::ok(crate::pd::RetryClient::new_with_cluster(
                 sm,
                 config.timeout,
                 config.pd_retry,
@@ -69,8 +69,10 @@ impl MockKvClient {
     }
 }
 
+#[cfg(test)]
 pub struct MockKvConnect;
 
+#[cfg(test)]
 pub struct MockCluster;
 
 #[derive(new)]
@@ -88,6 +90,7 @@ impl KvClient for MockKvClient {
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl KvConnect for MockKvConnect {
     type KvClient = MockKvClient;
@@ -107,7 +110,7 @@ impl MockPdClient {
         }
     }
 
-    pub fn region1() -> RegionWithLeader {
+    pub(crate) fn region1() -> RegionWithLeader {
         let mut region = RegionWithLeader::default();
         region.region.id = 1;
         region.region.start_key = vec![];
@@ -126,7 +129,7 @@ impl MockPdClient {
         region
     }
 
-    pub fn region2() -> RegionWithLeader {
+    pub(crate) fn region2() -> RegionWithLeader {
         let mut region = RegionWithLeader::default();
         region.region.id = 2;
         region.region.start_key = vec![10];
@@ -145,7 +148,7 @@ impl MockPdClient {
         region
     }
 
-    pub fn region3() -> RegionWithLeader {
+    pub(crate) fn region3() -> RegionWithLeader {
         let mut region = RegionWithLeader::default();
         region.region.id = 3;
         region.region.start_key = vec![250, 250];

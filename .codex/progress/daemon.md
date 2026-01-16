@@ -9,16 +9,18 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- bench：增加基准测试与压测指引（避免“猜测性能”）
-  - 步骤：
-    - 增加 `benches/`（criterion）：keyspace encode/truncate、plan shard/merge 开销（mock 驱动）
-    - 文档：如何跑 bench、如何解读、如何做 flamegraph（可选）
+- （无）
 
 # 待做工作
 
 - （无）
 
 # 已完成工作
+
+- bench：增加基准测试与压测指引（避免“猜测性能”）
+  - 产出：criterion microbench（keyspace encode/truncate；plan shard/dispatch/merge，mock 驱动、无需 TiKV 集群）；`doc/bench.md`（运行方式 + 可选 flamegraph）；README 增加入口
+  - 关键决策：引入 feature `test-util` 暴露 mock 给 bench 使用，同时保持生产构建不编译 mock
+  - 文件：`new-client-rust/benches/{keyspace,plan}.rs`，`new-client-rust/doc/bench.md`，`new-client-rust/Cargo.toml`，`new-client-rust/src/{lib,mock}.rs`，`new-client-rust/README.md`
 
 - observability：提供 `tracing` feature，将 client-side trace events 输出到 tracing
   - 关键决策：保留现有 hook API；`enable_tracing_events()` 在不覆盖用户 sink 的前提下追加 tracing sink；默认无 filter 时启用全部 category

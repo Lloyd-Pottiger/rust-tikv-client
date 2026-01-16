@@ -13,6 +13,8 @@ default = ["prometheus"]
 prometheus = ["dep:prometheus", "prometheus/push", "prometheus/process"]
 # Emit client-side trace events (`tikv_client::trace::trace_event`) via the `tracing` ecosystem.
 tracing = ["dep:tracing"]
+# Test/benchmark utilities (mocks) for internal development.
+test-util = []
 # Enable integration tests with a running TiKV and PD instance.
 # Use $PD_ADDRS, comma separated, to set the addresses the tests use.
 integration-tests = []
@@ -50,6 +52,7 @@ tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
 clap = "2"
+criterion = "0.5"
 env_logger = "0.10"
 fail = { version = "0.4", features = ["failpoints"] }
 proptest = "1"
@@ -65,3 +68,12 @@ tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
 name = "failpoint_tests"
 path = "tests/failpoint_tests.rs"
 required-features = ["fail/failpoints"]
+
+[[bench]]
+name = "keyspace"
+harness = false
+
+[[bench]]
+name = "plan"
+harness = false
+required-features = ["test-util"]
