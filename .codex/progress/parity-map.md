@@ -50,9 +50,13 @@
 - `client-go/metrics` / `trace`
   - Rust: 计划追加 `tikv_client::metrics`（prometheus feature-gated）+ `tikv_client::trace`（建议基于 `tracing`/OpenTelemetry）
 
-## 剩余 gap（当前视角，按优先级）
+## 当前差异 / 后续迭代点
 
-- `config`/`retry`：大量 Go 侧 knobs 尚未映射到 Rust 的 `Config`/`TransactionOptions`（例如 grpc keepalive / store liveness / backoff cfg 等）。
-- `tikvrpc`：若需要对外暴露“按命令类型构造请求/响应”的公共层，需要设计 Rust-y wrapper；当前以 `request` 作为低层 API。
-- `metrics`/`trace`：目前未对齐 client-go 的导出 metrics/trace API；需要明确 feature-gate 策略与最小 public surface。
-- `util/*` 与 `txnkv/*` 子包：多数属于实现细节/调试工具；需要逐项判定 public vs capability-only，并在 checklist 标注。
+> 说明：这里的条目多数是 **Rust 侧刻意不复刻** 的 client-go public surface（见 scope policy）。
+
+- `config`/`retry`：Rust 侧仅暴露显式 `Config/TransactionOptions/RetryOptions`；client-go 的全局可变 config 与大量 knobs 在 checklist 中已标注为 out-of-scope/capability-only。
+- `tikvrpc`：不复刻 Go 的 `CmdType/Request/Response` 枚举式 wrapper；低层能力以 `request::PlanBuilder` + kvproto request/response 覆盖。
+- `metrics`/`trace`：保持最小 public surface + feature-gate；`tracing` 集成通过 `tikv_client::trace::enable_tracing_events()`（feature `tracing`）对接生态。
+- `util/*` 与 `txnkv/*`：多数属于实现细节/调试工具；映射与取舍已在 checklist 标注。
+
+其余工程性 hardening（集成测、doc/bench、CI guardrail）以 `.codex/progress/daemon.md` 为准。

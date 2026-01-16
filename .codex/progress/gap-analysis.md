@@ -14,13 +14,15 @@
 - Trace/Metrics：trace hooks（最小 public surface）+ prometheus feature-gate 的 metrics（`new-client-rust/src/{trace.rs,metrics.rs,stats.rs}`）。
 - parity artifacts：inventory + checklist + scope policy（`.codex/progress/{client-go-api-inventory.md,parity-checklist.md,parity-map.md}`）。
 
-## 相对 client-go(v2) 仍缺（按能力域，粗粒度）
+## 相对 client-go(v2) 的差异（按能力域，粗粒度）
+
+> 多数差异为 **Rust 侧刻意不复刻** 的 client-go public surface（见 checklist 的 out-of-scope/capability-only 标注）。
 
 ### Public API surface
 - `config`/`retry`：Rust 侧仅暴露最小必要配置（`Config`/`TransactionOptions`/builders）；client-go 的全局可变 config 与大量 knobs 多数被标注为 out-of-scope/capability-only。
 - `tikvrpc`：不复刻 Go 的 `CmdType/Request/Response` 枚举式 wrapper；低层能力由 `PlanBuilder` + kvproto request 直接覆盖。
 - `trace/metrics`：目前为最小 public surface；尚未提供更 Rust 生态的 `tracing`/OpenTelemetry 对接与 client-go 级别的 label/handle 兼容层（已在 checklist 标注为 out-of-scope）。
-- `util/*`、`txnkv/*` 子包：导出符号已在 checklist 完成 public vs capability-only vs out-of-scope 标注；后续缺口以 TODO/FIXME 形式跟踪（见下节）。
+- `util/*`、`txnkv/*` 子包：多数属于实现细节/调试工具；映射与取舍已在 checklist 标注。
 
 ### Protocol/detail gaps（可直接落任务）
 - resolve-lock-lite 已实现并按 client-go 语义做 gating（region retry attempt>0 禁用等）；细节以单测与集成测试行为为准。
@@ -33,6 +35,5 @@
 
 ## 结论（策略建议）
 
-- `new-client-rust` 以 `client-rust` 迁移为起点的策略仍成立（PD/region cache/request plan/raw/txn），后续以 client-go(v2) 缺口逐步补齐；
-  - 理由：已覆盖事务核心协议（含 1PC/async commit 的雏形），能显著降低重写成本，并减少“猜测实现”风险。
-  - 后续以 `.codex/progress/parity-checklist.md` 为签名级跟踪入口，并在 `.codex/progress/parity-map.md` 明确哪些为 Rust public / capability-only / out-of-scope。
+- `new-client-rust` 以 `client-rust` 迁移为起点的策略成立：能力/协议已覆盖；Rust public surface 维持“前门小、实现细节隐藏”。
+- 后续迭代重点应放在 hardening（integration/doc/bench/CI guardrail），以 `.codex/progress/daemon.md` 为准。

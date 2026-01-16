@@ -9,11 +9,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- docs：刷新 parity artifacts（`parity-map.md`/`gap-analysis.md`）使其与当前实现一致
-  - 步骤：
-    - 复查 `.codex/progress/parity-map.md` 中“剩余 gap”段落是否仍准确；不准确则更新/移除
-    - 复查 `.codex/progress/gap-analysis.md` 的“仍缺/结论”段落，确保与当前 scope policy 一致
-    - 保持精简：只保留对后续迭代有指导意义的内容
+- （无）
 
 # 待做工作
 
@@ -56,3 +52,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：删除长期禁用且依赖真实集群的 proptests，测试覆盖由 unit/integration tests 承担
   - 改动：移除 `#[cfg(test)] mod proptests;` 与 `new-client-rust/src/proptests/*`
   - 文件：`new-client-rust/src/lib.rs`
+
+- docs：刷新 parity artifacts，使其与当前 scope policy/实现一致
+  - 关键决策：把“剩余 gap”改为“差异/后续迭代点”，避免误导为功能缺口；结论聚焦 hardening 与 daemon.md
+  - 文件：`.codex/progress/parity-map.md`，`.codex/progress/gap-analysis.md`
