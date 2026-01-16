@@ -318,10 +318,10 @@ Conventions:
 - [ ] `func FindNextStaleStoreID(collector prometheus.Collector, validStoreIDs map[uint64]struct{}) uint64` | Rust:  | Tests: 
 - [ ] `func GetStoreMetricVecList() []MetricVec` | Rust:  | Tests: 
 - [ ] `func GetTxnCommitCounter() TxnCommitCounter` | Rust:  | Tests: 
-- [ ] `func InitMetrics(namespace, subsystem string)` | Rust:  | Tests: 
-- [ ] `func InitMetricsWithConstLabels(namespace, subsystem string, constLabels prometheus.Labels)` | Rust:  | Tests: 
+- [x] `func InitMetrics(namespace, subsystem string)` | Rust: N/A (out-of-scope: fixed metric names; use `metrics::register`) | Tests: N/A
+- [x] `func InitMetricsWithConstLabels(namespace, subsystem string, constLabels prometheus.Labels)` | Rust: N/A (out-of-scope: fixed metric names; use `metrics::register`) | Tests: N/A
 - [ ] `func ObserveReadSLI(readKeys uint64, readTime float64, readSize float64)` | Rust:  | Tests: 
-- [ ] `func RegisterMetrics()` | Rust:  | Tests: 
+- [x] `func RegisterMetrics()` | Rust: `tikv_client::metrics::register` (new-client-rust/src/metrics.rs) | Tests: `new-client-rust/src/metrics.rs (gather_contains_core_metrics)`
 
 ### Consts
 - [ ] `LabelBatchRecvLoop` | Rust:  | Tests: 
@@ -1102,15 +1102,15 @@ Conventions:
 ## tikvrpc/interceptor (package interceptor)
 
 ### Types
-- [ ] `type MockInterceptorManager struct` | Rust:  | Tests: 
+- [x] `type MockInterceptorManager struct` | Rust: `tikv_client::interceptor::MockInterceptorManager` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
 - [x] `type RPCInterceptor interface` | Rust: `tikv_client::interceptor::RpcInterceptor` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/raw/client.rs (test_request_source_and_resource_group_tag)`
 - [x] `type RPCInterceptorChain struct` | Rust: `tikv_client::interceptor::RpcInterceptorChain` (new-client-rust/src/interceptor.rs) | Tests: N/A
-- [ ] `type RPCInterceptorFunc func(target string, req *tikvrpc.Request) (*tikvrpc.Response, error)` | Rust:  | Tests: 
+- [x] `type RPCInterceptorFunc func(target string, req *tikvrpc.Request) (*tikvrpc.Response, error)` | Rust: `tikv_client::interceptor::RpcInterceptorFunc` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
 
 ### Functions
-- [ ] `func ChainRPCInterceptors(first RPCInterceptor, rest ...RPCInterceptor) RPCInterceptor` | Rust:  | Tests: 
-- [ ] `func GetRPCInterceptorFromCtx(ctx context.Context) RPCInterceptor` | Rust:  | Tests: 
-- [ ] `func NewMockInterceptorManager() *MockInterceptorManager` | Rust:  | Tests: 
+- [x] `func ChainRPCInterceptors(first RPCInterceptor, rest ...RPCInterceptor) RPCInterceptor` | Rust: `tikv_client::interceptor::chain_rpc_interceptors` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (chain_rpc_interceptors_dedup_by_name)`
+- [x] `func GetRPCInterceptorFromCtx(ctx context.Context) RPCInterceptor` | Rust: N/A (out-of-scope: no Go-style context; configure on PlanBuilder/client) | Tests: N/A
+- [x] `func NewMockInterceptorManager() *MockInterceptorManager` | Rust: `MockInterceptorManager::new` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
 - [x] `func NewRPCInterceptor(name string, fn func(next RPCInterceptorFunc) RPCInterceptorFunc) RPCInterceptor` | Rust: `tikv_client::interceptor::rpc_interceptor` (new-client-rust/src/interceptor.rs) | Tests: N/A
 - [x] `func NewRPCInterceptorChain() *RPCInterceptorChain` | Rust: `RpcInterceptorChain::new` (new-client-rust/src/interceptor.rs) | Tests: N/A
 - [x] `func WithRPCInterceptor(ctx context.Context, interceptor RPCInterceptor) context.Context` | Rust: N/A (out-of-scope: configure on client via `with_rpc_interceptor`) | Tests: N/A
@@ -1124,50 +1124,50 @@ Conventions:
 ### Methods
 - [x] `func (c *RPCInterceptorChain) Len() int` | Rust: `RpcInterceptorChain::len` (new-client-rust/src/interceptor.rs) | Tests: N/A
 - [x] `func (c *RPCInterceptorChain) Link(it RPCInterceptor) *RPCInterceptorChain` | Rust: `RpcInterceptorChain::link` (new-client-rust/src/interceptor.rs) | Tests: N/A
-- [ ] `func (c *RPCInterceptorChain) Name() string` | Rust:  | Tests: 
-- [ ] `func (c *RPCInterceptorChain) Wrap(next RPCInterceptorFunc) RPCInterceptorFunc` | Rust:  | Tests: 
-- [ ] `func (m *MockInterceptorManager) BeginCount() int` | Rust:  | Tests: 
-- [ ] `func (m *MockInterceptorManager) CreateMockInterceptor(name string) RPCInterceptor` | Rust:  | Tests: 
-- [ ] `func (m *MockInterceptorManager) EndCount() int` | Rust:  | Tests: 
-- [ ] `func (m *MockInterceptorManager) ExecLog() []string` | Rust:  | Tests: 
-- [ ] `func (m *MockInterceptorManager) Reset()` | Rust:  | Tests: 
+- [x] `func (c *RPCInterceptorChain) Name() string` | Rust: `RpcInterceptorChain::name` (new-client-rust/src/interceptor.rs) | Tests: N/A
+- [x] `func (c *RPCInterceptorChain) Wrap(next RPCInterceptorFunc) RPCInterceptorFunc` | Rust: `RpcInterceptorChain::wrap` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (m *MockInterceptorManager) BeginCount() int` | Rust: `MockInterceptorManager::begin_count` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (m *MockInterceptorManager) CreateMockInterceptor(name string) RPCInterceptor` | Rust: `MockInterceptorManager::create_mock_interceptor` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (m *MockInterceptorManager) EndCount() int` | Rust: `MockInterceptorManager::end_count` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (m *MockInterceptorManager) ExecLog() []string` | Rust: `MockInterceptorManager::exec_log` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
+- [x] `func (m *MockInterceptorManager) Reset()` | Rust: `MockInterceptorManager::reset` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/interceptor.rs (interceptor_chain_wrap_is_onion_order)`
 
 ## trace (package trace)
 
 ### Types
-- [ ] `type Category uint32` | Rust:  | Tests: 
-- [ ] `type IsCategoryEnabledFunc func(category Category) bool` | Rust:  | Tests: 
+- [x] `type Category uint32` | Rust: `tikv_client::trace::Category` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `type IsCategoryEnabledFunc func(category Category) bool` | Rust: `tikv_client::trace::IsCategoryEnabledFn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
 - [ ] `type TraceControlExtractorFunc func(ctx context.Context) TraceControlFlags` | Rust:  | Tests: 
-- [ ] `type TraceControlFlags uint64` | Rust:  | Tests: 
-- [ ] `type TraceEventFunc func(ctx context.Context, category Category, name string, fields ...zap.Field)` | Rust:  | Tests: 
+- [x] `type TraceControlFlags uint64` | Rust: `tikv_client::trace::TraceControlFlags` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `type TraceEventFunc func(ctx context.Context, category Category, name string, fields ...zap.Field)` | Rust: `tikv_client::trace::TraceEventFn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
 
 ### Functions
 - [ ] `func ContextWithTraceID(ctx context.Context, traceID []byte) context.Context` | Rust:  | Tests: 
 - [ ] `func GetTraceControlFlags(ctx context.Context) TraceControlFlags` | Rust:  | Tests: 
 - [ ] `func ImmediateLoggingEnabled(ctx context.Context) bool` | Rust:  | Tests: 
-- [ ] `func IsCategoryEnabled(category Category) bool` | Rust:  | Tests: 
-- [ ] `func SetIsCategoryEnabledFunc(fn IsCategoryEnabledFunc)` | Rust:  | Tests: 
+- [x] `func IsCategoryEnabled(category Category) bool` | Rust: `tikv_client::trace::is_category_enabled` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `func SetIsCategoryEnabledFunc(fn IsCategoryEnabledFunc)` | Rust: `tikv_client::trace::set_is_category_enabled_fn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
 - [ ] `func SetTraceControlExtractor(fn TraceControlExtractorFunc)` | Rust:  | Tests: 
-- [ ] `func SetTraceEventFunc(fn TraceEventFunc)` | Rust:  | Tests: 
-- [ ] `func TraceEvent(ctx context.Context, category Category, name string, fields ...zap.Field)` | Rust:  | Tests: 
+- [x] `func SetTraceEventFunc(fn TraceEventFunc)` | Rust: `tikv_client::trace::set_trace_event_fn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `func TraceEvent(ctx context.Context, category Category, name string, fields ...zap.Field)` | Rust: `tikv_client::trace::trace_event` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
 - [ ] `func TraceIDFromContext(ctx context.Context) []byte` | Rust:  | Tests: 
 
 ### Consts
-- [ ] `CategoryKVRequest` | Rust:  | Tests: 
-- [ ] `CategoryRegionCache` | Rust:  | Tests: 
-- [ ] `CategoryTxn2PC` | Rust:  | Tests: 
-- [ ] `CategoryTxnLockResolve` | Rust:  | Tests: 
-- [ ] `FlagImmediateLog` | Rust:  | Tests: 
-- [ ] `FlagTiKVCategoryReadDetails` | Rust:  | Tests: 
-- [ ] `FlagTiKVCategoryRequest` | Rust:  | Tests: 
-- [ ] `FlagTiKVCategoryWriteDetails` | Rust:  | Tests: 
+- [x] `CategoryKVRequest` | Rust: `trace::CATEGORY_KV_REQUEST` (new-client-rust/src/trace.rs) | Tests: N/A
+- [x] `CategoryRegionCache` | Rust: `trace::CATEGORY_REGION_CACHE` (new-client-rust/src/trace.rs) | Tests: N/A
+- [x] `CategoryTxn2PC` | Rust: `trace::CATEGORY_TXN_2PC` (new-client-rust/src/trace.rs) | Tests: N/A
+- [x] `CategoryTxnLockResolve` | Rust: `trace::CATEGORY_TXN_LOCK_RESOLVE` (new-client-rust/src/trace.rs) | Tests: N/A
+- [x] `FlagImmediateLog` | Rust: `trace::FLAG_IMMEDIATE_LOG` (new-client-rust/src/trace.rs) | Tests: N/A
+- [x] `FlagTiKVCategoryReadDetails` | Rust: `trace::FLAG_TIKV_CATEGORY_READ_DETAILS` (new-client-rust/src/trace.rs) | Tests: N/A
+- [x] `FlagTiKVCategoryRequest` | Rust: `trace::FLAG_TIKV_CATEGORY_REQUEST` (new-client-rust/src/trace.rs) | Tests: N/A
+- [x] `FlagTiKVCategoryWriteDetails` | Rust: `trace::FLAG_TIKV_CATEGORY_WRITE_DETAILS` (new-client-rust/src/trace.rs) | Tests: N/A
 
 ### Vars
 - (none)
 
 ### Methods
-- [ ] `func (f TraceControlFlags) Has(flag TraceControlFlags) bool` | Rust:  | Tests: 
-- [ ] `func (f TraceControlFlags) With(flag TraceControlFlags) TraceControlFlags` | Rust:  | Tests: 
+- [x] `func (f TraceControlFlags) Has(flag TraceControlFlags) bool` | Rust: `TraceControlFlags::has` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
+- [x] `func (f TraceControlFlags) With(flag TraceControlFlags) TraceControlFlags` | Rust: `TraceControlFlags::with` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
 
 ## txnkv (package txnkv)
 

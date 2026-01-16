@@ -156,6 +156,33 @@ impl RpcInterceptorChain {
     }
 }
 
+impl RpcInterceptor for RpcInterceptorChain {
+    fn name(&self) -> &str {
+        self.name()
+    }
+
+    fn before_send(&self, info: &RpcContextInfo, ctx: &mut kvrpcpb::Context) {
+        self.apply(info, ctx);
+    }
+
+    fn wrap(self: Arc<Self>, next: RpcInterceptorFunc) -> RpcInterceptorFunc {
+        RpcInterceptorChain::wrap(&*self, next)
+    }
+}
+
+/// Chain multiple interceptors into one (onion model).
+pub fn chain_rpc_interceptors(
+    first: Arc<dyn RpcInterceptor>,
+    rest: impl IntoIterator<Item = Arc<dyn RpcInterceptor>>,
+) -> Arc<dyn RpcInterceptor> {
+    let mut chain = RpcInterceptorChain::new();
+    chain.link(first);
+    for it in rest {
+        chain.link(it);
+    }
+    Arc::new(chain)
+}
+
 /// Create mock interceptors and keep execution counters/logs.
 #[derive(Clone, Default)]
 pub struct MockInterceptorManager {
@@ -269,6 +296,27 @@ mod tests {
         assert_eq!(mgr.begin_count(), 2);
         assert_eq!(mgr.end_count(), 2);
         assert_eq!(mgr.exec_log(), vec!["i1".to_owned(), "i2".to_owned()]);
+    }
+
+    #[test]
+    fn chain_rpc_interceptors_dedup_by_name() {
+        let it1 = rpc_interceptor("dup", |_, ctx| {
+            ctx.request_source = "should_be_dropped".to_owned();
+        });
+        let it2 = rpc_interceptor("dup", |_, ctx| {
+            ctx.resource_group_tag = vec![9_u8];
+        });
+        let chained = chain_rpc_interceptors(it1, vec![it2]);
+
+        let base: RpcInterceptorFunc = Arc::new(|_, ctx| {
+            assert_eq!(ctx.request_source, "");
+            assert_eq!(ctx.resource_group_tag, vec![9_u8]);
+        });
+        let wrapped = chained.wrap(base);
+
+        let info = RpcContextInfo::default();
+        let mut ctx = kvrpcpb::Context::default();
+        wrapped(&info, &mut ctx);
     }
 }
 

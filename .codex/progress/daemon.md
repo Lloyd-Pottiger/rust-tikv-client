@@ -9,12 +9,17 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- Parity checklist：metrics/trace/interceptor 区域回填
+- metrics：补齐 metrics package 关键对齐点（按 checklist 渐进）
   - 计划：
-    - `go run ./tools/client-go-api-inventory` 刷新 checklist
-    - 逐条标注 public/capability-only/out-of-scope（按 scope policy）
+    - 基于现有 `stats.rs` 指标补齐 `metrics` checklist 的 Rust 映射/标注
+    - 逐步标注 out-of-scope（Go 全量指标不 1:1 暴露）
 
 # 待做工作
+
+# trace：补齐 trace package ctx helper（按 checklist 渐进）
+  - 计划：
+    - 明确 `ContextWithTraceID/TraceIDFromContext` 在 Rust 的映射（PlanBuilder / out-of-scope）
+    - 视需要增加兼容 helper（不引入 Go-style context）
 
 # 已完成工作
 
@@ -81,3 +86,13 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：提供 `metrics::register()`；新增 backoff sleep histogram（lock/region/grpc）并在关键 sleep 点埋点
   - 文件：`new-client-rust/src/{metrics.rs,stats.rs,request/plan.rs}`
   - 测试：新增 metrics gather 单测（prometheus on/off 都可运行）
+
+- Parity checklist：metrics/trace/interceptor 区域回填
+  - 关键决策：以 scope policy 回填 Rust 映射；优先标注已实现的 interceptor/trace/metrics 关键入口
+  - 文件：`.codex/progress/parity-checklist.md`
+  - 备注：inventory 工具可重复执行（`go run ./tools/client-go-api-inventory`）且不会覆盖已回填内容
+
+- interceptor：继续补齐 tikvrpc/interceptor 导出（ChainRPCInterceptors/GetRPCInterceptorFromCtx）
+  - 关键决策：提供 `chain_rpc_interceptors` 作为 Rust 侧 chain helper；GetRPCInterceptorFromCtx 标注 out-of-scope（无 Go-style context）
+  - 文件：`new-client-rust/src/interceptor.rs`，`.codex/progress/parity-checklist.md`
+  - 测试：新增 chain helper 去重单测
