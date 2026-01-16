@@ -575,68 +575,68 @@ Conventions:
 ## oracle (package oracle)
 
 ### Types
-- [ ] `type ErrFutureTSRead struct` | Rust:  | Tests: 
-- [ ] `type ErrLatestStaleRead struct` | Rust:  | Tests: 
-- [ ] `type Future interface` | Rust:  | Tests: 
-- [ ] `type NoopReadTSValidator struct` | Rust:  | Tests: 
-- [ ] `type Option struct` | Rust:  | Tests: 
-- [ ] `type Oracle interface` | Rust:  | Tests: 
-- [ ] `type ReadTSValidator interface` | Rust:  | Tests: 
+- [x] `type ErrFutureTSRead struct` | Rust: N/A (out-of-scope: oracle read-ts validation errors not exposed) | Tests: N/A
+- [x] `type ErrLatestStaleRead struct` | Rust: N/A (out-of-scope: oracle read-ts validation errors not exposed) | Tests: N/A
+- [x] `type Future interface` | Rust: N/A (out-of-scope: Rust uses `async`/`await` futures directly) | Tests: N/A
+- [x] `type NoopReadTSValidator struct` | Rust: N/A (out-of-scope: read-ts validation not exposed) | Tests: N/A
+- [x] `type Option struct` | Rust: N/A (out-of-scope: no txn-scope Oracle options; latest TiKV only) | Tests: N/A
+- [x] `type Oracle interface` | Rust: N/A (out-of-scope: timestamp oracle is internal; use `TransactionClient::current_timestamp`) | Tests: N/A
+- [x] `type ReadTSValidator interface` | Rust: N/A (out-of-scope: read-ts validation not exposed) | Tests: N/A
 
 ### Functions
-- [ ] `func ComposeTS(physical, logical int64) uint64` | Rust:  | Tests: 
-- [ ] `func ExtractLogical(ts uint64) int64` | Rust:  | Tests: 
-- [ ] `func ExtractPhysical(ts uint64) int64` | Rust:  | Tests: 
-- [ ] `func GetPhysical(t time.Time) int64` | Rust:  | Tests: 
-- [ ] `func GetTimeFromTS(ts uint64) time.Time` | Rust:  | Tests: 
-- [ ] `func GoTimeToLowerLimitStartTS(now time.Time, maxTxnTimeUse int64) uint64` | Rust:  | Tests: 
-- [ ] `func GoTimeToTS(t time.Time) uint64` | Rust:  | Tests: 
+- [x] `func ComposeTS(physical, logical int64) uint64` | Rust: `tikv_client::compose_ts` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (ts_parts_round_trip)`
+- [x] `func ExtractLogical(ts uint64) int64` | Rust: `tikv_client::extract_logical` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (ts_parts_round_trip)`
+- [x] `func ExtractPhysical(ts uint64) int64` | Rust: `tikv_client::extract_physical` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (ts_parts_round_trip)`
+- [x] `func GetPhysical(t time.Time) int64` | Rust: `tikv_client::get_physical(SystemTime)` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (system_time_round_trip_is_ms_precision)`
+- [x] `func GetTimeFromTS(ts uint64) time.Time` | Rust: `tikv_client::get_time_from_ts` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (system_time_round_trip_is_ms_precision)`
+- [x] `func GoTimeToLowerLimitStartTS(now time.Time, maxTxnTimeUse int64) uint64` | Rust: `tikv_client::lower_limit_start_ts(now, Duration)` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (lower_limit_matches_subtracted_time)`
+- [x] `func GoTimeToTS(t time.Time) uint64` | Rust: `tikv_client::time_to_ts` (new-client-rust/src/timestamp.rs) | Tests: `new-client-rust/src/timestamp.rs (system_time_round_trip_is_ms_precision)`
 
 ### Consts
-- [ ] `GlobalTxnScope` | Rust:  | Tests: 
+- [x] `GlobalTxnScope` | Rust: `tikv_client::GLOBAL_TXN_SCOPE` (new-client-rust/src/timestamp.rs) | Tests: N/A
 
 ### Vars
 - (none)
 
 ### Methods
-- [ ] `func (ErrLatestStaleRead) Error() string` | Rust:  | Tests: 
-- [ ] `func (NoopReadTSValidator) ValidateReadTS(ctx context.Context, readTS uint64, isStaleRead bool, opt *Option) error` | Rust:  | Tests: 
-- [ ] `func (e ErrFutureTSRead) Error() string` | Rust:  | Tests: 
+- [x] `func (ErrLatestStaleRead) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (NoopReadTSValidator) ValidateReadTS(ctx context.Context, readTS uint64, isStaleRead bool, opt *Option) error` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (e ErrFutureTSRead) Error() string` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ## oracle/oracles (package oracles)
 
 ### Types
-- [ ] `type MockOracle struct` | Rust:  | Tests: 
-- [ ] `type PDOracleOptions struct` | Rust:  | Tests: 
-- [ ] `type ValidateReadTSForTidbSnapshot struct` | Rust:  | Tests: 
+- [x] `type MockOracle struct` | Rust: N/A (out-of-scope: oracle impls are internal) | Tests: N/A
+- [x] `type PDOracleOptions struct` | Rust: N/A (out-of-scope: oracle impls are internal) | Tests: N/A
+- [x] `type ValidateReadTSForTidbSnapshot struct` | Rust: N/A (out-of-scope: TiDB snapshot validator not exposed) | Tests: N/A
 
 ### Functions
-- [ ] `func NewLocalOracle() oracle.Oracle` | Rust:  | Tests: 
-- [ ] `func NewPdOracle(pdClient pd.Client, options *PDOracleOptions) (oracle.Oracle, error)` | Rust:  | Tests: 
+- [x] `func NewLocalOracle() oracle.Oracle` | Rust: N/A (out-of-scope: local oracle not exposed) | Tests: N/A
+- [x] `func NewPdOracle(pdClient pd.Client, options *PDOracleOptions) (oracle.Oracle, error)` | Rust: N/A (out-of-scope: PD oracle is internal to clients) | Tests: N/A
 
 ### Consts
 - (none)
 
 ### Vars
-- [ ] `EnableTSValidation` | Rust:  | Tests: 
+- [x] `EnableTSValidation` | Rust: N/A (out-of-scope: TiDB integration knob not exposed) | Tests: N/A
 
 ### Methods
-- [ ] `func (o *MockOracle) AddOffset(d time.Duration)` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) Close()` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) Disable()` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) Enable()` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) GetAllTSOKeyspaceGroupMinTS(ctx context.Context) (uint64, error)` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) GetExternalTimestamp(ctx context.Context) (uint64, error)` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) GetLowResolutionTimestamp(ctx context.Context, opt *oracle.Option) (uint64, error)` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) GetLowResolutionTimestampAsync(ctx context.Context, opt *oracle.Option) oracle.Future` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) GetStaleTimestamp(ctx context.Context, txnScope string, prevSecond uint64) (ts uint64, err error)` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) GetTimestamp(ctx context.Context, _ *oracle.Option) (uint64, error)` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) GetTimestampAsync(ctx context.Context, _ *oracle.Option) oracle.Future` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) IsExpired(lockTimestamp, TTL uint64, _ *oracle.Option) bool` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) SetExternalTimestamp(ctx context.Context, newTimestamp uint64) error` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) SetLowResolutionTimestampUpdateInterval(time.Duration) error` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) UntilExpired(lockTimeStamp, TTL uint64, _ *oracle.Option) int64` | Rust:  | Tests: 
-- [ ] `func (o *MockOracle) ValidateReadTS(ctx context.Context, readTS uint64, isStaleRead bool, opt *oracle.Option) error` | Rust:  | Tests: 
+- [x] `func (o *MockOracle) AddOffset(d time.Duration)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) Close()` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) Disable()` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) Enable()` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) GetAllTSOKeyspaceGroupMinTS(ctx context.Context) (uint64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) GetExternalTimestamp(ctx context.Context) (uint64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) GetLowResolutionTimestamp(ctx context.Context, opt *oracle.Option) (uint64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) GetLowResolutionTimestampAsync(ctx context.Context, opt *oracle.Option) oracle.Future` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) GetStaleTimestamp(ctx context.Context, txnScope string, prevSecond uint64) (ts uint64, err error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) GetTimestamp(ctx context.Context, _ *oracle.Option) (uint64, error)` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) GetTimestampAsync(ctx context.Context, _ *oracle.Option) oracle.Future` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) IsExpired(lockTimestamp, TTL uint64, _ *oracle.Option) bool` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) SetExternalTimestamp(ctx context.Context, newTimestamp uint64) error` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) SetLowResolutionTimestampUpdateInterval(time.Duration) error` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) UntilExpired(lockTimeStamp, TTL uint64, _ *oracle.Option) int64` | Rust: N/A (out-of-scope) | Tests: N/A
+- [x] `func (o *MockOracle) ValidateReadTS(ctx context.Context, readTS uint64, isStaleRead bool, opt *oracle.Option) error` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ## rawkv (package rawkv)
 
