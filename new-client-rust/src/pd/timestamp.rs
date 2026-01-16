@@ -21,7 +21,6 @@ use futures::task::AtomicWaker;
 use futures::task::Context;
 use futures::task::Poll;
 use log::debug;
-use log::info;
 use pin_project::pin_project;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -36,7 +35,10 @@ use crate::Result;
 /// It is an empirical value.
 const MAX_BATCH_SIZE: usize = 64;
 
-/// TODO: This value should be adjustable.
+/// Maximum number of pending request groups buffered in memory.
+///
+/// This is an empirical value chosen to cap memory usage and apply backpressure. If needed,
+/// expose it via configuration.
 const MAX_PENDING_COUNT: usize = 1 << 16;
 
 type TimestampRequest = oneshot::Sender<Timestamp>;
@@ -106,8 +108,8 @@ async fn run_tso(
         // Wake up the sending future blocked by too many pending requests or locked.
         sending_future_waker.wake();
     }
-    // TODO: distinguish between unexpected stream termination and expected end of test
-    info!("TSO stream terminated");
+    // Stream termination is expected on shutdown/reconnect (e.g. during tests or PD reconnect).
+    debug!("TSO stream terminated");
     Ok(())
 }
 

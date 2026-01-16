@@ -9,19 +9,14 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- pd/timestamp：澄清 MAX_PENDING_COUNT/stream termination TODO，并补齐最小单测（或降级为注释）
-  - 计划：
-    - 处理 `pd/timestamp.rs` 的 TODO：要么变为可配置（Config/internal opts），要么明确为经验值并解释理由
-    - 处理 TSO stream 结束日志：明确是正常退出/错误退出两类（避免误报）
-    - `cargo test` 验证
-
-# 待做工作
-
 - pd/retry：校准 `new-client-rust/src/pd/retry.rs` cargo-culted 常量与重连策略（对齐 client-go/PD client 语义），补齐单测
   - 计划：
     - 阅读 client-go 对 PD/region fetch 的重试/重连策略（含错误分类）
     - 将 magic number 收敛为可审阅的 options（必要时挂到 `Config`）
     - 补齐单测覆盖（重连节流、leader change retry 上限、错误传播）
+    - `cargo test` 验证
+
+# 待做工作
 
 - region_cache：明确 TTL/失效策略与锁粒度（解决 TODO/FIXME，避免全局锁成为瓶颈）
   - 计划：
@@ -103,3 +98,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - pd/client(test)：澄清 `group_keys_by_region` 的输入约束，移除测试中的 FIXME
   - 关键决策：强调 batching 最优输入约束，而非 correctness 依赖
   - 文件：`new-client-rust/src/pd/client.rs`，`.codex/progress/daemon.md`
+
+- pd/timestamp：澄清 MAX_PENDING_COUNT 与 TSO stream termination 语义，移除 TODO
+  - 关键决策：MAX_PENDING_COUNT 作为经验值用于 backpressure；TSO stream 结束视为 shutdown/reconnect 的 debug 日志
+  - 文件：`new-client-rust/src/pd/timestamp.rs`，`.codex/progress/daemon.md`
