@@ -48,3 +48,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 根因：TiKV raw checksum 的 `CRC64(key||value)` 使用 init=~0 且 xorout=~0（否则 crc64_xor 会偏差）
   - 校验：`make tiup-up` + `cargo test --features integration-tests raw_checksum` + `make tiup-down`
   - 文件：`tests/integration_tests.rs`，`src/raw/{mod.rs,client.rs}`，`.codex/progress/daemon.md`
+
+- infra/devex：Makefile `tiup-up` 参数化版本并自动 install（减少本地集成测摩擦）
+  - 关键决策：引入 `TIKV_VERSION`（默认 `v8.5.1`，与 CI 对齐）；启动前执行 `tiup install tikv/pd` 确保首跑可用
+  - 校验：`make tiup-up` 启动成功 + PD ready；`make tiup-down` 清理
+  - 文件：`Makefile`，`doc/development.md`，`.codex/progress/daemon.md`

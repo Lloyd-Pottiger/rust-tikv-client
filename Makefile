@@ -5,6 +5,7 @@ export RUSTDOCFLAGS=-Dwarnings
 
 export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
+export TIKV_VERSION ?= v8.5.1
 
 ALL_FEATURES := integration-tests
 
@@ -74,8 +75,9 @@ tiup-up:
 		echo "tiup playground already running (pid=$$(cat "$(TIUP_PID_FILE)"))"; \
 		exit 0; \
 	fi
-	@echo "Starting tiup playground (tikv-slim)..." ; \
-		tiup playground nightly --mode tikv-slim --kv 3 --without-monitor \
+	@echo "Starting tiup playground (tikv-slim, $(TIKV_VERSION))..." ; \
+		tiup install tikv:$(TIKV_VERSION) pd:$(TIKV_VERSION) ; \
+		tiup playground $(TIKV_VERSION) --mode tikv-slim --kv 3 --without-monitor \
 			--kv.config "$(shell pwd)/config/tikv.toml" \
 			--pd.config "$(shell pwd)/config/pd.toml" \
 			> "$(TIUP_LOG_FILE)" 2>&1 & \
