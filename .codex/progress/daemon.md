@@ -9,19 +9,13 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- trace：补齐 trace package 最小可用集（category/flags + hooks + RequestContext 注入）
-  - 计划：
-    - 对齐 `TraceControlFlags` 与 category 常量；提供全局 hook（IsCategoryEnabled/TraceEvent）
-    - 在 txn 关键路径（2PC/lock-resolve）加少量 TraceEvent（feature-gate）
-    - 补单测：hook 调用与 context 字段透传
-
-# 待做工作
-
 - metrics：补齐 metrics package 最小可用集（Init/Register + 核心 counters/histograms）
   - 计划：
     - 提供 `metrics::register()`/`metrics::gather_as_text()` 等稳定 API
     - 渐进补齐关键 backoff/txn 指标（优先 lock/region/rpc）
     - 补单测：feature off 编译 + 指标可 gather
+
+# 待做工作
 
 - Parity checklist：metrics/trace/interceptor 区域回填
   - 计划：
@@ -83,3 +77,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：chain 引入 `wrap`（onion model）以对齐 client-go 执行顺序；`MockInterceptorManager` 记录 begin/end/log 便于测试
   - 文件：`new-client-rust/src/interceptor.rs`
   - 测试：新增 interceptor chain wrap 顺序单测
+
+- trace：补齐 trace package 最小可用集（category/flags + hooks + RequestContext 注入）
+  - 关键决策：提供全局 hook（IsCategoryEnabled/TraceEventFn）；txn 关键路径发出少量 `trace_event`（默认关闭）
+  - 文件：`new-client-rust/src/{trace.rs,transaction/{transaction.rs,lock.rs}}`
+  - 测试：新增 trace hook 单测；复用 PlanBuilder trace 字段透传断言

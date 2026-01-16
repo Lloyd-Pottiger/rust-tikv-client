@@ -2202,6 +2202,32 @@ impl<PdC: PdClient> Committer<PdC> {
 
     async fn prewrite(&mut self) -> Result<Option<Timestamp>> {
         debug!("prewriting");
+        crate::trace::trace_event(
+            crate::trace::CATEGORY_TXN_2PC,
+            "txn.prewrite.start",
+            [
+                (
+                    "start_ts",
+                    crate::trace::TraceValue::U64(self.start_version.version()),
+                ),
+                (
+                    "mutation_count",
+                    crate::trace::TraceValue::U64(self.prewrite_mutations.len() as u64),
+                ),
+                (
+                    "async_commit",
+                    crate::trace::TraceValue::Bool(self.options.async_commit),
+                ),
+                (
+                    "try_one_pc",
+                    crate::trace::TraceValue::Bool(self.options.try_one_pc),
+                ),
+                (
+                    "pessimistic",
+                    crate::trace::TraceValue::Bool(self.options.is_pessimistic()),
+                ),
+            ],
+        );
         let primary_lock = self.primary_key.clone().unwrap();
         let elapsed_ms = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = self.calc_txn_lock_ttl().saturating_add(elapsed_ms);

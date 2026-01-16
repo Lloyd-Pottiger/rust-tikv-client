@@ -51,6 +51,14 @@ pub async fn resolve_locks(
     request_context: &RequestContext,
 ) -> Result<Vec<kvrpcpb::LockInfo> /* live_locks */> {
     debug!("resolving locks");
+    crate::trace::trace_event(
+        crate::trace::CATEGORY_TXN_LOCK_RESOLVE,
+        "txn.resolve_locks.start",
+        [(
+            "lock_count",
+            crate::trace::TraceValue::U64(locks.len() as u64),
+        )],
+    );
     let ts = pd_client.clone().get_timestamp().await?;
     let (expired_locks, live_locks) =
         locks
