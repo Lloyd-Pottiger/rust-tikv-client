@@ -51,21 +51,33 @@ fn trace_event_lock() -> &'static RwLock<Option<TraceEventFn>> {
     TRACE_EVENT_FN.get_or_init(|| RwLock::new(None))
 }
 
+fn lock_read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
+fn lock_write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
 /// Set the global category enable hook used by [`is_category_enabled`].
 pub fn set_is_category_enabled_fn(f: Option<IsCategoryEnabledFn>) {
-    *is_category_enabled_lock().write().unwrap() = f;
+    *lock_write(is_category_enabled_lock()) = f;
 }
 
 /// Set the global trace event sink used by [`trace_event`].
 pub fn set_trace_event_fn(f: Option<TraceEventFn>) {
-    *trace_event_lock().write().unwrap() = f;
+    *lock_write(trace_event_lock()) = f;
 }
 
 /// Returns whether a category is enabled for client-side trace events.
 pub fn is_category_enabled(category: Category) -> bool {
-    is_category_enabled_lock()
-        .read()
-        .unwrap()
+    lock_read(is_category_enabled_lock())
         .as_ref()
         .map(|f| (f)(category))
         .unwrap_or(false)
@@ -93,7 +105,7 @@ pub fn trace_event(
             .collect(),
     };
 
-    if let Some(sink) = trace_event_lock().read().unwrap().as_ref() {
+    if let Some(sink) = lock_read(trace_event_lock()).as_ref() {
         sink(&event);
     }
 }

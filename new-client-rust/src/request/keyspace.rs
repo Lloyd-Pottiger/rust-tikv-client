@@ -187,7 +187,9 @@ fn prepend_bytes<const N: usize>(vec: &mut Vec<u8>, prefix: &[u8; N]) {
 }
 
 fn pretruncate_bytes<const N: usize>(vec: &mut Vec<u8>) {
-    assert!(vec.len() >= N);
+    if vec.len() < N {
+        return;
+    }
     unsafe {
         std::ptr::copy(vec.as_ptr().add(N), vec.as_mut_ptr(), vec.len() - N);
         vec.set_len(vec.len() - N);

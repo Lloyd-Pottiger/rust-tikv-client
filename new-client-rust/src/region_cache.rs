@@ -408,8 +408,10 @@ const ENGINE_LABEL_TIFLASH: &str = "tiflash";
 const ENGINE_LABEL_TIFLASH_COMPUTE: &str = "tiflash_compute";
 
 fn is_valid_tikv_store(store: &metapb::Store) -> bool {
-    if metapb::StoreState::try_from(store.state).unwrap() == metapb::StoreState::Tombstone {
-        return false;
+    match metapb::StoreState::try_from(store.state) {
+        Ok(metapb::StoreState::Tombstone) => return false,
+        Ok(_) => {}
+        Err(_) => return false,
     }
     let is_tiflash = store.labels.iter().any(|label| {
         label.key == ENGINE_LABEL_KEY

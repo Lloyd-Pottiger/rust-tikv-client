@@ -1327,20 +1327,15 @@ impl<PdC: PdClient> Transaction<PdC> {
     ///
     /// Once resolved it acquires locks on the keys in TiKV.
     /// A lock prevents other transactions from mutating the entry until it is released.
-    ///
-    /// # Panics
-    ///
-    /// Only valid for pessimistic transactions, panics if called on an optimistic transaction.
     async fn pessimistic_lock(
         &mut self,
         keys: impl IntoIterator<Item = impl PessimisticLock>,
         options: LockOptions,
     ) -> Result<Vec<KvPair>> {
         debug!("acquiring pessimistic lock");
-        assert!(
-            matches!(self.options.kind, TransactionKind::Pessimistic(_)),
-            "`pessimistic_lock` is only valid to use with pessimistic transactions"
-        );
+        if !matches!(self.options.kind, TransactionKind::Pessimistic(_)) {
+            return Err(Error::InvalidTransactionType);
+        }
 
         let mut locks: Vec<(Key, kvrpcpb::Assertion)> = keys
             .into_iter()
@@ -2031,7 +2026,9 @@ impl TransactionOptions {
 
     fn push_for_update_ts(&mut self, for_update_ts: Timestamp) {
         match &mut self.kind {
-            TransactionKind::Optimistic => unreachable!(),
+            TransactionKind::Optimistic => {
+                self.kind = TransactionKind::Pessimistic(for_update_ts);
+            }
             TransactionKind::Pessimistic(old_for_update_ts) => {
                 self.kind = TransactionKind::Pessimistic(Timestamp::from_version(std::cmp::max(
                     old_for_update_ts.version(),

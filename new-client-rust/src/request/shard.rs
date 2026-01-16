@@ -209,8 +209,8 @@ macro_rules! shardable_key {
             }
 
             fn apply_shard(&mut self, mut shard: Self::Shard) {
-                assert!(shard.len() == 1);
-                self.key = shard.pop().unwrap();
+                debug_assert_eq!(shard.len(), 1, "shardable_key expects a single-key shard");
+                self.key = shard.pop().unwrap_or_default();
             }
 
             fn apply_store(&mut self, store: &$crate::store::RegionStore) -> $crate::Result<()> {

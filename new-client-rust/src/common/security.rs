@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use log::info;
-use regex::Regex;
 use tonic::transport::Channel;
 use tonic::transport::ClientTlsConfig;
 use tonic::transport::Identity;
@@ -16,8 +15,15 @@ use tonic::transport::{Certificate, Endpoint};
 use crate::internal_err;
 use crate::Result;
 
-lazy_static::lazy_static! {
-    static ref SCHEME_REG: Regex = Regex::new(r"^\s*(https?://)").unwrap();
+fn strip_http_scheme(addr: &str) -> &str {
+    let addr = addr.trim_start();
+    if let Some(stripped) = addr.strip_prefix("http://") {
+        return stripped;
+    }
+    if let Some(stripped) = addr.strip_prefix("https://") {
+        return stripped;
+    }
+    addr
 }
 
 fn check_pem_file(tag: &str, path: &Path) -> Result<File> {
@@ -89,8 +95,8 @@ impl SecurityManager {
     }
 
     async fn tls_channel(&self, addr: &str) -> Result<Endpoint> {
-        let addr = "https://".to_string() + &SCHEME_REG.replace(addr, "");
-        let builder = self.endpoint(addr.to_string())?;
+        let addr = format!("https://{}", strip_http_scheme(addr));
+        let builder = self.endpoint(addr)?;
         let tls = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(&self.ca))
             .identity(Identity::from_pem(
@@ -102,7 +108,7 @@ impl SecurityManager {
     }
 
     async fn default_channel(&self, addr: &str) -> Result<Endpoint> {
-        let addr = "http://".to_string() + &SCHEME_REG.replace(addr, "");
+        let addr = format!("http://{}", strip_http_scheme(addr));
         self.endpoint(addr)
     }
 
@@ -144,5 +150,26 @@ mod tests {
         assert_eq!(mgr.cert, vec![1]);
         let key = load_pem_file("private key", &key_path).unwrap();
         assert_eq!(key, vec![2]);
+    }
+
+    #[test]
+    fn strip_http_scheme_accepts_plain_and_prefixed_addrs() {
+        assert_eq!(super::strip_http_scheme("127.0.0.1:2379"), "127.0.0.1:2379");
+        assert_eq!(
+            super::strip_http_scheme("http://127.0.0.1:2379"),
+            "127.0.0.1:2379"
+        );
+        assert_eq!(
+            super::strip_http_scheme("https://127.0.0.1:2379"),
+            "127.0.0.1:2379"
+        );
+        assert_eq!(
+            super::strip_http_scheme("   https://127.0.0.1:2379"),
+            "127.0.0.1:2379"
+        );
+        assert_eq!(
+            super::strip_http_scheme("   127.0.0.1:2379"),
+            "127.0.0.1:2379"
+        );
     }
 }

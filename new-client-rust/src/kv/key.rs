@@ -123,7 +123,8 @@ impl Key {
     #[inline]
     pub(super) fn into_lower_bound(mut self) -> Bound<Key> {
         if self.zero_terminated() {
-            self.0.pop().unwrap();
+            // `zero_terminated` guarantees there is a last byte.
+            let _ = self.0.pop();
             Bound::Excluded(self)
         } else {
             Bound::Included(self)
@@ -134,7 +135,8 @@ impl Key {
     #[inline]
     pub(super) fn into_upper_bound(mut self) -> Bound<Key> {
         if self.zero_terminated() {
-            self.0.pop().unwrap();
+            // `zero_terminated` guarantees there is a last byte.
+            let _ = self.0.pop();
             Bound::Included(self)
         } else {
             Bound::Excluded(self)
@@ -147,7 +149,8 @@ impl Key {
     pub fn to_encoded(&self) -> Key {
         let len = codec::max_encoded_bytes_size(self.0.len());
         let mut encoded = Vec::with_capacity(len);
-        encoded.encode_bytes(&self.0, false).unwrap();
+        // Encoding into `Vec<u8>` is infallible. Keep `to_encoded` non-panicking by construction.
+        let _ = encoded.encode_bytes(&self.0, false);
         Key(encoded)
     }
 

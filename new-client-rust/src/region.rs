@@ -56,11 +56,15 @@ impl RegionWithLeader {
 
     pub fn ver_id(&self) -> RegionVerId {
         let region = &self.region;
-        let epoch = region.region_epoch.as_ref().unwrap();
+        let (conf_ver, ver) = region
+            .region_epoch
+            .as_ref()
+            .map(|epoch| (epoch.conf_ver, epoch.version))
+            .unwrap_or((0, 0));
         RegionVerId {
             id: region.id,
-            conf_ver: epoch.conf_ver,
-            ver: epoch.version,
+            conf_ver,
+            ver,
         }
     }
 

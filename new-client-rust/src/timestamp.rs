@@ -9,10 +9,13 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use crate::internal_err;
+use crate::Result;
+
 pub use crate::proto::pdpb::Timestamp;
 
-const PHYSICAL_SHIFT_BITS: i64 = 18;
-const LOGICAL_MASK: i64 = (1 << PHYSICAL_SHIFT_BITS) - 1;
+const PHYSICAL_SHIFT_BITS: u32 = 18;
+const LOGICAL_MASK: i64 = (1_i64 << PHYSICAL_SHIFT_BITS) - 1;
 
 /// The default transaction scope used by TiKV's timestamp oracle.
 pub const GLOBAL_TXN_SCOPE: &str = "global";
@@ -20,14 +23,12 @@ pub const GLOBAL_TXN_SCOPE: &str = "global";
 /// Create a transaction timestamp from its physical and logical parts.
 ///
 /// This matches TiKV's timestamp encoding: `(physical_ms << 18) + logical`.
-///
-/// # Panics
-///
-/// Panics if the resulting value does not fit into a `u64`.
-pub fn compose_ts(physical_ms: i64, logical: i64) -> u64 {
-    ((physical_ms << PHYSICAL_SHIFT_BITS) + logical)
-        .try_into()
-        .expect("Overflow converting physical/logical parts to ts")
+pub fn compose_ts(physical_ms: i64, logical: i64) -> Result<u64> {
+    // Use a wider type to avoid debug-overflow panics, and validate the final range.
+    let ts: i128 = ((physical_ms as i128) << PHYSICAL_SHIFT_BITS) + (logical as i128);
+    ts.try_into().map_err(|_| {
+        internal_err!("invalid ts parts (physical_ms={physical_ms}, logical={logical})")
+    })
 }
 
 /// Extract the physical part (milliseconds since Unix epoch) from a TiKV timestamp.
@@ -43,11 +44,7 @@ pub fn extract_logical(ts: u64) -> i64 {
 /// Return the physical part (milliseconds since Unix epoch) of the given time.
 ///
 /// This is the same physical component used by TiKV's timestamps.
-///
-/// # Panics
-///
-/// Panics if the timestamp does not fit into an `i64` milliseconds value.
-pub fn get_physical(t: SystemTime) -> i64 {
+pub fn get_physical(t: SystemTime) -> Result<i64> {
     let (is_before_epoch, duration) = match t.duration_since(UNIX_EPOCH) {
         Ok(d) => (false, d),
         Err(e) => (true, e.duration()),
@@ -56,12 +53,8 @@ pub fn get_physical(t: SystemTime) -> i64 {
     let millis: i64 = duration
         .as_millis()
         .try_into()
-        .expect("Overflow converting SystemTime to milliseconds");
-    if is_before_epoch {
-        -millis
-    } else {
-        millis
-    }
+        .map_err(|_| internal_err!("overflow converting SystemTime to milliseconds"))?;
+    Ok(if is_before_epoch { -millis } else { millis })
 }
 
 /// Convert a TiKV timestamp to a `SystemTime`.
@@ -79,20 +72,14 @@ pub fn get_time_from_ts(ts: u64) -> SystemTime {
 /// Convert a `SystemTime` to a TiKV timestamp.
 ///
 /// The logical part of the resulting timestamp is `0` (millisecond precision only).
-///
-/// # Panics
-///
-/// Panics if the timestamp does not fit into a `u64`.
-pub fn time_to_ts(t: SystemTime) -> u64 {
-    let ts: i64 = get_physical(t) << PHYSICAL_SHIFT_BITS;
-    ts.try_into()
-        .expect("Overflow converting SystemTime to TiKV timestamp")
+pub fn time_to_ts(t: SystemTime) -> Result<u64> {
+    compose_ts(get_physical(t)?, 0)
 }
 
 /// Return the minimum start-ts for uncommitted transactions at `now`.
 ///
 /// This is equivalent to `time_to_ts(now - max_txn_time_use)`.
-pub fn lower_limit_start_ts(now: SystemTime, max_txn_time_use: Duration) -> u64 {
+pub fn lower_limit_start_ts(now: SystemTime, max_txn_time_use: Duration) -> Result<u64> {
     time_to_ts(now - max_txn_time_use)
 }
 
@@ -111,9 +98,8 @@ pub trait TimestampExt: Sized {
 
 impl TimestampExt for Timestamp {
     fn version(&self) -> u64 {
-        ((self.physical << PHYSICAL_SHIFT_BITS) + self.logical)
-            .try_into()
-            .expect("Overflow converting timestamp to version")
+        let ts: i128 = ((self.physical as i128) << PHYSICAL_SHIFT_BITS) + (self.logical as i128);
+        ts.try_into().unwrap_or(0)
     }
 
     fn from_version(version: u64) -> Self {
@@ -143,7 +129,7 @@ mod tests {
     fn ts_parts_round_trip() {
         let physical_ms = 1_700_000_123_456_i64;
         let logical = 42_i64;
-        let ts = compose_ts(physical_ms, logical);
+        let ts = compose_ts(physical_ms, logical).unwrap();
         assert_eq!(extract_physical(ts), physical_ms);
         assert_eq!(extract_logical(ts), logical);
     }
@@ -151,7 +137,7 @@ mod tests {
     #[test]
     fn system_time_round_trip_is_ms_precision() {
         let t = UNIX_EPOCH + Duration::from_millis(1_700_000_000_000);
-        let ts = time_to_ts(t);
+        let ts = time_to_ts(t).unwrap();
         assert_eq!(extract_logical(ts), 0);
         assert_eq!(get_time_from_ts(ts), t);
     }
@@ -161,8 +147,8 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_millis(1_700_000_000_000);
         let max_txn_time_use = Duration::from_secs(2);
         assert_eq!(
-            lower_limit_start_ts(now, max_txn_time_use),
-            time_to_ts(now - max_txn_time_use)
+            lower_limit_start_ts(now, max_txn_time_use).unwrap(),
+            time_to_ts(now - max_txn_time_use).unwrap()
         );
     }
 
@@ -170,7 +156,7 @@ mod tests {
     fn timestamp_ext_matches_helpers() {
         let physical_ms = 1_700_000_123_456_i64;
         let logical = 42_i64;
-        let ts = compose_ts(physical_ms, logical);
+        let ts = compose_ts(physical_ms, logical).unwrap();
 
         let ts_struct = Timestamp {
             physical: physical_ms,
@@ -179,5 +165,10 @@ mod tests {
         };
         assert_eq!(ts_struct.version(), ts);
         assert_eq!(Timestamp::from_version(ts), ts_struct);
+    }
+
+    #[test]
+    fn compose_ts_rejects_negative_timestamps() {
+        assert!(compose_ts(-1, 0).is_err());
     }
 }

@@ -217,7 +217,11 @@ impl MockInterceptorManager {
 
         self.inner.begin.store(0, Ordering::SeqCst);
         self.inner.end.store(0, Ordering::SeqCst);
-        *self.inner.exec_log.lock().unwrap() = Vec::new();
+        *self
+            .inner
+            .exec_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Vec::new();
     }
 
     #[must_use]
@@ -236,7 +240,11 @@ impl MockInterceptorManager {
 
     #[must_use]
     pub fn exec_log(&self) -> Vec<String> {
-        self.inner.exec_log.lock().unwrap().clone()
+        self.inner
+            .exec_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -258,7 +266,11 @@ impl RpcInterceptor for MockInterceptor {
         Arc::new(move |info, ctx| {
             use std::sync::atomic::Ordering;
 
-            inner.exec_log.lock().unwrap().push(name.clone());
+            inner
+                .exec_log
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(name.clone());
             inner.begin.fetch_add(1, Ordering::SeqCst);
             next(info, ctx);
             inner.end.fetch_add(1, Ordering::SeqCst);

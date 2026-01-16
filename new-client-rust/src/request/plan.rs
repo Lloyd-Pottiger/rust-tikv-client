@@ -87,16 +87,15 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
 
     async fn execute(&self) -> Result<Self::Result> {
         let stats = tikv_stats(self.request.label());
-        let result = self
-            .kv_client
-            .as_ref()
-            .expect("Unreachable: kv_client has not been initialised in Dispatch")
-            .dispatch(&self.request)
-            .await;
+        let kv_client = self.kv_client.as_ref().ok_or_else(|| {
+            crate::internal_err!("Dispatch plan executed without an attached kv_client")
+        })?;
+        let result = kv_client.dispatch(&self.request).await;
         let result = stats.done(result);
-        result.map(|r| {
-            *r.downcast()
-                .expect("Downcast failed: request and response type mismatch")
+        result.and_then(|r| {
+            r.downcast::<Req::Response>()
+                .map(|r| *r)
+                .map_err(|_| crate::internal_err!("KvClient returned an unexpected response type"))
         })
     }
 }
@@ -226,10 +225,24 @@ where
             Err(err) => return Err(err),
         };
 
-        let leader_peer = region
-            .leader
-            .as_ref()
-            .expect("ReadRouting::select_peer validated leader exists");
+        let Some(leader_peer) = region.leader.as_ref() else {
+            return Self::handle_other_error(
+                pd_client,
+                plan,
+                region.ver_id(),
+                None,
+                backoff,
+                permits,
+                preserve_region_results,
+                request_context.clone(),
+                read_routing,
+                attempt + 1,
+                Error::LeaderNotFound {
+                    region: region.ver_id(),
+                },
+            )
+            .await;
+        };
         let current_replica_kind = replica_kind_for_peer(leader_peer, &read_peer.target_peer);
         let request_source_override = match read_routing.request_source() {
             None => None,
@@ -301,7 +314,9 @@ where
         };
 
         // limit concurrent requests
-        let permit = permits.acquire().await.unwrap();
+        let permit = permits.acquire().await.map_err(|e| {
+            crate::internal_err!("semaphore closed while acquiring permit: {:?}", e)
+        })?;
         let res = plan.execute().await;
         drop(permit);
 
@@ -443,8 +458,8 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
             pd_client.invalidate_store_cache(store_id).await;
         }
         Ok(false)
-    } else if e.epoch_not_match.is_some() {
-        on_region_epoch_not_match(pd_client.clone(), region_store, e.epoch_not_match.unwrap()).await
+    } else if let Some(epoch_not_match) = e.epoch_not_match {
+        on_region_epoch_not_match(pd_client.clone(), region_store, epoch_not_match).await
     } else if e.stale_command.is_some() || e.region_not_found.is_some() {
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
@@ -480,15 +495,18 @@ pub(crate) async fn on_region_epoch_not_match<PdC: PdClient>(
 
     for r in error.current_regions {
         if r.id == region_store.region_with_leader.id() {
-            let region_epoch = r.region_epoch.unwrap();
+            let Some(region_epoch) = r.region_epoch else {
+                pd_client.invalidate_region_cache(ver_id).await;
+                return Ok(true);
+            };
             let returned_conf_ver = region_epoch.conf_ver;
             let returned_version = region_epoch.version;
-            let current_region_epoch = region_store
-                .region_with_leader
-                .region
-                .region_epoch
-                .clone()
-                .unwrap();
+            let Some(current_region_epoch) =
+                region_store.region_with_leader.region.region_epoch.clone()
+            else {
+                pd_client.invalidate_region_cache(ver_id).await;
+                return Ok(true);
+            };
             let current_conf_ver = current_region_epoch.conf_ver;
             let current_version = current_region_epoch.version;
 
@@ -601,7 +619,9 @@ where
         permits: Arc<Semaphore>,
     ) -> Result<P::Result> {
         loop {
-            let permit = permits.acquire().await.unwrap();
+            let permit = permits.acquire().await.map_err(|e| {
+                crate::internal_err!("semaphore closed while acquiring permit: {:?}", e)
+            })?;
             let res = plan.execute().await;
             drop(permit);
 
@@ -672,8 +692,15 @@ macro_rules! collect_single {
             type Out = $type_;
 
             fn merge(&self, mut input: Vec<Result<$type_>>) -> Result<Self::Out> {
-                assert!(input.len() == 1);
-                input.pop().unwrap()
+                if input.len() != 1 {
+                    return Err($crate::internal_err!(
+                        "CollectSingle expected 1 response, got {}",
+                        input.len()
+                    ));
+                }
+                input
+                    .pop()
+                    .ok_or_else(|| $crate::internal_err!("CollectSingle missing response"))?
             }
         }
     };
@@ -901,13 +928,16 @@ where
     async fn execute(&self) -> Result<Self::Result> {
         let mut result = CleanupLocksResult::default();
         let mut inner = self.inner.clone();
+        let store = self.store.as_ref().ok_or_else(|| {
+            crate::internal_err!("CleanupLocks executed without an attached store")
+        })?;
         let mut lock_resolver = crate::transaction::LockResolver::new(
             self.ctx.clone(),
             self.pd_client.clone(),
             self.keyspace,
         )
         .with_request_context(self.request_context.clone());
-        let region = &self.store.as_ref().unwrap().region_with_leader;
+        let region = &store.region_with_leader;
         let mut has_more_batch = true;
         let mut backoff = self.backoff.clone();
 
@@ -962,10 +992,7 @@ where
             debug!("CleanupLocks::execute, meet locks:{}", locks.len());
 
             let lock_size = locks.len();
-            match lock_resolver
-                .cleanup_locks(self.store.clone().unwrap(), locks)
-                .await
-            {
+            match lock_resolver.cleanup_locks(store.clone(), locks).await {
                 Ok(()) => {
                     result.resolved_locks += lock_size;
                 }
@@ -980,9 +1007,16 @@ where
                 },
                 Err(Error::ExtractedErrors(mut errors)) => {
                     // Propagate errors to `retry_multi_region` for retry.
-                    if let Error::RegionError(e) = errors.pop().unwrap() {
+                    let Some(first) = errors.pop() else {
+                        return Err(crate::internal_err!("ExtractedErrors was empty"));
+                    };
+                    if let Error::RegionError(e) = first {
                         result.region_error = Some(*e);
+                        if !errors.is_empty() {
+                            result.key_error = Some(errors);
+                        }
                     } else {
+                        errors.push(first);
                         result.key_error = Some(errors);
                     }
                     return Ok(result);
@@ -1077,11 +1111,9 @@ where
 
     async fn execute(&self) -> Result<Self::Result> {
         let res = self.inner.execute().await?;
-        let shard = self
-            .shard
-            .as_ref()
-            .expect("Unreachable: Shardable::apply_shard() is not called before executing PreserveShard")
-            .clone();
+        let shard = self.shard.as_ref().cloned().ok_or_else(|| {
+            crate::internal_err!("PreserveShard executed without an attached shard")
+        })?;
         Ok(ResponseWithShard(res, shard))
     }
 }

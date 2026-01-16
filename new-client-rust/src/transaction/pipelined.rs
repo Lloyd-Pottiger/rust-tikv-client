@@ -89,7 +89,10 @@ impl PipelinedTxnState {
             let sem = sem.clone();
             let pd_client = pd_client.clone();
             let request_context = request_context.clone();
-            let permit = sem.acquire_owned().await.unwrap();
+            let permit = sem
+                .acquire_owned()
+                .await
+                .map_err(|e| crate::internal_err!("pipelined semaphore closed: {:?}", e))?;
             let handle = tokio::spawn(async move {
                 let _permit = permit;
                 let request =
@@ -217,18 +220,14 @@ impl PipelinedTxnState {
         let generation = self.generation;
 
         // Track the global flushed key range as [min_key, max_key.next()).
-        let min_key = self
-            .mutable
-            .keys()
-            .next()
-            .expect("mutable is not empty")
-            .clone();
-        let max_key = self
-            .mutable
-            .keys()
-            .next_back()
-            .expect("mutable is not empty")
-            .clone();
+        let min_key =
+            self.mutable.keys().next().cloned().ok_or_else(|| {
+                crate::internal_err!("pipelined mutable buffer unexpectedly empty")
+            })?;
+        let max_key =
+            self.mutable.keys().next_back().cloned().ok_or_else(|| {
+                crate::internal_err!("pipelined mutable buffer unexpectedly empty")
+            })?;
         self.update_flushed_range(min_key, max_key);
 
         let mutations = std::mem::take(&mut self.mutable)

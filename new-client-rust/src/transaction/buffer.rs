@@ -64,7 +64,7 @@ impl Buffer {
             MutationValue::Determined(value) => Ok(value),
             MutationValue::Undetermined => {
                 let value = f(key.clone()).await?;
-                self.update_cache(key, value.clone());
+                self.update_cache(key, value.clone())?;
                 Ok(value)
             }
         }
@@ -97,9 +97,10 @@ impl Buffer {
                 })
                 .partition(|(_, v)| *v == MutationValue::Undetermined);
 
-            let cached_results = cached_results
-                .into_iter()
-                .filter_map(|(k, v)| v.unwrap().map(|v| KvPair(k, v)));
+            let cached_results = cached_results.into_iter().filter_map(|(k, v)| match v {
+                MutationValue::Determined(Some(v)) => Some(KvPair(k, v)),
+                MutationValue::Determined(None) | MutationValue::Undetermined => None,
+            });
 
             let undetermined_keys = undetermined_keys.into_iter().map(|(k, _)| k);
             (cached_results, undetermined_keys)
@@ -109,7 +110,7 @@ impl Buffer {
         for kvpair in &fetched_results {
             let key = kvpair.0.clone();
             let value = Some(kvpair.1.clone());
-            self.update_cache(key, value);
+            self.update_cache(key, value)?;
         }
 
         let results = cached_results.chain(fetched_results);
@@ -165,7 +166,7 @@ impl Buffer {
         // update local buffer
         if update_cache {
             for (k, v) in &results {
-                self.update_cache(k.clone(), Some(v.clone()));
+                self.update_cache(k.clone(), Some(v.clone()))?;
             }
         }
 
@@ -355,7 +356,7 @@ impl Buffer {
             .unwrap_or(MutationValue::Undetermined)
     }
 
-    fn update_cache(&mut self, key: Key, value: Option<Value>) {
+    fn update_cache(&mut self, key: Key, value: Option<Value>) -> Result<()> {
         match self.entry_map.get(&key) {
             Some(BufferEntry::Locked(None)) => {
                 self.entry_map.insert(key, BufferEntry::Locked(Some(value)));
@@ -364,17 +365,47 @@ impl Buffer {
                 self.entry_map.insert(key, BufferEntry::Cached(value));
             }
             Some(BufferEntry::Cached(v)) | Some(BufferEntry::Locked(Some(v))) => {
-                assert!(&value == v);
+                if &value != v {
+                    return Err(crate::internal_err!(
+                        "buffer cache mismatch (entry=cached, key_len={})",
+                        key.len()
+                    ));
+                }
             }
-            Some(BufferEntry::Put(v)) => assert!(value.as_ref() == Some(v)),
+            Some(BufferEntry::Put(v)) => {
+                if value.as_ref() != Some(v) {
+                    return Err(crate::internal_err!(
+                        "buffer cache mismatch (entry=put, key_len={})",
+                        key.len()
+                    ));
+                }
+            }
             Some(BufferEntry::Del) => {
-                assert!(value.is_none());
+                if value.is_some() {
+                    return Err(crate::internal_err!(
+                        "buffer cache mismatch (entry=del, key_len={})",
+                        key.len()
+                    ));
+                }
             }
-            Some(BufferEntry::Insert(v)) => assert!(value.as_ref() == Some(v)),
+            Some(BufferEntry::Insert(v)) => {
+                if value.as_ref() != Some(v) {
+                    return Err(crate::internal_err!(
+                        "buffer cache mismatch (entry=insert, key_len={})",
+                        key.len()
+                    ));
+                }
+            }
             Some(BufferEntry::CheckNotExist) => {
-                assert!(value.is_none());
+                if value.is_some() {
+                    return Err(crate::internal_err!(
+                        "buffer cache mismatch (entry=check_not_exist, key_len={})",
+                        key.len()
+                    ));
+                }
             }
         }
+        Ok(())
     }
 
     fn insert_entry(&mut self, key: impl Into<Key>, entry: BufferEntry) {
@@ -475,15 +506,8 @@ enum MutationValue {
     // The buffer cannot determine the value.
     Undetermined,
 }
-
-impl MutationValue {
-    fn unwrap(self) -> Option<Value> {
-        match self {
-            MutationValue::Determined(v) => v,
-            MutationValue::Undetermined => unreachable!(),
-        }
-    }
-}
+// Intentionally no `unwrap` helper: treat `Undetermined` explicitly at call sites to avoid
+// panicking in library code.
 
 #[cfg(test)]
 mod tests {
@@ -678,5 +702,21 @@ mod tests {
                 .unwrap(),
             val
         );
+    }
+
+    #[test]
+    fn scan_and_fetch_errors_on_cache_mismatch() {
+        let mut buffer = Buffer::new(false);
+        let key: Key = b"k1".to_vec().into();
+        buffer
+            .entry_map
+            .insert(key.clone(), BufferEntry::Cached(Some(b"v1".to_vec())));
+
+        let range: BoundRange = (key.clone()..Key::from(b"k2".to_vec())).into();
+        let res = block_on(buffer.scan_and_fetch(range, 1, true, false, move |_, _| {
+            ready(Ok(vec![KvPair::new(key.clone(), b"v2".to_vec())]))
+        }));
+
+        assert!(matches!(res, Err(crate::Error::InternalError { .. })));
     }
 }

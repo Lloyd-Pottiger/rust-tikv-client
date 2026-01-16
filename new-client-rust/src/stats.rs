@@ -10,9 +10,11 @@
 
 #[cfg(feature = "prometheus")]
 mod imp {
+    use std::sync::OnceLock;
     use std::time::Duration;
     use std::time::Instant;
 
+    use log::warn;
     use prometheus::register_histogram;
     use prometheus::register_histogram_vec;
     use prometheus::register_int_counter_vec;
@@ -22,23 +24,139 @@ mod imp {
 
     use crate::Result;
 
+    struct Metrics {
+        tikv_request_duration: Option<HistogramVec>,
+        tikv_request_total: Option<IntCounterVec>,
+        tikv_failed_request_duration: Option<HistogramVec>,
+        tikv_failed_request_total: Option<IntCounterVec>,
+        backoff_sleep_duration: Option<HistogramVec>,
+
+        pd_request_duration: Option<HistogramVec>,
+        pd_request_total: Option<IntCounterVec>,
+        pd_failed_request_duration: Option<HistogramVec>,
+        pd_failed_request_total: Option<IntCounterVec>,
+        pd_tso_batch_size: Option<Histogram>,
+    }
+
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+
+    fn metrics() -> &'static Metrics {
+        METRICS.get_or_init(Metrics::register)
+    }
+
+    impl Metrics {
+        fn register_histogram_vec(
+            name: &'static str,
+            help: &'static str,
+            labels: &'static [&'static str],
+        ) -> Option<HistogramVec> {
+            match register_histogram_vec!(name, help, labels) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!("failed to register prometheus histogram vec {name}: {e:?}");
+                    None
+                }
+            }
+        }
+
+        fn register_int_counter_vec(
+            name: &'static str,
+            help: &'static str,
+            labels: &'static [&'static str],
+        ) -> Option<IntCounterVec> {
+            match register_int_counter_vec!(name, help, labels) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!("failed to register prometheus counter vec {name}: {e:?}");
+                    None
+                }
+            }
+        }
+
+        fn register_histogram(name: &'static str, help: &'static str) -> Option<Histogram> {
+            match register_histogram!(name, help) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!("failed to register prometheus histogram {name}: {e:?}");
+                    None
+                }
+            }
+        }
+
+        fn register() -> Metrics {
+            Metrics {
+                tikv_request_duration: Self::register_histogram_vec(
+                    "tikv_request_duration_seconds",
+                    "Bucketed histogram of TiKV requests duration",
+                    &["type"],
+                ),
+                tikv_request_total: Self::register_int_counter_vec(
+                    "tikv_request_total",
+                    "Total number of requests sent to TiKV",
+                    &["type"],
+                ),
+                tikv_failed_request_duration: Self::register_histogram_vec(
+                    "tikv_failed_request_duration_seconds",
+                    "Bucketed histogram of failed TiKV requests duration",
+                    &["type"],
+                ),
+                tikv_failed_request_total: Self::register_int_counter_vec(
+                    "tikv_failed_request_total",
+                    "Total number of failed requests sent to TiKV",
+                    &["type"],
+                ),
+                backoff_sleep_duration: Self::register_histogram_vec(
+                    "tikv_backoff_sleep_duration_seconds",
+                    "Bucketed histogram of TiKV client backoff sleep duration",
+                    &["type"],
+                ),
+                pd_request_duration: Self::register_histogram_vec(
+                    "pd_request_duration_seconds",
+                    "Bucketed histogram of PD requests duration",
+                    &["type"],
+                ),
+                pd_request_total: Self::register_int_counter_vec(
+                    "pd_request_total",
+                    "Total number of requests sent to PD",
+                    &["type"],
+                ),
+                pd_failed_request_duration: Self::register_histogram_vec(
+                    "pd_failed_request_duration_seconds",
+                    "Bucketed histogram of failed PD requests duration",
+                    &["type"],
+                ),
+                pd_failed_request_total: Self::register_int_counter_vec(
+                    "pd_failed_request_total",
+                    "Total number of failed requests sent to PD",
+                    &["type"],
+                ),
+                pd_tso_batch_size: Self::register_histogram(
+                    "pd_tso_batch_size",
+                    "Bucketed histogram of TSO request batch size",
+                ),
+            }
+        }
+    }
+
     pub struct RequestStats {
         start: Instant,
         cmd: &'static str,
-        duration: &'static HistogramVec,
-        failed_duration: &'static HistogramVec,
-        failed_counter: &'static IntCounterVec,
+        duration: Option<&'static HistogramVec>,
+        failed_duration: Option<&'static HistogramVec>,
+        failed_counter: Option<&'static IntCounterVec>,
     }
 
     impl RequestStats {
         fn new(
             cmd: &'static str,
-            duration: &'static HistogramVec,
-            counter: &'static IntCounterVec,
-            failed_duration: &'static HistogramVec,
-            failed_counter: &'static IntCounterVec,
+            duration: Option<&'static HistogramVec>,
+            counter: Option<&'static IntCounterVec>,
+            failed_duration: Option<&'static HistogramVec>,
+            failed_counter: Option<&'static IntCounterVec>,
         ) -> Self {
-            counter.with_label_values(&[cmd]).inc();
+            if let Some(counter) = counter {
+                counter.with_label_values(&[cmd]).inc();
+            }
             Self {
                 start: Instant::now(),
                 cmd,
@@ -50,128 +168,63 @@ mod imp {
 
         pub fn done<R>(&self, r: Result<R>) -> Result<R> {
             if r.is_ok() {
-                self.duration
-                    .with_label_values(&[self.cmd])
-                    .observe(duration_to_sec(self.start.elapsed()));
+                if let Some(duration) = self.duration {
+                    duration
+                        .with_label_values(&[self.cmd])
+                        .observe(duration_to_sec(self.start.elapsed()));
+                }
             } else {
-                self.failed_duration
-                    .with_label_values(&[self.cmd])
-                    .observe(duration_to_sec(self.start.elapsed()));
-                self.failed_counter.with_label_values(&[self.cmd]).inc();
+                if let Some(failed_duration) = self.failed_duration {
+                    failed_duration
+                        .with_label_values(&[self.cmd])
+                        .observe(duration_to_sec(self.start.elapsed()));
+                }
+                if let Some(failed_counter) = self.failed_counter {
+                    failed_counter.with_label_values(&[self.cmd]).inc();
+                }
             }
             r
         }
     }
 
     pub fn tikv_stats(cmd: &'static str) -> RequestStats {
-        ensure_metrics_registered();
+        let metrics = metrics();
         RequestStats::new(
             cmd,
-            &TIKV_REQUEST_DURATION_HISTOGRAM_VEC,
-            &TIKV_REQUEST_COUNTER_VEC,
-            &TIKV_FAILED_REQUEST_DURATION_HISTOGRAM_VEC,
-            &TIKV_FAILED_REQUEST_COUNTER_VEC,
+            metrics.tikv_request_duration.as_ref(),
+            metrics.tikv_request_total.as_ref(),
+            metrics.tikv_failed_request_duration.as_ref(),
+            metrics.tikv_failed_request_total.as_ref(),
         )
     }
 
     pub fn pd_stats(cmd: &'static str) -> RequestStats {
-        ensure_metrics_registered();
+        let metrics = metrics();
         RequestStats::new(
             cmd,
-            &PD_REQUEST_DURATION_HISTOGRAM_VEC,
-            &PD_REQUEST_COUNTER_VEC,
-            &PD_FAILED_REQUEST_DURATION_HISTOGRAM_VEC,
-            &PD_FAILED_REQUEST_COUNTER_VEC,
+            metrics.pd_request_duration.as_ref(),
+            metrics.pd_request_total.as_ref(),
+            metrics.pd_failed_request_duration.as_ref(),
+            metrics.pd_failed_request_total.as_ref(),
         )
     }
 
     #[allow(dead_code)]
     pub fn observe_tso_batch(batch_size: usize) {
-        ensure_metrics_registered();
-        PD_TSO_BATCH_SIZE_HISTOGRAM.observe(batch_size as f64);
+        if let Some(h) = metrics().pd_tso_batch_size.as_ref() {
+            h.observe(batch_size as f64);
+        }
     }
 
     pub(crate) fn ensure_metrics_registered() {
-        // Force the lazy statics to initialize so callers can `gather()` even before the first RPC.
-        lazy_static::initialize(&TIKV_REQUEST_DURATION_HISTOGRAM_VEC);
-        lazy_static::initialize(&TIKV_REQUEST_COUNTER_VEC);
-        lazy_static::initialize(&TIKV_FAILED_REQUEST_DURATION_HISTOGRAM_VEC);
-        lazy_static::initialize(&TIKV_FAILED_REQUEST_COUNTER_VEC);
-        lazy_static::initialize(&BACKOFF_SLEEP_DURATION_HISTOGRAM_VEC);
-        lazy_static::initialize(&PD_REQUEST_DURATION_HISTOGRAM_VEC);
-        lazy_static::initialize(&PD_REQUEST_COUNTER_VEC);
-        lazy_static::initialize(&PD_FAILED_REQUEST_DURATION_HISTOGRAM_VEC);
-        lazy_static::initialize(&PD_FAILED_REQUEST_COUNTER_VEC);
-        lazy_static::initialize(&PD_TSO_BATCH_SIZE_HISTOGRAM);
+        let _ = metrics();
     }
 
     pub(crate) fn observe_backoff_sleep(kind: &'static str, duration: Duration) {
-        ensure_metrics_registered();
-        BACKOFF_SLEEP_DURATION_HISTOGRAM_VEC
-            .with_label_values(&[kind])
-            .observe(duration_to_sec(duration));
-    }
-
-    lazy_static::lazy_static! {
-        static ref TIKV_REQUEST_DURATION_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
-            "tikv_request_duration_seconds",
-            "Bucketed histogram of TiKV requests duration",
-            &["type"]
-        )
-        .unwrap();
-        static ref TIKV_REQUEST_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
-            "tikv_request_total",
-            "Total number of requests sent to TiKV",
-            &["type"]
-        )
-        .unwrap();
-        static ref TIKV_FAILED_REQUEST_DURATION_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
-            "tikv_failed_request_duration_seconds",
-            "Bucketed histogram of failed TiKV requests duration",
-            &["type"]
-        )
-        .unwrap();
-        static ref TIKV_FAILED_REQUEST_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
-            "tikv_failed_request_total",
-            "Total number of failed requests sent to TiKV",
-            &["type"]
-        )
-        .unwrap();
-        static ref BACKOFF_SLEEP_DURATION_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
-            "tikv_backoff_sleep_duration_seconds",
-            "Bucketed histogram of TiKV client backoff sleep duration",
-            &["type"]
-        )
-        .unwrap();
-        static ref PD_REQUEST_DURATION_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
-            "pd_request_duration_seconds",
-            "Bucketed histogram of PD requests duration",
-            &["type"]
-        )
-        .unwrap();
-        static ref PD_REQUEST_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
-            "pd_request_total",
-            "Total number of requests sent to PD",
-            &["type"]
-        )
-        .unwrap();
-        static ref PD_FAILED_REQUEST_DURATION_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
-            "pd_failed_request_duration_seconds",
-            "Bucketed histogram of failed PD requests duration",
-            &["type"]
-        )
-        .unwrap();
-        static ref PD_FAILED_REQUEST_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
-            "pd_failed_request_total",
-            "Total number of failed requests sent to PD",
-            &["type"]
-        )
-        .unwrap();
-        static ref PD_TSO_BATCH_SIZE_HISTOGRAM: Histogram = register_histogram!(
-            "pd_tso_batch_size",
-            "Bucketed histogram of TSO request batch size"
-        )
-        .unwrap();
+        if let Some(h) = metrics().backoff_sleep_duration.as_ref() {
+            h.with_label_values(&[kind])
+                .observe(duration_to_sec(duration));
+        }
     }
 
     /// Convert Duration to seconds.

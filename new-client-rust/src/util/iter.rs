@@ -49,8 +49,10 @@ impl<
                     Some(elt) => return Some(Ok(elt)),
                 },
                 Some(Err(_)) => {
-                    let e = self.frontiter.take().unwrap().err().unwrap();
-                    return Some(Err(e));
+                    if let Some(Err(e)) = self.frontiter.take() {
+                        return Some(Err(e));
+                    }
+                    self.frontiter = None;
                 }
                 None => {}
             }

@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use log::error;
+use log::warn;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
@@ -82,7 +84,12 @@ pub(crate) struct LatchesScheduler {
 
 impl LatchesScheduler {
     pub(crate) fn new(size: usize) -> Arc<Self> {
-        assert!(size > 0, "latches size must be > 0");
+        let size = if size == 0 {
+            warn!("latches size is 0, using 1");
+            1
+        } else {
+            size
+        };
         let latches = Latches::new(size);
         let (unlock_tx, mut unlock_rx) = mpsc::unbounded_channel::<Arc<LatchLock>>();
 
@@ -189,7 +196,7 @@ impl Latches {
         let slot_id = lock.slot_at(idx);
         let slot = &self.slots[slot_id];
 
-        let mut inner = slot.inner.lock().unwrap();
+        let mut inner = slot.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         // Best-effort recycling to cap per-slot memory usage.
         if inner.nodes.len() >= LATCH_LIST_COUNT {
@@ -227,26 +234,35 @@ impl Latches {
     }
 
     fn release_slot(&self, lock: &Arc<LatchLock>) -> Option<Arc<LatchLock>> {
-        let idx = lock
-            .dec_acquired()
-            .expect("release_slot called with acquired_count=0");
+        let Some(idx) = lock.dec_acquired() else {
+            error!("latch: release_slot called with acquired_count=0");
+            return None;
+        };
         let key = lock.key_at(idx);
         let slot_id = lock.slot_at(idx);
         let slot = &self.slots[slot_id];
 
-        let mut inner = slot.inner.lock().unwrap();
-        let node_max_commit_ts = {
-            let node = inner
-                .nodes
-                .get_mut(key)
-                .expect("latch node must exist when releasing");
-            match &node.value {
-                Some(owner) if Arc::ptr_eq(owner, lock) => {}
-                _ => panic!("release_slot wrong lock owner"),
+        let mut inner = slot.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let node = inner.nodes.entry(key.to_vec()).or_insert_with(|| Node {
+            max_commit_ts: 0,
+            value: None,
+        });
+        let node_max_commit_ts = match &node.value {
+            Some(owner) if Arc::ptr_eq(owner, lock) => {
+                node.max_commit_ts = max(node.max_commit_ts, lock.commit_ts());
+                node.value = None;
+                node.max_commit_ts
             }
-            node.max_commit_ts = max(node.max_commit_ts, lock.commit_ts());
-            node.value = None;
-            node.max_commit_ts
+            Some(_) => {
+                error!("latch: release_slot wrong lock owner");
+                return None;
+            }
+            None => {
+                // Inconsistent state (e.g. node evicted unexpectedly). Best-effort: treat the latch
+                // as already released and continue to wake waiters.
+                node.max_commit_ts = max(node.max_commit_ts, lock.commit_ts());
+                node.max_commit_ts
+            }
         };
 
         if inner.waiting.is_empty() {
@@ -268,10 +284,10 @@ impl Latches {
         // Stale detection: if the max_commit_ts for this key is newer than the waiting txn's
         // start_ts, mark it stale and grant it the latch so it can release promptly.
         if node_max_commit_ts > next.start_ts() {
-            let node = inner
-                .nodes
-                .get_mut(key)
-                .expect("latch node must exist when granting to stale lock");
+            let node = inner.nodes.entry(key.to_vec()).or_insert_with(|| Node {
+                max_commit_ts: node_max_commit_ts,
+                value: None,
+            });
             node.value = Some(next.clone());
             next.inc_acquired();
             next.mark_stale();
@@ -281,7 +297,7 @@ impl Latches {
 
     fn recycle(&self, current_ts: u64) {
         for slot in self.slots.iter() {
-            let mut inner = slot.inner.lock().unwrap();
+            let mut inner = slot.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.recycle(current_ts);
         }
     }

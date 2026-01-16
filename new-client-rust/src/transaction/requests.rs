@@ -579,101 +579,109 @@ impl Merge<ResponseWithShard<kvrpcpb::PessimisticLockResponse, Vec<kvrpcpb::Muta
             Result<ResponseWithShard<kvrpcpb::PessimisticLockResponse, Vec<kvrpcpb::Mutation>>>,
         >,
     ) -> Result<Self::Out> {
-        if input.iter().any(Result::is_err) {
-            let (success, mut errors): (Vec<_>, Vec<_>) =
-                input.into_iter().partition(Result::is_ok);
-            let first_err = errors.pop().unwrap();
-            let success_keys = success
+        let mut oks = Vec::new();
+        let mut first_err = None;
+
+        for item in input {
+            match item {
+                Ok(ok) => oks.push(ok),
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+
+        if let Some(err) = first_err {
+            let success_keys = oks
                 .into_iter()
-                .map(Result::unwrap)
                 .flat_map(|ResponseWithShard(_resp, mutations)| {
                     mutations.into_iter().map(|m| m.key)
                 })
                 .collect();
-            Err(PessimisticLockError {
-                inner: Box::new(first_err.unwrap_err()),
+            return Err(PessimisticLockError {
+                inner: Box::new(err),
                 success_keys,
-            })
-        } else {
-            let mut out = Vec::new();
-            for ResponseWithShard(resp, mutations) in input.into_iter().map(Result::unwrap) {
-                if !resp.results.is_empty() {
-                    if resp.results.len() != mutations.len() {
-                        return Err(crate::Error::InternalError {
-                            message: format!(
-                                "PessimisticLockResponse.results length mismatch: mutations={}, results={}",
-                                mutations.len(),
-                                resp.results.len()
-                            ),
-                        });
-                    }
-                    for (mutation, result) in mutations.into_iter().zip(resp.results.into_iter()) {
-                        let result_type =
-                            kvrpcpb::PessimisticLockKeyResultType::try_from(result.r#type)
-                                .unwrap_or(kvrpcpb::PessimisticLockKeyResultType::LockResultFailed);
-                        match result_type {
-                            kvrpcpb::PessimisticLockKeyResultType::LockResultNormal
-                            | kvrpcpb::PessimisticLockKeyResultType::LockResultLockedWithConflict => {
-                                if result.existence {
-                                    out.push(KvPair::new(mutation.key, result.value));
-                                }
+            });
+        }
+
+        let mut out = Vec::new();
+        for ResponseWithShard(resp, mutations) in oks {
+            if !resp.results.is_empty() {
+                if resp.results.len() != mutations.len() {
+                    return Err(crate::Error::InternalError {
+                        message: format!(
+                            "PessimisticLockResponse.results length mismatch: mutations={}, results={}",
+                            mutations.len(),
+                            resp.results.len()
+                        ),
+                    });
+                }
+                for (mutation, result) in mutations.into_iter().zip(resp.results.into_iter()) {
+                    let result_type =
+                        kvrpcpb::PessimisticLockKeyResultType::try_from(result.r#type)
+                            .unwrap_or(kvrpcpb::PessimisticLockKeyResultType::LockResultFailed);
+                    match result_type {
+                        kvrpcpb::PessimisticLockKeyResultType::LockResultNormal
+                        | kvrpcpb::PessimisticLockKeyResultType::LockResultLockedWithConflict => {
+                            if result.existence {
+                                out.push(KvPair::new(mutation.key, result.value));
                             }
-                            kvrpcpb::PessimisticLockKeyResultType::LockResultFailed => {}
                         }
+                        kvrpcpb::PessimisticLockKeyResultType::LockResultFailed => {}
                     }
-                    continue;
                 }
+                continue;
+            }
 
-                let mut values = resp.values;
-                let not_founds = resp.not_founds;
+            let mut values = resp.values;
+            let not_founds = resp.not_founds;
 
-                // When `return_values` is false, TiKV may return an empty `values` list even if
-                // `check_existence` is true (in which case `not_founds` is populated). To keep
-                // merging logic uniform and avoid panics, treat missing values as empty bytes.
-                if values.is_empty() && !mutations.is_empty() {
-                    values = iter::repeat_with(Vec::new).take(mutations.len()).collect();
-                }
-                if values.len() != mutations.len() {
-                    return Err(crate::Error::InternalError {
-                        message: format!(
-                            "PessimisticLockResponse.values length mismatch: mutations={}, values={}",
-                            mutations.len(),
-                            values.len()
-                        ),
-                    });
-                }
-                if !not_founds.is_empty() && not_founds.len() != mutations.len() {
-                    return Err(crate::Error::InternalError {
-                        message: format!(
-                            "PessimisticLockResponse.not_founds length mismatch: mutations={}, not_founds={}",
-                            mutations.len(),
-                            not_founds.len()
-                        ),
-                    });
-                }
+            // When `return_values` is false, TiKV may return an empty `values` list even if
+            // `check_existence` is true (in which case `not_founds` is populated). To keep
+            // merging logic uniform and avoid panics, treat missing values as empty bytes.
+            if values.is_empty() && !mutations.is_empty() {
+                values = iter::repeat_with(Vec::new).take(mutations.len()).collect();
+            }
+            if values.len() != mutations.len() {
+                return Err(crate::Error::InternalError {
+                    message: format!(
+                        "PessimisticLockResponse.values length mismatch: mutations={}, values={}",
+                        mutations.len(),
+                        values.len()
+                    ),
+                });
+            }
+            if !not_founds.is_empty() && not_founds.len() != mutations.len() {
+                return Err(crate::Error::InternalError {
+                    message: format!(
+                        "PessimisticLockResponse.not_founds length mismatch: mutations={}, not_founds={}",
+                        mutations.len(),
+                        not_founds.len()
+                    ),
+                });
+            }
 
-                if not_founds.is_empty() {
-                    // Legacy TiKV does not distinguish not existing key and existing key with an
-                    // empty value. We assume that key does not exist if the returned value is
-                    // empty.
-                    for (mutation, value) in mutations.into_iter().zip(values) {
-                        if !value.is_empty() {
-                            out.push(KvPair::new(mutation.key, value));
-                        }
+            if not_founds.is_empty() {
+                // Legacy TiKV does not distinguish not existing key and existing key with an
+                // empty value. We assume that key does not exist if the returned value is
+                // empty.
+                for (mutation, value) in mutations.into_iter().zip(values) {
+                    if !value.is_empty() {
+                        out.push(KvPair::new(mutation.key, value));
                     }
-                } else {
-                    for ((mutation, value), not_found) in
-                        mutations.into_iter().zip(values).zip(not_founds)
-                    {
-                        if !not_found {
-                            out.push(KvPair::new(mutation.key, value));
-                        }
+                }
+            } else {
+                for ((mutation, value), not_found) in
+                    mutations.into_iter().zip(values).zip(not_founds)
+                {
+                    if !not_found {
+                        out.push(KvPair::new(mutation.key, value));
                     }
                 }
             }
-
-            Ok(out)
         }
+
+        Ok(out)
     }
 }
 
@@ -778,8 +786,12 @@ impl Shardable for kvrpcpb::TxnHeartBeatRequest {
     }
 
     fn apply_shard(&mut self, mut shard: Self::Shard) {
-        assert!(shard.len() == 1);
-        self.primary_lock = shard.pop().unwrap();
+        debug_assert_eq!(
+            shard.len(),
+            1,
+            "TxnHeartBeatRequest expects a single-key shard"
+        );
+        self.primary_lock = shard.pop().unwrap_or_default();
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
@@ -838,8 +850,12 @@ impl Shardable for kvrpcpb::CheckTxnStatusRequest {
     }
 
     fn apply_shard(&mut self, mut shard: Self::Shard) {
-        assert!(shard.len() == 1);
-        self.primary_key = shard.pop().unwrap();
+        debug_assert_eq!(
+            shard.len(),
+            1,
+            "CheckTxnStatusRequest expects a single-key shard"
+        );
+        self.primary_key = shard.pop().unwrap_or_default();
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
@@ -873,7 +889,7 @@ pub struct TransactionStatus {
 impl From<kvrpcpb::CheckTxnStatusResponse> for TransactionStatus {
     fn from(mut resp: kvrpcpb::CheckTxnStatusResponse) -> TransactionStatus {
         TransactionStatus {
-            action: Action::try_from(resp.action).unwrap(),
+            action: Action::try_from(resp.action).unwrap_or(Action::NoAction),
             kind: (resp.commit_version, resp.lock_ttl, resp.lock_info.take()).into(),
             is_expired: false,
         }
@@ -923,12 +939,13 @@ impl TransactionStatus {
 
 impl From<(u64, u64, Option<kvrpcpb::LockInfo>)> for TransactionStatusKind {
     fn from((ts, ttl, info): (u64, u64, Option<kvrpcpb::LockInfo>)) -> TransactionStatusKind {
-        match (ts, ttl, info) {
-            (0, 0, None) => TransactionStatusKind::RolledBack,
-            (ts, 0, None) => TransactionStatusKind::Committed(Timestamp::from_version(ts)),
-            (0, ttl, Some(info)) => TransactionStatusKind::Locked(ttl, info),
-            _ => unreachable!(),
+        if ts != 0 {
+            return TransactionStatusKind::Committed(Timestamp::from_version(ts));
         }
+        if let Some(info) = info {
+            return TransactionStatusKind::Locked(ttl, info);
+        }
+        TransactionStatusKind::RolledBack
     }
 }
 

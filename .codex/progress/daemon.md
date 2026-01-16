@@ -9,7 +9,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- （无）
+- safety：审阅并加固 unsafe 代码块（补齐 SAFETY 说明 + 边界测试）
+  - 计划：
+    - `rg '\\bunsafe\\b' new-client-rust/src --glob '!*/generated/*'` 盘点所有 unsafe 点
+    - 为每个 unsafe block 增补 `// SAFETY: ...`（前置条件/不变式/为何不会 UB）
+    - 针对关键边界（Key repr cast / keyspace prefix truncate / memmove）补齐单测
 
 # 待做工作
 
@@ -50,3 +54,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：为 `NextBatch` 增加 `end_key()`，由 CleanupLocks 在计算 next_range 时过滤 `start_key >= end_key`；`ScanLockResponse::has_next_batch()` 仅负责生成 next start_key
   - 测试：新增单测覆盖 end_key 边界（next start == end_key 时不再发起下一次 ScanLock）
   - 文件：`new-client-rust/src/{request/shard.rs,transaction/requests.rs,request/plan.rs}`，`.codex/progress/daemon.md`
+
+- hardening：清理非测试路径的 panic/unwrap/expect，并补齐可测的错误分支单测
+  - 关键决策：锁中毒/字段缺失/配置异常不再 panic（返回 `Error`）；`Backoff` jitter 构造参数自动 clamp（避免 `gen_range(0..0)`）；timestamp helpers 改为 `Result`；移除 `lazy_static+regex` scheme 处理；修复 `internal_err!` 宏递归路径的作用域问题
+  - 测试：补齐 scheme strip / backoff invalid params / pd retry `leader_change_retry==0` / buffer cache mismatch / timestamp negative；验证 `cargo fmt && cargo test && cargo clippy --all-targets`（含 `--no-default-features`）
+  - 文件：`new-client-rust/Cargo.toml`，`new-client-rust/src/{backoff.rs,timestamp.rs,common/{errors,security}.rs,pd/retry.rs,request/{keyspace,plan,shard}.rs,transaction/{buffer,requests,transaction}.rs,region_cache.rs,kv/key.rs}`，以及相关 panic/unwrap 清理文件，`.codex/progress/daemon.md`

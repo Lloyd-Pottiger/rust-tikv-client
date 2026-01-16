@@ -131,7 +131,7 @@ impl Connection {
     ) -> Result<Cluster> {
         let members = self.validate_endpoints(endpoints, timeout).await?;
         let (client, keyspace_client, members) = self.try_connect_leader(&members, timeout).await?;
-        let id = members.header.as_ref().unwrap().cluster_id;
+        let id = Self::validate_members_response("pd", &members)?;
         let tso = TimestampOracle::new(id, &client)?;
         let cluster = Cluster {
             id,
@@ -186,7 +186,11 @@ impl Connection {
             };
 
             // Check cluster ID.
-            let cid = resp.header.as_ref().unwrap().cluster_id;
+            let cid = resp
+                .header
+                .as_ref()
+                .map(|header| header.cluster_id)
+                .ok_or_else(|| internal_err!("missing PD response header from {}", ep))?;
             if let Some(sample) = cluster_id {
                 if sample != cid {
                     return Err(internal_err!(
@@ -323,7 +327,11 @@ impl Connection {
         members: &pdpb::GetMembersResponse,
         cluster_id: u64,
     ) -> Result<()> {
-        let new_cluster_id = members.header.as_ref().unwrap().cluster_id;
+        let new_cluster_id = members
+            .header
+            .as_ref()
+            .map(|header| header.cluster_id)
+            .ok_or_else(|| internal_err!("missing PD response header from {}", addr))?;
         if new_cluster_id != cluster_id {
             Err(internal_err!(
                 "{} no longer belongs to cluster {}, it is in {}",
@@ -345,9 +353,16 @@ impl Connection {
         keyspacepb::keyspace_client::KeyspaceClient<Channel>,
         pdpb::GetMembersResponse,
     )> {
-        let previous_leader = previous.leader.as_ref().unwrap();
+        let previous_leader = previous
+            .leader
+            .as_ref()
+            .ok_or_else(|| internal_err!("no leader found in GetMembersResponse"))?;
         let members = &previous.members;
-        let cluster_id = previous.header.as_ref().unwrap().cluster_id;
+        let cluster_id = previous
+            .header
+            .as_ref()
+            .map(|header| header.cluster_id)
+            .ok_or_else(|| internal_err!("missing PD response header"))?;
 
         let mut resp = None;
         // Try to connect to other members, then the previous leader.
@@ -404,7 +419,10 @@ trait PdMessage: Sized {
         req.set_timeout(timeout);
         let response = Self::rpc(req, client).await?;
 
-        if let Some(err) = &response.header().error {
+        let header = response
+            .header()
+            .ok_or_else(|| internal_err!("missing PD response header"))?;
+        if let Some(err) = &header.error {
             Err(internal_err!(err.message))
         } else {
             Ok(response)
@@ -473,36 +491,36 @@ impl PdMessage for keyspacepb::LoadKeyspaceRequest {
 }
 
 trait PdResponse {
-    fn header(&self) -> &pdpb::ResponseHeader;
+    fn header(&self) -> Option<&pdpb::ResponseHeader>;
 }
 
 impl PdResponse for pdpb::GetStoreResponse {
-    fn header(&self) -> &pdpb::ResponseHeader {
-        self.header.as_ref().unwrap()
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
     }
 }
 
 impl PdResponse for pdpb::GetRegionResponse {
-    fn header(&self) -> &pdpb::ResponseHeader {
-        self.header.as_ref().unwrap()
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
     }
 }
 
 impl PdResponse for pdpb::GetAllStoresResponse {
-    fn header(&self) -> &pdpb::ResponseHeader {
-        self.header.as_ref().unwrap()
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
     }
 }
 
 impl PdResponse for pdpb::UpdateGcSafePointResponse {
-    fn header(&self) -> &pdpb::ResponseHeader {
-        self.header.as_ref().unwrap()
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
     }
 }
 
 impl PdResponse for keyspacepb::LoadKeyspaceResponse {
-    fn header(&self) -> &pdpb::ResponseHeader {
-        self.header.as_ref().unwrap()
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
     }
 }
 

@@ -94,8 +94,16 @@ macro_rules! retry_core {
             }
         }
 
+        if retry_cfg.leader_change_retry == 0 {
+            return Err(crate::internal_err!(
+                "PdRetryConfig.leader_change_retry must be > 0"
+            ));
+        }
+
         last_err?;
-        unreachable!();
+        Err(crate::internal_err!(
+            "pd retry loop exhausted without producing an error"
+        ))
     }};
 }
 
@@ -182,10 +190,11 @@ impl RetryClientTrait for RetryClient<Cluster> {
 
     async fn get_store(self: Arc<Self>, id: StoreId) -> Result<metapb::Store> {
         retry_mut!(self, self.retry_config, "get_store", |cluster| async {
-            cluster
-                .get_store(id, self.timeout)
-                .await
-                .map(|resp| resp.store.unwrap())
+            cluster.get_store(id, self.timeout).await.and_then(|resp| {
+                resp.store.ok_or_else(|| {
+                    crate::internal_err!("missing store in PD GetStoreResponse (store_id={})", id)
+                })
+            })
         })
     }
 
@@ -420,5 +429,37 @@ mod test {
             assert!(retry_max_ok(client.clone(), max_retries, cfg).await.is_ok());
             assert_eq!(client.cluster.read().await.0.load(Ordering::SeqCst), 2);
         })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_retry_rejects_zero_leader_change_retry() {
+        struct MockClient {
+            cluster: RwLock<((), Instant)>,
+        }
+
+        #[async_trait]
+        impl Reconnect for MockClient {
+            type Cl = ();
+
+            async fn reconnect(&self, _: Duration) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let client = Arc::new(MockClient {
+            cluster: RwLock::new(((), Instant::now())),
+        });
+        let cfg = PdRetryConfig {
+            reconnect_interval: Duration::from_secs(0),
+            max_reconnect_attempts: 1,
+            leader_change_retry: 0,
+        };
+
+        async fn retry_ok(client: Arc<MockClient>, cfg: PdRetryConfig) -> Result<()> {
+            retry!(client, cfg, "test", |_c| { ready(Ok::<_, Error>(())) })
+        }
+
+        let res = retry_ok(client, cfg).await;
+        assert!(matches!(res, Err(Error::InternalError { .. })));
     }
 }

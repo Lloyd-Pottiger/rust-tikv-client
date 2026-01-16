@@ -62,9 +62,12 @@ impl Backoff {
             }
             BackoffKind::DecorrelatedJitter => {
                 let mut rng = thread_rng();
-                let delay_ms: u64 = rng
-                    .gen_range(0..self.current_delay_ms * 3 - self.base_delay_ms)
-                    + self.base_delay_ms;
+                let upper_exclusive = self
+                    .current_delay_ms
+                    .saturating_mul(3)
+                    .saturating_sub(self.base_delay_ms)
+                    .max(1);
+                let delay_ms: u64 = rng.gen_range(0..upper_exclusive) + self.base_delay_ms;
 
                 let delay_ms = delay_ms.min(self.max_delay_ms);
                 self.current_delay_ms = delay_ms;
@@ -126,10 +129,10 @@ impl Backoff {
         max_delay_ms: u64,
         max_attempts: u32,
     ) -> Backoff {
-        assert!(
-            base_delay_ms > 0 && max_delay_ms > 0,
-            "Both base_delay_ms and max_delay_ms must be positive"
-        );
+        // Avoid panics in `next_delay_duration` when `rand::Rng::gen_range` would be called with
+        // an empty range (e.g. `0..0`).
+        let base_delay_ms = base_delay_ms.max(1);
+        let max_delay_ms = max_delay_ms.max(1);
 
         Backoff {
             kind: BackoffKind::FullJitter,
@@ -151,10 +154,10 @@ impl Backoff {
         max_delay_ms: u64,
         max_attempts: u32,
     ) -> Backoff {
-        assert!(
-            base_delay_ms > 1 && max_delay_ms > 1,
-            "Both base_delay_ms and max_delay_ms must be greater than 1"
-        );
+        // Equal-jitter uses `delay_ms >> 1` as the lower bound; ensure `delay_ms >= 2` so the
+        // random range is non-empty.
+        let base_delay_ms = base_delay_ms.max(2);
+        let max_delay_ms = max_delay_ms.max(2);
 
         Backoff {
             kind: BackoffKind::EqualJitter,
@@ -176,7 +179,9 @@ impl Backoff {
         max_delay_ms: u64,
         max_attempts: u32,
     ) -> Backoff {
-        assert!(base_delay_ms > 0, "base_delay_ms must be positive");
+        // Decorrelated-jitter draws from `[base_delay_ms, prev_delay_ms*3]`; keep invariants valid.
+        let base_delay_ms = base_delay_ms.max(1);
+        let max_delay_ms = max_delay_ms.max(base_delay_ms);
 
         Backoff {
             kind: BackoffKind::DecorrelatedJitter,
@@ -237,15 +242,15 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Both base_delay_ms and max_delay_ms must be positive")]
     fn test_full_jitter_backoff_with_invalid_base_delay_ms() {
-        Backoff::full_jitter_backoff(0, 7, 3);
+        let mut backoff = Backoff::full_jitter_backoff(0, 7, 3);
+        assert!(backoff.next_delay_duration().unwrap() <= Duration::from_millis(1));
     }
 
     #[test]
-    #[should_panic(expected = "Both base_delay_ms and max_delay_ms must be positive")]
     fn test_full_jitter_backoff_with_invalid_max_delay_ms() {
-        Backoff::full_jitter_backoff(2, 0, 3);
+        let mut backoff = Backoff::full_jitter_backoff(2, 0, 3);
+        assert!(backoff.next_delay_duration().unwrap() <= Duration::from_millis(1));
     }
 
     #[test]
@@ -268,15 +273,19 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Both base_delay_ms and max_delay_ms must be greater than 1")]
     fn test_equal_jitter_backoff_with_invalid_base_delay_ms() {
-        Backoff::equal_jitter_backoff(1, 7, 3);
+        let mut backoff = Backoff::equal_jitter_backoff(1, 7, 1);
+        let first_delay_dur = backoff.next_delay_duration().unwrap();
+        assert!(first_delay_dur >= Duration::from_millis(1));
+        assert!(first_delay_dur <= Duration::from_millis(2));
     }
 
     #[test]
-    #[should_panic(expected = "Both base_delay_ms and max_delay_ms must be greater than 1")]
     fn test_equal_jitter_backoff_with_invalid_max_delay_ms() {
-        Backoff::equal_jitter_backoff(2, 1, 3);
+        let mut backoff = Backoff::equal_jitter_backoff(2, 1, 1);
+        let first_delay_dur = backoff.next_delay_duration().unwrap();
+        assert!(first_delay_dur >= Duration::from_millis(1));
+        assert!(first_delay_dur <= Duration::from_millis(2));
     }
 
     #[test]
@@ -301,8 +310,10 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "base_delay_ms must be positive")]
     fn test_decorrelated_jitter_backoff_with_invalid_base_delay_ms() {
-        Backoff::decorrelated_jitter_backoff(0, 7, 3);
+        let mut backoff = Backoff::decorrelated_jitter_backoff(0, 7, 1);
+        let first_delay_dur = backoff.next_delay_duration().unwrap();
+        assert!(first_delay_dur >= Duration::from_millis(1));
+        assert!(first_delay_dur <= Duration::from_millis(2));
     }
 }

@@ -457,7 +457,7 @@ macro_rules! internal_err {
         }
     });
     ($f:tt, $($arg:expr),+) => ({
-        internal_err!(format!($f, $($arg),+))
+        $crate::internal_err!(format!($f, $($arg),+))
     });
 }
 

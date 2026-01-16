@@ -176,13 +176,22 @@ async fn resolve_lock_with_retry(
                         continue;
                     }
                     Some(e) => return Err(e),
-                    None => unreachable!(),
+                    None => {
+                        return Err(crate::internal_err!(
+                            "ResolveLock returned ExtractedErrors([]), which violates plan invariants"
+                        ));
+                    }
                 }
             }
             Err(e) => return Err(e),
         }
     }
-    Err(error.expect("no error is impossible"))
+    if let Some(err) = error {
+        return Err(err);
+    }
+    Err(crate::internal_err!(
+        "resolve lock retry loop exhausted without producing an error"
+    ))
 }
 
 #[derive(Default, Clone)]
