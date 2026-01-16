@@ -99,9 +99,11 @@
 
 pub mod backoff;
 pub mod interceptor;
+pub mod metrics;
 #[doc(hidden)]
 pub mod raw;
 pub mod request;
+pub mod trace;
 #[doc(hidden)]
 pub mod transaction;
 

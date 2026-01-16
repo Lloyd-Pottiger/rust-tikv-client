@@ -20,6 +20,8 @@ pub(crate) struct RequestContext {
     priority: Option<CommandPriority>,
     disk_full_opt: Option<DiskFullOpt>,
     txn_source: Option<u64>,
+    trace_id: Option<Arc<[u8]>>,
+    trace_control_flags: Option<u64>,
     resource_control_penalty: Option<Arc<resource_manager::Consumption>>,
     resource_control_override_priority: Option<u64>,
     resource_group_tagger: Option<ResourceGroupTagger>,
@@ -35,6 +37,8 @@ impl Default for RequestContext {
             priority: None,
             disk_full_opt: None,
             txn_source: None,
+            trace_id: None,
+            trace_control_flags: None,
             resource_control_penalty: None,
             resource_control_override_priority: None,
             resource_group_tagger: None,
@@ -55,6 +59,8 @@ impl fmt::Debug for RequestContext {
             .field("priority", &self.priority)
             .field("disk_full_opt", &self.disk_full_opt)
             .field("txn_source", &self.txn_source)
+            .field("trace_id", &self.trace_id.as_deref().map(|t| t.len()))
+            .field("trace_control_flags", &self.trace_control_flags)
             .field(
                 "resource_control_penalty",
                 &self.resource_control_penalty.is_some(),
@@ -116,6 +122,25 @@ impl RequestContext {
     }
 
     #[must_use]
+    pub(crate) fn with_trace_id(&self, trace_id: impl Into<Vec<u8>>) -> Self {
+        let mut cloned = self.clone();
+        cloned.trace_id = Some(Arc::<[u8]>::from(trace_id.into()));
+        cloned
+    }
+
+    #[must_use]
+    pub(crate) fn with_trace_control_flags(&self, flags: u64) -> Self {
+        let mut cloned = self.clone();
+        cloned.trace_control_flags = Some(flags);
+        cloned
+    }
+
+    #[must_use]
+    pub(crate) fn with_trace_control(&self, flags: crate::trace::TraceControlFlags) -> Self {
+        self.with_trace_control_flags(flags.0)
+    }
+
+    #[must_use]
     pub(crate) fn with_resource_control_penalty(
         &self,
         penalty: impl Into<resource_manager::Consumption>,
@@ -173,29 +198,45 @@ impl RequestContext {
     }
 
     pub(crate) fn apply_to<R: Request>(&self, mut request: R) -> R {
+        let ctx = request.context_mut();
         if let Some(source) = self.request_source.as_deref() {
-            request.set_request_source(source);
+            ctx.request_source = source.to_owned();
         }
         if let Some(tag) = self.resource_group_tag.as_deref() {
-            request.set_resource_group_tag(tag);
+            ctx.resource_group_tag = tag.to_vec();
         }
         if let Some(name) = self.resource_group_name.as_deref() {
-            request.set_resource_group_name(name);
+            let resource_ctl_ctx = ctx
+                .resource_control_context
+                .get_or_insert(crate::kvrpcpb::ResourceControlContext::default());
+            resource_ctl_ctx.resource_group_name = name.to_owned();
         }
         if let Some(priority) = self.priority {
-            request.set_priority(priority);
+            ctx.priority = priority.into();
         }
         if let Some(disk_full_opt) = self.disk_full_opt {
-            request.set_disk_full_opt(disk_full_opt);
+            ctx.disk_full_opt = disk_full_opt.into();
         }
         if let Some(txn_source) = self.txn_source {
-            request.set_txn_source(txn_source);
+            ctx.txn_source = txn_source;
+        }
+        if let Some(trace_id) = self.trace_id.as_deref() {
+            ctx.trace_id = trace_id.to_vec();
+        }
+        if let Some(flags) = self.trace_control_flags {
+            ctx.trace_control_flags = flags;
         }
         if let Some(override_priority) = self.resource_control_override_priority {
-            request.set_resource_control_override_priority(override_priority);
+            let resource_ctl_ctx = ctx
+                .resource_control_context
+                .get_or_insert(crate::kvrpcpb::ResourceControlContext::default());
+            resource_ctl_ctx.override_priority = override_priority;
         }
         if let Some(penalty) = self.resource_control_penalty.as_deref() {
-            request.set_resource_control_penalty(penalty);
+            let resource_ctl_ctx = ctx
+                .resource_control_context
+                .get_or_insert(crate::kvrpcpb::ResourceControlContext::default());
+            resource_ctl_ctx.penalty = Some(penalty.clone());
         }
         request
     }

@@ -130,6 +130,30 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
         self
     }
 
+    /// Set `kvrpcpb::Context.trace_id` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_trace_id(mut self, trace_id: impl Into<Vec<u8>>) -> Self {
+        self.request_context = self.request_context.with_trace_id(trace_id);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self
+    }
+
+    /// Set `kvrpcpb::Context.trace_control_flags` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_trace_control_flags(mut self, flags: u64) -> Self {
+        self.request_context = self.request_context.with_trace_control_flags(flags);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self
+    }
+
+    /// Set `kvrpcpb::Context.trace_control_flags` for all requests executed by this plan.
+    #[must_use]
+    pub fn with_trace_control(mut self, flags: crate::trace::TraceControlFlags) -> Self {
+        self.request_context = self.request_context.with_trace_control(flags);
+        self.plan.request = self.request_context.apply_to(self.plan.request);
+        self
+    }
+
     /// Set `kvrpcpb::Context.resource_control_context.override_priority` for all requests executed by this plan.
     #[must_use]
     pub fn with_resource_control_override_priority(mut self, override_priority: u64) -> Self {
@@ -421,6 +445,8 @@ mod tests {
         let expected_source = "unit-test".to_owned();
         let expected_group_name = "unit-test-group".to_owned();
         let expected_dynamic_tag = vec![9_u8];
+        let expected_trace_id = vec![1_u8, 2, 3, 4];
+        let expected_trace_flags = 0x1234_u64;
 
         let interceptor_called = Arc::new(AtomicBool::new(false));
         let interceptor_called_cloned = interceptor_called.clone();
@@ -435,6 +461,7 @@ mod tests {
 
         let hook_expected_group_name = expected_group_name.clone();
         let hook_expected_dynamic_tag = expected_dynamic_tag.clone();
+        let hook_expected_trace_id = expected_trace_id.clone();
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
                 let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
@@ -443,6 +470,8 @@ mod tests {
                 let ctx = req.context.as_ref().expect("context should be set");
                 assert_eq!(ctx.request_source, "from-interceptor");
                 assert_eq!(ctx.resource_group_tag, hook_expected_dynamic_tag);
+                assert_eq!(ctx.trace_id, hook_expected_trace_id);
+                assert_eq!(ctx.trace_control_flags, expected_trace_flags);
                 let resource_ctl_ctx = ctx
                     .resource_control_context
                     .as_ref()
@@ -467,6 +496,8 @@ mod tests {
         let plan = PlanBuilder::new(pd_client, Keyspace::Disable, req)
             .with_request_source(expected_source.clone())
             .with_resource_group_name(expected_group_name.clone())
+            .with_trace_id(expected_trace_id)
+            .with_trace_control_flags(expected_trace_flags)
             .with_resource_group_tagger(move |info, ctx| {
                 // Tagger runs before interceptors.
                 assert_eq!(info.label, "raw_get");

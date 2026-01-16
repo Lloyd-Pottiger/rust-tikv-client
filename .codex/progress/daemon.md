@@ -11,11 +11,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- metrics/trace：补齐 feature-gate 策略与最小 public API（对齐 client-go 导出包语义）
-  - 计划：
-    - prometheus/tracing 依赖改为可选 feature
-    - 先对齐核心 counters/histograms（可渐进补齐）
-
 # 已完成工作
 
 - Core crate 基线（new-client-rust）：Raw/Txn 客户端、PD/Region 路由、request plan、Keyspace、基础 Error/RequestContext（可编译可测试）
@@ -61,3 +56,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：`resolve_lock_with_retry` 对 region error 引入 backoff + 复用 `handle_region_error` 做 cache/leader 更新；store.attempt 透传到 request context
   - 文件：`new-client-rust/src/transaction/lock.rs`
   - 测试：lock resolver 重试单测改用 0ms backoff（避免 sleep 放大测试耗时）
+
+- metrics/trace：补齐 feature-gate 策略与最小 public API（对齐 client-go 导出包语义）
+  - 关键决策：Prometheus 作为可选依赖；禁用 `prometheus` feature 时 stats 退化为 no-op；提供最小 `metrics::gather_as_text()` 与 `PlanBuilder` trace 注入入口
+  - 文件：`new-client-rust/{Cargo.toml,src/{metrics.rs,trace.rs,stats.rs,lib.rs,request_context.rs,request/plan_builder.rs}}`
+  - 测试：补 PlanBuilder trace_id/trace_control_flags 注入断言；`--no-default-features` 可编译可测试
