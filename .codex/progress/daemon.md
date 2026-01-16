@@ -9,12 +9,16 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- trace：补齐 trace package ctx helper（按 checklist 渐进）
+- oracle：补齐 oracle/oracles 时间戳/TS helper 对齐点（按 checklist 渐进）
   - 计划：
-    - 明确 `ContextWithTraceID/TraceIDFromContext` 在 Rust 的映射（PlanBuilder / out-of-scope）
-    - 视需要增加兼容 helper（不引入 Go-style context）
+    - 对照 `client-go/oracle`/`client-go/oracle/oracles` exported API，确认 still-relevant 的对齐点
+    - 在 Rust 侧映射到 `Timestamp`/`TimestampExt`/现有 client API，不足则补齐实现与单测
+    - 逐步标注 out-of-scope（Go-style context/旧版本兼容点不保留）
 
 # 待做工作
+
+- tikv/tikvrpc/txnkv：public API mapping + out-of-scope（按 checklist 渐进，优先入口与核心类型）
+- config/retry + error：对齐并标注 out-of-scope（按 checklist 渐进）
 
 # 已完成工作
 
@@ -27,6 +31,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 测试：覆盖 flush/rollback/latch、replica/stale routing、assertion/lock options、lite txn_size、lock resolver retry/backoff、resource control 透传
 
 - 横切能力 + parity artifacts：interceptor chain(wrap)/mock、trace hooks + PlanBuilder/RequestContext 注入、metrics(feature-gate)+最小 API、checklist scope policy + inventory 工具
-  - 关键决策：Prometheus 可选依赖，禁用 `prometheus` 时 stats no-op；metrics 不 1:1 暴露 Go 的 label/handle（统一标注 out-of-scope），仅保留 `metrics::{register,gather_as_text}`
+  - 关键决策：trace ctx helper（ContextWithTraceID/TraceIDFromContext/GetTraceControlFlags）不引入 Go-style context，统一映射到 `PlanBuilder::{with_trace_id,with_trace_control}` 并标注 out-of-scope；Prometheus 可选依赖，禁用 `prometheus` 时 stats no-op；metrics 不 1:1 暴露 Go 的 label/handle（统一标注 out-of-scope），仅保留 `metrics::{register,gather_as_text}`
   - 文件：`new-client-rust/src/{interceptor.rs,trace.rs,metrics.rs,stats.rs,request/plan.rs,request/plan_builder.rs,request_context.rs}`，`.codex/progress/{parity-checklist.md,parity-map.md,gap-analysis.md,client-go-api-inventory.md}`，`tools/client-go-api-inventory/main.go`
   - 测试：`new-client-rust/src/metrics.rs (gather_contains_core_metrics)` 先打点再 gather（避免空 vec 不输出导致 flaky），`--no-default-features` 可编译可测试

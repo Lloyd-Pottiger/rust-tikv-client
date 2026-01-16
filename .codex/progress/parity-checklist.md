@@ -1137,20 +1137,20 @@ Conventions:
 ### Types
 - [x] `type Category uint32` | Rust: `tikv_client::trace::Category` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
 - [x] `type IsCategoryEnabledFunc func(category Category) bool` | Rust: `tikv_client::trace::IsCategoryEnabledFn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
-- [ ] `type TraceControlExtractorFunc func(ctx context.Context) TraceControlFlags` | Rust:  | Tests: 
+- [x] `type TraceControlExtractorFunc func(ctx context.Context) TraceControlFlags` | Rust: N/A (out-of-scope: no Go-style context; set flags explicitly via `PlanBuilder::with_trace_control`) | Tests: N/A
 - [x] `type TraceControlFlags uint64` | Rust: `tikv_client::trace::TraceControlFlags` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
 - [x] `type TraceEventFunc func(ctx context.Context, category Category, name string, fields ...zap.Field)` | Rust: `tikv_client::trace::TraceEventFn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
 
 ### Functions
-- [ ] `func ContextWithTraceID(ctx context.Context, traceID []byte) context.Context` | Rust:  | Tests: 
-- [ ] `func GetTraceControlFlags(ctx context.Context) TraceControlFlags` | Rust:  | Tests: 
-- [ ] `func ImmediateLoggingEnabled(ctx context.Context) bool` | Rust:  | Tests: 
+- [x] `func ContextWithTraceID(ctx context.Context, traceID []byte) context.Context` | Rust: `tikv_client::request::PlanBuilder::with_trace_id` (new-client-rust/src/request/plan_builder.rs) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func GetTraceControlFlags(ctx context.Context) TraceControlFlags` | Rust: N/A (out-of-scope: no Go-style context; pass flags explicitly via `PlanBuilder::with_trace_control`) | Tests: N/A
+- [x] `func ImmediateLoggingEnabled(ctx context.Context) bool` | Rust: N/A (capability: `TraceControlFlags::has(FLAG_IMMEDIATE_LOG)`) | Tests: N/A
 - [x] `func IsCategoryEnabled(category Category) bool` | Rust: `tikv_client::trace::is_category_enabled` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
 - [x] `func SetIsCategoryEnabledFunc(fn IsCategoryEnabledFunc)` | Rust: `tikv_client::trace::set_is_category_enabled_fn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
-- [ ] `func SetTraceControlExtractor(fn TraceControlExtractorFunc)` | Rust:  | Tests: 
+- [x] `func SetTraceControlExtractor(fn TraceControlExtractorFunc)` | Rust: N/A (out-of-scope: no Go-style context) | Tests: N/A
 - [x] `func SetTraceEventFunc(fn TraceEventFunc)` | Rust: `tikv_client::trace::set_trace_event_fn` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
 - [x] `func TraceEvent(ctx context.Context, category Category, name string, fields ...zap.Field)` | Rust: `tikv_client::trace::trace_event` (new-client-rust/src/trace.rs) | Tests: `new-client-rust/src/trace.rs (trace_event_is_guarded_by_category)`
-- [ ] `func TraceIDFromContext(ctx context.Context) []byte` | Rust:  | Tests: 
+- [x] `func TraceIDFromContext(ctx context.Context) []byte` | Rust: N/A (out-of-scope: no Go-style context; use `PlanBuilder::with_trace_id`) | Tests: N/A
 
 ### Consts
 - [x] `CategoryKVRequest` | Rust: `trace::CATEGORY_KV_REQUEST` (new-client-rust/src/trace.rs) | Tests: N/A
