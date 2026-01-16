@@ -138,10 +138,29 @@ Running integration tests or manually testing the client with a TiKV cluster is 
 tiup playground nightly --mode tikv-slim
 ```
 
+Or use this repo's Makefile (starts the playground in the background):
+
+```
+make tiup-up
+```
+
 Then if you want to run integration tests:
 
 ```
 PD_ADDRS="127.0.0.1:2379" cargo test --package tikv-client --test integration_tests --features integration-tests
+```
+
+For a small smoke suite (one raw + one txn test):
+
+```
+make integration-test-smoke
+```
+
+Stop and clean up the playground:
+
+```
+make tiup-down
+make tiup-clean  # also removes target/tiup-playground.log
 ```
 
 ## Creating a PR

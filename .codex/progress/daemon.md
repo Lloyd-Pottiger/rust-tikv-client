@@ -9,18 +9,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- integration-tests：补齐“可重复运行”的真实集群集成测试指引/脚手架
-  - 步骤：
-    - Makefile：提供 `tiup-up/tiup-down/tiup-clean`（一键启动/停止/清理 playground）
-    - Makefile：提供 `integration-test-smoke`（cargo test 跑少量 raw/txn）
-    - README/doc：补齐对应命令与注意事项
-
-# 待做工作
-
 - observability：补齐 Rust 生态 `tracing`/OpenTelemetry 对接（feature-gate）
   - 步骤：
-    - 提供 `tracing` feature：将 `trace::trace_event` 以 span/event 的方式输出（保留现有 hook）
-    - 文档：如何配置 trace id / category flags / 与 TiKV-side trace 联动
+    - 提供 `tracing` feature：将 `trace::trace_event` 以 `tracing::Event` 输出（保留现有 hook）
+    - 文档：如何启用 feature + 如何接到用户侧 subscriber/OTel
+
+# 待做工作
 
 - bench：增加基准测试与压测指引（避免“猜测性能”）
   - 步骤：
@@ -28,6 +22,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
     - 文档：如何跑 bench、如何解读、如何做 flamegraph（可选）
 
 # 已完成工作
+
+- integration-tests：补齐可重复运行的 TiUP playground 脚手架 + smoke suite
+  - 产出：`make tiup-up/tiup-down/tiup-clean`（后台启动 + 日志落盘）；`make integration-test-smoke`（cargo test 跑 txn/raw 各 1 个）
+  - 文档：README 增加一键命令（启动/停止/清理 + smoke）
+  - 文件：`new-client-rust/Makefile`，`new-client-rust/README.md`
 
 - txn/retry：`Transaction::get` 遵循 `TransactionOptions::no_resolve_regions`
   - 关键决策：`retry_multi_region` 使用 `retry_options.region_backoff`（而不是固定常量），使 `no_resolve_regions()` 对 read-path 生效

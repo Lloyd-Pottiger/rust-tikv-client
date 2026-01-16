@@ -1,6 +1,6 @@
 export RUSTFLAGS=-Dwarnings
 
-.PHONY: default check unit-test generate integration-tests integration-tests-txn integration-tests-raw test doc docker-pd docker-kv docker all
+.PHONY: default check unit-test generate integration-test integration-test-txn integration-test-raw integration-test-smoke test doc tiup tiup-up tiup-down tiup-clean all clean
 
 export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
@@ -12,6 +12,9 @@ NEXTEST_ARGS := --config-file $(shell pwd)/config/nextest.toml
 INTEGRATION_TEST_ARGS := --features "integration-tests" --test-threads 1
 
 RUN_INTEGRATION_TEST := cargo nextest run ${NEXTEST_ARGS} --all ${INTEGRATION_TEST_ARGS}
+
+TIUP_PID_FILE := target/tiup-playground.pid
+TIUP_LOG_FILE := target/tiup-playground.log
 
 default: check
 
@@ -34,13 +37,44 @@ integration-test-txn: generate
 integration-test-raw: generate
 	$(RUN_INTEGRATION_TEST) raw_
 
+integration-test-smoke: generate
+	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests txn_crud -- --test-threads 1
+	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests raw_req -- --test-threads 1
+
 test: unit-test integration-test
 
 doc:
 	cargo doc --workspace --exclude tikv-client-proto --document-private-items --no-deps
 
-tiup:
-	tiup playground nightly --mode tikv-slim --kv 3 --without-monitor --kv.config $(shell pwd)/config/tikv.toml --pd.config $(shell pwd)/config/pd.toml &
+tiup-up:
+	@mkdir -p target
+	@if [ -f "$(TIUP_PID_FILE)" ] && kill -0 "$$(cat "$(TIUP_PID_FILE)")" 2>/dev/null; then \
+		echo "tiup playground already running (pid=$$(cat "$(TIUP_PID_FILE)"))"; \
+		exit 0; \
+	fi
+	@echo "Starting tiup playground (tikv-slim)..." ; \
+		tiup playground nightly --mode tikv-slim --kv 3 --without-monitor \
+			--kv.config "$(shell pwd)/config/tikv.toml" \
+			--pd.config "$(shell pwd)/config/pd.toml" \
+			> "$(TIUP_LOG_FILE)" 2>&1 & \
+		echo $$! > "$(TIUP_PID_FILE)"
+	@echo "Started (pid=$$(cat "$(TIUP_PID_FILE)")). Logs: $(TIUP_LOG_FILE)"
+	@echo "PD_ADDRS=$(PD_ADDRS)"
+
+tiup-down:
+	@if [ -f "$(TIUP_PID_FILE)" ]; then \
+		pid=$$(cat "$(TIUP_PID_FILE)"); \
+		echo "Stopping tiup playground (pid=$$pid)..." ; \
+		kill $$pid 2>/dev/null || true; \
+		rm -f "$(TIUP_PID_FILE)"; \
+	else \
+		echo "No pid file: $(TIUP_PID_FILE)"; \
+	fi
+
+tiup-clean: tiup-down
+	rm -f "$(TIUP_LOG_FILE)"
+
+tiup: tiup-up
 
 all: generate check doc test
 
