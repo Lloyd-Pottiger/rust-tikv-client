@@ -64,7 +64,7 @@ Retry and routing are configured via `TransactionOptions` (builder-style). Examp
 let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
 
 let mut txn = txn_client
-    .begin_with_options(TransactionOptions::new_optimistic().async_commit())
+    .begin_with_options(TransactionOptions::new_optimistic().use_async_commit())
     .await?;
 
 txn.put("k".to_owned(), "v".to_owned()).await?;
@@ -98,4 +98,3 @@ Go-ecosystem conveniences like global config mutation). In `new-client-rust`:
 - “Implementation details” are kept crate-private but the underlying capability exists.
 - Go-style global config and some internal tuning knobs are intentionally not exposed; prefer
   explicit `Config` / `TransactionOptions` / builder APIs.
-

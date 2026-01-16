@@ -19,14 +19,17 @@ use rand::Rng;
 use serial_test::serial;
 use std::collections::HashMap;
 use std::iter;
+use std::time::Duration;
 use tikv_client::backoff::DEFAULT_REGION_BACKOFF;
 use tikv_client::transaction::HeartbeatOption;
 use tikv_client::transaction::Mutation;
+use tikv_client::transaction::PipelinedTxnOptions;
 use tikv_client::Config;
 use tikv_client::Error;
 use tikv_client::Key;
 use tikv_client::KvPair;
 use tikv_client::RawClient;
+use tikv_client::ReplicaReadType;
 use tikv_client::Result;
 use tikv_client::TransactionClient;
 use tikv_client::TransactionOptions;
@@ -1620,5 +1623,151 @@ async fn txn_unsafe_destroy_range() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_try_one_pc() -> Result<()> {
+    init().await?;
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let key = "one_pc_k".to_owned();
+    let value = "v".to_owned();
+
+    let mut txn = client
+        .begin_with_options(TransactionOptions::new_optimistic().try_one_pc())
+        .await?;
+    txn.put(key.clone(), value.clone()).await?;
+    txn.commit().await?;
+
+    let mut snapshot = client.snapshot(
+        client.current_timestamp().await?,
+        TransactionOptions::new_optimistic(),
+    );
+    assert_eq!(snapshot.get(key).await?, Some(value.into_bytes()));
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_pipelined_flush() -> Result<()> {
+    init().await?;
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let pipelined = PipelinedTxnOptions::new()
+        .flush_concurrency(1)
+        .resolve_lock_concurrency(1)
+        .write_throttle_ratio(0.0)
+        .min_flush_keys_for_test(1);
+
+    let mut txn = client
+        .begin_with_options(TransactionOptions::new_optimistic().use_pipelined_txn(pipelined))
+        .await?;
+
+    let mut expected = HashMap::new();
+    let mut keys = Vec::new();
+    for i in 0..64_u32 {
+        let key = format!("pipelined_k_{i}");
+        let value = format!("v_{i}");
+        expected.insert(Key::from(key.clone()), value.clone().into_bytes());
+        keys.push(key.clone());
+        txn.put(key, value).await?;
+    }
+    let commit_ts = txn.commit().await?.expect("commit timestamp");
+
+    // Pipelined transactions may resolve secondary locks asynchronously; retry reads until all
+    // keys are visible (or timeout).
+    for _ in 0..30 {
+        let mut snapshot = client.snapshot(commit_ts.clone(), TransactionOptions::new_optimistic());
+        let got: HashMap<Key, Value> = snapshot
+            .batch_get(keys.clone())
+            .await?
+            .map(|pair| (pair.0, pair.1))
+            .collect();
+        if got.len() == expected.len() {
+            assert_eq!(got, expected);
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Final attempt: surface the error if it still isn't ready.
+    let mut snapshot = client.snapshot(commit_ts, TransactionOptions::new_optimistic());
+    let got: HashMap<Key, Value> = snapshot
+        .batch_get(keys)
+        .await?
+        .map(|pair| (pair.0, pair.1))
+        .collect();
+    assert_eq!(got, expected);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_replica_read_snapshot_get() -> Result<()> {
+    init().await?;
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let key = "replica_read_k".to_owned();
+    let value = "v".to_owned();
+
+    let mut txn = client.begin_optimistic().await?;
+    txn.put(key.clone(), value.clone()).await?;
+    let commit_ts = txn.commit().await?.expect("commit timestamp");
+
+    // Snapshot get from a follower replica.
+    let mut snapshot = client.snapshot(
+        commit_ts,
+        TransactionOptions::new_optimistic().replica_read(ReplicaReadType::Follower),
+    );
+    assert_eq!(snapshot.get(key).await?, Some(value.into_bytes()));
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_stale_read_snapshot_get() -> Result<()> {
+    init().await?;
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let key = "stale_read_k".to_owned();
+    let value = "v".to_owned();
+
+    let mut txn = client.begin_optimistic().await?;
+    txn.put(key.clone(), value.clone()).await?;
+    let commit_ts = txn.commit().await?.expect("commit timestamp");
+
+    // Stale reads are served from a non-leader replica when possible; use an old-enough timestamp
+    // and retry to wait for replicas to catch up to `commit_ts`.
+    for _ in 0..30 {
+        let mut snapshot = client.snapshot(
+            commit_ts.clone(),
+            TransactionOptions::new_optimistic().stale_read(true),
+        );
+        match snapshot.get(key.clone()).await {
+            Ok(Some(v)) => {
+                assert_eq!(v, value.clone().into_bytes());
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(_) => {}
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let mut snapshot = client.snapshot(
+        commit_ts,
+        TransactionOptions::new_optimistic().stale_read(true),
+    );
+    assert_eq!(snapshot.get(key).await?, Some(value.into_bytes()));
     Ok(())
 }

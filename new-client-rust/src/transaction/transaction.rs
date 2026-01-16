@@ -108,8 +108,14 @@ impl PipelinedTxnOptions {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn min_flush_keys_for_test(mut self, min_flush_keys: usize) -> Self {
+    /// Set `min_flush_keys` for tests.
+    ///
+    /// This is a test-only escape hatch to exercise pipelined flush/resolve logic with small
+    /// transactions. It is not part of the stable public API surface.
+    #[cfg(any(test, feature = "integration-tests"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn min_flush_keys_for_test(mut self, min_flush_keys: usize) -> Self {
         self.min_flush_keys = min_flush_keys;
         self
     }

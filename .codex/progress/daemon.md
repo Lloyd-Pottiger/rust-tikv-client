@@ -9,17 +9,28 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- integration-tests：补齐关键协议路径的集成测试覆盖（真实 TiKV/PD）
-  - 步骤：
-    - txn：async-commit / 1PC / pipelined flush / lock resolver（最小可重复 case）
-    - read：replica read / stale read 路由（Context 注入 + 结果一致性）
-    - harness：纳入 `make integration-test-smoke`（保持可重复、可清理）
+- （无）
 
 # 待做工作
 
-- （无）
+- stale-read：补齐“安全时间戳”获取 API（避免用户手写 PD RPC）
+  - 步骤：
+    - `TransactionClient` 增加 `get_min_ts`/`stale_read_timestamp`（调用 PD GetMinTs）
+    - 增加单测/集成测：stale-read snapshot 使用该 ts 必须稳定通过
+    - 文档：迁移指南补齐 stale-read 的正确用法
+
+- correctness：修复 pessimistic snapshot 不做 lock 检查（tests 里已有 TODO #235）
+  - 步骤：
+    - 明确语义：pessimistic snapshot/read-path 是否应 resolve/check locks
+    - 补齐实现与单测（对齐 optimistic 行为或按 client-go 语义）
+    - 集成测：复现并防回归（锁存在时读/写行为）
 
 # 已完成工作
+
+- integration-tests：补齐关键协议路径的集成测试覆盖（真实 TiKV/PD）
+  - 产出：新增 txn 关键路径用例（1PC / pipelined flush / replica read / stale read）；pipelined 增加 test-only `min_flush_keys_for_test`（feature `integration-tests` 下可用）以便小事务触发 FlushRequest；smoke suite 覆盖 1PC/pipelined/replica read（stale read 用例保留但不纳入 smoke，避免耗时）
+  - 验证：`make -C new-client-rust check`；TiUP playground 跑 `make -C new-client-rust integration-test-smoke`；手动跑 `txn_stale_read_snapshot_get` 通过
+  - 文件：`new-client-rust/src/transaction/transaction.rs`，`new-client-rust/tests/integration_tests.rs`，`new-client-rust/Makefile`，`new-client-rust/doc/client-go-v2-migration.md`
 
 - docs：补齐 “client-go v2 → new-client-rust” 迁移指南（Rust public API 视角）
   - 产出：迁移文档（核心入口/配置/观测/低层 request plan）；明确 capability-only/out-of-scope 的差异与替代方式
