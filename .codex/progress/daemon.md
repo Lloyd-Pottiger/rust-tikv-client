@@ -9,10 +9,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- Parity checklist 回填（继续）：补齐 `tikv` / `tikvrpc` 其余 entrypoints（标注 capability-only vs public）
+- Protocol TODO（第 1 项）：启用 lite resolve lock（对齐 client-go 的 PrewriteRequest.txn_size 语义）
   - 计划：
-    - `tikvrpc`：将 `AttachContext/NewReplicaReadRequest/...` 映射到 `request::PlanBuilder`（见 PoC），并在 checklist 标注
-    - `tikv`：优先对外真正有用的控制面/入口；其余按 scope policy 标注 capability-only 或 out-of-scope
+    - 阅读 `client-go/txnkv/transaction/prewrite.go` / 2PC 相关代码，确认 txn_size 的设定条件与含义
+    - Rust: 移除 `txn_size=u64::MAX` 的禁用逻辑，改为传递真实 txn size（必要时对齐“超大 txn”策略）
+    - 补单测：确保请求字段与 fallback 行为对齐（至少覆盖 async-commit/1PC + pessimistic）
 
 # 待做工作
 
@@ -21,7 +22,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
     - prometheus/tracing 依赖改为可选 feature
     - 先对齐核心 counters/histograms（可渐进补齐）
 
-- Protocol TODO：lite resolve lock / lock resolver backoff / retry 参数校准
+- Protocol TODO（后续）：lock resolver backoff / retry 参数校准
   - 计划：
     - 逐 TODO/FIXME 立项（从 `.codex/progress/gap-analysis.md` + `rg TODO|FIXME new-client-rust/src`）
     - 每项补单测与行为对齐说明
@@ -57,3 +58,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键决策：不引入巨型 enum；提供 PlanBuilder 的 context 注入 + replica/stale read builder，使低层调用具备与 client-go `tikvrpc` 等价的控制面能力
   - 文件：`new-client-rust/src/request/{plan_builder.rs,read_routing.rs}`，`new-client-rust/doc/tikvrpc-public-wrapper.md`
   - 测试：新增 PlanBuilder request_context/interceptor 注入测试
+
+- Parity checklist 回填（第 2 批）：`tikvrpc` entrypoints + `tikv` 核心入口标注
+  - 关键决策：`tikvrpc.{CmdType,Request,Response}` 标注 out-of-scope（以 PlanBuilder + typed requests 替代）；`tikv.NewKVStore` 标注 out-of-scope（Rust 不暴露内部 store wiring）
+  - 文件：`.codex/progress/parity-checklist.md`

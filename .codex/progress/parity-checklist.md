@@ -759,15 +759,15 @@ Conventions:
 - [ ] `func ChangePDRegionMetaCircuitBreakerSettings(apply func(config *circuitbreaker.Settings))` | Rust:  | Tests: 
 - [ ] `func CodecV1ExcludePrefixes() [][]byte` | Rust:  | Tests: 
 - [ ] `func CodecV2Prefixes() [][]byte` | Rust:  | Tests: 
-- [ ] `func DisableResourceControl()` | Rust:  | Tests: 
-- [ ] `func EnableResourceControl()` | Rust:  | Tests: 
+- [x] `func DisableResourceControl()` | Rust: N/A (out-of-scope: no global toggle; use per-client/plan context + interceptors) | Tests: N/A
+- [x] `func EnableResourceControl()` | Rust: N/A (out-of-scope: no global toggle; use per-client/plan context + interceptors) | Tests: N/A
 - [ ] `func GetStoreTypeByMeta(store *metapb.Store) tikvrpc.EndpointType` | Rust:  | Tests: 
 - [ ] `func LoadShuttingDown() uint32` | Rust:  | Tests: 
 - [ ] `func NewBackoffer(ctx context.Context, maxSleep int) *Backoffer` | Rust:  | Tests: 
 - [ ] `func NewBackofferWithVars(ctx context.Context, maxSleep int, vars *kv.Variables) *Backoffer` | Rust:  | Tests: 
 - [ ] `func NewEtcdSafePointKV(addrs []string, tlsConfig *tls.Config, opts ...SafePointKVOpt) (*EtcdSafePointKV, error)` | Rust:  | Tests: 
 - [ ] `func NewGcResolveLockMaxBackoffer(ctx context.Context) *Backoffer` | Rust:  | Tests: 
-- [ ] `func NewKVStore( uuid string, pdClient pd.Client, spkv SafePointKV, tikvclient Client, opt ...Option, ) (_ *KVStore, retErr error)` | Rust:  | Tests: 
+- [x] `func NewKVStore( uuid string, pdClient pd.Client, spkv SafePointKV, tikvclient Client, opt ...Option, ) (_ *KVStore, retErr error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`, internal store wiring is not public) | Tests: N/A
 - [ ] `func NewLockResolver(etcdAddrs []string, security config.Security, opts ...opt.ClientOption) ( *txnlock.LockResolver, error, )` | Rust:  | Tests: 
 - [ ] `func NewLockResolverProb(r *txnlock.LockResolver) *LockResolverProbe` | Rust:  | Tests: 
 - [ ] `func NewMockSafePointKV(opts ...SafePointKVOpt) *MockSafePointKV` | Rust:  | Tests: 
@@ -786,11 +786,11 @@ Conventions:
 - [ ] `func SetLogContextKey(key interface{})` | Rust:  | Tests: 
 - [ ] `func SetRegionCacheTTLSec(t int64)` | Rust:  | Tests: 
 - [ ] `func SetRegionCacheTTLWithJitter(base int64, jitter int64)` | Rust:  | Tests: 
-- [ ] `func SetResourceControlInterceptor(interceptor resourceControlClient.ResourceGroupKVInterceptor)` | Rust:  | Tests: 
+- [x] `func SetResourceControlInterceptor(interceptor resourceControlClient.ResourceGroupKVInterceptor)` | Rust: `interceptor::RpcInterceptor` + `RawClient/TransactionClient/PlanBuilder::{with_rpc_interceptor,with_added_rpc_interceptor}` | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 - [ ] `func SetStoreLivenessTimeout(t time.Duration)` | Rust:  | Tests: 
 - [ ] `func StoreShuttingDown(v uint32)` | Rust:  | Tests: 
 - [ ] `func TxnStartKey() interface{}` | Rust:  | Tests: 
-- [ ] `func UnsetResourceControlInterceptor()` | Rust:  | Tests: 
+- [x] `func UnsetResourceControlInterceptor()` | Rust: N/A (out-of-scope: no global interceptor; configure on client/plan) | Tests: N/A
 - [ ] `func WithCodec(codec apicodec.Codec) ClientOpt` | Rust:  | Tests: 
 - [ ] `func WithConcurrency(concurrency int) GCOpt` | Rust:  | Tests: 
 - [ ] `func WithDefaultPipelinedTxn() TxnOption` | Rust:  | Tests: 
@@ -927,28 +927,28 @@ Conventions:
 
 ### Types
 - [ ] `type BatchCopStreamResponse struct` | Rust:  | Tests: 
-- [ ] `type CmdType uint16` | Rust:  | Tests: 
+- [x] `type CmdType uint16` | Rust: N/A (out-of-scope: Rust uses typed kvproto requests + `request::PlanBuilder`, no `CmdType` switch layer) | Tests: N/A
 - [ ] `type CopStreamResponse struct` | Rust:  | Tests: 
 - [ ] `type EndpointType uint8` | Rust:  | Tests: 
 - [ ] `type Lease struct` | Rust:  | Tests: 
 - [ ] `type MPPStreamResponse struct` | Rust:  | Tests: 
-- [ ] `type Request struct` | Rust:  | Tests: 
+- [x] `type Request struct` | Rust: N/A (capability: kvproto request types + `tikv_client::request::PlanBuilder`) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 - [x] `type ResourceGroupTagger func(req *Request)` | Rust: `tikv_client::interceptor::ResourceGroupTagger` (new-client-rust/src/interceptor.rs) | Tests: `new-client-rust/src/raw/client.rs (test_request_source_and_resource_group_tag)`
-- [ ] `type Response struct` | Rust:  | Tests: 
+- [x] `type Response struct` | Rust: N/A (capability: typed kvproto response types + `request::{Merge,Process}`) | Tests: `new-client-rust/src/request/plan.rs (tests)`
 - [ ] `type ResponseExt struct` | Rust:  | Tests: 
 
 ### Functions
-- [ ] `func AttachContext(req *Request, rpcCtx kvrpcpb.Context) bool` | Rust:  | Tests: 
+- [x] `func AttachContext(req *Request, rpcCtx kvrpcpb.Context) bool` | Rust: `request::PlanBuilder::{with_request_source,with_resource_group_tag,with_resource_group_name,...}` (new-client-rust/src/request/plan_builder.rs) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 - [ ] `func CallDebugRPC(ctx context.Context, client debugpb.DebugClient, req *Request) (*Response, error)` | Rust:  | Tests: 
 - [ ] `func CallRPC(ctx context.Context, client tikvpb.TikvClient, req *Request) (*Response, error)` | Rust:  | Tests: 
 - [ ] `func CheckStreamTimeoutLoop(ch <-chan *Lease, done <-chan struct{})` | Rust:  | Tests: 
 - [ ] `func FromBatchCommandsResponse(res *tikvpb.BatchCommandsResponse_Response) (*Response, error)` | Rust:  | Tests: 
 - [ ] `func GenRegionErrorResp(req *Request, e *errorpb.Error) (*Response, error)` | Rust:  | Tests: 
 - [ ] `func GetStoreTypeByMeta(store *metapb.Store) EndpointType` | Rust:  | Tests: 
-- [ ] `func NewReplicaReadRequest(typ CmdType, pointer interface{}, replicaReadType kv.ReplicaReadType, replicaReadSeed *uint32, ctxs ...kvrpcpb.Context) *Request` | Rust:  | Tests: 
-- [ ] `func NewRequest(typ CmdType, pointer interface{}, ctxs ...kvrpcpb.Context) *Request` | Rust:  | Tests: 
-- [ ] `func SetContext(req *Request, region *metapb.Region, peer *metapb.Peer) error` | Rust:  | Tests: 
-- [ ] `func SetContextNoAttach(req *Request, region *metapb.Region, peer *metapb.Peer) error` | Rust:  | Tests: 
+- [x] `func NewReplicaReadRequest(typ CmdType, pointer interface{}, replicaReadType kv.ReplicaReadType, replicaReadSeed *uint32, ctxs ...kvrpcpb.Context) *Request` | Rust: `PlanBuilder::{replica_read,stale_read,replica_read_seed}` + `ReplicaReadType` (new-client-rust/src/request/plan_builder.rs) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func NewRequest(typ CmdType, pointer interface{}, ctxs ...kvrpcpb.Context) *Request` | Rust: kvproto request constructors (`raw_lowering`/`transaction_lowering`) + `PlanBuilder::new` | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func SetContext(req *Request, region *metapb.Region, peer *metapb.Peer) error` | Rust: N/A (capability: PlanBuilder resolves regions and sets context automatically) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
+- [x] `func SetContextNoAttach(req *Request, region *metapb.Region, peer *metapb.Peer) error` | Rust: N/A (capability: PlanBuilder resolves regions and sets context automatically) | Tests: `new-client-rust/src/request/plan_builder.rs (test_plan_builder_request_context_and_interceptors)`
 
 ### Consts
 - [ ] `CmdBatchCop` | Rust:  | Tests: 
