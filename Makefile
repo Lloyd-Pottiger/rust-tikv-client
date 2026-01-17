@@ -6,6 +6,7 @@ export RUSTDOCFLAGS=-Dwarnings
 export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
 export TIKV_VERSION ?= v8.5.1
+export TIUP_KV      ?= 3
 
 ALL_FEATURES := integration-tests
 
@@ -103,7 +104,7 @@ tiup-up:
 		rm -f "$(TIUP_NAME_FILE)" "$(TIUP_PID_FILE)"; \
 		echo "Starting tiup playground (tikv-slim, $(TIKV_VERSION))..." ; \
 		tiup install tikv:$(TIKV_VERSION) pd:$(TIKV_VERSION) ; \
-		tiup playground $(TIKV_VERSION) --mode tikv-slim --kv 3 --without-monitor \
+		tiup playground $(TIKV_VERSION) --mode tikv-slim --kv $(TIUP_KV) --without-monitor \
 			--kv.config "$$kv_cfg" \
 			--pd.config "$$pd_cfg" \
 			> "$(TIUP_LOG_FILE)" 2>&1 & \
@@ -135,22 +136,43 @@ tiup-up:
 	case "$$pd_addr" in \
 		http://*|https://*) pd_url="$$pd_addr" ;; \
 	esac; \
-	if ! command -v curl >/dev/null 2>&1; then \
-		echo "curl not found; skipping PD readiness check (install curl or wait manually)."; \
-		exit 0; \
-	fi; \
-	echo "Waiting for PD ($$pd_addr) to be ready..."; \
-	tries=0; \
-	while [ $$tries -lt 60 ]; do \
-		if curl -fsS "$$pd_url/pd/api/v1/version" >/dev/null 2>&1; then \
-			echo "PD is ready."; \
+		if ! command -v curl >/dev/null 2>&1; then \
+			echo "curl not found; skipping PD readiness check (install curl or wait manually)."; \
 			exit 0; \
 		fi; \
-		sleep 1; \
-		tries=$$((tries + 1)); \
-	done; \
-	echo "PD did not become ready in time. See $(TIUP_LOG_FILE)."; \
-	exit 1
+		echo "Waiting for PD ($$pd_addr) to be ready..."; \
+		tries=0; \
+		while [ $$tries -lt 60 ]; do \
+			if curl -fsS "$$pd_url/pd/api/v1/version" >/dev/null 2>&1; then \
+				echo "PD is ready."; \
+				break; \
+			fi; \
+			sleep 1; \
+			tries=$$((tries + 1)); \
+		done; \
+		if [ $$tries -ge 60 ]; then \
+			echo "PD did not become ready in time. See $(TIUP_LOG_FILE)."; \
+			exit 1; \
+		fi; \
+		py=""; \
+		if command -v python3 >/dev/null 2>&1; then py=python3; elif command -v python >/dev/null 2>&1; then py=python; fi; \
+		if [ -z "$$py" ]; then \
+			echo "python not found; skipping TiKV stores readiness check."; \
+			exit 0; \
+		fi; \
+		echo "Waiting for TiKV stores to be ready (expected=$(TIUP_KV))..."; \
+		expected_kv="$(TIUP_KV)"; \
+		tries=0; \
+		while [ $$tries -lt 60 ]; do \
+			if curl -fsS "$$pd_url/pd/api/v1/stores" 2>/dev/null | $$py -c "import json,sys; expected=int('$$expected_kv'); data=json.load(sys.stdin); count=int(data.get('count',0) or 0); stores=data.get('stores',[]); all_up=all((s.get('store') or {}).get('state_name')=='Up' for s in stores); sys.exit(0 if (count >= expected and all_up) else 1)"; then \
+				echo "TiKV stores are ready."; \
+				exit 0; \
+			fi; \
+			sleep 1; \
+			tries=$$((tries + 1)); \
+		done; \
+		echo "TiKV stores did not become ready in time. See $(TIUP_LOG_FILE)."; \
+		exit 1
 
 tiup-down:
 	@set -e; \

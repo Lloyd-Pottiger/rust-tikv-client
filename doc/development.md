@@ -62,6 +62,7 @@ Key environment variables:
 - `PD_ADDRS` (default `127.0.0.1:2379`): comma-separated PD endpoints
 - `MULTI_REGION` (default `1`): pre-splits regions in `tests/common/init()` for multi-region tests
 - `TIKV_VERSION` (default `v8.5.1`): TiUp playground TiKV/PD version used by `make tiup-up`
+- `TIUP_KV` (default `3`): TiUp playground TiKV instance count used by `make tiup-up` (and the readiness check)
 
 Stop and clean up:
 
