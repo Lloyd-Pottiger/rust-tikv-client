@@ -150,6 +150,13 @@ Or use this repo's Makefile (starts the playground in the background):
 make tiup-up
 ```
 
+`make tiup-up` waits for PD/TiKV to become ready and stores the TiUp playground instance name and
+PID under `target/tiup-playground.name` and `target/tiup-playground.pid` (used by `make tiup-down`).
+
+You can customize the playground with:
+- `TIKV_VERSION` (default `v8.5.1`)
+- `TIUP_KV` (default `3`)
+
 Then if you want to run integration tests:
 
 ```
