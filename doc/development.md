@@ -40,6 +40,10 @@ The easiest way to start a local playground is TiUp:
 make tiup-up
 ```
 
+`make tiup-up` stores the TiUp playground instance name and PID under:
+- `target/tiup-playground.name`
+- `target/tiup-playground.pid`
+
 Run a small smoke suite:
 
 ```bash

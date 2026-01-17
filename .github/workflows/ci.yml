@@ -76,25 +76,39 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: install tiup
         run: curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+      - name: Add tiup to PATH
+        run: echo "$HOME/.tiup/bin" >> "$GITHUB_PATH"
       - name: start tiup playground
-        run: |
-          # use latest stable version
-          ~/.tiup/bin/tiup install tikv:${{ env.TIKV_VERSION }} pd:${{ env.TIKV_VERSION }}
-          ~/.tiup/bin/tiup playground ${{ env.TIKV_VERSION }} --mode tikv-slim --kv 3 --tag cluster --without-monitor --kv.config config/tikv.toml --pd.config config/pd.toml &
-          while :; do
-            echo "waiting cluster to be ready"
-            [[ "$(curl -I http://127.0.0.1:2379/pd/api/v1/regions 2>/dev/null | head -n 1 | cut -d$' ' -f2)" -ne "405" ]] || break
-            sleep 1
-          done
+        run: make tiup-up
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Integration test
         run: MULTI_REGION=1 make ${{ matrix.case }}
+      - name: Collect logs
+        if: failure()
+        run: |
+          set -uo pipefail
+          mkdir -p target/tiup-logs
+
+          cp -a target/tiup-playground.log target/tiup-logs/ 2>/dev/null || true
+          cp -a target/tiup-playground.name target/tiup-logs/ 2>/dev/null || true
+          cp -a target/tiup-playground.pid target/tiup-logs/ 2>/dev/null || true
+
+          if [ -f target/tiup-playground.name ]; then
+            name="$(cat target/tiup-playground.name)"
+            dir="$(tiup status 2>/dev/null | awk -v name="$name" 'NR>2 && $1==name {print $6; exit}')"
+            if [ -n "${dir:-}" ]; then
+              cp -a "$dir"/pd-*/pd.log target/tiup-logs/ 2>/dev/null || true
+              cp -a "$dir"/tikv-*/tikv.log target/tiup-logs/ 2>/dev/null || true
+            fi
+          fi
+
+      - name: stop tiup playground
+        if: always()
+        run: make tiup-down
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: cluster-logs
-          path: |
-            ~/.tiup/data/cluster/tikv*/*.log
-            ~/.tiup/data/cluster/pd*/*.log
+          path: target/tiup-logs
