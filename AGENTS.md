@@ -1,56 +1,51 @@
-# 工作流
- 
-  你需要持续跟踪和更新 .codex/progress/daemon.md 直至里面列出的所有任务完成。这里面分为了三个区域：
- 
-  - 正在进行的工作
-  - 待做工作
-  - 已完成工作
- 
-  1. 你需要优先继续完成「正在进行的工作」（如果有）。
- 
-  2. 如果没有正在进行的工作，那么你需要自行决定开始做「待做工作」中列出的哪个工作，不一定是第一个任务先做。
-     任务粗略优先级从高到底如下：
- 
-     1. 架构决策与核心抽象
-     2. 模块间的集成点
-     3. 未知的未知与快速验证工作
-     4. 标准功能与实现
-     5. 优化、清理与快速成果
- 
-     你可以同时开始多个任务。
- 
-  3. 当你开始工作时，你应当把它（或它们）从「待做工作」中移到「正在进行的工作」中，表示你正在处理它。
- 
-  4. 当你完成一项工作后，工作进展应当追加到 .codex/progress/daemon.md 的「已完成工作」中，包括这些内容：
- 
-     - 你完成了什么任务（任务原始描述的精简、准确、保留必要细节的表述）
-     - 关键决策和理由
-     - 你改动了哪些文件
-     - 任何阻碍或下次迭代的注意事项
- 
-     你需要保持简洁，宁可牺牲语法也不要冗长。这个文件帮助未来的迭代跳过探索阶段。
- 
-     同时，这项（或这些）工作应当从「待做工作」或「正在进行的工作」中移除。
- 
-     工作完成后，你应当自行使用 git commit 提交你的改动，提交信息应当简洁地描述你完成的任务。
- 
-  5. 你可以自行依据自己对项目的理解，在「待做工作」中根据需要增加和删除任务。删除任务前你必须完整确认这项任务已不再需要。你需要自行对大任务做拆解、拆成小任务，以便能更聚焦地完成，或根据你对项目最新状态的理解调整任务内容。每个任务都应该清楚地写明具体计划实施步骤。
- 
-  6. 根据你对代码库的理解，自行进行重构以帮助你更好的理解项目并维护良好的代码结构。
- 
-  7. 一开始，如果没有任何待做工作和已完成工作，你应当先详尽地探索代码，记录下你对代码的理解，然后依据 .codex/progress/daemon.md 中写的「整体工作目标」，制定详细的实施计划、拆解形成初始的「待做工作」列表。
- 
-  8. 如果所有待做工作都已完成，那你应当新增这个工作：
- 
-     基于当前代码的实现，详细审阅「整体工作目标」中的内容，确认所有目标均已达成。如果发现有未达成的目标，需将其拆解成具体任务，加入「待做工作」列表。如果没有未达成的目标，则应当按照你的理解，自行分析当前代码的不足之处（例如代码简洁度、工程实现质量、可读性、可测试性等等），形成新的「待做工作」列表。
- 
-  9. 当「已完成工作」中累计超过 10 个条目时，你应当首先对齐进行合并和总结，只保留重要、关键的内容，缩减到 3 个或更少条目。
- 
-  重要提示：
-  1. 现在这是一个新的 git 目录。
-  2. client-go 是你想要改写的源代码目录。
- 
-  要求：
- 
-  - 不要向我提出任何问题，坚持完成任务直到 .codex/progress/daemon.md 中列出的工作已经全部完成
-  - 你可以删除当前目录下 (/DATA/disk1/qiuyang/projects/tikv-client/) 的任何文件只要有必要，不需要征求我同意。
+# Repository Guidelines
+
+## Project Structure & Module Organization
+
+- `src/`: Rust library crate (`tikv_client`); protobuf bindings are generated into `src/generated/`.
+- `proto/`, `proto-build/`: vendored kvproto sources + generator workspace crate (`make generate`).
+- `tests/`: `integration_tests.rs`, `failpoint_tests.rs`, plus shared helpers in `tests/common/`.
+- `examples/`: runnable client examples (e.g. `raw.rs`, `transaction.rs`).
+- `benches/`: Criterion microbenchmarks.
+- `doc/`: architecture, parity roadmap, development notes.
+- `config/`: `nextest` and TiUp playground configs.
+- `client-go/`, `client-rust/`: upstream snapshots for reference; not built by the root Cargo workspace.
+
+## Build, Test, and Development Commands
+
+```bash
+make generate               # (re)generate protobuf bindings (requires protoc)
+make check                  # generate + cargo check + fmt --check + clippy (warnings denied)
+make unit-test              # unit tests (uses cargo-nextest if installed)
+make doc                    # rustdoc (warnings denied)
+make tiup-up                # start local PD+TiKV playground (logs: target/tiup-playground.log)
+make integration-test-smoke # quick integration subset (cluster required)
+make all                    # CI-like run
+
+cargo run --example raw -- --pd 127.0.0.1:2379
+```
+
+- Toolchain: use the pinned toolchain in `rust-toolchain.toml` (MSRV is enforced in CI).
+- Integration env: `PD_ADDRS` (comma-separated PD endpoints), `TIKV_VERSION`, `MULTI_REGION`.
+
+## Coding Style & Naming Conventions
+
+- Rust 2021; format with `cargo fmt` (see `rustfmt.toml`).
+- Lint with `cargo clippy`; this repo treats warnings as errors (`RUSTFLAGS=-Dwarnings`).
+- Follow PingCAP's Rust style guide (linked from `README.md`).
+- Do not hand-edit `src/generated/`; update it via `make generate`.
+- Integration tests are commonly grouped by name prefix (`txn_...` / `raw_...`) for Makefile/nextest filters.
+
+## Testing Guidelines
+
+- Prefer adding unit tests close to the code; run with `make unit-test`.
+- Integration tests require a running TiKV+PD cluster and the `integration-tests` feature:
+  `make tiup-up` then `make integration-test`, `make integration-test-txn`, or `make integration-test-raw`.
+- Keep integration tests deterministic and avoid cross-test state leakage (tests run with `--test-threads 1`).
+
+## Commit & Pull Request Guidelines
+
+- Commit subjects typically use an `<area>: <summary>` prefix (e.g. `feat:`, `fix:`, `docs:`, `test:`, `infra:`).
+- Sign commits for DCO: `git commit -s`.
+- PRs should explain intent + testing performed; CI must be green (fmt/clippy/doc/tests), and at least one review is expected.
+- Keep generated code committed (CI checks `git diff` after `make generate`).
