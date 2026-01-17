@@ -50,12 +50,26 @@ Run a small smoke suite:
 make integration-test-smoke
 ```
 
+Or run the smoke suite with an automatic playground lifecycle (starts/stops TiUp for you):
+
+```bash
+make tiup-integration-test-smoke
+```
+
 Run the full integration test sets:
 
 ```bash
 make integration-test        # txn + raw
 make integration-test-txn
 make integration-test-raw
+```
+
+Or run the full sets with an automatic playground lifecycle:
+
+```bash
+make tiup-integration-test        # txn + raw
+make tiup-integration-test-txn
+make tiup-integration-test-raw
 ```
 
 Key environment variables:

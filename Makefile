@@ -1,7 +1,7 @@
 export RUSTFLAGS=-Dwarnings
 export RUSTDOCFLAGS=-Dwarnings
 
-.PHONY: default check unit-test generate integration-test integration-test-txn integration-test-raw integration-test-smoke test doc tiup tiup-up tiup-down tiup-clean all clean
+.PHONY: default check unit-test generate integration-test integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc tiup tiup-up tiup-down tiup-clean all clean
 
 export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
@@ -65,6 +65,26 @@ integration-test-smoke: generate
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests txn_replica_read_snapshot_get -- --test-threads 1
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests raw_req -- --test-threads 1
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests raw_checksum -- --test-threads 1
+
+tiup-integration-test-smoke:
+	@set -e; \
+	trap '$(MAKE) tiup-down >/dev/null' EXIT; \
+	$(MAKE) tiup-up; \
+	$(MAKE) integration-test-smoke
+
+tiup-integration-test: tiup-integration-test-txn tiup-integration-test-raw
+
+tiup-integration-test-txn:
+	@set -e; \
+	trap '$(MAKE) tiup-down >/dev/null' EXIT; \
+	$(MAKE) tiup-up; \
+	$(MAKE) integration-test-txn
+
+tiup-integration-test-raw:
+	@set -e; \
+	trap '$(MAKE) tiup-down >/dev/null' EXIT; \
+	$(MAKE) tiup-up; \
+	$(MAKE) integration-test-raw
 
 test: unit-test integration-test
 
