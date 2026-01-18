@@ -256,15 +256,16 @@ impl LockOptions {
 /// # Examples
 ///
 /// ```rust,no_run
-/// # use tikv_client::{Config, TransactionClient};
-/// # use futures::prelude::*;
-/// # futures::executor::block_on(async {
-/// let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
-/// let mut txn = client.begin_optimistic().await.unwrap();
-/// let foo = txn.get("foo".to_owned()).await.unwrap().unwrap();
-/// txn.put("bar".to_owned(), foo).await.unwrap();
-/// txn.commit().await.unwrap();
-/// # });
+/// # use tikv_client::{Result, TransactionClient};
+/// # async fn example() -> Result<()> {
+/// let client = TransactionClient::new(vec!["192.168.0.100"]).await?;
+/// let mut txn = client.begin_optimistic().await?;
+/// if let Some(foo) = txn.get("foo".to_owned()).await? {
+///     txn.put("bar".to_owned(), foo).await?;
+/// }
+/// txn.commit().await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct Transaction<PdC: PdClient = PdRpcClient> {
     status: Arc<AtomicU8>,
@@ -435,14 +436,14 @@ impl<PdC: PdClient> Transaction<PdC> {
     ///
     /// # Examples
     /// ```rust,no_run
-    /// # use tikv_client::{Value, Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{Result, TransactionClient, Value};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
     /// let key = "TiKV".to_owned();
-    /// let result: Option<Value> = txn.get(key).await.unwrap();
-    /// # });
+    /// let _result: Option<Value> = txn.get(key).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn get(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         trace!("invoking transactional get request");
@@ -507,17 +508,17 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Value, Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_pessimistic().await.unwrap();
+    /// # use tikv_client::{Result, TransactionClient, Value};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_pessimistic().await?;
     /// let key = "TiKV".to_owned();
-    /// let result: Value = txn.get_for_update(key).await.unwrap().unwrap();
+    /// let _result: Option<Value> = txn.get_for_update(key).await?;
     /// // now the key "TiKV" is locked, other transactions cannot modify it
     /// // Finish the transaction...
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn get_for_update(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         self.get_for_update_with_options(key, LockOptions::new())
@@ -554,14 +555,14 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Value, Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_pessimistic().await.unwrap();
-    /// let exists = txn.key_exists("k1".to_owned()).await.unwrap();
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_pessimistic().await?;
+    /// let _exists = txn.key_exists("k1".to_owned()).await?;
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn key_exists(&mut self, key: impl Into<Key>) -> Result<bool> {
         debug!("invoking transactional key_exists request");
@@ -579,22 +580,21 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Key, Value, Config, TransactionClient};
-    /// # use futures::prelude::*;
     /// # use std::collections::HashMap;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{Key, Result, TransactionClient, Value};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
     /// let keys = vec!["TiKV".to_owned(), "TiDB".to_owned()];
-    /// let result: HashMap<Key, Value> = txn
+    /// let _result: HashMap<Key, Value> = txn
     ///     .batch_get(keys)
-    ///     .await
-    ///     .unwrap()
+    ///     .await?
     ///     .map(|pair| (pair.0, pair.1))
     ///     .collect();
     /// // Finish the transaction...
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn batch_get(
         &mut self,
@@ -643,21 +643,17 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Key, Value, Config, TransactionClient, KvPair};
-    /// # use futures::prelude::*;
-    /// # use std::collections::HashMap;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_pessimistic().await.unwrap();
+    /// # use tikv_client::{KvPair, Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_pessimistic().await?;
     /// let keys = vec!["foo".to_owned(), "bar".to_owned()];
-    /// let result: Vec<KvPair> = txn
-    ///     .batch_get_for_update(keys)
-    ///     .await
-    ///     .unwrap();
+    /// let _result: Vec<KvPair> = txn.batch_get_for_update(keys).await?;
     /// // now "foo" and "bar" are both locked
     /// // Finish the transaction...
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn batch_get_for_update(
         &mut self,
@@ -705,22 +701,17 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Key, KvPair, Value, Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # use std::collections::HashMap;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{Key, KvPair, Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
     /// let key1: Key = b"foo".to_vec().into();
     /// let key2: Key = b"bar".to_vec().into();
-    /// let result: Vec<KvPair> = txn
-    ///     .scan(key1..key2, 10)
-    ///     .await
-    ///     .unwrap()
-    ///     .collect();
+    /// let _result: Vec<KvPair> = txn.scan(key1..key2, 10).await?.collect();
     /// // Finish the transaction...
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn scan(
         &mut self,
@@ -741,22 +732,17 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Key, KvPair, Value, Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # use std::collections::HashMap;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{Key, Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
     /// let key1: Key = b"foo".to_vec().into();
     /// let key2: Key = b"bar".to_vec().into();
-    /// let result: Vec<Key> = txn
-    ///     .scan_keys(key1..key2, 10)
-    ///     .await
-    ///     .unwrap()
-    ///     .collect();
+    /// let _result: Vec<Key> = txn.scan_keys(key1..key2, 10).await?.collect();
     /// // Finish the transaction...
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn scan_keys(
         &mut self,
@@ -802,16 +788,16 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Key, Value, Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
     /// let key = "foo".to_owned();
     /// let val = "FOO".to_owned();
-    /// txn.put(key, val);
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// txn.put(key, val).await?;
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn put(&mut self, key: impl Into<Key>, value: impl Into<Value>) -> Result<()> {
         trace!("invoking transactional put request");
@@ -836,16 +822,16 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Key, Value, Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
     /// let key = "foo".to_owned();
     /// let val = "FOO".to_owned();
-    /// txn.insert(key, val);
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// txn.insert(key, val).await?;
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn insert(&mut self, key: impl Into<Key>, value: impl Into<Value>) -> Result<()> {
         debug!("invoking transactional insert request");
@@ -875,15 +861,15 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Key, Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
     /// let key = "foo".to_owned();
-    /// txn.delete(key);
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// txn.delete(key).await?;
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn delete(&mut self, key: impl Into<Key>) -> Result<()> {
         debug!("invoking transactional delete request");
@@ -907,18 +893,18 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Key, Config, TransactionClient, transaction::Mutation};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{transaction::Mutation, Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
     /// let mutations = vec![
     ///     Mutation::Delete("k0".to_owned().into()),
     ///     Mutation::Put("k1".to_owned().into(), b"v1".to_vec()),
     /// ];
-    /// txn.batch_mutate(mutations).await.unwrap();
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// txn.batch_mutate(mutations).await?;
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn batch_mutate(
         &mut self,
@@ -965,15 +951,15 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
-    /// txn.lock_keys(vec!["TiKV".to_owned(), "Rust".to_owned()]);
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
+    /// txn.lock_keys(vec!["TiKV".to_owned(), "Rust".to_owned()]).await?;
     /// // ... Do some actions.
-    /// txn.commit().await.unwrap();
-    /// # });
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn lock_keys(
         &mut self,
@@ -1017,14 +1003,14 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Config, Timestamp, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
     /// // ... Do some actions.
-    /// let result: Timestamp = txn.commit().await.unwrap().unwrap();
-    /// # });
+    /// let _commit_ts = txn.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn commit(&mut self) -> Result<Option<Timestamp>> {
         debug!("commiting transaction");
@@ -1180,14 +1166,14 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Config, Timestamp, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// # let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
-    /// let mut txn = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
     /// // ... Do some actions.
-    /// txn.rollback().await.unwrap();
-    /// # });
+    /// txn.rollback().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn rollback(&mut self) -> Result<()> {
         debug!("rolling back transaction");

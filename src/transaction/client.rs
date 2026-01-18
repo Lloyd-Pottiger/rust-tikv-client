@@ -77,11 +77,11 @@ impl Client {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
-    /// # });
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let _client = TransactionClient::new(vec!["192.168.0.100"]).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn new<S: Into<String>>(pd_endpoints: Vec<S>) -> Result<Client> {
         // debug!("creating transactional client");
@@ -97,17 +97,16 @@ impl Client {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Config, TransactionClient};
-    /// # use futures::prelude::*;
+    /// # use tikv_client::{Config, Result, TransactionClient};
     /// # use std::time::Duration;
-    /// # futures::executor::block_on(async {
-    /// let client = TransactionClient::new_with_config(
+    /// # async fn example() -> Result<()> {
+    /// let _client = TransactionClient::new_with_config(
     ///     vec!["192.168.0.100"],
     ///     Config::default().with_timeout(Duration::from_secs(60)),
     /// )
-    /// .await
-    /// .unwrap();
-    /// # });
+    /// .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn new_with_config<S: Into<String>>(
         pd_endpoints: Vec<S>,
@@ -266,14 +265,14 @@ impl<PdC: PdClient> Client<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
-    /// let mut transaction = client.begin_optimistic().await.unwrap();
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await?;
+    /// let mut transaction = client.begin_optimistic().await?;
     /// // ... Issue some commands.
-    /// transaction.commit().await.unwrap();
-    /// # });
+    /// transaction.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn begin_optimistic(&self) -> Result<Transaction<PdC>> {
         debug!("creating new optimistic transaction");
@@ -289,14 +288,14 @@ impl<PdC: PdClient> Client<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
-    /// let mut transaction = client.begin_pessimistic().await.unwrap();
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await?;
+    /// let mut transaction = client.begin_pessimistic().await?;
     /// // ... Issue some commands.
-    /// transaction.commit().await.unwrap();
-    /// # });
+    /// transaction.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn begin_pessimistic(&self) -> Result<Transaction<PdC>> {
         debug!("creating new pessimistic transaction");
@@ -309,17 +308,16 @@ impl<PdC: PdClient> Client<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Config, TransactionClient, TransactionOptions};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
+    /// # use tikv_client::{Result, TransactionClient, TransactionOptions};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await?;
     /// let mut transaction = client
     ///     .begin_with_options(TransactionOptions::default().use_async_commit())
-    ///     .await
-    ///     .unwrap();
+    ///     .await?;
     /// // ... Issue some commands.
-    /// transaction.commit().await.unwrap();
-    /// # });
+    /// transaction.commit().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn begin_with_options(
         &self,
@@ -342,12 +340,12 @@ impl<PdC: PdClient> Client<PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Config, TransactionClient};
-    /// # use futures::prelude::*;
-    /// # futures::executor::block_on(async {
-    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
-    /// let timestamp = client.current_timestamp().await.unwrap();
-    /// # });
+    /// # use tikv_client::{Result, TransactionClient};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await?;
+    /// let _timestamp = client.current_timestamp().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn current_timestamp(&self) -> Result<Timestamp> {
         self.pd.clone().get_timestamp().await

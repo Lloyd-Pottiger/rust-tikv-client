@@ -69,31 +69,29 @@
 //!
 //! ```rust,no_run
 //! # use tikv_client::{RawClient, Result};
-//! # use futures::prelude::*;
-//! # fn main() -> Result<()> {
-//! # futures::executor::block_on(async {
+//! # async fn example() -> Result<()> {
 //! let client = RawClient::new(vec!["127.0.0.1:2379"]).await?;
 //! client.put("key".to_owned(), "value".to_owned()).await?;
-//! let value = client.get("key".to_owned()).await?;
+//! let _value = client.get("key".to_owned()).await?;
 //! # Ok(())
-//! # })}
+//! # }
 //! ```
 //!
 //! Transactional mode:
 //!
 //! ```rust,no_run
 //! # use tikv_client::{TransactionClient, Result};
-//! # use futures::prelude::*;
-//! # fn main() -> Result<()> {
-//! # futures::executor::block_on(async {
+//! # async fn example() -> Result<()> {
 //! let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
 //! let mut txn = txn_client.begin_optimistic().await?;
 //! txn.put("key".to_owned(), "value".to_owned()).await?;
-//! let value = txn.get("key".to_owned()).await?;
+//! let _value = txn.get("key".to_owned()).await?;
 //! txn.commit().await?;
 //! # Ok(())
-//! # })}
+//! # }
 //! ```
+//!
+//! Since this crate provides an async API, you need an async runtime (Tokio-only).
 
 #![allow(clippy::field_reassign_with_default)]
 
