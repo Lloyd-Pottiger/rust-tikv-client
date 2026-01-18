@@ -138,13 +138,9 @@ recommend [nextest](https://nexte.st/index.html):
 cargo install cargo-nextest --locked
 ```
 
-Running integration tests or manually testing the client with a TiKV cluster is a little bit more involved. The easiest way is to use [TiUp](https://github.com/pingcap/tiup) (>= 1.5) to initialise a cluster on your local machine:
-
-```
-tiup playground nightly --mode tikv-slim
-```
-
-Or use this repo's Makefile (starts the playground in the background):
+Running integration tests or manually testing the client with a TiKV cluster is a little bit more involved.
+The easiest way is to use [TiUp](https://github.com/pingcap/tiup) (>= 1.5) via this repo's Makefile
+(starts the playground in the background):
 
 ```
 make tiup-up
@@ -157,16 +153,26 @@ You can customize the playground with:
 - `TIKV_VERSION` (default `v8.5.1`)
 - `TIUP_KV` (default `3`)
 
-Then if you want to run integration tests:
+Then run integration tests:
 
 ```
 PD_ADDRS="127.0.0.1:2379" cargo test --package tikv-client --test integration_tests --features integration-tests
 ```
 
-For a small smoke suite (one raw + one txn test):
+Or use this repo's Makefile targets:
 
 ```
 make integration-test-smoke
+make integration-test        # txn + raw
+```
+
+If you want an automatic TiUp playground lifecycle (start + test + stop):
+
+```
+make tiup-integration-test-smoke
+make tiup-integration-test        # txn + raw
+make tiup-integration-test-txn
+make tiup-integration-test-raw
 ```
 
 ## Benchmarks

@@ -99,3 +99,18 @@ make all
 
 This runs: proto generation, `cargo check`, `cargo fmt --check`, `cargo clippy`, rustdoc, unit
 tests, and (optionally) integration tests when a cluster is available.
+
+## Coverage (Optional)
+
+To generate a local coverage report for unit tests, install `cargo llvm-cov` and run:
+
+```bash
+cargo install cargo-llvm-cov --locked
+rustup component add llvm-tools-preview
+
+make coverage
+```
+
+`make coverage` uses `--no-default-features` and does not run integration tests. To include
+integration tests, start a cluster first (e.g. `make tiup-up`) and run `cargo llvm-cov` with
+`--features integration-tests`.
