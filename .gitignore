@@ -12,4 +12,4 @@ client-rust/
 
 # codex workflow
 .codex
-AGENTS.overrider.md
+AGENTS.override.md
