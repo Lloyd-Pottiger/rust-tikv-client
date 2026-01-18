@@ -72,7 +72,11 @@ tiup-integration-test-smoke:
 	$(MAKE) tiup-up; \
 	$(MAKE) integration-test-smoke
 
-tiup-integration-test: tiup-integration-test-txn tiup-integration-test-raw
+tiup-integration-test:
+	@set -e; \
+	trap '$(MAKE) tiup-down >/dev/null' EXIT; \
+	$(MAKE) tiup-up; \
+	$(MAKE) integration-test
 
 tiup-integration-test-txn:
 	@set -e; \
