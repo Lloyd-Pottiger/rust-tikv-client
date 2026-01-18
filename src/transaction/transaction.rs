@@ -2638,8 +2638,10 @@ mod tests {
             None,
         );
         heartbeat_txn.put(key1.clone(), "foo").await.unwrap();
+        let handle = tokio::runtime::Handle::current();
         let heartbeat_txn_handle = tokio::task::spawn_blocking(move || {
-            assert!(futures::executor::block_on(heartbeat_txn.commit()).is_ok())
+            let mut heartbeat_txn = heartbeat_txn;
+            assert!(handle.block_on(heartbeat_txn.commit()).is_ok());
         });
         assert_eq!(heartbeats.load(Ordering::SeqCst), 0);
         heartbeat_txn_handle.await.unwrap();

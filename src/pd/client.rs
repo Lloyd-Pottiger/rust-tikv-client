@@ -377,15 +377,14 @@ fn make_key_range(start_key: Vec<u8>, end_key: Vec<u8>) -> kvrpcpb::KeyRange {
 
 #[cfg(test)]
 pub mod test {
-    use futures::executor;
-    use futures::executor::block_on;
+    use futures::{pin_mut, StreamExt};
 
     use super::*;
     use crate::mock::*;
 
     #[tokio::test]
     async fn test_kv_client_caching() {
-        let client = block_on(pd_rpc_client());
+        let client = pd_rpc_client().await;
 
         let addr1 = "foo";
         let addr2 = "bar";
@@ -397,8 +396,8 @@ pub mod test {
         assert_eq!(kv2.addr, kv3.addr);
     }
 
-    #[test]
-    fn test_group_keys_by_region() {
+    #[tokio::test]
+    async fn test_group_keys_by_region() {
         let client = MockPdClient::default();
 
         // NOTE: `group_keys_by_region` only batches consecutive keys that belong to the same
@@ -413,9 +412,9 @@ pub mod test {
         ];
 
         let stream = Arc::new(client).group_keys_by_region(tasks.into_iter());
-        let mut stream = executor::block_on_stream(stream);
+        pin_mut!(stream);
 
-        let result: Vec<Key> = stream.next().unwrap().unwrap().0;
+        let result: Vec<Key> = stream.next().await.unwrap().unwrap().0;
         assert_eq!(
             result,
             vec![
@@ -426,32 +425,34 @@ pub mod test {
             ]
         );
         assert_eq!(
-            stream.next().unwrap().unwrap().0,
+            stream.next().await.unwrap().unwrap().0,
             vec![vec![12].into(), vec![11, 4].into()]
         );
-        assert!(stream.next().is_none());
+        assert!(stream.next().await.is_none());
     }
 
-    #[test]
-    fn test_regions_for_range() {
+    #[tokio::test]
+    async fn test_regions_for_range() {
         let client = Arc::new(MockPdClient::default());
         let k1: Key = vec![1].into();
         let k2: Key = vec![5, 2].into();
         let k3: Key = vec![11, 4].into();
         let range1 = (k1, k2.clone()).into();
-        let mut stream = executor::block_on_stream(client.clone().regions_for_range(range1));
-        assert_eq!(stream.next().unwrap().unwrap().id(), 1);
-        assert!(stream.next().is_none());
+        let stream = client.clone().regions_for_range(range1);
+        pin_mut!(stream);
+        assert_eq!(stream.next().await.unwrap().unwrap().id(), 1);
+        assert!(stream.next().await.is_none());
 
         let range2 = (k2, k3).into();
-        let mut stream = executor::block_on_stream(client.regions_for_range(range2));
-        assert_eq!(stream.next().unwrap().unwrap().id(), 1);
-        assert_eq!(stream.next().unwrap().unwrap().id(), 2);
-        assert!(stream.next().is_none());
+        let stream = client.regions_for_range(range2);
+        pin_mut!(stream);
+        assert_eq!(stream.next().await.unwrap().unwrap().id(), 1);
+        assert_eq!(stream.next().await.unwrap().unwrap().id(), 2);
+        assert!(stream.next().await.is_none());
     }
 
-    #[test]
-    fn test_group_ranges_by_region() {
+    #[tokio::test]
+    async fn test_group_ranges_by_region() {
         let client = Arc::new(MockPdClient::default());
         let k1 = vec![1];
         let k2 = vec![5, 2];
@@ -465,36 +466,41 @@ pub mod test {
         let range3 = make_key_range(k2.clone(), k4.clone());
         let ranges = vec![range1, range2, range3];
 
-        let mut stream = executor::block_on_stream(client.clone().group_ranges_by_region(ranges));
-        let ranges1 = stream.next().unwrap().unwrap();
-        let ranges2 = stream.next().unwrap().unwrap();
-        let ranges3 = stream.next().unwrap().unwrap();
-        let ranges4 = stream.next().unwrap().unwrap();
+        {
+            let stream = client.clone().group_ranges_by_region(ranges);
+            pin_mut!(stream);
 
-        assert_eq!(ranges1.1.id(), 1);
-        assert_eq!(
-            ranges1.0,
-            vec![
-                make_key_range(k1.clone(), k2.clone()),
-                make_key_range(k1.clone(), k_split.clone()),
-            ]
-        );
-        assert_eq!(ranges2.1.id(), 2);
-        assert_eq!(ranges2.0, vec![make_key_range(k_split.clone(), k3.clone())]);
-        assert_eq!(ranges3.1.id(), 1);
-        assert_eq!(ranges3.0, vec![make_key_range(k2.clone(), k_split.clone())]);
-        assert_eq!(ranges4.1.id(), 2);
-        assert_eq!(ranges4.0, vec![make_key_range(k_split, k4.clone())]);
-        assert!(stream.next().is_none());
+            let ranges1 = stream.next().await.unwrap().unwrap();
+            let ranges2 = stream.next().await.unwrap().unwrap();
+            let ranges3 = stream.next().await.unwrap().unwrap();
+            let ranges4 = stream.next().await.unwrap().unwrap();
+
+            assert_eq!(ranges1.1.id(), 1);
+            assert_eq!(
+                ranges1.0,
+                vec![
+                    make_key_range(k1.clone(), k2.clone()),
+                    make_key_range(k1.clone(), k_split.clone()),
+                ]
+            );
+            assert_eq!(ranges2.1.id(), 2);
+            assert_eq!(ranges2.0, vec![make_key_range(k_split.clone(), k3.clone())]);
+            assert_eq!(ranges3.1.id(), 1);
+            assert_eq!(ranges3.0, vec![make_key_range(k2.clone(), k_split.clone())]);
+            assert_eq!(ranges4.1.id(), 2);
+            assert_eq!(ranges4.0, vec![make_key_range(k_split, k4.clone())]);
+            assert!(stream.next().await.is_none());
+        }
 
         let range1 = make_key_range(k1.clone(), k2.clone());
         let range2 = make_key_range(k3.clone(), k4.clone());
         let range3 = make_key_range(k5.clone(), k6.clone());
         let ranges = vec![range1, range2, range3];
-        stream = executor::block_on_stream(client.group_ranges_by_region(ranges));
-        let ranges1 = stream.next().unwrap().unwrap();
-        let ranges2 = stream.next().unwrap().unwrap();
-        let ranges3 = stream.next().unwrap().unwrap();
+        let stream = client.group_ranges_by_region(ranges);
+        pin_mut!(stream);
+        let ranges1 = stream.next().await.unwrap().unwrap();
+        let ranges2 = stream.next().await.unwrap().unwrap();
+        let ranges3 = stream.next().await.unwrap().unwrap();
         assert_eq!(ranges1.1.id(), 1);
         assert_eq!(ranges1.0, vec![make_key_range(k1, k2)]);
         assert_eq!(ranges2.1.id(), 2);

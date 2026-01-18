@@ -511,72 +511,75 @@ enum MutationValue {
 
 #[cfg(test)]
 mod tests {
-    use futures::executor::block_on;
     use futures::future::ready;
 
     use super::*;
     use crate::internal_err;
 
-    #[test]
-    fn set_and_get_from_buffer() {
+    #[tokio::test]
+    async fn set_and_get_from_buffer() {
         let mut buffer = Buffer::new(false);
         buffer.put(b"key1".to_vec().into(), b"value1".to_vec());
         buffer.put(b"key2".to_vec().into(), b"value2".to_vec());
         assert_eq!(
-            block_on(
-                buffer.get_or_else(b"key1".to_vec().into(), move |_| ready(Err(internal_err!(
+            buffer
+                .get_or_else(b"key1".to_vec().into(), move |_| ready(Err(internal_err!(
                     ""
                 ))))
-            )
-            .unwrap()
-            .unwrap(),
+                .await
+                .unwrap()
+                .unwrap(),
             b"value1".to_vec()
         );
 
         buffer.delete(b"key2".to_vec().into());
         buffer.put(b"key1".to_vec().into(), b"value".to_vec());
         assert_eq!(
-            block_on(buffer.batch_get_or_else(
-                vec![b"key2".to_vec().into(), b"key1".to_vec().into()].into_iter(),
-                move |_| ready(Ok(vec![])),
-            ))
-            .unwrap()
-            .collect::<Vec<_>>(),
+            buffer
+                .batch_get_or_else(
+                    vec![b"key2".to_vec().into(), b"key1".to_vec().into()].into_iter(),
+                    move |_| ready(Ok(vec![])),
+                )
+                .await
+                .unwrap()
+                .collect::<Vec<_>>(),
             vec![KvPair(Key::from(b"key1".to_vec()), b"value".to_vec(),),]
         );
     }
 
-    #[test]
-    fn insert_and_get_from_buffer() {
+    #[tokio::test]
+    async fn insert_and_get_from_buffer() {
         let mut buffer = Buffer::new(false);
         buffer.insert(b"key1".to_vec().into(), b"value1".to_vec());
         buffer.insert(b"key2".to_vec().into(), b"value2".to_vec());
         assert_eq!(
-            block_on(
-                buffer.get_or_else(b"key1".to_vec().into(), move |_| ready(Err(internal_err!(
+            buffer
+                .get_or_else(b"key1".to_vec().into(), move |_| ready(Err(internal_err!(
                     ""
                 ))))
-            )
-            .unwrap()
-            .unwrap(),
+                .await
+                .unwrap()
+                .unwrap(),
             b"value1".to_vec()
         );
 
         buffer.delete(b"key2".to_vec().into());
         buffer.insert(b"key1".to_vec().into(), b"value".to_vec());
         assert_eq!(
-            block_on(buffer.batch_get_or_else(
-                vec![b"key2".to_vec().into(), b"key1".to_vec().into()].into_iter(),
-                move |_| ready(Ok(vec![])),
-            ))
-            .unwrap()
-            .collect::<Vec<_>>(),
+            buffer
+                .batch_get_or_else(
+                    vec![b"key2".to_vec().into(), b"key1".to_vec().into()].into_iter(),
+                    move |_| ready(Ok(vec![])),
+                )
+                .await
+                .unwrap()
+                .collect::<Vec<_>>(),
             vec![KvPair(Key::from(b"key1".to_vec()), b"value".to_vec()),]
         );
     }
 
-    #[test]
-    fn repeat_reads_are_cached() {
+    #[tokio::test]
+    async fn repeat_reads_are_cached() {
         let k1: Key = b"key1".to_vec().into();
         let k1_ = k1.clone();
         let k2: Key = b"key2".to_vec().into();
@@ -588,23 +591,29 @@ mod tests {
         let v2_ = v2.clone();
 
         let mut buffer = Buffer::new(false);
-        let r1 = block_on(buffer.get_or_else(k1.clone(), move |_| ready(Ok(Some(v1_)))));
-        let r2 = block_on(buffer.get_or_else(k1.clone(), move |_| ready(Err(internal_err!("")))));
+        let r1 = buffer
+            .get_or_else(k1.clone(), move |_| ready(Ok(Some(v1_))))
+            .await;
+        let r2 = buffer
+            .get_or_else(k1.clone(), move |_| ready(Err(internal_err!(""))))
+            .await;
         assert_eq!(r1.unwrap().unwrap(), v1);
         assert_eq!(r2.unwrap().unwrap(), v1);
 
         let mut buffer = Buffer::new(false);
-        let r1 = block_on(
-            buffer.batch_get_or_else(vec![k1.clone(), k2.clone()].into_iter(), move |_| {
+        let r1 = buffer
+            .batch_get_or_else(vec![k1.clone(), k2.clone()].into_iter(), move |_| {
                 ready(Ok(vec![(k1_, v1__).into(), (k2_, v2_).into()]))
-            }),
-        );
-        let r2 = block_on(buffer.get_or_else(k2.clone(), move |_| ready(Err(internal_err!("")))));
-        let r3 = block_on(
-            buffer.batch_get_or_else(vec![k1.clone(), k2.clone()].into_iter(), move |_| {
+            })
+            .await;
+        let r2 = buffer
+            .get_or_else(k2.clone(), move |_| ready(Err(internal_err!(""))))
+            .await;
+        let r3 = buffer
+            .batch_get_or_else(vec![k1.clone(), k2.clone()].into_iter(), move |_| {
                 ready(Ok(vec![]))
-            }),
-        );
+            })
+            .await;
         assert_eq!(
             r1.unwrap().collect::<Vec<_>>(),
             vec![
@@ -619,19 +628,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn scan_and_fetch_redundant_limit_does_not_overflow() {
+    #[tokio::test]
+    async fn scan_and_fetch_redundant_limit_does_not_overflow() {
         let mut buffer = Buffer::new(false);
         buffer.delete(b"key1".to_vec().into());
 
         let range: BoundRange = (..).into();
-        let res =
-            block_on(
-                buffer.scan_and_fetch(range, u32::MAX, false, false, |_, redundant_limit| {
-                    assert_eq!(redundant_limit, u32::MAX);
-                    ready(Ok(Vec::<KvPair>::new()))
-                }),
-            )
+        let res = buffer
+            .scan_and_fetch(range, u32::MAX, false, false, |_, redundant_limit| {
+                assert_eq!(redundant_limit, u32::MAX);
+                ready(Ok(Vec::<KvPair>::new()))
+            })
+            .await
             .unwrap()
             .collect::<Vec<_>>();
 
@@ -639,8 +647,8 @@ mod tests {
     }
 
     // Check that multiple writes to the same key combine in the correct way.
-    #[test]
-    fn state_machine() {
+    #[tokio::test]
+    async fn state_machine() {
         let mut buffer = Buffer::new(false);
 
         macro_rules! assert_entry {
@@ -691,21 +699,25 @@ mod tests {
         let key: Key = b"key5".to_vec().into();
         let val: Value = b"value5".to_vec();
         let val_ = val.clone();
-        let r = block_on(buffer.get_or_else(key.clone(), move |_| ready(Ok(Some(val_)))));
+        let r = buffer
+            .get_or_else(key.clone(), move |_| ready(Ok(Some(val_))))
+            .await;
         assert_eq!(r.unwrap().unwrap(), val);
         buffer.lock(key.clone());
         buffer.unlock(&key);
         assert_entry!(key, BufferEntry::Cached(Some(_)));
         assert_eq!(
-            block_on(buffer.get_or_else(key, move |_| ready(Err(internal_err!("")))))
+            buffer
+                .get_or_else(key, move |_| ready(Err(internal_err!(""))))
+                .await
                 .unwrap()
                 .unwrap(),
             val
         );
     }
 
-    #[test]
-    fn scan_and_fetch_errors_on_cache_mismatch() {
+    #[tokio::test]
+    async fn scan_and_fetch_errors_on_cache_mismatch() {
         let mut buffer = Buffer::new(false);
         let key: Key = b"k1".to_vec().into();
         buffer
@@ -713,9 +725,11 @@ mod tests {
             .insert(key.clone(), BufferEntry::Cached(Some(b"v1".to_vec())));
 
         let range: BoundRange = (key.clone()..Key::from(b"k2".to_vec())).into();
-        let res = block_on(buffer.scan_and_fetch(range, 1, true, false, move |_, _| {
-            ready(Ok(vec![KvPair::new(key.clone(), b"v2".to_vec())]))
-        }));
+        let res = buffer
+            .scan_and_fetch(range, 1, true, false, move |_, _| {
+                ready(Ok(vec![KvPair::new(key.clone(), b"v2".to_vec())]))
+            })
+            .await;
 
         assert!(matches!(res, Err(crate::Error::InternalError { .. })));
     }

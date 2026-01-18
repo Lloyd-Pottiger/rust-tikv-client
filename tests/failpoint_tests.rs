@@ -61,11 +61,15 @@ async fn txn_optimistic_heartbeat() -> Result<()> {
         .await
         .unwrap();
 
+    let handle = tokio::runtime::Handle::current();
+    let handle2 = handle.clone();
     let heartbeat_txn_handle = tokio::task::spawn_blocking(move || {
-        assert!(futures::executor::block_on(heartbeat_txn.commit()).is_ok())
+        let mut heartbeat_txn = heartbeat_txn;
+        assert!(handle.block_on(heartbeat_txn.commit()).is_ok());
     });
     let txn_without_heartbeat_handle = tokio::task::spawn_blocking(move || {
-        assert!(futures::executor::block_on(txn_without_heartbeat.commit()).is_err())
+        let mut txn_without_heartbeat = txn_without_heartbeat;
+        assert!(handle2.block_on(txn_without_heartbeat.commit()).is_err());
     });
 
     // inital TTL is 3 seconds, before which TTL is valid regardless of heartbeat.

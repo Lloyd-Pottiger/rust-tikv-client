@@ -292,7 +292,6 @@ mod test {
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
 
-    use futures::executor;
     use futures::future::ready;
 
     use super::*;
@@ -337,35 +336,21 @@ mod test {
             retry!(client, cfg, "test", |_c| { ready(Ok::<_, Error>(())) })
         }
 
-        executor::block_on(async {
-            let client = Arc::new(MockClient {
-                reconnect_count: AtomicUsize::new(0),
-                cluster: RwLock::new(((), Instant::now())),
-            });
+        let client = Arc::new(MockClient {
+            reconnect_count: AtomicUsize::new(0),
+            cluster: RwLock::new(((), Instant::now())),
+        });
 
-            assert!(retry_err(client.clone()).await.is_err());
-            assert_eq!(
-                client
-                    .reconnect_count
-                    .load(std::sync::atomic::Ordering::SeqCst),
-                2
-            );
+        assert!(retry_err(client.clone()).await.is_err());
+        assert_eq!(client.reconnect_count.load(Ordering::SeqCst), 2);
 
-            client
-                .reconnect_count
-                .store(0, std::sync::atomic::Ordering::SeqCst);
-            assert!(retry_ok(client.clone()).await.is_ok());
-            assert_eq!(
-                client
-                    .reconnect_count
-                    .load(std::sync::atomic::Ordering::SeqCst),
-                0
-            );
-        })
+        client.reconnect_count.store(0, Ordering::SeqCst);
+        assert!(retry_ok(client.clone()).await.is_ok());
+        assert_eq!(client.reconnect_count.load(Ordering::SeqCst), 0);
     }
 
-    #[test]
-    fn test_retry() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_retry() {
         struct MockClient {
             cluster: RwLock<(AtomicUsize, Instant)>,
         }
@@ -413,33 +398,31 @@ mod test {
             })
         }
 
-        executor::block_on(async {
-            let client = Arc::new(MockClient {
-                cluster: RwLock::new((AtomicUsize::new(0), Instant::now())),
-            });
-            let max_retries = Arc::new(AtomicUsize::new(1000));
+        let client = Arc::new(MockClient {
+            cluster: RwLock::new((AtomicUsize::new(0), Instant::now())),
+        });
+        let max_retries = Arc::new(AtomicUsize::new(1000));
 
-            let cfg = PdRetryConfig {
-                reconnect_interval: Duration::from_secs(0),
-                max_reconnect_attempts: 1,
-                leader_change_retry: 3,
-            };
-            assert!(retry_max_err(client.clone(), max_retries, cfg)
-                .await
-                .is_err());
-            assert_eq!(
-                client.cluster.read().await.0.load(Ordering::SeqCst),
-                cfg.leader_change_retry
-            );
+        let cfg = PdRetryConfig {
+            reconnect_interval: Duration::from_secs(0),
+            max_reconnect_attempts: 1,
+            leader_change_retry: 3,
+        };
+        assert!(retry_max_err(client.clone(), max_retries, cfg)
+            .await
+            .is_err());
+        assert_eq!(
+            client.cluster.read().await.0.load(Ordering::SeqCst),
+            cfg.leader_change_retry
+        );
 
-            let client = Arc::new(MockClient {
-                cluster: RwLock::new((AtomicUsize::new(0), Instant::now())),
-            });
-            let max_retries = Arc::new(AtomicUsize::new(2));
+        let client = Arc::new(MockClient {
+            cluster: RwLock::new((AtomicUsize::new(0), Instant::now())),
+        });
+        let max_retries = Arc::new(AtomicUsize::new(2));
 
-            assert!(retry_max_ok(client.clone(), max_retries, cfg).await.is_ok());
-            assert_eq!(client.cluster.read().await.0.load(Ordering::SeqCst), 2);
-        })
+        assert!(retry_max_ok(client.clone(), max_retries, cfg).await.is_ok());
+        assert_eq!(client.cluster.read().await.0.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
