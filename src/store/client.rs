@@ -58,3 +58,66 @@ impl KvClient for KvRpcClient {
         request.dispatch(&self.rpc_client, self.timeout).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use tonic::transport::Endpoint;
+
+    use super::*;
+    use crate::proto::kvrpcpb;
+    use crate::store::RegionWithLeader;
+
+    #[derive(Default)]
+    struct TestRequest {
+        called: AtomicBool,
+        timeout_ms: AtomicU64,
+        context: Option<kvrpcpb::Context>,
+    }
+
+    #[async_trait]
+    impl Request for TestRequest {
+        async fn dispatch(
+            &self,
+            _client: &TikvClient<Channel>,
+            timeout: Duration,
+        ) -> Result<Box<dyn Any>> {
+            self.called.store(true, Ordering::SeqCst);
+            self.timeout_ms
+                .store(timeout.as_millis() as u64, Ordering::SeqCst);
+            Ok(Box::new(42_u64))
+        }
+
+        fn label(&self) -> &'static str {
+            "test_request"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn context_mut(&mut self) -> &mut kvrpcpb::Context {
+            self.context.get_or_insert_with(kvrpcpb::Context::default)
+        }
+
+        fn set_leader(&mut self, _leader: &RegionWithLeader) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_api_version(&mut self, _api_version: kvrpcpb::ApiVersion) {}
+    }
+
+    #[tokio::test]
+    async fn kv_rpc_client_dispatch_calls_request_dispatch() -> Result<()> {
+        let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let client = KvRpcClient::new(TikvClient::new(channel), Duration::from_millis(123));
+
+        let req = TestRequest::default();
+        let resp = client.dispatch(&req).await?;
+        assert!(req.called.load(Ordering::SeqCst));
+        assert_eq!(req.timeout_ms.load(Ordering::SeqCst), 123);
+        assert_eq!(*resp.downcast::<u64>().unwrap(), 42);
+        Ok(())
+    }
+}

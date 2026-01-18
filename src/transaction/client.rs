@@ -49,14 +49,14 @@ use crate::Result;
 ///
 /// The returned results of transactional requests are [`Future`](std::future::Future)s that must be
 /// awaited to execute.
-pub struct Client {
-    pd: Arc<PdRpcClient>,
+pub struct Client<PdC: PdClient = PdRpcClient> {
+    pd: Arc<PdC>,
     keyspace: Keyspace,
     request_context: RequestContext,
     txn_latches: Option<Arc<super::LatchesScheduler>>,
 }
 
-impl Clone for Client {
+impl<PdC: PdClient> Clone for Client<PdC> {
     fn clone(&self) -> Self {
         Self {
             pd: self.pd.clone(),
@@ -132,7 +132,9 @@ impl Client {
             txn_latches: None,
         })
     }
+}
 
+impl<PdC: PdClient> Client<PdC> {
     /// Set `kvrpcpb::Context.request_source` for all requests created by this client.
     #[must_use]
     pub fn with_request_source(&self, source: impl Into<String>) -> Self {
@@ -273,7 +275,7 @@ impl Client {
     /// transaction.commit().await.unwrap();
     /// # });
     /// ```
-    pub async fn begin_optimistic(&self) -> Result<Transaction> {
+    pub async fn begin_optimistic(&self) -> Result<Transaction<PdC>> {
         debug!("creating new optimistic transaction");
         let timestamp = self.current_timestamp().await?;
         Ok(self.new_transaction(timestamp, TransactionOptions::new_optimistic()))
@@ -296,7 +298,7 @@ impl Client {
     /// transaction.commit().await.unwrap();
     /// # });
     /// ```
-    pub async fn begin_pessimistic(&self) -> Result<Transaction> {
+    pub async fn begin_pessimistic(&self) -> Result<Transaction<PdC>> {
         debug!("creating new pessimistic transaction");
         let timestamp = self.current_timestamp().await?;
         Ok(self.new_transaction(timestamp, TransactionOptions::new_pessimistic()))
@@ -319,7 +321,10 @@ impl Client {
     /// transaction.commit().await.unwrap();
     /// # });
     /// ```
-    pub async fn begin_with_options(&self, options: TransactionOptions) -> Result<Transaction> {
+    pub async fn begin_with_options(
+        &self,
+        options: TransactionOptions,
+    ) -> Result<Transaction<PdC>> {
         debug!("creating new customized transaction");
         options.validate()?;
         let timestamp = self.current_timestamp().await?;
@@ -327,7 +332,7 @@ impl Client {
     }
 
     /// Create a new [`Snapshot`] at the given [`Timestamp`].
-    pub fn snapshot(&self, timestamp: Timestamp, options: TransactionOptions) -> Snapshot {
+    pub fn snapshot(&self, timestamp: Timestamp, options: TransactionOptions) -> Snapshot<PdC> {
         debug!("creating new snapshot");
         Snapshot::new(self.new_transaction(timestamp, options.read_only()))
     }
@@ -471,7 +476,11 @@ impl Client {
         plan.execute().await
     }
 
-    fn new_transaction(&self, timestamp: Timestamp, options: TransactionOptions) -> Transaction {
+    fn new_transaction(
+        &self,
+        timestamp: Timestamp,
+        options: TransactionOptions,
+    ) -> Transaction<PdC> {
         Transaction::new(
             timestamp,
             self.pd.clone(),
@@ -480,5 +489,133 @@ impl Client {
             self.request_context.clone(),
             self.txn_latches.clone(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::interceptor::rpc_interceptor;
+    use crate::mock::MockKvClient;
+    use crate::mock::MockPdClient;
+    use crate::proto::kvrpcpb;
+
+    #[tokio::test]
+    async fn builder_methods_clone_and_update_state() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            pd: pd_client,
+            keyspace: Keyspace::Disable,
+            request_context: RequestContext::default(),
+            txn_latches: None,
+        };
+
+        let interceptor1 = rpc_interceptor("txn.client.test.interceptor1", |_, _| {});
+        let interceptor2 = rpc_interceptor("txn.client.test.interceptor2", |_, _| {});
+
+        let client = client
+            .with_request_source("src")
+            .with_resource_group_tag(vec![1_u8, 2, 3])
+            .with_resource_group_name("rg")
+            .with_priority(CommandPriority::High)
+            .with_disk_full_opt(DiskFullOpt::AllowedOnAlreadyFull)
+            .with_txn_source(42)
+            .with_resource_control_override_priority(7)
+            .with_resource_control_penalty(crate::resource_manager::Consumption::default())
+            .with_resource_group_tagger(|_, _| vec![9])
+            .with_rpc_interceptor(interceptor1)
+            .with_added_rpc_interceptor(interceptor2)
+            .with_txn_local_latches(16);
+
+        assert!(client.txn_latches.is_some());
+        assert_eq!(client.request_context.rpc_interceptors().len(), 2);
+
+        let req = client
+            .request_context
+            .apply_to(kvrpcpb::GetRequest::default());
+        let ctx = req.context.unwrap_or_default();
+        assert_eq!(ctx.request_source, "src");
+        assert_eq!(ctx.resource_group_tag, vec![1, 2, 3]);
+        assert_eq!(ctx.priority, i32::from(CommandPriority::High));
+        assert_eq!(
+            ctx.disk_full_opt,
+            i32::from(DiskFullOpt::AllowedOnAlreadyFull)
+        );
+        assert_eq!(ctx.txn_source, 42);
+        let ctl = ctx.resource_control_context.unwrap_or_default();
+        assert_eq!(ctl.resource_group_name, "rg");
+        assert_eq!(ctl.override_priority, 7);
+        assert!(ctl.penalty.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn begin_variants_and_current_min_ts_work_with_mock_pd() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            pd: pd_client,
+            keyspace: Keyspace::Disable,
+            request_context: RequestContext::default(),
+            txn_latches: None,
+        };
+
+        let _ = client.current_timestamp().await?;
+        let _ = client.current_min_timestamp().await?;
+
+        let mut txn = client.begin_optimistic().await?;
+        txn.rollback().await?;
+
+        let mut txn = client.begin_pessimistic().await?;
+        txn.rollback().await?;
+
+        let options = TransactionOptions::new_pessimistic()
+            .use_pipelined_txn(crate::transaction::PipelinedTxnOptions::new());
+        assert!(client.begin_with_options(options).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gc_and_unsafe_destroy_range_are_reachable() -> Result<()> {
+        let scan_lock_calls = Arc::new(AtomicUsize::new(0));
+        let destroy_calls = Arc::new(AtomicUsize::new(0));
+        let scan_lock_calls_for_hook = scan_lock_calls.clone();
+        let destroy_calls_for_hook = destroy_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::ScanLockRequest>().is_some() {
+                    scan_lock_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::ScanLockResponse::default()) as Box<dyn Any>);
+                }
+                if req
+                    .downcast_ref::<kvrpcpb::UnsafeDestroyRangeRequest>()
+                    .is_some()
+                {
+                    destroy_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::new(kvrpcpb::UnsafeDestroyRangeResponse::default()) as Box<dyn Any>
+                    );
+                }
+                unreachable!("unexpected request type");
+            },
+        )));
+
+        let client = Client {
+            pd: pd_client,
+            keyspace: Keyspace::Disable,
+            request_context: RequestContext::default(),
+            txn_latches: None,
+        };
+
+        assert!(client.gc(Timestamp::default()).await?);
+        assert!(scan_lock_calls.load(Ordering::SeqCst) > 0);
+
+        client.unsafe_destroy_range(..).await?;
+        assert!(destroy_calls.load(Ordering::SeqCst) > 0);
+        Ok(())
     }
 }
