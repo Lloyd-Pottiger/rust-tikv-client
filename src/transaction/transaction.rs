@@ -1657,6 +1657,20 @@ impl<PdC: PdClient> Transaction<PdC> {
         Ok(())
     }
 
+    fn is_txn_not_found_heartbeat_error(err: &Error) -> bool {
+        match err {
+            Error::TxnNotFound { .. } => true,
+            Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
+                !errors.is_empty()
+                    && errors
+                        .iter()
+                        .all(|err| Self::is_txn_not_found_heartbeat_error(err))
+            }
+            Error::UndeterminedError(inner) => Self::is_txn_not_found_heartbeat_error(inner),
+            _ => false,
+        }
+    }
+
     async fn start_auto_heartbeat(&mut self, primary_key: Key) {
         debug!("starting auto_heartbeat");
         if !self.options.heartbeat_option.is_auto_heartbeat() || self.is_heartbeat_started {
@@ -1700,7 +1714,14 @@ impl<PdC: PdClient> Transaction<PdC> {
                     .retry_multi_region(region_backoff.clone())
                     .merge(CollectSingle)
                     .plan();
-                plan.execute().await?;
+                match plan.execute().await {
+                    Ok(_) => {}
+                    Err(err) if Self::is_txn_not_found_heartbeat_error(&err) => {
+                        debug!("auto_heartbeat stopped: {}", err);
+                        break;
+                    }
+                    Err(err) => return Err(err),
+                }
             }
             Ok::<(), Error>(())
         };
@@ -2531,6 +2552,27 @@ mod tests {
     use crate::RequestContext;
     use crate::Transaction;
     use crate::TransactionOptions;
+
+    #[test]
+    fn heartbeat_txn_not_found_error_is_detected() {
+        let err = Error::TxnNotFound { start_ts: 7 };
+        assert!(Transaction::<MockPdClient>::is_txn_not_found_heartbeat_error(&err));
+
+        let err = Error::MultipleKeyErrors(vec![Error::TxnNotFound { start_ts: 7 }]);
+        assert!(Transaction::<MockPdClient>::is_txn_not_found_heartbeat_error(&err));
+
+        let err = Error::MultipleKeyErrors(vec![
+            Error::TxnNotFound { start_ts: 7 },
+            Error::Unimplemented,
+        ]);
+        assert!(
+            !Transaction::<MockPdClient>::is_txn_not_found_heartbeat_error(&err),
+            "should not suppress non-TxnNotFound errors"
+        );
+
+        let err = Error::UndeterminedError(Box::new(Error::TxnNotFound { start_ts: 7 }));
+        assert!(Transaction::<MockPdClient>::is_txn_not_found_heartbeat_error(&err));
+    }
 
     #[tokio::test]
     #[serial]
