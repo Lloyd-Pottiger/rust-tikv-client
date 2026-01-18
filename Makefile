@@ -1,7 +1,7 @@
 export RUSTFLAGS=-Dwarnings
 export RUSTDOCFLAGS=-Dwarnings
 
-.PHONY: default check unit-test generate integration-test integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc tiup tiup-up tiup-down tiup-clean all clean
+.PHONY: default check unit-test generate integration-test integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc coverage tiup tiup-up tiup-down tiup-clean all clean
 
 export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
@@ -94,6 +94,16 @@ test: unit-test integration-test
 
 doc:
 	cargo doc --workspace --exclude tikv-client-proto-build --document-private-items --no-deps
+
+coverage:
+	@if cargo llvm-cov --version >/dev/null 2>&1; then \
+		rustup component add llvm-tools-preview >/dev/null 2>&1 || true; \
+		cargo llvm-cov --package tikv-client --no-default-features --lib --tests --html; \
+		echo "Coverage report: target/llvm-cov/html/index.html"; \
+	else \
+		echo "cargo llvm-cov not installed. Install with: cargo install cargo-llvm-cov --locked"; \
+		exit 1; \
+	fi
 
 tiup-up:
 	@mkdir -p target

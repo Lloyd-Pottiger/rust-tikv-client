@@ -33,6 +33,28 @@ jobs:
         run: |
           git diff --exit-code
 
+  coverage:
+    name: coverage (non-blocking)
+    continue-on-error: true
+    env:
+      CARGO_INCREMENTAL: 0
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: coverage
+        run: make coverage
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html
+          if-no-files-found: ignore
+
   unit-test:
     name: unit test
     env:
