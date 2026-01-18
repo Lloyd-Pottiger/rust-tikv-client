@@ -10,6 +10,9 @@ From the repo root:
 # Compile + rustfmt + clippy (warnings are denied).
 make check
 
+# Compile rustdoc examples (doc tests).
+make doc-test
+
 # Unit tests (uses `cargo nextest` if installed, otherwise `cargo test`).
 make unit-test
 
@@ -98,7 +101,7 @@ make all
 ```
 
 This runs: proto generation, `cargo check`, `cargo fmt --check`, `cargo clippy`, rustdoc, unit
-tests, and (optionally) integration tests when a cluster is available.
+tests, doc tests, and (optionally) integration tests when a cluster is available.
 
 ## Coverage (Optional)
 

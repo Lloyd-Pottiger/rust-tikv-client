@@ -266,7 +266,7 @@ tiup-clean: tiup-down
 
 tiup: tiup-up
 
-all: generate check doc test
+all: generate check doc-test doc test
 
 clean:
 	cargo clean
