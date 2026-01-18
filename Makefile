@@ -1,7 +1,7 @@
 export RUSTFLAGS=-Dwarnings
 export RUSTDOCFLAGS=-Dwarnings
 
-.PHONY: default check unit-test generate integration-test integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc coverage tiup tiup-up tiup-down tiup-clean all clean
+.PHONY: default check unit-test generate integration-test integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc coverage coverage-integration tiup-coverage-integration tiup tiup-up tiup-down tiup-clean all clean
 
 export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
@@ -98,12 +98,36 @@ doc:
 coverage:
 	@if cargo llvm-cov --version >/dev/null 2>&1; then \
 		rustup component add llvm-tools-preview >/dev/null 2>&1 || true; \
-		cargo llvm-cov --package tikv-client --no-default-features --lib --tests --html; \
+		cargo llvm-cov --package tikv-client --no-default-features --lib --tests \
+			--ignore-filename-regex 'src/generated/' \
+			--fail-under-lines 80 \
+			--html; \
 		echo "Coverage report: target/llvm-cov/html/index.html"; \
 	else \
-		echo "cargo llvm-cov not installed. Install with: cargo install cargo-llvm-cov --locked"; \
+		# Keep the suggested version compatible with rust-toolchain.toml (MSRV). \
+		echo "cargo llvm-cov not installed. Install with: cargo install cargo-llvm-cov --version 0.6.21 --locked"; \
 		exit 1; \
 	fi
+
+coverage-integration:
+	@if cargo llvm-cov --version >/dev/null 2>&1; then \
+		rustup component add llvm-tools-preview >/dev/null 2>&1 || true; \
+		PD_ADDRS="$(PD_ADDRS)" cargo llvm-cov --package tikv-client --no-default-features --features "integration-tests" --lib --tests \
+			--ignore-filename-regex 'src/generated/' \
+			--fail-under-lines 80 \
+			--html -- --test-threads 1; \
+		echo "Coverage report: target/llvm-cov/html/index.html"; \
+	else \
+		# Keep the suggested version compatible with rust-toolchain.toml (MSRV). \
+		echo "cargo llvm-cov not installed. Install with: cargo install cargo-llvm-cov --version 0.6.21 --locked"; \
+		exit 1; \
+	fi
+
+tiup-coverage-integration:
+	@set -e; \
+	trap '$(MAKE) tiup-down >/dev/null' EXIT; \
+	$(MAKE) tiup-up; \
+	$(MAKE) coverage-integration
 
 tiup-up:
 	@mkdir -p target

@@ -333,7 +333,9 @@ async fn txn_cleanup_2pc_locks() -> Result<()> {
         )
         .await?;
         let keys = write_data(&client, false, false).await?;
-        assert_eq!(count_locks(&client).await?, 0);
+        // `commit()` returns after the primary key is committed. Secondary key commits are
+        // best-effort/background (matching client-go 2PC), so locks may be visible briefly.
+        assert_eq!(wait_for_locks_count(&client, 0).await?, 0);
 
         let safepoint = client.current_timestamp().await?;
         let options = ResolveLocksOptions {

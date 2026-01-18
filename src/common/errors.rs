@@ -646,4 +646,88 @@ mod tests {
         assert!(Error::UndeterminedError(Box::new(Error::Unimplemented)).is_undetermined());
         assert!(!Error::Unimplemented.is_undetermined());
     }
+
+    #[test]
+    fn reason_and_assertion_kind_mappings_are_stable() {
+        assert_eq!(
+            WriteConflictReason::from(write_conflict::Reason::Optimistic as i32).to_string(),
+            "optimistic"
+        );
+        assert_eq!(
+            WriteConflictReason::from(write_conflict::Reason::PessimisticRetry as i32).to_string(),
+            "pessimistic_retry"
+        );
+        assert_eq!(
+            WriteConflictReason::from(write_conflict::Reason::SelfRolledBack as i32).to_string(),
+            "self_rolled_back"
+        );
+        assert_eq!(
+            WriteConflictReason::from(write_conflict::Reason::RcCheckTs as i32).to_string(),
+            "rc_check_ts"
+        );
+        assert_eq!(
+            WriteConflictReason::from(write_conflict::Reason::LazyUniquenessCheck as i32)
+                .to_string(),
+            "lazy_uniqueness_check"
+        );
+        assert_eq!(
+            WriteConflictReason::from(write_conflict::Reason::NotLockedKeyConflict as i32)
+                .to_string(),
+            "not_locked_key_conflict"
+        );
+        assert_eq!(WriteConflictReason::from(-1).to_string(), "unknown");
+
+        assert_eq!(
+            AssertionKind::from(kvrpcpb::Assertion::Exist as i32).to_string(),
+            "exist"
+        );
+        assert_eq!(
+            AssertionKind::from(kvrpcpb::Assertion::NotExist as i32).to_string(),
+            "not_exist"
+        );
+        assert_eq!(AssertionKind::from(-1).to_string(), "none");
+    }
+
+    #[test]
+    fn error_queries_recurse_through_wrappers() {
+        fn make_wc() -> Error {
+            Error::WriteConflict(WriteConflictError {
+                start_ts: 1,
+                conflict_ts: 2,
+                conflict_commit_ts: 3,
+                key: vec![0x01],
+                primary: vec![0x02],
+                reason: WriteConflictReason::Optimistic,
+            })
+        }
+
+        let wc = make_wc();
+        assert!(wc.is_write_conflict());
+        assert!(!wc.is_deadlock());
+        assert!(!wc.is_key_exists());
+        assert!(!wc.is_assertion_failed());
+
+        let wrapped = Error::UndeterminedError(Box::new(make_wc()));
+        assert!(wrapped.is_write_conflict());
+        assert!(wrapped.is_undetermined());
+
+        let pessimistic = Error::PessimisticLockError {
+            inner: Box::new(make_wc()),
+            success_keys: vec![],
+        };
+        assert!(pessimistic.is_write_conflict());
+
+        let multi = Error::MultipleKeyErrors(vec![Error::Unimplemented, make_wc()]);
+        assert!(multi.is_write_conflict());
+
+        let extracted = Error::ExtractedErrors(vec![Error::Unimplemented, make_wc()]);
+        assert!(extracted.is_write_conflict());
+    }
+
+    #[test]
+    fn internal_err_macro_contains_message() {
+        let err = crate::internal_err!("boom");
+        let msg = err.to_string();
+        assert!(msg.contains("boom"), "{msg}");
+    }
 }

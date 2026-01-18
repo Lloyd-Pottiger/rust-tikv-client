@@ -23,3 +23,15 @@ impl From<DiskFullOpt> for i32 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DiskFullOpt;
+
+    #[test]
+    fn to_proto_i32_is_stable() {
+        assert_eq!(i32::from(DiskFullOpt::NotAllowedOnFull), 0);
+        assert_eq!(i32::from(DiskFullOpt::AllowedOnAlmostFull), 1);
+        assert_eq!(i32::from(DiskFullOpt::AllowedOnAlreadyFull), 2);
+    }
+}

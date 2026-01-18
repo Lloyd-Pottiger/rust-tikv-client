@@ -221,3 +221,99 @@ impl_request!(
     broadcast_txn_status,
     "broadcast_txn_status"
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::metapb;
+    use crate::region::RegionWithLeader;
+
+    #[test]
+    fn request_label_and_context_fields() {
+        let mut req = kvrpcpb::GetRequest::default();
+        assert_eq!(req.label(), "kv_get");
+
+        req.set_request_source("src");
+        req.set_resource_group_tag(b"tag");
+        req.set_resource_group_name("rg");
+        req.set_priority(CommandPriority::High);
+        req.set_disk_full_opt(DiskFullOpt::AllowedOnAlmostFull);
+        req.set_txn_source(42);
+        req.set_resource_control_override_priority(7);
+        req.set_resource_control_penalty(&resource_manager::Consumption::default());
+        req.set_replica_read(true);
+        req.set_stale_read(true);
+
+        let ctx = req.context_mut();
+        assert_eq!(ctx.request_source, "src");
+        assert_eq!(ctx.resource_group_tag, b"tag".to_vec());
+        assert!(ctx.resource_control_context.is_some());
+        assert_eq!(
+            ctx.resource_control_context
+                .as_ref()
+                .unwrap()
+                .resource_group_name,
+            "rg"
+        );
+        assert_eq!(
+            ctx.resource_control_context
+                .as_ref()
+                .unwrap()
+                .override_priority,
+            7
+        );
+        assert!(ctx
+            .resource_control_context
+            .as_ref()
+            .unwrap()
+            .penalty
+            .is_some());
+        assert_eq!(ctx.priority, i32::from(CommandPriority::High));
+        assert_eq!(
+            ctx.disk_full_opt,
+            i32::from(DiskFullOpt::AllowedOnAlmostFull)
+        );
+        assert_eq!(ctx.txn_source, 42);
+        assert!(ctx.replica_read);
+        assert!(ctx.stale_read);
+    }
+
+    #[test]
+    fn set_leader_and_api_version() {
+        let mut req = kvrpcpb::GetRequest::default();
+        let region = RegionWithLeader {
+            region: metapb::Region {
+                id: 10,
+                region_epoch: Some(metapb::RegionEpoch {
+                    conf_ver: 1,
+                    version: 2,
+                }),
+                ..Default::default()
+            },
+            leader: Some(metapb::Peer {
+                store_id: 42,
+                ..Default::default()
+            }),
+        };
+        req.set_leader(&region).unwrap();
+        req.set_api_version(kvrpcpb::ApiVersion::V2);
+
+        let ctx = req.context_mut();
+        assert_eq!(ctx.region_id, 10);
+        assert!(ctx.region_epoch.is_some());
+        assert!(ctx.peer.is_some());
+        assert_eq!(ctx.peer.as_ref().unwrap().store_id, 42);
+        assert_eq!(ctx.api_version, kvrpcpb::ApiVersion::V2 as i32);
+    }
+
+    #[test]
+    fn set_leader_errors_when_missing() {
+        let mut req = kvrpcpb::GetRequest::default();
+        let region = RegionWithLeader::default();
+        let err = req.set_leader(&region).unwrap_err();
+        match err {
+            Error::LeaderNotFound { .. } => {}
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}

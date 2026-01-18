@@ -522,4 +522,67 @@ mod tests {
         drop(g1);
         drop(g2);
     }
+
+    #[test]
+    fn murmur3_tail_paths_are_exercised() {
+        // Cover tail lengths 0..=3 and the body path.
+        let _ = murmur3_x86_32(b"", 0);
+        let _ = murmur3_x86_32(b"a", 0);
+        let _ = murmur3_x86_32(b"ab", 0);
+        let _ = murmur3_x86_32(b"abc", 0);
+        let _ = murmur3_x86_32(b"abcd", 0);
+        let _ = murmur3_x86_32(b"abcde", 0);
+    }
+
+    #[tokio::test]
+    async fn scheduler_size_zero_is_clamped() {
+        // This should not panic and should still make progress.
+        let sched = LatchesScheduler::new(0);
+        let g = sched.lock(1, vec![b"k".to_vec()]).await;
+        drop(g);
+    }
+
+    #[test]
+    fn release_slot_with_zero_acquired_is_noop() {
+        let latches = Latches::new(8);
+        let lock = latches.gen_lock(1, vec![b"k".to_vec()]);
+        assert_eq!(lock.acquired_count(), 0);
+        assert!(latches.release_slot(&lock).is_none());
+    }
+
+    #[test]
+    fn release_slot_wrong_owner_is_noop() {
+        let latches = Latches::new(8);
+        let lock1 = latches.gen_lock(1, vec![b"k".to_vec()]);
+        let lock2 = latches.gen_lock(1, vec![b"k".to_vec()]);
+
+        // Acquire lock1 as the owner for key "k".
+        assert_eq!(latches.acquire(&lock1), AcquireResult::Success);
+        assert_eq!(lock1.acquired_count(), lock1.required_len());
+
+        // Pretend lock2 acquired one slot (but it isn't the owner in the node).
+        lock2.inc_acquired();
+        assert!(latches.release_slot(&lock2).is_none());
+    }
+
+    #[test]
+    fn recycle_drops_old_unused_nodes() {
+        let latches = Latches::new(8);
+        let lock = latches.gen_lock(1, vec![b"k".to_vec()]);
+        assert_eq!(latches.acquire(&lock), AcquireResult::Success);
+
+        // Release and record a commit_ts on the node.
+        lock.set_commit_ts(1000_u64 << PD_TS_LOGICAL_BITS);
+        latches.release(&lock);
+
+        // Advance current ts beyond EXPIRE_DURATION.
+        let expired_ts =
+            (1000_u64 + (EXPIRE_DURATION.as_millis() as u64) + 1) << PD_TS_LOGICAL_BITS;
+        latches.recycle(expired_ts);
+
+        // The node should have been removed (no owner, too old).
+        let slot = &latches.slots[latches.slot_id(b"k")];
+        let inner = slot.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(inner.nodes.is_empty());
+    }
 }

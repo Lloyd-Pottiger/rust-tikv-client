@@ -158,3 +158,57 @@ impl Config {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_stable() {
+        let cfg = Config::default();
+        assert_eq!(cfg.timeout, Duration::from_secs(2));
+        assert_eq!(cfg.region_cache_ttl, Duration::from_secs(600));
+        assert_eq!(cfg.region_cache_ttl_jitter, Duration::from_secs(60));
+        assert_eq!(cfg.keyspace, None);
+        assert_eq!(cfg.pd_retry, PdRetryConfig::default());
+
+        let pd = PdRetryConfig::default();
+        assert_eq!(pd.reconnect_interval, Duration::from_secs(1));
+        assert_eq!(pd.max_reconnect_attempts, 5);
+        assert_eq!(pd.leader_change_retry, 10);
+    }
+
+    #[test]
+    fn builder_methods_update_fields() {
+        let cfg = Config::default()
+            .with_security("ca", "cert", "key")
+            .with_timeout(Duration::from_secs(10))
+            .with_keyspace("KS")
+            .with_region_cache_ttl(Duration::from_secs(3), Duration::from_secs(1));
+
+        assert_eq!(cfg.ca_path, Some(PathBuf::from("ca")));
+        assert_eq!(cfg.cert_path, Some(PathBuf::from("cert")));
+        assert_eq!(cfg.key_path, Some(PathBuf::from("key")));
+        assert_eq!(cfg.timeout, Duration::from_secs(10));
+        assert_eq!(cfg.keyspace.as_deref(), Some("KS"));
+        assert_eq!(cfg.region_cache_ttl, Duration::from_secs(3));
+        assert_eq!(cfg.region_cache_ttl_jitter, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn default_keyspace_is_default() {
+        let cfg = Config::default().with_default_keyspace();
+        assert_eq!(cfg.keyspace.as_deref(), Some("DEFAULT"));
+    }
+
+    #[test]
+    fn pd_retry_config_is_settable() {
+        let pd_retry = PdRetryConfig {
+            reconnect_interval: Duration::from_secs(9),
+            max_reconnect_attempts: 99,
+            leader_change_retry: 123,
+        };
+        let cfg = Config::default().with_pd_retry_config(pd_retry);
+        assert_eq!(cfg.pd_retry, pd_retry);
+    }
+}

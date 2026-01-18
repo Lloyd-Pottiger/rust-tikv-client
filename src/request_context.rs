@@ -241,3 +241,77 @@ impl RequestContext {
         request
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interceptor::rpc_interceptor;
+    use crate::proto::kvrpcpb;
+    use crate::trace::TraceControlFlags;
+    use crate::CommandPriority;
+    use crate::DiskFullOpt;
+
+    #[test]
+    fn apply_to_sets_all_supported_context_fields() {
+        let penalty = resource_manager::Consumption::default();
+        let mut ctx = RequestContext::default()
+            .with_request_source("src")
+            .with_resource_group_tag(vec![1, 2, 3])
+            .with_resource_group_name("rg")
+            .with_priority(CommandPriority::Low)
+            .with_disk_full_opt(DiskFullOpt::AllowedOnAlreadyFull)
+            .with_txn_source(7)
+            .with_trace_id(vec![9, 9, 9])
+            .with_trace_control_flags(123)
+            .with_resource_control_override_priority(456)
+            .with_resource_control_penalty(penalty.clone());
+
+        // Make sure the interceptor chain is cloneable and link-able.
+        ctx = ctx.add_rpc_interceptor(rpc_interceptor("noop", |_, _| {}));
+        assert_eq!(ctx.rpc_interceptors.len(), 1);
+
+        let req = kvrpcpb::GetRequest::default();
+        let req = ctx.apply_to(req);
+        let applied = req.context.unwrap_or_default();
+
+        assert_eq!(applied.request_source, "src");
+        assert_eq!(applied.resource_group_tag, vec![1, 2, 3]);
+        assert_eq!(applied.priority, i32::from(CommandPriority::Low));
+        assert_eq!(
+            applied.disk_full_opt,
+            i32::from(DiskFullOpt::AllowedOnAlreadyFull)
+        );
+        assert_eq!(applied.txn_source, 7);
+        assert_eq!(applied.trace_id, vec![9, 9, 9]);
+        assert_eq!(applied.trace_control_flags, 123);
+
+        let ctl = applied.resource_control_context.unwrap_or_default();
+        assert_eq!(ctl.resource_group_name, "rg");
+        assert_eq!(ctl.override_priority, 456);
+        assert_eq!(ctl.penalty, Some(penalty));
+    }
+
+    #[test]
+    fn debug_includes_key_fields() {
+        let ctx = RequestContext::default()
+            .with_request_source("src")
+            .with_resource_group_tag(vec![1, 2, 3])
+            .with_resource_group_name("rg")
+            .with_priority(CommandPriority::High)
+            .with_disk_full_opt(DiskFullOpt::AllowedOnAlmostFull)
+            .with_txn_source(7);
+
+        let s = format!("{ctx:?}");
+        assert!(s.contains("RequestContext"), "{s}");
+        assert!(s.contains("src"), "{s}");
+        assert!(s.contains("rpc_interceptors"), "{s}");
+    }
+
+    #[test]
+    fn with_trace_control_sets_flags() {
+        let ctx = RequestContext::default().with_trace_control(TraceControlFlags(42));
+        let req = ctx.apply_to(kvrpcpb::GetRequest::default());
+        let applied = req.context.unwrap_or_default();
+        assert_eq!(applied.trace_control_flags, 42);
+    }
+}

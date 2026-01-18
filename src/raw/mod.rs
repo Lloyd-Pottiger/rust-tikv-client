@@ -112,3 +112,38 @@ trait RawRpcRequest: Default {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn column_family_parsing_and_display() {
+        assert_eq!(
+            ColumnFamily::try_from("default").unwrap(),
+            ColumnFamily::Default
+        );
+        assert_eq!(ColumnFamily::try_from("lock").unwrap(), ColumnFamily::Lock);
+        assert_eq!(
+            ColumnFamily::try_from("write").unwrap(),
+            ColumnFamily::Write
+        );
+
+        assert_eq!(
+            ColumnFamily::try_from("default".to_owned()).unwrap(),
+            ColumnFamily::Default
+        );
+        assert_eq!(ColumnFamily::Default.to_string(), "default");
+        assert_eq!(ColumnFamily::Lock.to_string(), "lock");
+        assert_eq!(ColumnFamily::Write.to_string(), "write");
+    }
+
+    #[test]
+    fn column_family_rejects_unknown() {
+        let err = ColumnFamily::try_from("unknown").unwrap_err();
+        match err {
+            Error::ColumnFamilyError(s) => assert_eq!(s, "unknown"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}

@@ -1171,17 +1171,190 @@ impl<Resp: HasRegionError, Shard> HasRegionError for ResponseWithShard<Resp, Sha
 
 #[cfg(test)]
 mod test {
+    use std::any::Any;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
 
     use futures::stream::BoxStream;
     use futures::stream::{self};
+    use tonic::Status;
 
     use super::*;
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
+    use crate::proto::keyspacepb;
     use crate::proto::kvrpcpb::BatchGetResponse;
+    use crate::region::RegionId;
+    use crate::store::Store;
+    use crate::Key;
+    use crate::Timestamp;
+
+    #[derive(Default)]
+    struct CountingPdClient {
+        invalidated_regions: AtomicUsize,
+        invalidated_stores: AtomicUsize,
+        fail_update_leader: bool,
+    }
+
+    #[async_trait]
+    impl PdClient for CountingPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            _region: RegionWithLeader,
+        ) -> Result<RegionStore> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_key(&self, _key: &Key) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn all_stores(&self) -> Result<Vec<Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
+            if self.fail_update_leader {
+                Err(Error::Unimplemented)
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {
+            self.invalidated_regions.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {
+            self.invalidated_stores.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MockStoreResponse {
+        key_errors: Option<Vec<Error>>,
+        region_error: Option<errorpb::Error>,
+    }
+
+    impl HasKeyErrors for MockStoreResponse {
+        fn key_errors(&mut self) -> Option<Vec<Error>> {
+            self.key_errors.take()
+        }
+    }
+
+    impl HasRegionError for MockStoreResponse {
+        fn region_error(&mut self) -> Option<errorpb::Error> {
+            self.region_error.take()
+        }
+    }
+
+    #[derive(Clone)]
+    struct StoreKeyErrorsPlan;
+
+    #[async_trait]
+    impl Plan for StoreKeyErrorsPlan {
+        type Result = MockStoreResponse;
+
+        async fn execute(&self) -> Result<Self::Result> {
+            Ok(MockStoreResponse {
+                key_errors: Some(vec![Error::Unimplemented]),
+                region_error: None,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct StoreRegionErrorPlan;
+
+    #[async_trait]
+    impl Plan for StoreRegionErrorPlan {
+        type Result = MockStoreResponse;
+
+        async fn execute(&self) -> Result<Self::Result> {
+            Ok(MockStoreResponse {
+                key_errors: None,
+                region_error: Some(errorpb::Error::default()),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct StoreOkPlan;
+
+    #[async_trait]
+    impl Plan for StoreOkPlan {
+        type Result = MockStoreResponse;
+
+        async fn execute(&self) -> Result<Self::Result> {
+            Ok(MockStoreResponse::default())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FlakyGrpcPlan {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Plan for FlakyGrpcPlan {
+        type Result = MockStoreResponse;
+
+        async fn execute(&self) -> Result<Self::Result> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                Err(Error::GrpcAPI(Status::unavailable("grpc error")))
+            } else {
+                Ok(MockStoreResponse::default())
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct AlwaysGrpcPlan;
+
+    #[async_trait]
+    impl Plan for AlwaysGrpcPlan {
+        type Result = MockStoreResponse;
+
+        async fn execute(&self) -> Result<Self::Result> {
+            Err(Error::GrpcAPI(Status::unavailable("grpc error")))
+        }
+    }
+
+    #[derive(Clone)]
+    struct NonGrpcErrorPlan;
+
+    #[async_trait]
+    impl Plan for NonGrpcErrorPlan {
+        type Result = MockStoreResponse;
+
+        async fn execute(&self) -> Result<Self::Result> {
+            Err(Error::Unimplemented)
+        }
+    }
 
     #[derive(Clone)]
     struct ErrPlan;
@@ -1231,6 +1404,397 @@ mod test {
             read_routing: ReadRouting::default(),
         };
         assert!(plan.execute().await.is_err())
+    }
+
+    #[tokio::test]
+    async fn test_err_plan_execute_and_apply_store_are_reachable() -> Result<()> {
+        let mut plan = ErrPlan;
+        plan.apply_shard(());
+        let store = RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        plan.apply_store(&store)?;
+        assert!(plan.execute().await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_multi_region_retries_grpc_error_with_backoff() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    return Err(Error::GrpcAPI(Status::unavailable("grpc error")));
+                }
+                Ok(Box::new(kvrpcpb::RawGetResponse {
+                    not_found: true,
+                    ..Default::default()
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            backoff: Backoff::no_jitter_backoff(0, 0, 1),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let _ = plan.clone();
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let response = results.into_iter().next().unwrap()?;
+        assert!(response.not_found);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_multi_region_grpc_error_without_backoff_returns_err() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                Err(Error::GrpcAPI(Status::unavailable("grpc error")))
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client,
+            backoff: Backoff::no_backoff(),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        assert!(plan.execute().await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_not_leader_update_leader_failure_invalidates_region() {
+        let pd_client = Arc::new(CountingPdClient {
+            fail_update_leader: true,
+            ..Default::default()
+        });
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            not_leader: Some(errorpb::NotLeader {
+                leader: Some(metapb::Peer {
+                    store_id: 99,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(handle_region_error(pd_client.clone(), err, region_store)
+            .await
+            .is_err());
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_store_not_match_invalidates_region_and_store() -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            store_not_match: Some(errorpb::StoreNotMatch::default()),
+            ..Default::default()
+        };
+
+        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_stale_command_invalidates_region() -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            stale_command: Some(errorpb::StaleCommand::default()),
+            ..Default::default()
+        };
+
+        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_server_is_busy_is_fatal() {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            server_is_busy: Some(errorpb::ServerIsBusy::default()),
+            ..Default::default()
+        };
+
+        let err = handle_region_error(pd_client.clone(), err, region_store)
+            .await
+            .expect_err("server_is_busy should be propagated as a RegionError");
+        assert!(matches!(err, Error::RegionError(_)));
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_unknown_invalidates_region_and_store() -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            key_not_in_region: Some(errorpb::KeyNotInRegion {
+                key: vec![1],
+                region_id: 1,
+                start_key: vec![],
+                end_key: vec![10],
+            }),
+            ..Default::default()
+        };
+
+        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_on_region_epoch_not_match_missing_region_epoch_invalidates_and_retries(
+    ) -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = EpochNotMatch {
+            current_regions: vec![metapb::Region {
+                id: 1,
+                ..Default::default()
+            }],
+        };
+
+        assert!(on_region_epoch_not_match(pd_client.clone(), region_store, err).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_on_region_epoch_not_match_missing_cached_epoch_invalidates_and_retries(
+    ) -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let mut region = MockPdClient::region1();
+        region.region.region_epoch = None;
+        let region_store = RegionStore::new(region, Arc::new(MockKvClient::default()));
+        let err = EpochNotMatch {
+            current_regions: vec![metapb::Region {
+                id: 1,
+                region_epoch: Some(metapb::RegionEpoch {
+                    conf_ver: 1,
+                    version: 1,
+                }),
+                ..Default::default()
+            }],
+        };
+
+        assert!(on_region_epoch_not_match(pd_client.clone(), region_store, err).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_on_region_epoch_not_match_current_epoch_ahead_backoffs() -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let mut region = MockPdClient::region1();
+        region.region.region_epoch = Some(metapb::RegionEpoch {
+            conf_ver: 2,
+            version: 2,
+        });
+        let region_store = RegionStore::new(region, Arc::new(MockKvClient::default()));
+        let err = EpochNotMatch {
+            current_regions: vec![metapb::Region {
+                id: 1,
+                region_epoch: Some(metapb::RegionEpoch {
+                    conf_ver: 1,
+                    version: 1,
+                }),
+                ..Default::default()
+            }],
+        };
+
+        assert!(!on_region_epoch_not_match(pd_client.clone(), region_store, err).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cleanup_locks_result_clone_preserves_count_and_drops_errors() {
+        let mut region_error = errorpb::Error::default();
+        region_error.message = "err".to_owned();
+        let result = CleanupLocksResult {
+            region_error: Some(region_error),
+            key_error: Some(vec![Error::Unimplemented]),
+            resolved_locks: 7,
+        };
+
+        let cloned = result.clone();
+        assert_eq!(cloned.resolved_locks, 7);
+        assert!(cloned.region_error.is_none());
+        assert!(cloned.key_error.is_none());
+    }
+
+    #[test]
+    fn test_extract_error_is_cloneable() {
+        let extractor = ExtractError { inner: ErrPlan };
+        let _ = extractor.clone();
+    }
+
+    #[test]
+    fn test_collect_single_errors_when_not_singleton() {
+        let merge = CollectSingle;
+        let input = vec![
+            Ok(kvrpcpb::RawGetResponse::default()),
+            Ok(kvrpcpb::RawGetResponse::default()),
+        ];
+        assert!(merge.merge(input).is_err());
+    }
+
+    #[test]
+    fn test_response_with_shard_take_locks_delegates() {
+        let mut resp = kvrpcpb::ScanLockResponse::default();
+        resp.locks.push(kvrpcpb::LockInfo {
+            key: vec![1],
+            ..Default::default()
+        });
+        let mut wrapped = ResponseWithShard(resp, ());
+        let locks = wrapped.take_locks();
+        assert_eq!(locks.len(), 1);
+    }
+
+    #[test]
+    fn test_retryable_all_stores_is_cloneable() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let plan = RetryableAllStores {
+            inner: StoreOkPlan,
+            pd_client,
+            backoff: Backoff::no_backoff(),
+        };
+        let _ = plan.clone();
+    }
+
+    #[tokio::test]
+    async fn test_retryable_all_stores_single_store_handler_fails_if_semaphore_closed() {
+        let permits = Arc::new(Semaphore::new(1));
+        permits.close();
+        assert!(
+            RetryableAllStores::<StoreOkPlan, MockPdClient>::single_store_handler(
+                StoreOkPlan,
+                Backoff::no_backoff(),
+                permits,
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retryable_all_stores_single_store_handler_key_errors_are_wrapped() {
+        let permits = Arc::new(Semaphore::new(1));
+        let err = RetryableAllStores::<StoreKeyErrorsPlan, MockPdClient>::single_store_handler(
+            StoreKeyErrorsPlan,
+            Backoff::no_backoff(),
+            permits,
+        )
+        .await
+        .expect_err("expected key errors to be surfaced as an error");
+        assert!(matches!(err, Error::MultipleKeyErrors(_)));
+    }
+
+    #[tokio::test]
+    async fn test_retryable_all_stores_single_store_handler_region_errors_are_wrapped() {
+        let permits = Arc::new(Semaphore::new(1));
+        let err = RetryableAllStores::<StoreRegionErrorPlan, MockPdClient>::single_store_handler(
+            StoreRegionErrorPlan,
+            Backoff::no_backoff(),
+            permits,
+        )
+        .await
+        .expect_err("expected region errors to be surfaced as an error");
+        assert!(matches!(err, Error::RegionError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_retryable_all_stores_single_store_handler_retries_grpc_error_with_backoff(
+    ) -> Result<()> {
+        let permits = Arc::new(Semaphore::new(1));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let plan = FlakyGrpcPlan { calls };
+        let resp = RetryableAllStores::<FlakyGrpcPlan, MockPdClient>::single_store_handler(
+            plan,
+            Backoff::no_jitter_backoff(0, 0, 1),
+            permits,
+        )
+        .await?;
+        let mut resp = resp;
+        assert!(resp.key_errors().is_none());
+        assert!(resp.region_error().is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_all_stores_single_store_handler_grpc_error_without_backoff_returns_err()
+    {
+        let permits = Arc::new(Semaphore::new(1));
+        assert!(
+            RetryableAllStores::<AlwaysGrpcPlan, MockPdClient>::single_store_handler(
+                AlwaysGrpcPlan,
+                Backoff::no_backoff(),
+                permits,
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retryable_all_stores_single_store_handler_non_grpc_error_returns_err() {
+        let permits = Arc::new(Semaphore::new(1));
+        let err = RetryableAllStores::<NonGrpcErrorPlan, MockPdClient>::single_store_handler(
+            NonGrpcErrorPlan,
+            Backoff::no_backoff(),
+            permits,
+        )
+        .await
+        .expect_err("expected non-grpc error to be propagated");
+        assert!(matches!(err, Error::Unimplemented));
     }
 
     #[tokio::test]

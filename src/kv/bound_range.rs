@@ -375,3 +375,129 @@ fn convert_to_bound_key<K: Into<Key>>(b: Bound<K>) -> Bound<Key> {
         Bound::Unbounded => Bound::Unbounded,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn into_keys_matches_scan_semantics() {
+        // Exclusive end stays as-is.
+        let range: BoundRange = ("a".to_owned().."z".to_owned()).into();
+        assert_eq!(
+            range.into_keys(),
+            (Key::from("a".to_owned()), Some(Key::from("z".to_owned()))),
+        );
+
+        // Inclusive end is represented by appending a '\0' (smallest key greater than end).
+        let range: BoundRange = ("a".to_owned()..="z".to_owned()).into();
+        assert_eq!(
+            range.into_keys(),
+            (Key::from("a".to_owned()), Some(Key::from("z\0".to_owned()))),
+        );
+
+        // Full range: start is empty, end is unbounded.
+        let range: BoundRange = (..).into();
+        assert_eq!(range.into_keys(), (Key::EMPTY, None));
+    }
+
+    #[test]
+    fn range_bounds_treat_empty_end_as_unbounded() {
+        let start = Key::from("a".to_owned());
+        let br = BoundRange::new(Bound::Included(start.clone()), Bound::Excluded(Key::EMPTY));
+        assert_eq!(br.start_bound(), Bound::Included(&start));
+        assert_eq!(br.end_bound(), Bound::Unbounded);
+    }
+
+    #[test]
+    fn tuple_conversions_respect_zero_termination() {
+        // For upper bounds: "k\0" means inclusive "k".
+        let from: Key = "k".to_owned().into();
+        let to: Key = "end\0".to_owned().into();
+        let br: BoundRange = (from.clone(), Some(to.clone())).into();
+        assert_eq!(br.from, Bound::Included(from));
+        assert_eq!(br.to, Bound::Included(Key::from("end".to_owned())));
+
+        // For lower bounds: "k\0" means exclusive "k".
+        let br: BoundRange = (Key::from("k\0".to_owned()), None).into();
+        assert_eq!(br.from, Bound::Excluded(Key::from("k".to_owned())));
+        assert_eq!(br.to, Bound::Unbounded);
+    }
+
+    #[test]
+    fn keyrange_round_trip() {
+        let original: BoundRange = ("a".to_owned().."b".to_owned()).into();
+        let pb: kvrpcpb::KeyRange = original.clone().into();
+        let back: BoundRange = pb.into();
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn into_owned_range_converts_borrowed_ranges() {
+        let r: Range<&str> = "s".."e";
+        let br = r.into_owned();
+        assert_eq!(br, BoundRange::from("s".to_owned().."e".to_owned()));
+
+        let r: RangeInclusive<&str> = "s"..="e";
+        let br = r.into_owned();
+        assert_eq!(br, BoundRange::from("s".to_owned()..="e".to_owned()));
+
+        let r: RangeToInclusive<&str> = ..="z";
+        let br = r.into_owned();
+        assert_eq!(br, BoundRange::from(..="z".to_owned()));
+    }
+
+    #[test]
+    fn conversions_cover_all_range_shapes() {
+        let br: BoundRange = ("a".to_owned()..).into();
+        assert_eq!(br, (Bound::Included("a".to_owned()), Bound::Unbounded));
+
+        let br: BoundRange = (.."b".to_owned()).into();
+        assert_eq!(br, (Bound::Unbounded, Bound::Excluded("b".to_owned())));
+
+        let br: BoundRange = ("a".to_owned(), "b".to_owned()).into();
+        assert_eq!(
+            br,
+            (
+                Bound::Included("a".to_owned()),
+                Bound::Excluded("b".to_owned())
+            )
+        );
+
+        let br: BoundRange = (
+            Bound::Excluded("a".to_owned()),
+            Bound::Included("b".to_owned()),
+        )
+            .into();
+        assert_eq!(
+            br,
+            (
+                Bound::Excluded("a".to_owned()),
+                Bound::Included("b".to_owned())
+            )
+        );
+
+        let br = BoundRange::range_from(Key::from("a".to_owned()));
+        assert_eq!(br, (Bound::Included("a".to_owned()), Bound::Unbounded));
+    }
+
+    #[test]
+    fn into_owned_range_supports_more_inputs() {
+        let br = ("start"..).into_owned();
+        assert_eq!(br, BoundRange::from("start".to_owned()..));
+
+        let br = (.."end").into_owned();
+        assert_eq!(br, BoundRange::from(.."end".to_owned()));
+
+        let br = (..).into_owned();
+        assert_eq!(br, BoundRange::from(..));
+
+        let br = ("k", Some("z")).into_owned();
+        assert_eq!(br, BoundRange::from(("k".to_owned(), Some("z".to_owned()))));
+
+        let k1: Vec<u8> = b"k1".to_vec();
+        let k2: Vec<u8> = b"k2".to_vec();
+        let br = (&k1, &k2).into_owned();
+        assert_eq!(br, BoundRange::from((k1, k2)));
+    }
+}

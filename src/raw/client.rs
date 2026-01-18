@@ -1102,13 +1102,17 @@ struct ScanInnerArgs {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::*;
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
+    use crate::proto::errorpb;
     use crate::proto::kvrpcpb;
+    use crate::proto::metapb;
     use crate::Result;
+    use tonic::Status;
 
     #[test]
     fn test_cluster_id_accessor() {
@@ -1368,5 +1372,356 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_request_context_setters_and_interceptors() -> Result<()> {
+        let expected_source = "unit-test-context".to_owned();
+        let expected_tag = vec![9_u8, 9, 9];
+        let expected_priority = CommandPriority::High;
+        let expected_override_priority = 16_u64;
+
+        let interceptor1_called = Arc::new(AtomicBool::new(false));
+        let interceptor2_called = Arc::new(AtomicBool::new(false));
+
+        let interceptor1_called_cloned = interceptor1_called.clone();
+        let interceptor2_called_cloned = interceptor2_called.clone();
+        let interceptor1 =
+            crate::interceptor::rpc_interceptor("unit_test.interceptor1", move |info, ctx| {
+                assert_eq!(info.label, "raw_get");
+                interceptor1_called_cloned.store(true, Ordering::SeqCst);
+                ctx.request_source = "from-interceptor".to_owned();
+            });
+        let interceptor2 =
+            crate::interceptor::rpc_interceptor("unit_test.interceptor2", move |info, _| {
+                assert_eq!(info.label, "raw_get");
+                interceptor2_called_cloned.store(true, Ordering::SeqCst);
+            });
+
+        let tag_expected_source = expected_source.clone();
+        let tag_expected_tag = expected_tag.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let ctx = req.context.as_ref().expect("context should be set");
+                assert_eq!(ctx.request_source, "from-interceptor");
+                assert_eq!(ctx.resource_group_tag, tag_expected_tag);
+                assert_eq!(ctx.priority, i32::from(expected_priority));
+                let resource_ctl_ctx = ctx
+                    .resource_control_context
+                    .as_ref()
+                    .expect("resource_control_context should be set");
+                assert_eq!(
+                    resource_ctl_ctx.override_priority,
+                    expected_override_priority
+                );
+                assert!(resource_ctl_ctx.penalty.is_some());
+
+                Ok(Box::new(kvrpcpb::RawGetResponse {
+                    not_found: true,
+                    ..Default::default()
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        }
+        .with_request_source(expected_source.clone())
+        .with_priority(expected_priority)
+        .with_resource_control_override_priority(expected_override_priority)
+        .with_resource_control_penalty(crate::resource_manager::Consumption::default())
+        .with_resource_group_tagger(move |info, ctx| {
+            assert_eq!(info.label, "raw_get");
+            assert_eq!(ctx.request_source, tag_expected_source);
+            expected_tag.clone()
+        })
+        .with_rpc_interceptor(interceptor1)
+        .with_added_rpc_interceptor(interceptor2);
+
+        assert_eq!(client.get(vec![1_u8]).await?, None);
+        assert!(interceptor1_called.load(Ordering::SeqCst));
+        assert!(interceptor2_called.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_keys_wrappers_return_empty_for_zero_limit() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        assert!(client
+            .scan_keys(vec![1_u8]..vec![2_u8], 0)
+            .await?
+            .is_empty());
+        assert!(client
+            .scan_keys_reverse(vec![1_u8]..vec![2_u8], 0)
+            .await?
+            .is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_limit_exceeded_errors() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let err = client
+            .scan(vec![1_u8]..vec![2_u8], MAX_RAW_KV_SCAN_LIMIT + 1)
+            .await
+            .expect_err("expected MaxScanLimitExceeded");
+        assert!(matches!(err, Error::MaxScanLimitExceeded { .. }));
+
+        let err = client
+            .batch_scan(vec![vec![1_u8]..vec![2_u8]], MAX_RAW_KV_SCAN_LIMIT + 1)
+            .await
+            .expect_err("expected MaxScanLimitExceeded");
+        assert!(matches!(err, Error::MaxScanLimitExceeded { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_checksum_empty_range_returns_default_without_rpc() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let checksum = client.checksum(vec![2_u8]..vec![2_u8]).await?;
+        assert_eq!(checksum, RawChecksum::default());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_swap_requires_atomic_mode() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let err = client
+            .compare_and_swap(vec![1_u8], None, vec![2_u8])
+            .await
+            .expect_err("expected UnsupportedMode");
+        assert!(matches!(err, Error::UnsupportedMode));
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_swap_atomic_success() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawCasRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let ctx = req.context.as_ref().expect("context should be set");
+                assert_eq!(ctx.region_id, 1);
+                Ok(Box::new(kvrpcpb::RawCasResponse {
+                    succeed: true,
+                    previous_not_exist: false,
+                    previous_value: vec![7],
+                    ..Default::default()
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: true,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let (prev, swapped) = client
+            .compare_and_swap(vec![1_u8], Some(vec![6_u8]), vec![7_u8])
+            .await?;
+        assert_eq!(prev, Some(vec![7_u8]));
+        assert!(swapped);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_scan_region_error_resolved_retries_immediately() -> Result<()> {
+        let scan_calls = Arc::new(AtomicUsize::new(0));
+        let scan_calls_for_hook = scan_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawScanRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = scan_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    return Ok(Box::new(kvrpcpb::RawScanResponse {
+                        region_error: Some(errorpb::Error {
+                            not_leader: Some(errorpb::NotLeader {
+                                leader: Some(metapb::Peer {
+                                    store_id: 42,
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>);
+                }
+                Ok(Box::new(kvrpcpb::RawScanResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: Backoff::no_backoff(),
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let _ = client.scan(vec![1_u8]..vec![2_u8], 1).await?;
+        assert_eq!(scan_calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_scan_region_error_backoffs_then_retries() -> Result<()> {
+        let scan_calls = Arc::new(AtomicUsize::new(0));
+        let scan_calls_for_hook = scan_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawScanRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = scan_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    return Ok(Box::new(kvrpcpb::RawScanResponse {
+                        region_error: Some(errorpb::Error {
+                            stale_command: Some(errorpb::StaleCommand::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>);
+                }
+                Ok(Box::new(kvrpcpb::RawScanResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: Backoff::no_jitter_backoff(0, 0, 1),
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let _ = client.scan(vec![1_u8]..vec![2_u8], 1).await?;
+        assert_eq!(scan_calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_scan_region_error_without_backoff_returns_err() {
+        let scan_calls = Arc::new(AtomicUsize::new(0));
+        let scan_calls_for_hook = scan_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawScanRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                scan_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(kvrpcpb::RawScanResponse {
+                    region_error: Some(errorpb::Error {
+                        stale_command: Some(errorpb::StaleCommand::default()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: Backoff::no_backoff(),
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let err = client
+            .scan(vec![1_u8]..vec![2_u8], 1)
+            .await
+            .expect_err("expected RegionError");
+        assert!(matches!(err, Error::RegionError(_)));
+        assert_eq!(scan_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_retryable_scan_propagates_store_scan_error() {
+        let scan_calls = Arc::new(AtomicUsize::new(0));
+        let scan_calls_for_hook = scan_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawScanRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                scan_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                Err(Error::GrpcAPI(Status::unavailable("grpc error")))
+            },
+        )));
+
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: Backoff::no_backoff(),
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        assert!(client.scan(vec![1_u8]..vec![2_u8], 1).await.is_err());
+        assert_eq!(scan_calls.load(Ordering::SeqCst), 1);
     }
 }

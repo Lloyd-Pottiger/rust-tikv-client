@@ -144,3 +144,53 @@ impl fmt::Debug for KvPair {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accessors_and_mutators() {
+        let mut pair = KvPair::new("k".to_owned(), "v".to_owned());
+        assert_eq!(pair.key(), &Key::from("k".to_owned()));
+        assert_eq!(pair.value(), &Value::from("v".to_owned()));
+
+        pair.set_key("k2".to_owned());
+        pair.set_value("v2".to_owned());
+        assert_eq!(pair.key(), &Key::from("k2".to_owned()));
+        assert_eq!(pair.value(), &Value::from("v2".to_owned()));
+
+        pair.key_mut().0.push(b'X');
+        pair.value_mut().push(b'Y');
+        assert!(pair.key().0.ends_with(b"X"));
+        assert!(pair.value().ends_with(b"Y"));
+
+        let key: Key = pair.clone().into();
+        assert_eq!(key, pair.0);
+
+        let (k, v): (Key, Value) = pair.clone().into();
+        assert_eq!(k, pair.0);
+        assert_eq!(v, pair.1);
+    }
+
+    #[test]
+    fn debug_formats_utf8_and_non_utf8_values() {
+        let pair = KvPair::new("key".to_owned(), "hello".to_owned());
+        let s = format!("{pair:?}");
+        assert!(s.contains("KvPair("));
+        assert!(s.contains("\"hello\""));
+
+        let pair = KvPair::new("key".to_owned(), vec![0xFF, 0x00, 0xAA]);
+        let s = format!("{pair:?}");
+        // value printed as hex when not valid UTF-8
+        assert!(s.contains("FF00AA"), "{s}");
+    }
+
+    #[test]
+    fn proto_round_trip() {
+        let pair = KvPair::new("k".to_owned(), vec![1, 2, 3]);
+        let proto: kvrpcpb::KvPair = pair.clone().into();
+        let back: KvPair = proto.into();
+        assert_eq!(back, pair);
+    }
+}

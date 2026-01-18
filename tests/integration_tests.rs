@@ -25,6 +25,7 @@ use tikv_client::backoff::DEFAULT_REGION_BACKOFF;
 use tikv_client::transaction::HeartbeatOption;
 use tikv_client::transaction::Mutation;
 use tikv_client::transaction::PipelinedTxnOptions;
+use tikv_client::ColumnFamily;
 use tikv_client::Config;
 use tikv_client::Error;
 use tikv_client::Key;
@@ -215,6 +216,139 @@ async fn txn_pessimistic_snapshot_checks_locks() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+#[serial]
+async fn txn_snapshot_api_and_request_context() -> Result<()> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use tikv_client::interceptor::rpc_interceptor;
+    use tikv_client::resource_manager;
+    use tikv_client::CommandPriority;
+    use tikv_client::DiskFullOpt;
+
+    init().await?;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let check = rpc_interceptor("client-check", {
+        let calls = calls.clone();
+        move |_, ctx| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                ctx.request_source.ends_with("client-src"),
+                "unexpected request_source: {}",
+                ctx.request_source
+            );
+            assert_eq!(ctx.resource_group_tag, vec![1, 2, 3]);
+            assert_eq!(ctx.priority, i32::from(CommandPriority::Low));
+            assert_eq!(
+                ctx.disk_full_opt,
+                i32::from(DiskFullOpt::AllowedOnAlmostFull)
+            );
+            assert_eq!(ctx.txn_source, 7);
+
+            let ctl = ctx.resource_control_context.as_ref().unwrap();
+            assert_eq!(ctl.resource_group_name, "rg");
+            assert_eq!(ctl.override_priority, 11);
+            assert!(ctl.penalty.is_some());
+        }
+    });
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?
+            .with_request_source("client-src")
+            .with_resource_group_tag(vec![1, 2, 3])
+            .with_resource_group_name("rg")
+            .with_priority(CommandPriority::Low)
+            .with_disk_full_opt(DiskFullOpt::AllowedOnAlmostFull)
+            .with_txn_source(7)
+            .with_resource_control_override_priority(11)
+            .with_resource_control_penalty(resource_manager::Consumption::default())
+            .with_resource_group_tagger(|_, _| vec![9])
+            .with_txn_local_latches(16)
+            .with_rpc_interceptor(check)
+            .with_added_rpc_interceptor(rpc_interceptor("client-check2", |_, _| {}));
+
+    // A simple read to ensure the client request context is applied to outgoing TiKV RPCs.
+    let mut txn = client.begin_optimistic().await?;
+    assert!(txn.get("missing".to_owned()).await?.is_none());
+    txn.commit().await?;
+    assert!(calls.load(Ordering::SeqCst) > 0);
+
+    // Seed data for snapshot reads.
+    let mut txn = client.begin_optimistic().await?;
+    txn.put("a".to_owned(), "va".to_owned()).await?;
+    txn.put("b".to_owned(), "vb".to_owned()).await?;
+    txn.put("c".to_owned(), "vc".to_owned()).await?;
+    txn.commit().await?;
+
+    let snapshot_calls = Arc::new(AtomicUsize::new(0));
+    let snapshot_check = rpc_interceptor("snap-check", {
+        let snapshot_calls = snapshot_calls.clone();
+        move |_, ctx| {
+            snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                ctx.request_source.ends_with("snap-src"),
+                "unexpected request_source: {}",
+                ctx.request_source
+            );
+            assert_eq!(ctx.resource_group_tag, vec![4, 5]);
+            assert_eq!(ctx.priority, i32::from(CommandPriority::High));
+        }
+    });
+
+    let mut snapshot = client.snapshot(
+        client.current_timestamp().await?,
+        TransactionOptions::new_pessimistic(),
+    );
+
+    // Exercise Snapshot request-context setters and RPC interceptors.
+    snapshot.set_request_source("snap-src");
+    snapshot.set_resource_group_tag(vec![4, 5]);
+    snapshot.set_resource_group_name("snap-rg");
+    snapshot.set_priority(CommandPriority::High);
+    snapshot.set_resource_control_override_priority(16);
+    snapshot.set_resource_control_penalty(resource_manager::Consumption::default());
+    snapshot.set_resource_group_tagger(|_, _| vec![1, 2, 3]);
+    snapshot.set_rpc_interceptor(snapshot_check);
+    snapshot.add_rpc_interceptor(rpc_interceptor("snap-check2", |_, _| {}));
+
+    assert!(snapshot.key_exists("a".to_owned()).await?);
+    let got: Vec<_> = snapshot
+        .batch_get(vec!["a".to_owned(), "b".to_owned()])
+        .await?
+        .collect();
+    assert_eq!(got.len(), 2);
+
+    let scan: Vec<_> = snapshot
+        .scan("a".to_owned().."d".to_owned(), 10)
+        .await?
+        .collect();
+    assert_eq!(scan.len(), 3);
+
+    let scan_keys: Vec<_> = snapshot
+        .scan_keys("a".to_owned().."d".to_owned(), 10)
+        .await?
+        .collect();
+    assert_eq!(scan_keys.len(), 3);
+
+    let scan_rev: Vec<_> = snapshot
+        .scan_reverse("a".to_owned().."d".to_owned(), 10)
+        .await?
+        .collect();
+    assert_eq!(scan_rev.len(), 3);
+
+    let scan_keys_rev: Vec<_> = snapshot
+        .scan_keys_reverse("a".to_owned().."d".to_owned(), 10)
+        .await?
+        .collect();
+    assert_eq!(scan_keys_rev.len(), 3);
+
+    assert!(snapshot_calls.load(Ordering::SeqCst) > 0);
+    Ok(())
+}
+
 // Tests transactional insert and delete-your-writes cases
 #[tokio::test]
 #[serial]
@@ -347,6 +481,15 @@ async fn raw_bank_transfer() -> Result<()> {
         new_sum += get_u32(&client, person.clone()).await?;
     }
     assert_eq!(sum, new_sum);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn raw_client_new_and_with_cf_smoke() -> Result<()> {
+    init().await?;
+    let client = RawClient::new(pd_addrs()).await?;
+    let _ = client.with_cf(ColumnFamily::Write);
     Ok(())
 }
 

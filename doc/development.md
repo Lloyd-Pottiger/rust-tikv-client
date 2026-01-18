@@ -105,12 +105,27 @@ tests, and (optionally) integration tests when a cluster is available.
 To generate a local coverage report for unit tests, install `cargo llvm-cov` and run:
 
 ```bash
-cargo install cargo-llvm-cov --locked
+# Pin to a version compatible with this repo's Rust toolchain (see rust-toolchain.toml).
+cargo install cargo-llvm-cov --version 0.6.21 --locked
 rustup component add llvm-tools-preview
 
 make coverage
 ```
 
 `make coverage` uses `--no-default-features` and does not run integration tests. To include
-integration tests, start a cluster first (e.g. `make tiup-up`) and run `cargo llvm-cov` with
-`--features integration-tests`.
+integration tests, start a cluster first (e.g. `make tiup-up`) and run:
+
+```bash
+make coverage-integration
+```
+
+Notes:
+- Coverage ignores generated protobuf sources under `src/generated/**`.
+- `coverage-integration` runs tests with `--test-threads 1` to match the integration test
+  assumptions around region boundaries.
+
+If you want a one-shot command that manages the playground lifecycle automatically:
+
+```bash
+make tiup-coverage-integration
+```

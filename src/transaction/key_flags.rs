@@ -82,3 +82,38 @@ pub enum FlagsOp {
     SetAssertUnknown,
     SetAssertNone,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_and_queries() {
+        let flags = KeyFlags::default()
+            .apply(FlagsOp::SetPresumeKeyNotExists)
+            .apply(FlagsOp::SetPrewriteOnly)
+            .apply(FlagsOp::SetAssertExist);
+        assert!(flags.has_presume_key_not_exists());
+        assert!(flags.has_prewrite_only());
+        assert!(flags.has_assert_exist());
+        assert!(!flags.has_assert_not_exist());
+        assert!(!flags.has_assert_unknown());
+        assert!(flags.has_assertion_flags());
+
+        let flags = flags.apply(FlagsOp::SetAssertNotExist);
+        assert!(!flags.has_assert_exist());
+        assert!(flags.has_assert_not_exist());
+
+        let flags = flags.apply(FlagsOp::SetAssertUnknown);
+        assert!(flags.has_assert_unknown());
+
+        let flags = flags.apply(FlagsOp::SetAssertNone);
+        assert!(!flags.has_assertion_flags());
+
+        let flags = flags
+            .apply(FlagsOp::DelPresumeKeyNotExists)
+            .apply(FlagsOp::DelPrewriteOnly);
+        assert!(!flags.has_presume_key_not_exists());
+        assert!(!flags.has_prewrite_only());
+    }
+}

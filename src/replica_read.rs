@@ -49,3 +49,35 @@ impl fmt::Display for ReplicaReadType {
         f.write_str(s)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ReplicaReadType;
+
+    #[test]
+    fn default_is_leader() {
+        assert_eq!(ReplicaReadType::default(), ReplicaReadType::Leader);
+        assert!(!ReplicaReadType::Leader.is_follower_read());
+    }
+
+    #[test]
+    fn follower_read_modes() {
+        for mode in [
+            ReplicaReadType::Follower,
+            ReplicaReadType::Mixed,
+            ReplicaReadType::Learner,
+            ReplicaReadType::PreferLeader,
+        ] {
+            assert!(mode.is_follower_read(), "{mode:?} should be follower-read");
+        }
+    }
+
+    #[test]
+    fn display_is_stable() {
+        assert_eq!(ReplicaReadType::Leader.to_string(), "leader");
+        assert_eq!(ReplicaReadType::Follower.to_string(), "follower");
+        assert_eq!(ReplicaReadType::Mixed.to_string(), "mixed");
+        assert_eq!(ReplicaReadType::Learner.to_string(), "learner");
+        assert_eq!(ReplicaReadType::PreferLeader.to_string(), "prefer-leader");
+    }
+}

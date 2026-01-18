@@ -532,6 +532,7 @@ mod tests {
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb;
     use crate::request::CollectSingle;
+    use crate::trace::TraceControlFlags;
     use crate::Backoff;
     use crate::Result;
 
@@ -608,6 +609,131 @@ mod tests {
         let value = plan.execute().await?;
         assert!(value.is_none());
         assert!(interceptor_called.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_plan_builder_context_setters_and_routing_knobs() -> Result<()> {
+        let expected_source = "unit-test2".to_owned();
+        let expected_group_name = "unit-test-group2".to_owned();
+        let expected_tag = vec![1_u8, 2, 3];
+        let expected_trace_id = vec![7_u8, 7, 7];
+        let expected_trace_flags = 0x42_u64;
+        let expected_override_priority = 16_u64;
+
+        let interceptor1_called = Arc::new(AtomicBool::new(false));
+        let interceptor2_called = Arc::new(AtomicBool::new(false));
+
+        let interceptor1_called_cloned = interceptor1_called.clone();
+        let interceptor2_called_cloned = interceptor2_called.clone();
+        let interceptor1 =
+            crate::interceptor::rpc_interceptor("unit_test.interceptor1", move |info, _| {
+                assert_eq!(info.label, "raw_get");
+                interceptor1_called_cloned.store(true, Ordering::SeqCst);
+            });
+        let interceptor2 =
+            crate::interceptor::rpc_interceptor("unit_test.interceptor2", move |info, _| {
+                assert_eq!(info.label, "raw_get");
+                interceptor2_called_cloned.store(true, Ordering::SeqCst);
+            });
+
+        let expected_source_for_hook = expected_source.clone();
+        let expected_tag_for_hook = expected_tag.clone();
+        let expected_group_name_for_hook = expected_group_name.clone();
+        let expected_trace_id_for_hook = expected_trace_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type in plan builder setters test");
+                };
+                let ctx = req.context.as_ref().expect("context should be set");
+                assert!(
+                    ctx.request_source.ends_with(&expected_source_for_hook),
+                    "unexpected request_source: {}",
+                    ctx.request_source
+                );
+                assert_eq!(ctx.resource_group_tag, expected_tag_for_hook);
+                assert_eq!(ctx.trace_id, expected_trace_id_for_hook);
+                assert_eq!(ctx.trace_control_flags, expected_trace_flags);
+                assert_eq!(ctx.priority, i32::from(CommandPriority::High));
+                assert_eq!(
+                    ctx.disk_full_opt,
+                    i32::from(DiskFullOpt::AllowedOnAlmostFull)
+                );
+                assert_eq!(ctx.txn_source, 7);
+                let resource_ctl_ctx = ctx
+                    .resource_control_context
+                    .as_ref()
+                    .expect("resource_control_context should be set");
+                assert_eq!(
+                    resource_ctl_ctx.resource_group_name,
+                    expected_group_name_for_hook
+                );
+                assert_eq!(
+                    resource_ctl_ctx.override_priority,
+                    expected_override_priority
+                );
+                assert!(resource_ctl_ctx.penalty.is_some());
+
+                let resp = kvrpcpb::RawGetResponse {
+                    not_found: true,
+                    ..Default::default()
+                };
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut req = kvrpcpb::RawGetRequest::default();
+        // Choose a key in `MockPdClient::region1`.
+        req.key = vec![5];
+
+        let plan = PlanBuilder::new(pd_client.clone(), Keyspace::Disable, req)
+            .with_request_source(expected_source)
+            .with_resource_group_tag(expected_tag)
+            .with_resource_group_name(expected_group_name)
+            .with_priority(CommandPriority::High)
+            .with_disk_full_opt(DiskFullOpt::AllowedOnAlmostFull)
+            .with_txn_source(7)
+            .with_trace_id(expected_trace_id)
+            .with_trace_control(TraceControlFlags(expected_trace_flags))
+            .with_resource_control_override_priority(expected_override_priority)
+            .with_resource_control_penalty(crate::resource_manager::Consumption::default())
+            .with_rpc_interceptor(interceptor1)
+            .with_added_rpc_interceptor(interceptor2)
+            .replica_read(ReplicaReadType::Follower)
+            .stale_read(true)
+            .replica_read_seed(42)
+            .retry_multi_region_with_concurrency(Backoff::no_backoff(), 1)
+            .merge(CollectSingle)
+            .post_process_default()
+            .plan();
+
+        let value = plan.execute().await?;
+        assert!(value.is_none());
+        assert!(interceptor1_called.load(Ordering::SeqCst));
+        assert!(interceptor2_called.load(Ordering::SeqCst));
+
+        // Also exercise the preserve-results variant (it should behave identically on success).
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type in preserve-results test");
+                };
+                Ok(Box::new(kvrpcpb::RawGetResponse {
+                    not_found: true,
+                    ..Default::default()
+                }) as Box<dyn Any>)
+            },
+        )));
+        let mut req = kvrpcpb::RawGetRequest::default();
+        req.key = vec![5];
+        let plan = PlanBuilder::new(pd_client, Keyspace::Disable, req)
+            .with_request_source("preserve-results")
+            .retry_multi_region_preserve_results_with_concurrency(Backoff::no_backoff(), 1)
+            .merge(CollectSingle)
+            .plan();
+
+        let _ = plan.execute().await?;
         Ok(())
     }
 }

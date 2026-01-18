@@ -225,3 +225,127 @@ fn pick_peer(
         % (peers.len() as u32);
     Some(peers[idx as usize].clone())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_peer(store_id: u64, role: metapb::PeerRole) -> metapb::Peer {
+        metapb::Peer {
+            store_id,
+            role: role as i32,
+            ..Default::default()
+        }
+    }
+
+    fn make_region(leader_store_id: u64, followers: &[u64], learners: &[u64]) -> RegionWithLeader {
+        let leader = make_peer(leader_store_id, metapb::PeerRole::Voter);
+        let mut peers = Vec::with_capacity(1 + followers.len() + learners.len());
+        peers.push(leader.clone());
+        peers.extend(
+            followers
+                .iter()
+                .copied()
+                .map(|id| make_peer(id, metapb::PeerRole::Voter)),
+        );
+        peers.extend(
+            learners
+                .iter()
+                .copied()
+                .map(|id| make_peer(id, metapb::PeerRole::Learner)),
+        );
+        RegionWithLeader {
+            region: metapb::Region {
+                id: 1,
+                peers,
+                ..Default::default()
+            },
+            leader: Some(leader),
+        }
+    }
+
+    #[test]
+    fn default_selects_leader() {
+        let routing = ReadRouting::default();
+        let region = make_region(1, &[2], &[]);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+        assert!(!selected.stale_read);
+    }
+
+    #[test]
+    fn follower_read_prefers_follower_then_falls_back_to_leader() {
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::Follower);
+        let region = make_region(1, &[2], &[]);
+
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 2);
+        assert!(selected.replica_read);
+        assert!(!selected.stale_read);
+
+        let selected = routing.select_peer(&region, 1).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+        assert!(!selected.stale_read);
+    }
+
+    #[test]
+    fn stale_read_prefers_replicas_then_falls_back_to_leader() {
+        let mut routing = ReadRouting::default();
+        routing.set_stale_read(true);
+
+        let region = make_region(1, &[2], &[]);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 2);
+        assert!(!selected.replica_read);
+        assert!(selected.stale_read);
+
+        let selected = routing.select_peer(&region, 1).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+        assert!(selected.stale_read);
+
+        // No replicas: fall back to leader on the first attempt too.
+        let region = make_region(1, &[], &[]);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+        assert!(selected.stale_read);
+    }
+
+    #[test]
+    fn force_leader_overrides_stale_read() {
+        let mut routing = ReadRouting::default();
+        routing.set_stale_read(true);
+        routing.force_leader();
+
+        let region = make_region(1, &[2], &[]);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+        assert!(!selected.stale_read);
+    }
+
+    #[test]
+    fn prefer_leader_retries_can_shift_to_replica() {
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::PreferLeader);
+        let region = make_region(1, &[2], &[]);
+
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+
+        let selected = routing.select_peer(&region, 1).unwrap();
+        assert_eq!(selected.target_peer.store_id, 2);
+        assert!(selected.replica_read);
+    }
+
+    #[test]
+    fn request_source_is_stored() {
+        let routing = ReadRouting::default().with_request_source(Some(Arc::<str>::from("src")));
+        assert_eq!(routing.request_source(), Some("src"));
+    }
+}
