@@ -27,6 +27,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: make check
         run: make check
+      - name: make doc-test
+        run: make doc-test
       - name: make doc
         run: make doc
       - name: Catch unexpected changes in the generated code
