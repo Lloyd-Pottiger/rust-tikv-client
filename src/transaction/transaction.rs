@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use derive_new::new;
 use fail::fail_point;
-use futures::prelude::*;
+use futures::{FutureExt, TryFutureExt};
 use log::warn;
 use log::{debug, trace};
 use tokio::time::Duration;

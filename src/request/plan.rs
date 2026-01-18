@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use futures::future::try_join_all;
-use futures::prelude::*;
+use futures::StreamExt;
 use log::debug;
 use log::info;
 use tokio::sync::Semaphore;

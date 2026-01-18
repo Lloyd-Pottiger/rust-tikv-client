@@ -9,8 +9,8 @@ use std::cmp::min;
 use std::sync::Arc;
 
 use derive_new::new;
-use futures::prelude::*;
 use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
 
 pub use self::client::KvClient;
 pub use self::client::KvConnect;

@@ -12,14 +12,16 @@
 //! server and allocates timestamps for the requests.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::pin_mut;
-use futures::prelude::*;
 use futures::task::AtomicWaker;
 use futures::task::Context;
 use futures::task::Poll;
+use futures::Stream;
+use futures::StreamExt;
 use log::debug;
 use pin_project::pin_project;
 use tokio::sync::mpsc;

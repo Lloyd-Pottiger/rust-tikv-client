@@ -1,11 +1,12 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::prelude::*;
 use futures::stream::BoxStream;
+use futures::StreamExt;
 use log::info;
 use tokio::sync::RwLock;
 
