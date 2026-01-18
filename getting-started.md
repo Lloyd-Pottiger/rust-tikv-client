@@ -4,8 +4,8 @@ The TiKV client is a Rust library (crate). To use this crate in your project, ad
 
 ```toml
 [dependencies]
-tikv-client = "0.1"
-tokio = { version = "1.5", features = ["full"] }
+tikv-client = "0.3"
+tokio = { version = "1", features = ["full"] }
 ```
 
 Note that you need to use Tokio. The TiKV client has an async API and therefore you need an async runtime in your program to use it. At the moment, Tokio is used internally in the client and so you must use Tokio in your code too. We plan to become more flexible in future versions.
@@ -19,43 +19,50 @@ To use the client in your program, use code like the following.
 Raw mode:
 
 ```rust
-use tikv_client::RawClient;
+use tikv_client::{RawClient, Result};
 
-let client = RawClient::new(vec!["127.0.0.1:2379"], None).await?;
-client.put("key".to_owned(), "value".to_owned()).await?;
-let value = client.get("key".to_owned()).await?;
+#[tokio::main]
+async fn main() -> Result<()> {
+    let client = RawClient::new(vec!["127.0.0.1:2379"]).await?;
+    client.put("key".to_owned(), "value".to_owned()).await?;
+    let _value = client.get("key".to_owned()).await?;
+    Ok(())
+}
 ```
 
 Transactional mode:
 
 ```rust
-use tikv_client::TransactionClient;
+use tikv_client::{Result, TransactionClient};
 
-let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"], None).await?;
-let mut txn = txn_client.begin_optimistic().await?;
-txn.put("key".to_owned(), "value".to_owned()).await?;
-let value = txn.get("key".to_owned()).await?;
-txn.commit().await?;
+#[tokio::main]
+async fn main() -> Result<()> {
+    let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
+    let mut txn = txn_client.begin_optimistic().await?;
+    txn.put("key".to_owned(), "value".to_owned()).await?;
+    let _value = txn.get("key".to_owned()).await?;
+    txn.commit().await?;
+    Ok(())
+}
 ```
 
 To make an example which builds and runs,
 
 ```rust
-use tikv_client::{TransactionClient, Error};
+use tikv_client::{Result, TransactionClient};
 
-async fn run() -> Result<(), Error> {
-    let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"], None).await?;
+async fn run() -> Result<()> {
+    let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
     let mut txn = txn_client.begin_optimistic().await?;
     txn.put("key".to_owned(), "value".to_owned()).await?;
-    let value = txn.get("key".to_owned()).await?;
-    println!("value: {:?}", value);
+    let _value = txn.get("key".to_owned()).await?;
     txn.commit().await?;
     Ok(())
 }
 
 #[tokio::main]
-async fn main() {
-    run().await.unwrap();
+async fn main() -> Result<()> {
+    run().await
 }
 ```
 
