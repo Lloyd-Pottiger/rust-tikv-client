@@ -17,66 +17,16 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
-- tests/port-local-oracle：迁移 Go local oracle 的时间戳/过期语义（Go `oracle/oracles/local_test.go`）
-  - 关键：用 test-only `LocalOracle` 复刻语义（SystemTime + per-ms logical counter）；可 hook current time 保证确定性
-  - 覆盖：unique ts；IsExpired/UntilExpired 边界与 Go 对齐
+- tests/oracle-parity：迁移 client-go oracle 相关关键测试语义（pd oracle + local oracle）
+  - 关键：per-txn-scope singleflight GetTS + low-res ts cache；stale-ts/UntilExpired 用 physical 差值；local oracle 用 SystemTime + per-ms logical counter + time hook；测试用 tokio paused time 避免 flake
   - 验证：`cargo test`
-  - 文件：`src/timestamp.rs`，`src/timestamp/local_oracle.rs`，`.codex/progress/daemon.md`
+  - 文件：`src/pd/*`，`src/timestamp.rs`，`src/timestamp/local_oracle.rs`，`.codex/progress/daemon.md`
 
-- tests/port-kv-prefix-next-key：迁移 Go `kv.PrefixNextKey` 边界语义（全 0xFF -> empty）
-  - 关键：新增 `Key::next_prefix_key`（byte carry）；全 0xFF 时返回 empty（对齐 client-go）
-  - 覆盖：`client-go/kv/key_test.go::TestPrefixNextKey`
+- tests/core-parity：迁移 client-go 核心请求/重试/kv/misc 可迁移测试语义
+  - 关键：`Key::next_prefix_key` 边界（全 0xFF -> empty）；region/cache/retry 的 fast-retry+invalidate；stale-read bytes/req metrics；resource-control bypass request_source `internal_others`
   - 验证：`cargo test`
-  - 文件：`src/kv/key.rs`，`.codex/progress/daemon.md`
+  - 文件：`src/kv/key.rs`，`src/store/*`，`src/request/*`，`src/region_cache.rs`，`src/stats.rs`，`src/resource_control.rs`，`.codex/progress/daemon.md`
 
-- tests/audit-client-go-tests-port-map：对齐 client-go 全量 `_test.go` 用例的 Rust 覆盖/标注 N/A
-  - 关键：核对 go `_test.go` 文件数(101)/Test 用例数(294)/Top dirs 分布；补齐 map 文档对 `kv/trace/error/rawkv/tikv/txnkv` 目录的覆盖说明
-  - 决策：mocktikv/mockstore 强绑定用例统一标注 N/A（Rust 用 real-cluster E2E + unit-test mocks 覆盖等价语义）
-  - 验证：`cargo test`
-  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
-
-- tests/port-store-client-unit：迁移 client-go `internal/client/*_test.go` 的可迁移语义到 Rust `src/store/*`
-  - 关键：补齐 store-level error traits 单测（region error 提取 + SetRegionError）；补齐连接入口对非法地址的 fast-fail（对应 Go conn/fast-fail 类语义）
-  - 覆盖：Vec region_errors 聚合+消费；SetRegionError 写回；TikvConnect invalid addr 返回 transport/uri error
-  - 验证：`cargo test`
-  - 文件：`src/store/client.rs`，`src/store/errors.rs`，`.codex/progress/daemon.md`
-
-- tests/port-pd-oracle-low-res-ts：迁移 PD oracle low-resolution TS / update interval/adaptive interval 相关语义（Go `oracle/oracles/pd_test.go`）
-  - 关键：实现 low-res ts cache + per-scope update loop；实现 adaptive interval state machine（normal/adapting/recovering/unadjustable）+ shrink 通知；SetLowResolutionTimestampUpdateInterval 对齐“非自适应/缩短时立即生效”
-  - 覆盖：`TestPdOracle_SetLowResolutionTimestampUpdateInterval`（用 tokio paused time 替换 time bounds）；`TestAdaptiveUpdateTSInterval`；`TestSetLastTSAlwaysPushTS`
-  - 验证：`cargo test`
-  - 文件：`src/pd/low_resolution_ts.rs`，`src/pd/mod.rs`，`.codex/progress/daemon.md`
-
-- tests/port-pd-oracle-stale-ts：迁移 PD oracle `GetStaleTimestamp/UntilExpired` 语义（Go `oracle/oracles/pd_test.go`）
-  - 关键：按 `physical(last_ts)+elapsed-arrival-prevSecond` 估算 stale ts；UntilExpired 用 physical 差值计算等待 ms；invalid prevSecond 直接报错
-  - 覆盖：`TestPDOracle_UntilExpired`；`TestPdOracle_GetStaleTimestamp`（含 invalid prevSecond 大值/MaxUint64）
-  - 验证：`cargo test`
-  - 文件：`src/pd/stale_timestamp.rs`，`src/pd/mod.rs`，`.codex/progress/daemon.md`
-
-- tests/port-pd-oracle-non-future-stale-ts：迁移 stale ts 不返回 future 的并发语义（Go `TestNonFutureStaleTSO`）
-  - 关键：并发 set last ts + GetStaleTimestamp(0) 循环，校验 stale ts 在 1ms 内不会超过 now+5ms（time drift 容忍）
-  - 覆盖：`TestNonFutureStaleTSO`
-  - 验证：`cargo test`
-  - 文件：`src/pd/stale_timestamp.rs`，`.codex/progress/daemon.md`
-
-- tests/port-pd-oracle-validate-read-ts：迁移 PD oracle ValidateReadTS/stale-read read-ts 校验语义（Go `oracle/oracles/pd_test.go`）
-  - 关键：实现 per-txn-scope singleflight GetTS + low-res ts 缓存；readTS>currentTS 时最多重试一次避免 singleflight 复用导致的 false-positive；单 waiter cancel 不传播到共享 GetTS
-  - 覆盖：MaxUint64 sentinel（stale/normal）；MaxInt64..MaxUint64 invalid range；ts+1/ts+2 pass，ts+3 fail；并发校验阻塞/取消；singleflight reuse + retry
-  - 验证：`cargo test`
-  - 文件：`src/pd/read_ts_validation.rs`，`src/pd/mod.rs`，`.codex/progress/daemon.md`
-
-- tests/core-request-retry-parity：对齐 client-go region/cache/request retry + replica selection 关键语义（region errors 分类、backoff budget、cache invalidate、TTL/inflight、pinned store/slow-store score）
-  - 关键：replica-read stale-command 不 backoff 直接切 peer（加 non-witness fast-retry 上限）；unknown region errors -> invalidate region cache + unresolved backoff；KeyNotInRegion resolved 立即重试
-  - 覆盖：RegionCache TTL refresh/expired read-through；Plan handle_region_error（NotLeader/ServerIsBusy/MaxTsNotSynced/...）；KvRpcClient dispatch error 透传 + gRPC invalidation
-  - 验证：`cargo test`
-  - 文件：`src/request/plan.rs`，`src/request/read_routing.rs`，`src/region_cache.rs`，`src/store/client.rs`，`.codex/progress/daemon.md`
-
-- tests/telemetry+misc-parity：补齐 client-go 可迁移杂项语义（metrics/time_detail/interceptors/errors/keyspace/resource-control）
-  - 关键：stale-read bytes metrics 在 gRPC dispatch 按 `Context.stale_read` 统计（暂 local-zone）；resourcecontrol bypass: request_source 包含 `internal_others`
-  - 覆盖：network stale-read out/in bytes + req counter；RequestInfo write_bytes(prewrite/commit)+store_id；TimeDetail Display；InterceptorChain dedup/flatten；KeyError debug_info redaction；keyspace v2 codec
-  - 验证：`cargo test`
-  - 文件：`src/stats.rs`，`src/store/request.rs`，`src/request/metrics_collector.rs`，`src/resource_control.rs`，`src/util/time_detail.rs`，`src/interceptor.rs`，`src/common/errors.rs`，`src/request/keyspace.rs`，`.codex/progress/daemon.md`
-
-- infra/mapping+docs：维护 client-go 测试映射与文档/CI 入口
-  - 覆盖：`.codex/progress/client-go-*-port.md`/design docs；CI/文档/Makefile；integration tests scaffold
-  - 文件：`Makefile`，`.github/workflows/ci.yml`，`doc/*`，`README.md`，`getting-started.md`，`tests/*`，`.codex/progress/*.md`
+- infra/test-mapping+docs：维护 client-go 测试清单/覆盖映射与集成测试文档入口
+  - 关键：统计 go tests（101 files/294 cases）并标注 N/A（mockstore/mocktikv 强绑定）；维护 integration_tests 高层映射
+  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/daemon.md`
