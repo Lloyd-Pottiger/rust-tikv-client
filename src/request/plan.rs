@@ -521,9 +521,6 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
     } else {
         debug!("handle_region_error: unknown region error: {:?}", e);
         pd_client.invalidate_region_cache(ver_id).await;
-        if let Ok(store_id) = store_id {
-            pd_client.invalidate_store_cache(store_id).await;
-        }
         Ok(false)
     }
 }
@@ -1993,6 +1990,118 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_retryable_multi_region_unknown_region_error_requires_backoff_budget() -> Result<()>
+    {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            message: "unknown".to_owned(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // No backoff attempts available: unknown region error can't be retried and must be
+            // returned to the caller.
+            backoff: Backoff::no_jitter_backoff(50, 50, 0),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let err = plan
+            .execute()
+            .await
+            .expect_err("unknown region error should require a backoff budget to retry");
+        assert!(matches!(err, Error::RegionError(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_multi_region_unknown_region_error_retries_with_backoff_budget(
+    ) -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            message: "unknown".to_owned(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // One retry is enough; use a 0ms delay to keep the test deterministic.
+            backoff: Backoff::no_jitter_backoff(0, 0, 1),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_retryable_multi_region_stale_command_backoffs() -> Result<()> {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -2538,7 +2647,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_handle_region_error_unknown_invalidates_region_and_store() -> Result<()> {
+    async fn test_handle_region_error_unknown_invalidates_region_and_backoffs() -> Result<()> {
         let pd_client = Arc::new(CountingPdClient::default());
         let region_store =
             RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
@@ -2549,7 +2658,7 @@ mod test {
 
         assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
         assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
-        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
         Ok(())
     }
 
