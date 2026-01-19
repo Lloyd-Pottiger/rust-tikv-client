@@ -120,4 +120,48 @@ mod tests {
         assert_eq!(*resp.downcast::<u64>().unwrap(), 42);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn kv_rpc_client_dispatch_propagates_request_error() {
+        #[derive(Default)]
+        struct ErrorRequest;
+
+        #[async_trait]
+        impl Request for ErrorRequest {
+            async fn dispatch(
+                &self,
+                _client: &TikvClient<Channel>,
+                _timeout: Duration,
+            ) -> Result<Box<dyn Any>> {
+                Err(crate::Error::Unimplemented)
+            }
+
+            fn label(&self) -> &'static str {
+                "error_request"
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn context_mut(&mut self) -> &mut kvrpcpb::Context {
+                unreachable!("context not used")
+            }
+
+            fn set_leader(&mut self, _leader: &RegionWithLeader) -> Result<()> {
+                Ok(())
+            }
+
+            fn set_api_version(&mut self, _api_version: kvrpcpb::ApiVersion) {}
+        }
+
+        let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let client = KvRpcClient::new(TikvClient::new(channel), Duration::from_millis(1));
+
+        let err = client
+            .dispatch(&ErrorRequest::default())
+            .await
+            .expect_err("KvRpcClient must propagate request errors");
+        assert!(matches!(err, crate::Error::Unimplemented));
+    }
 }
