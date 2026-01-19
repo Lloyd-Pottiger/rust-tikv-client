@@ -17,6 +17,7 @@ use rand::seq::IteratorRandom;
 use rand::thread_rng;
 use rand::Rng;
 use serial_test::serial;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::iter;
 use std::time::Duration;
@@ -833,6 +834,79 @@ async fn raw_req() -> Result<()> {
     assert_eq!(res[1].1, "v4".as_bytes());
     assert_eq!(res[2].1, "v3".as_bytes());
     assert_eq!(res[3].1, "v2".as_bytes());
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn raw_delete_range() -> Result<()> {
+    init().await?;
+
+    // DEFAULT_REGION_BACKOFF is not long enough for some CI environments.
+    let backoff = Backoff::no_jitter_backoff(100, 30000, 20);
+    let client =
+        RawClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace()).await?;
+    let client = client.with_backoff(backoff);
+
+    async fn scan_all(client: &RawClient) -> Result<BTreeMap<Key, Value>> {
+        let mut data = BTreeMap::new();
+        for KvPair(key, value) in client.scan(.., 1024).await? {
+            data.insert(key, value);
+        }
+        Ok(data)
+    }
+
+    fn delete_range_from_map(m: &mut BTreeMap<Key, Value>, start: &[u8], end: &[u8]) {
+        let keys_to_delete = m
+            .keys()
+            .filter(|k| {
+                let bytes: &[u8] = (*k).into();
+                bytes >= start && (end.is_empty() || bytes < end)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for k in keys_to_delete {
+            m.remove(&k);
+        }
+    }
+
+    let mut expected = BTreeMap::<Key, Value>::new();
+    for prefix in [b'a', b'b', b'c', b'd'] {
+        for digit in b'0'..=b'9' {
+            let key = vec![prefix, digit];
+            let value = vec![prefix, digit];
+            client.put(key.clone(), value.clone()).await?;
+            expected.insert(key.into(), value);
+        }
+    }
+    assert_eq!(scan_all(&client).await?, expected);
+
+    client.delete_range(b"b".to_vec()..b"c0".to_vec()).await?;
+    delete_range_from_map(&mut expected, b"b", b"c0");
+    assert_eq!(scan_all(&client).await?, expected);
+
+    client.delete_range(b"d0".to_vec()..b"d0".to_vec()).await?;
+    delete_range_from_map(&mut expected, b"d0", b"d0");
+    assert_eq!(scan_all(&client).await?, expected);
+
+    client
+        .delete_range(b"d0\0".to_vec()..b"d1\0".to_vec())
+        .await?;
+    delete_range_from_map(&mut expected, b"d0\0", b"d1\0");
+    assert_eq!(scan_all(&client).await?, expected);
+
+    client.delete_range(b"c5".to_vec()..b"d5".to_vec()).await?;
+    delete_range_from_map(&mut expected, b"c5", b"d5");
+    assert_eq!(scan_all(&client).await?, expected);
+
+    client.delete_range(b"a".to_vec()..b"z".to_vec()).await?;
+    expected.clear();
+    assert_eq!(scan_all(&client).await?, expected);
+
+    // Deleting the full range again should be a no-op.
+    client.delete_range(..).await?;
+    assert_eq!(scan_all(&client).await?, expected);
 
     Ok(())
 }

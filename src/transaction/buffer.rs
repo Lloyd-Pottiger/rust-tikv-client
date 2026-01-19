@@ -646,6 +646,80 @@ mod tests {
         assert!(res.is_empty());
     }
 
+    #[tokio::test]
+    async fn scan_and_fetch_redundant_limit_includes_local_deletes() {
+        let mut buffer = Buffer::new(false);
+        buffer.delete(b"k1".to_vec().into());
+        buffer.delete(b"k2".to_vec().into());
+
+        let range: BoundRange = (..).into();
+        buffer
+            .scan_and_fetch(range, 1, false, false, |_, redundant_limit| {
+                assert_eq!(redundant_limit, 3);
+                ready(Ok(Vec::<KvPair>::new()))
+            })
+            .await
+            .unwrap()
+            .count();
+    }
+
+    #[tokio::test]
+    async fn scan_and_fetch_overlays_local_mutations_and_respects_reverse_order() {
+        let mut buffer = Buffer::new(false);
+        buffer.put(b"k1".to_vec().into(), b"local1".to_vec());
+        buffer.delete(b"k2".to_vec().into());
+
+        let range: BoundRange = (Key::from(b"k1".to_vec())..Key::from(b"k4".to_vec())).into();
+        let fetched = vec![
+            KvPair::new(b"k1".to_vec(), b"remote1".to_vec()),
+            KvPair::new(b"k2".to_vec(), b"remote2".to_vec()),
+            KvPair::new(b"k3".to_vec(), b"remote3".to_vec()),
+        ];
+
+        let res = buffer
+            .scan_and_fetch(
+                range.clone(),
+                10,
+                false,
+                false,
+                move |_, redundant_limit| {
+                    // One local delete means we may need to fetch one extra key to satisfy `limit`.
+                    assert_eq!(redundant_limit, 11);
+                    ready(Ok(fetched))
+                },
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            res,
+            vec![
+                KvPair::new(b"k1".to_vec(), b"local1".to_vec()),
+                KvPair::new(b"k3".to_vec(), b"remote3".to_vec()),
+            ]
+        );
+
+        let fetched = vec![
+            KvPair::new(b"k1".to_vec(), b"remote1".to_vec()),
+            KvPair::new(b"k2".to_vec(), b"remote2".to_vec()),
+            KvPair::new(b"k3".to_vec(), b"remote3".to_vec()),
+        ];
+        let res = buffer
+            .scan_and_fetch(range, 2, false, true, move |_, _| ready(Ok(fetched)))
+            .await
+            .unwrap()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            res,
+            vec![
+                KvPair::new(b"k3".to_vec(), b"remote3".to_vec()),
+                KvPair::new(b"k1".to_vec(), b"local1".to_vec()),
+            ]
+        );
+    }
+
     // Check that multiple writes to the same key combine in the correct way.
     #[tokio::test]
     async fn state_machine() {

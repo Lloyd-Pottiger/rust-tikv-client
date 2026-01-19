@@ -239,6 +239,16 @@ mod tests {
     }
 
     fn make_region(leader_store_id: u64, followers: &[u64], learners: &[u64]) -> RegionWithLeader {
+        make_region_with_id(1, leader_store_id, followers, learners, &[])
+    }
+
+    fn make_region_with_id(
+        region_id: u64,
+        leader_store_id: u64,
+        followers: &[u64],
+        learners: &[u64],
+        witnesses: &[u64],
+    ) -> RegionWithLeader {
         let leader = make_peer(leader_store_id, metapb::PeerRole::Voter);
         let mut peers = Vec::with_capacity(1 + followers.len() + learners.len());
         peers.push(leader.clone());
@@ -254,9 +264,15 @@ mod tests {
                 .copied()
                 .map(|id| make_peer(id, metapb::PeerRole::Learner)),
         );
+        peers.extend(witnesses.iter().copied().map(|id| metapb::Peer {
+            store_id: id,
+            role: metapb::PeerRole::Voter as i32,
+            is_witness: true,
+            ..Default::default()
+        }));
         RegionWithLeader {
             region: metapb::Region {
-                id: 1,
+                id: region_id,
                 peers,
                 ..Default::default()
             },
@@ -341,6 +357,135 @@ mod tests {
         let selected = routing.select_peer(&region, 1).unwrap();
         assert_eq!(selected.target_peer.store_id, 2);
         assert!(selected.replica_read);
+    }
+
+    #[test]
+    fn learner_read_prefers_learner_then_falls_back_to_leader() {
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::Learner);
+        let region = make_region(1, &[2], &[3]);
+
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 3);
+        assert!(selected.replica_read);
+        assert!(!selected.stale_read);
+
+        let selected = routing.select_peer(&region, 1).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+        assert!(!selected.stale_read);
+
+        // No learners: fall back to leader on the first attempt too.
+        let region = make_region(1, &[2], &[]);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+    }
+
+    #[test]
+    fn mixed_read_can_pick_followers_or_learners() {
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::Mixed);
+        let region = make_region_with_id(1, 1, &[2], &[3], &[]);
+
+        routing.set_seed(0);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 3);
+        assert!(selected.replica_read);
+
+        routing.set_seed(1);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 2);
+        assert!(selected.replica_read);
+
+        // No replicas: fall back to leader.
+        let region = make_region(1, &[], &[]);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+    }
+
+    #[test]
+    fn witness_peers_are_excluded_from_replica_selection() {
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::Follower);
+
+        // Store 2 is a witness and must not be selected for replica reads.
+        let region = make_region_with_id(1, 1, &[3], &[], &[2]);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 3);
+        assert!(selected.replica_read);
+
+        // If all replicas are witnesses, fall back to leader.
+        let region = make_region_with_id(1, 1, &[], &[], &[2]);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+    }
+
+    #[test]
+    fn stale_read_retry_falls_back_to_leader_but_keeps_stale_read_flag() {
+        let mut routing = ReadRouting::default();
+        routing.set_stale_read(true);
+        let region = make_region(1, &[2], &[]);
+
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 2);
+        assert!(selected.stale_read);
+        assert!(!selected.replica_read);
+
+        let selected = routing.select_peer(&region, 1).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(selected.stale_read);
+        assert!(!selected.replica_read);
+    }
+
+    #[test]
+    fn deterministic_replica_selection_depends_on_seed() {
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::PreferLeader);
+
+        let region = make_region_with_id(1, 1, &[2, 3], &[], &[]);
+
+        routing.set_seed(0);
+        let selected = routing.select_peer(&region, 1).unwrap();
+        assert_eq!(selected.target_peer.store_id, 2);
+
+        routing.set_seed(1);
+        let selected = routing.select_peer(&region, 1).unwrap();
+        assert_eq!(selected.target_peer.store_id, 3);
+    }
+
+    #[test]
+    fn select_peer_for_request_source_ignores_force_leader_override() {
+        let mut routing = ReadRouting::default();
+        routing.set_stale_read(true);
+        routing.force_leader();
+
+        let region = make_region(1, &[2], &[]);
+        let selected = routing.select_peer_for_request_source(&region).unwrap();
+        assert_eq!(selected.target_peer.store_id, 2);
+        assert!(selected.stale_read);
+
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.stale_read);
+    }
+
+    #[test]
+    fn error_when_leader_missing() {
+        let routing = ReadRouting::default();
+        let region = RegionWithLeader {
+            region: metapb::Region {
+                id: 1,
+                ..Default::default()
+            },
+            leader: None,
+        };
+        assert!(matches!(
+            routing.select_peer(&region, 0),
+            Err(Error::LeaderNotFound { .. })
+        ));
     }
 
     #[test]

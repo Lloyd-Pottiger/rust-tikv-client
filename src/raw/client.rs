@@ -613,6 +613,14 @@ impl<PdC: PdClient> Client<PdC> {
         debug!("invoking raw delete_range request");
         self.assert_non_atomic()?;
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
+        let (start_key, end_key) = range.clone().into_keys();
+        if let Some(end_key) = &end_key {
+            if start_key >= *end_key {
+                // TiKV rejects delete-range requests with an empty/invalid range. Treat them as
+                // a no-op for ergonomics and parity with other range-based APIs.
+                return Ok(());
+            }
+        }
         let request =
             self.with_request_context(new_raw_delete_range_request(range, self.cf.clone()));
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)

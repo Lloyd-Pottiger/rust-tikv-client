@@ -12,10 +12,29 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 ---
 
 # 正在进行的工作
-
+ 
 # 待做工作
 
 # 已完成工作
+
+- tests/port-client-go：盘点 client-go 全量测试并做 Rust 覆盖映射（out-of-scope 明确化 + 缺口列表）
+  - 决策：遵循 parity checklist 的 out-of-scope 约束（Go context/unionstore/mockstore 等不做 1:1）；以“等价语义覆盖”替代文件级对齐
+  - 文件：`.codex/progress/client-go-tests-port.md`
+
+- tests/port-unit：补齐可迁移的单元/逻辑测试覆盖（不依赖 TiKV 集群）
+  - 变更：增强 read routing/replica read 用例；补 plan 并发 semaphore 用例；补 transaction buffer scan/delete overlay 用例
+  - 验证：`cargo test`；`make check`
+  - 文件：`src/request/read_routing.rs`，`src/request/plan.rs`，`src/transaction/buffer.rs`
+
+- tests/port-mockstore：对 Go mockstore/unionstore 测试做语义迁移（不做 1:1 mock server）
+  - 决策：Go unionstore/memdb/mocktikv 属于实现细节；Rust 用更小的 mock + 关键语义单测替代（聚焦 buffer/plan/routing）
+  - 文件：`src/request/plan.rs`，`src/transaction/buffer.rs`
+
+- tests/port-integration：对齐 client-go `integration_tests/` 的关键 E2E 语义并补缺口
+  - 变更：新增 raw delete-range E2E（覆盖 `start==end` 空区间与 `\\0` 边界技巧）；补齐 delete-range 空区间为 no-op（避免 TiKV 报 invalid range）
+  - 映射：`.codex/progress/client-go-integration-tests-port.md`
+  - 验证：`make integration-test-if-ready`
+  - 文件：`tests/integration_tests.rs`，`src/raw/client.rs`
 
 - core/parity+quality：完成 client-go(v2) 关键能力与 Public API 对齐（Rust-idiomatic），并补齐关键测试/文档
   - 决策：显式 `Config/TransactionOptions`；低层 `request::PlanBuilder` + typed kvproto（不复刻 Go `tikvrpc` mega-wrapper）

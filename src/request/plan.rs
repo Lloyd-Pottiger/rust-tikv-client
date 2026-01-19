@@ -1178,6 +1178,7 @@ mod test {
 
     use futures::stream::BoxStream;
     use futures::stream::{self};
+    use tokio::sync::Notify;
     use tonic::Status;
 
     use super::*;
@@ -1309,6 +1310,41 @@ mod test {
         type Result = MockStoreResponse;
 
         async fn execute(&self) -> Result<Self::Result> {
+            Ok(MockStoreResponse::default())
+        }
+    }
+
+    #[derive(Clone)]
+    struct BlockingPlan {
+        calls: Arc<AtomicUsize>,
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl Plan for BlockingPlan {
+        type Result = MockStoreResponse;
+
+        async fn execute(&self) -> Result<Self::Result> {
+            let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            loop {
+                let prev = self.max_in_flight.load(Ordering::SeqCst);
+                if current <= prev {
+                    break;
+                }
+                if self
+                    .max_in_flight
+                    .compare_exchange(prev, current, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+
+            self.release.notified().await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
             Ok(MockStoreResponse::default())
         }
     }
@@ -1723,6 +1759,58 @@ mod test {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_retryable_all_stores_single_store_handler_limits_concurrency() -> Result<()> {
+        let permits = Arc::new(Semaphore::new(1));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+
+        let plan = BlockingPlan {
+            calls: calls.clone(),
+            in_flight,
+            max_in_flight: max_in_flight.clone(),
+            release: release.clone(),
+        };
+
+        let handle1 = tokio::spawn(
+            RetryableAllStores::<BlockingPlan, MockPdClient>::single_store_handler(
+                plan.clone(),
+                Backoff::no_backoff(),
+                permits.clone(),
+            ),
+        );
+        let handle2 = tokio::spawn(
+            RetryableAllStores::<BlockingPlan, MockPdClient>::single_store_handler(
+                plan,
+                Backoff::no_backoff(),
+                permits.clone(),
+            ),
+        );
+
+        while calls.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Release the first request; the second one should not enter `execute` until the permit is
+        // dropped (so `max_in_flight` must remain 1).
+        release.notify_one();
+
+        while calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        release.notify_one();
+
+        handle1.await.unwrap()?;
+        handle2.await.unwrap()?;
+
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
+        Ok(())
     }
 
     #[tokio::test]
