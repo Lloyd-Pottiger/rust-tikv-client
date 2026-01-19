@@ -1532,8 +1532,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let range = pipelined.flushed_range();
 
         let commit_version = self.rpc.clone().get_timestamp().await?;
-        let req = new_commit_request(
-            iter::once(primary_key),
+        let req = new_commit_request_with_primary_key(
+            iter::once(primary_key.clone()),
+            Some(primary_key),
             self.timestamp.clone(),
             commit_version.clone(),
         );
@@ -2336,9 +2337,11 @@ impl<PdC: PdClient> Committer<PdC> {
     /// Commits the primary key and returns the commit version
     async fn commit_primary(&mut self) -> Result<Timestamp> {
         debug!("committing primary");
-        let primary_key = self.primary_key.clone().into_iter();
+        let primary_key = self.primary_key.clone();
+        let keys = primary_key.clone().into_iter();
         let commit_version = self.rpc.clone().get_timestamp().await?;
-        let req = new_commit_request(
+        let req = new_commit_request_with_primary_key(
+            keys,
             primary_key,
             self.start_version.clone(),
             commit_version.clone(),
@@ -2560,6 +2563,41 @@ mod tests {
 
         let err = Error::UndeterminedError(Box::new(Error::TxnNotFound { start_ts: 7 }));
         assert!(Transaction::<MockPdClient>::is_txn_not_found_heartbeat_error(&err));
+    }
+
+    #[tokio::test]
+    async fn test_keyspace_encodes_commit_request_primary_key() -> crate::Result<()> {
+        let keyspace_id = 4242;
+        let keyspace = Keyspace::Enable { keyspace_id };
+
+        let expected_key = vec![b'x', 0, 16, 146, b'k', b'e', b'y'];
+        let expected_key_cloned = expected_key.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    assert_eq!(req.keys, vec![expected_key_cloned.clone()]);
+                    assert_eq!(req.primary_key, expected_key_cloned);
+                    Ok(Box::new(kvrpcpb::CommitResponse::default()) as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type: {:?}", req.type_id());
+                }
+            },
+        )));
+
+        let mut committer = super::Committer::<MockPdClient>::new(
+            Some(crate::Key::from(expected_key)),
+            vec![],
+            vec![],
+            Timestamp::from_version(42),
+            pd_client,
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            keyspace,
+            0,
+            std::time::Instant::now(),
+        );
+
+        committer.commit_primary().await?;
+        Ok(())
     }
 
     #[tokio::test]

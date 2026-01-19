@@ -93,6 +93,20 @@ pub fn new_commit_request(
     )
 }
 
+pub fn new_commit_request_with_primary_key(
+    keys: impl Iterator<Item = Key>,
+    primary_key: Option<Key>,
+    start_version: Timestamp,
+    commit_version: Timestamp,
+) -> kvrpcpb::CommitRequest {
+    requests::new_commit_request_with_primary_key(
+        keys.map(Into::into).collect(),
+        primary_key.map(Into::into),
+        start_version.version(),
+        commit_version.version(),
+    )
+}
+
 pub fn new_batch_rollback_request(
     keys: impl Iterator<Item = Key>,
     start_version: Timestamp,

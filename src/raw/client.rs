@@ -1123,6 +1123,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_keyspace_encodes_raw_get_request_key() -> Result<()> {
+        let keyspace_id = 4242;
+        let expected_key = vec![b'r', 0, 16, 146, b'k', b'e', b'y'];
+
+        let expected_key_cloned = expected_key.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() {
+                    assert_eq!(req.key, expected_key_cloned);
+                    Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>)
+                } else {
+                    unreachable!("unexpected request type: {:?}", req.type_id());
+                }
+            },
+        )));
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Enable { keyspace_id },
+            request_context: crate::RequestContext::default(),
+        };
+
+        let value = client.get("key".to_owned()).await?;
+        assert!(value.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_batch_put_with_ttl() -> Result<()> {
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {

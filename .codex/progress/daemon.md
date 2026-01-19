@@ -13,16 +13,15 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- tests/port-keyspace-encode-request：对齐 apicodec v2 EncodeRequest（key fields prefixing）
-  - 范围：`client-go/internal/apicodec/codec_v2_test.go`（`TestEncodeRequest`）
-  - 计划：
-    - 补 raw/txn 请求构造层的 keyspace encode 断言（mock dispatch 截获 kvproto request）
-    - 覆盖 RawGet/Commit（含 PrimaryKey 非空场景）等关键 case
-  - 验证：`cargo test`；`make check`
-
 # 待做工作
 
 # 已完成工作
+
+- tests/port-keyspace-encode-request：对齐 apicodec v2 EncodeRequest（key fields prefixing）
+  - 覆盖：RawGet key prefix；CommitRequest.keys/primary_key prefix（PrimaryKey 非空场景）
+  - 决策：commit request 通过新增 ctor 支持设置 primary_key（保持原 ctor 不破坏兼容）；测试用 mock dispatch 截获 kvproto request
+  - 验证：`cargo test`
+  - 文件：`src/raw/client.rs`，`src/transaction/transaction.rs`，`src/transaction/lowering.rs`，`src/transaction/requests.rs`，`.codex/progress/daemon.md`
 
 - tests/port-keyspace-bucket-keys：对齐 apicodec v2 DecodeBucketKeys（decode bytes + keyspace range filter）
   - 覆盖：bucket keys memcomparable decode；keyspace range filter；`{}` 边界规范化（prev-prefix/endKey -> `{}`，inside strip prefix）

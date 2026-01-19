@@ -435,6 +435,19 @@ pub fn new_commit_request(
     req
 }
 
+pub fn new_commit_request_with_primary_key(
+    keys: Vec<Vec<u8>>,
+    primary_key: Option<Vec<u8>>,
+    start_version: u64,
+    commit_version: u64,
+) -> kvrpcpb::CommitRequest {
+    let mut req = new_commit_request(keys, start_version, commit_version);
+    if let Some(primary_key) = primary_key {
+        req.primary_key = primary_key;
+    }
+    req
+}
+
 impl KvRequest for kvrpcpb::CommitRequest {
     type Response = kvrpcpb::CommitResponse;
 }
