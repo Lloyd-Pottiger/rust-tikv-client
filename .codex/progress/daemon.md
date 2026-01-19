@@ -26,13 +26,13 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 验证：`cargo test`
   - 文件：`src/region_cache.rs`，`src/request/plan*.rs`，`src/store/*.rs`，`.codex/progress/daemon.md`
 
-- tests/port-util-misc-time-detail：移植 client-go `util/misc_test.go` 可迁移部分（TimeDetail 格式化等）
-  - 计划：为 `kvrpcpb::TimeDetail` 提供 Rust 侧格式化 helper（避免改 generated），用等价字符串断言覆盖
-  - 计划：评估 `CompatibleParseGCTime` 在 Rust 侧是否需要；若无入口则标注 out-of-scope 并用等价 Rust 用例覆盖必要行为
-  - 验证：`cargo test`
-  - 文件：`src/*`（新 helper），`.codex/progress/daemon.md`
-
 # 已完成工作
+
+- tests/port-util-misc-time-detail：移植 client-go util.TimeDetail 的字符串格式化语义（映射到 kvproto TimeDetail/TimeDetailV2）
+  - 关键：为 `kvrpcpb::TimeDetail`/`TimeDetailV2` 实现 `Display`（只输出非零字段；字段名/顺序对齐 client-go；ms/ns 转换 + 轻量 duration 格式化）
+  - 决策：`CompatibleParseGCTime` 在 client-go 内部无引用，Rust 无对应入口 -> out-of-scope（不迁移）
+  - 验证：`cargo test`；`make check`
+  - 文件：`src/util/time_detail.rs`，`src/util/mod.rs`，`.codex/progress/daemon.md`
 
 - tests/port-interceptor-chain-flatten-dedup：对齐 client-go `RPCInterceptorChain.Link`/`ChainRPCInterceptors` 的 chain 拼接语义
   - 关键：`RpcInterceptorChain::link` 支持递归 flatten 嵌套 chain；dedup by name 时保留最后一个并移动到队尾（执行顺序可预期）
