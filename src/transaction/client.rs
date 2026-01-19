@@ -119,9 +119,7 @@ impl Client {
         let keyspace = match config.keyspace {
             Some(keyspace) => {
                 let keyspace = pd.load_keyspace(&keyspace).await?;
-                Keyspace::Enable {
-                    keyspace_id: keyspace.id,
-                }
+                Keyspace::try_enable(keyspace.id)?
             }
             None => Keyspace::Disable,
         };

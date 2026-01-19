@@ -14,6 +14,7 @@ use crate::{BoundRange, KvPair};
 pub const RAW_KEY_PREFIX: u8 = b'r';
 pub const TXN_KEY_PREFIX: u8 = b'x';
 pub const KEYSPACE_PREFIX_LEN: usize = 4;
+const MAX_KEYSPACE_ID: u32 = (1 << 24) - 1;
 
 #[cfg(test)]
 pub(crate) const CODEC_V2_PREFIXES: [[u8; 1]; 2] = [[RAW_KEY_PREFIX], [TXN_KEY_PREFIX]];
@@ -23,6 +24,9 @@ pub(crate) const CODEC_V1_EXCLUDE_PREFIXES: [[u8; 1]; 2] = CODEC_V2_PREFIXES;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Keyspace {
     Disable,
+    /// Enable APIv2 keyspace encoding.
+    ///
+    /// Note: TiKV keyspace IDs are 24-bit; values above `2^24-1` are invalid.
     Enable { keyspace_id: u32 },
 }
 
@@ -38,6 +42,17 @@ impl Keyspace {
             Keyspace::Disable => kvrpcpb::ApiVersion::V1,
             Keyspace::Enable { .. } => kvrpcpb::ApiVersion::V2,
         }
+    }
+
+    pub fn try_enable(keyspace_id: u32) -> crate::Result<Self> {
+        if keyspace_id > MAX_KEYSPACE_ID {
+            return Err(crate::internal_err!(
+                "invalid keyspace_id={} (max={})",
+                keyspace_id,
+                MAX_KEYSPACE_ID
+            ));
+        }
+        Ok(Keyspace::Enable { keyspace_id })
     }
 }
 
@@ -686,6 +701,17 @@ mod tests {
         assert_eq!(keyspace_prefix(0, key_mode), [b'x', 0, 0, 0]);
         assert_eq!(keyspace_prefix(1, key_mode), [b'x', 0, 0, 1]);
         assert_eq!(keyspace_prefix(0xFFFF, key_mode), [b'x', 0, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn try_enable_rejects_out_of_range_keyspace_id() {
+        assert!(Keyspace::try_enable(u32::MAX).is_err());
+        assert_eq!(
+            Keyspace::try_enable((1 << 24) - 1).unwrap(),
+            Keyspace::Enable {
+                keyspace_id: (1 << 24) - 1
+            }
+        );
     }
 
     #[test]
