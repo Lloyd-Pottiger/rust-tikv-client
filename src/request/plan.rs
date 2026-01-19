@@ -382,15 +382,30 @@ where
                 )
                 .await;
             }
+            let region_error = e.clone();
+            let region_error_resolved =
+                handle_region_error(pd_client.clone(), e, region_store).await?;
+            // If we've resolved the region error (e.g. NotLeader with a leader), retry immediately
+            // without consuming a backoff attempt. This matches client-go's behavior: backoff only
+            // applies when we need to wait for the cluster to converge (e.g. leader election).
+            if region_error_resolved {
+                return Self::single_plan_handler(
+                    pd_client,
+                    plan,
+                    backoff,
+                    permits,
+                    preserve_region_results,
+                    request_context.clone(),
+                    read_routing,
+                    attempt + 1,
+                )
+                .await;
+            }
+
             match backoff.next_delay_duration() {
                 Some(duration) => {
-                    let region_error_resolved =
-                        handle_region_error(pd_client.clone(), e, region_store).await?;
-                    // don't sleep if we have resolved the region error
-                    if !region_error_resolved {
-                        crate::stats::observe_backoff_sleep("region", duration);
-                        sleep(duration).await;
-                    }
+                    crate::stats::observe_backoff_sleep("region", duration);
+                    sleep(duration).await;
                     Self::single_plan_handler(
                         pd_client,
                         plan,
@@ -403,7 +418,7 @@ where
                     )
                     .await
                 }
-                None => Err(Error::RegionError(Box::new(e))),
+                None => Err(Error::RegionError(Box::new(region_error))),
             }
         } else {
             Ok(vec![Ok(resp)])
@@ -1203,7 +1218,58 @@ mod test {
     struct CountingPdClient {
         invalidated_regions: AtomicUsize,
         invalidated_stores: AtomicUsize,
+        update_leader_calls: AtomicUsize,
         fail_update_leader: bool,
+    }
+
+    struct LeaderSwitchPdClient {
+        client: MockKvClient,
+        region: Mutex<RegionWithLeader>,
+        invalidated_regions: AtomicUsize,
+        update_leader_calls: AtomicUsize,
+    }
+
+    impl LeaderSwitchPdClient {
+        fn new(client: MockKvClient) -> Self {
+            let leader = metapb::Peer {
+                id: 101,
+                store_id: 1,
+                role: metapb::PeerRole::Voter as i32,
+                is_witness: false,
+            };
+            let follower_1 = metapb::Peer {
+                id: 102,
+                store_id: 2,
+                role: metapb::PeerRole::Voter as i32,
+                is_witness: false,
+            };
+            let follower_2 = metapb::Peer {
+                id: 103,
+                store_id: 3,
+                role: metapb::PeerRole::Voter as i32,
+                is_witness: false,
+            };
+
+            let mut region = metapb::Region::default();
+            region.id = 1;
+            region.start_key = vec![];
+            region.end_key = vec![];
+            region.region_epoch = Some(metapb::RegionEpoch {
+                conf_ver: 0,
+                version: 0,
+            });
+            region.peers = vec![leader.clone(), follower_1, follower_2];
+
+            Self {
+                client,
+                region: Mutex::new(RegionWithLeader {
+                    region,
+                    leader: Some(leader),
+                }),
+                invalidated_regions: AtomicUsize::new(0),
+                update_leader_calls: AtomicUsize::new(0),
+            }
+        }
     }
 
     #[async_trait]
@@ -1246,6 +1312,7 @@ mod test {
         }
 
         async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
+            self.update_leader_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail_update_leader {
                 Err(Error::Unimplemented)
             } else {
@@ -1260,6 +1327,63 @@ mod test {
         async fn invalidate_store_cache(&self, _store_id: StoreId) {
             self.invalidated_stores.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[async_trait]
+    impl PdClient for LeaderSwitchPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            region: RegionWithLeader,
+        ) -> Result<RegionStore> {
+            Ok(RegionStore::new(region, Arc::new(self.client.clone())))
+        }
+
+        async fn region_for_key(&self, _key: &Key) -> Result<RegionWithLeader> {
+            Ok(self.region.lock().unwrap().clone())
+        }
+
+        async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+            Ok(self.region.lock().unwrap().clone())
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Ok(Timestamp::default())
+        }
+
+        async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+            Ok(Timestamp::default())
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Ok(keyspacepb::KeyspaceMeta {
+                id: 0,
+                name: keyspace.to_owned(),
+                state: keyspacepb::KeyspaceState::Enabled as i32,
+                ..Default::default()
+            })
+        }
+
+        async fn all_stores(&self) -> Result<Vec<Store>> {
+            Ok(vec![Store::new(Arc::new(self.client.clone()))])
+        }
+
+        async fn update_leader(&self, _ver_id: RegionVerId, leader: metapb::Peer) -> Result<()> {
+            self.update_leader_calls.fetch_add(1, Ordering::SeqCst);
+            self.region.lock().unwrap().leader = Some(leader);
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {
+            self.invalidated_regions.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {}
     }
 
     #[derive(Debug, Default)]
@@ -1527,6 +1651,174 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_retryable_multi_region_not_leader_with_leader_does_not_consume_backoff(
+    ) -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_hook = seen.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let ctx = req
+                    .context
+                    .as_ref()
+                    .expect("missing context on RawGetRequest");
+                let peer = ctx.peer.as_ref().expect("missing peer in context");
+                seen_for_hook.lock().unwrap().push(peer.store_id);
+
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            not_leader: Some(errorpb::NotLeader {
+                                leader: Some(metapb::Peer {
+                                    id: 102,
+                                    store_id: 2,
+                                    role: metapb::PeerRole::Voter as i32,
+                                    is_witness: false,
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    1 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            not_leader: Some(errorpb::NotLeader {
+                                leader: Some(metapb::Peer {
+                                    id: 103,
+                                    store_id: 3,
+                                    role: metapb::PeerRole::Voter as i32,
+                                    is_witness: false,
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // Only one backoff attempt. If we consume backoff for NotLeader-with-leader, the
+            // second NotLeader would run out of attempts and fail.
+            backoff: Backoff::no_jitter_backoff(50, 50, 1),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(results.len(), 1);
+
+        let response = results.into_iter().next().unwrap()?;
+        assert!(response.not_found);
+
+        assert_eq!(pd_client.update_leader_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.as_slice(), &[1, 2, 3]);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_retryable_multi_region_not_leader_without_leader_backoffs() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let ctx = req
+                    .context
+                    .as_ref()
+                    .expect("missing context on RawGetRequest");
+                let peer = ctx.peer.as_ref().expect("missing peer in context");
+                assert_eq!(peer.store_id, 1);
+
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            not_leader: Some(errorpb::NotLeader::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            backoff: Backoff::no_jitter_backoff(50, 50, 1),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let handle = tokio::spawn(async move { plan.execute().await });
+
+        while calls.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(49)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+
+        let results = handle.await.expect("task panicked")?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let response = results.into_iter().next().unwrap()?;
+        assert!(response.not_found);
+
+        assert_eq!(pd_client.update_leader_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
     #[derive(Clone)]
     struct MultiStorePdClient {
         client: MockKvClient,
@@ -1758,8 +2050,49 @@ mod test {
         assert!(handle_region_error(pd_client.clone(), err, region_store)
             .await
             .is_err());
+        assert_eq!(pd_client.update_leader_calls.load(Ordering::SeqCst), 1);
         assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
         assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_not_leader_updates_leader_and_retries() -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            not_leader: Some(errorpb::NotLeader {
+                leader: Some(metapb::Peer {
+                    store_id: 99,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert_eq!(pd_client.update_leader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_not_leader_without_leader_invalidates_region() -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            not_leader: Some(errorpb::NotLeader::default()),
+            ..Default::default()
+        };
+
+        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert_eq!(pd_client.update_leader_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
     }
 
     #[tokio::test]

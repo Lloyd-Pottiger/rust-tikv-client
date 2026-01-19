@@ -13,15 +13,26 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
+- tests/port-region-cache-inflight-dedup：补齐 region cache 并发 load 语义（对齐 client-go region_cache 的“in-flight singleflight”行为）
+  - 计划：并发 `get_region_by_id`/`get_region_by_key` 时只触发一次 PD fetch；waiters 正确唤醒；失败也必须清理 in-flight 标记避免永久挂死
+  - 验证：`cargo test`
+  - 文件：`src/region_cache.rs`，`.codex/progress/daemon.md`
+
 # 待做工作
 
-- tests/port-region-request-and-cache：扩展 region cache + region request sender 覆盖面（对齐 client-go `internal/locate/region_request*_test.go`）
-  - 计划：补齐 stale-region/epoch-not-match/leader-change/retry state 关键路径的等价用例
-  - 计划：对齐错误注入方式：MockPd/MockKv + Plan retry；避免依赖真实 cluster
+- tests/port-region-request-error-retry-semantics：扩展 region_request sender 的 region error retry/backoff 覆盖面（对齐 client-go `internal/locate/region_request*_test.go`）
+  - 计划：补齐 StaleCommand/RegionNotFound/StoreNotMatch/EpochNotMatch 的 retry vs backoff 语义（resolved 不消耗 backoff；unresolved 才 backoff）
   - 验证：`cargo test`
-  - 文件：`src/region_cache.rs`，`src/request/plan*.rs`，`src/store/*.rs`，`.codex/progress/daemon.md`
+  - 文件：`src/request/plan.rs`，`.codex/progress/daemon.md`
 
 # 已完成工作
+
+- tests/port-region-request-and-cache：扩展 region request sender 对 NotLeader 的等价语义覆盖（对齐 client-go `internal/locate/region_request*_test.go`）
+  - 关键：NotLeader(leader present) -> `update_leader` + 立即重试；NotLeader(no leader) -> invalidate region + backoff 后重试
+  - 决策：resolved region error（`handle_region_error -> Ok(true)`）不消耗 backoff attempt（对齐 client-go：不调用 bo.Backoff）
+  - 覆盖：新增 `RetryableMultiRegion` NotLeader with/without leader 行为单测（含 start_paused backoff 断言），补齐 `handle_region_error` NotLeader 单测
+  - 验证：`cargo test`
+  - 文件：`src/request/plan.rs`，`Cargo.toml`，`.codex/progress/daemon.md`
 
 - tests/port-store-client-behavior-timeout-cancel：修复并覆盖 plan 并发执行的 cancel 行为（避免脱管 tokio task）
   - 关键：`RetryableMultiRegion`/`RetryableAllStores` 用 `FuturesUnordered` 执行并发 shard/store handler，替代 `tokio::spawn + try_join_all`；外层 future drop/abort 会连带取消内层 handler
