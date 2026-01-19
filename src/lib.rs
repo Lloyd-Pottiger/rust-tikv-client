@@ -121,6 +121,8 @@ mod region;
 mod region_cache;
 mod replica_read;
 mod request_context;
+#[cfg(test)]
+mod resource_control;
 mod stats;
 mod store;
 mod timestamp;

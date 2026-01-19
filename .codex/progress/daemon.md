@@ -15,64 +15,26 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port-resourcecontrol-request-info：迁移 resource control RequestInfo 语义（Go `internal/resourcecontrol/resource_control_test.go`）
-  - 计划：实现 should_bypass(request_source) + write_bytes(prewrite/commit) + store_id(ctx.peer) 提取；不做 PD/NextGen 全链路
-  - 步骤：新增 RequestInfo helper + 单测覆盖 BatchGet/Prewrite/Commit/ nil peer；对齐 write-bytes 计算（mutations + primary_lock + keys）
+- tests/port-pd-oracle-validate-read-ts：迁移 PD oracle ValidateReadTS/stale-read read-ts 校验语义（Go `oracle/oracles/pd_test.go`）
+  - 计划：补齐 validate_read_ts 相关接口/缓存/interval 调整；先做 unit-test + mock PD
+  - 步骤：梳理 Rust `src/pd/*` timestamp/oracle；实现 validate_read_ts API（含不同 source 的隔离/复用）；按 go 用例拆小测试
   - 验证：`cargo test`
-  - 文件：`src/*`，`.codex/progress/daemon.md`
+  - 文件：`src/pd/*`，`src/timestamp.rs`，`.codex/progress/daemon.md`
 
 # 已完成工作
 
-- tests/port-metrics-collector：迁移 locate/network collector 的 request/response bytes + stale-read metrics（Go `internal/locate/metrics_collector_test.go`）
-  - 决策：用 `prost::Message::encoded_len` 对齐 Go proto.Size；stale-read metrics 在 gRPC dispatch 处按 `Context.stale_read` 统计（暂按 local-zone）
-  - 覆盖：ExecDetails unpacked bytes（local/cross-zone）；stale-read out/in bytes + req counter（prometheus）
+- tests/core-request-retry-parity：对齐 client-go region/cache/request retry + replica selection 关键语义（region errors 分类、backoff budget、cache invalidate、TTL/inflight、pinned store/slow-store score）
+  - 关键：replica-read stale-command 不 backoff 直接切 peer（加 non-witness fast-retry 上限）；unknown region errors -> invalidate region cache + unresolved backoff；KeyNotInRegion resolved 立即重试
+  - 覆盖：RegionCache TTL refresh/expired read-through；Plan handle_region_error（NotLeader/ServerIsBusy/MaxTsNotSynced/...）；KvRpcClient dispatch error 透传 + gRPC invalidation
   - 验证：`cargo test`
-  - 文件：`src/stats.rs`，`src/store/request.rs`，`src/request/metrics_collector.rs`，`src/request/mod.rs`，`.codex/progress/daemon.md`
+  - 文件：`src/request/plan.rs`，`src/request/read_routing.rs`，`src/region_cache.rs`，`src/store/client.rs`，`.codex/progress/daemon.md`
 
-- tests/port-store-client-tests：补齐 store/rpc client 并发/错误路径单测（对齐 go `internal/client/*_test.go` 的可迁移部分）
-  - 覆盖：KvRpcClient dispatch error 透传；RetryableMultiRegion 遇到 gRPC Status（unavailable/deadline_exceeded）会 invalidate region+store cache 且依赖 backoff budget 重试
+- tests/telemetry+misc-parity：补齐 client-go 可迁移杂项语义（metrics/time_detail/interceptors/errors/keyspace/resource-control）
+  - 关键：stale-read bytes metrics 在 gRPC dispatch 按 `Context.stale_read` 统计（暂 local-zone）；resourcecontrol bypass: request_source 包含 `internal_others`
+  - 覆盖：network stale-read out/in bytes + req counter；RequestInfo write_bytes(prewrite/commit)+store_id；TimeDetail Display；InterceptorChain dedup/flatten；KeyError debug_info redaction；keyspace v2 codec
   - 验证：`cargo test`
-  - 文件：`src/store/client.rs`，`src/request/plan.rs`，`.codex/progress/daemon.md`
+  - 文件：`src/stats.rs`，`src/store/request.rs`，`src/request/metrics_collector.rs`，`src/resource_control.rs`，`src/util/time_detail.rs`，`src/interceptor.rs`，`src/common/errors.rs`，`src/request/keyspace.rs`，`.codex/progress/daemon.md`
 
-- tests/port-region-cache-tests-more：继续迁移 client-go `internal/locate/region_cache_test.go` 缺失语义（重点：invalidate/TTL/并发/region-split/resolve-loop）
-  - 覆盖：补 RegionCache TTL check_and_refresh 单测；补 expired TTL 触发 read-through refetch 的集成单测
-  - 验证：`cargo test`
-  - 文件：`src/region_cache.rs`，`.codex/progress/daemon.md`
-
-- tests/port-read-routing-score-tests：扩展 `ReadRouting`/replica selection 的 score/seed/slow-store 语义覆盖（对齐 go `replica_selector_test.go` 的可迁移部分）
-  - 覆盖：补齐 calculate_score（tryLeader/preferLeader/learnerOnly/slow-store）关键 flag 断言；补齐 pinned store override + witness 排除等路径的单测
-  - 验证：`cargo test`
-  - 文件：`src/request/read_routing.rs`，`.codex/progress/daemon.md`
-
-- tests/port-region-request-replica-selector-errors：迁移/等价覆盖 replica selector 在 region error 下的重试/切 peer 语义（Go `region_request3_test.go`）
-  - 关键：ReadRouting 增加 per-region pinned store；replica-read 下 StaleCommand 不 backoff 直接切 peer（并用 non-witness peer 数限制 fast-retry 防止无限递归）
-  - 覆盖：replica-read stale-command 切 peer；ServerIsBusy/MaxTsNotSynced/ReadIndexNotReady/ProposalInMergingMode backoff+重试同 store；handle_region_error 对上述错误改为 backoff(不 invalidate)
-  - 验证：`cargo test`
-  - 文件：`src/request/read_routing.rs`，`src/request/plan.rs`，`.codex/progress/daemon.md`
-
-- tests/port-region-request-unknown-region-error：对齐 unknown region error 的 invalidate/backoff 语义（对齐 client-go `internal/locate/region_request*_test.go`）
-  - 关键：unknown region error -> invalidate region cache（不 invalidate store）；归类为 unresolved，走 backoff budget（避免无限递归/stack overflow）
-  - 覆盖：handle_region_error 单测 + RetryableMultiRegion（backoff=0 直接返回 RegionError；backoff=1 可重试成功）
-  - 验证：`cargo test`
-  - 文件：`src/request/plan.rs`，`.codex/progress/daemon.md`
-
-- tests/port-region-request-key-not-in-region：对齐 KeyNotInRegion 的 invalidate/retry 语义（对齐 client-go `internal/locate/region_request*_test.go`）
-  - 关键：KeyNotInRegion -> 仅 invalidate region cache（不 invalidate store）+ 立即重试（resolved，不消耗 backoff）
-  - 覆盖：handle_region_error 单测 + RetryableMultiRegion 端到端重试不 backoff 断言（backoff=0 也能成功）
-  - 验证：`cargo test`
-  - 文件：`src/request/plan.rs`，`.codex/progress/daemon.md`
-
-- core/request+cache-retry-parity：对齐 client-go region/cache/request retry 关键语义（plan retry、NotLeader/backoff、region cache inflight）
-  - 关键：resolved region errors（NotLeader(with leader)/StoreNotMatch/RegionNotFound/EpochNotMatch when behind）立即重试不消耗 backoff；需要等待的错误（NotLeader(no leader)/StaleCommand/EpochNotMatch when cache ahead）才 backoff；RegionCache `get_region_by_{id,key}` in-flight singleflight（成功/失败都清理并唤醒）
-  - 覆盖：新增/扩展 plan/region_cache 单测（tokio start_paused backoff 断言；并发 get_region* 只触发一次 PD fetch）
-  - 验证：`cargo test`
-  - 文件：`src/request/plan.rs`，`src/region_cache.rs`，`Cargo.toml`，`.codex/progress/daemon.md`
-
-- parity/misc-utils：移植 client-go 杂项语义与单测（time_detail、interceptor chain、error debug_info redaction、keyspace apicodec v2）
-  - 关键：TimeDetail Display 输出字段/顺序对齐；InterceptorChain flatten+dedup；KeyError debug_info JSON redaction on/off；keyspace v2 prefix/epoch-not-match decode+range；CommitRequest primary_key prefix ctor
-  - 验证：`cargo test`；必要时 `make check`
-  - 文件：`src/util/time_detail.rs`，`src/interceptor.rs`，`src/common/errors.rs`，`src/request/keyspace.rs`，`src/raw/client.rs`，`src/transaction/*`，`Cargo.toml`，`Cargo.lock`，`.codex/progress/daemon.md`
-
-- infra/mapping+docs：维护 client-go 测试映射、CI/doc/Makefile 入口与 replica-read 设计拆解
+- infra/mapping+docs：维护 client-go 测试映射与文档/CI 入口
   - 覆盖：`.codex/progress/client-go-*-port.md`/design docs；CI/文档/Makefile；integration tests scaffold
-  - 文件：`Makefile`，`.github/workflows/ci.yml`，`doc/development.md`，`README.md`，`getting-started.md`，`tests/integration_tests.rs`，`.codex/progress/*.md`
+  - 文件：`Makefile`，`.github/workflows/ci.yml`，`doc/*`，`README.md`，`getting-started.md`，`tests/*`，`.codex/progress/*.md`
