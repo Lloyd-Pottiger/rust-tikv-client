@@ -15,13 +15,13 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port-store-client-unit：迁移 client-go `internal/client/*_test.go` 的可迁移语义到 Rust `src/store/*`
-  - 计划：补齐 dispatch error 分类/timeout/ctx 应用；与 PlanBuilder retry/invalidate 的组合测试
-  - 步骤：列出 go 测试与 Rust 对应点；为 `KvRpcClient`/`Store` 增加 mock + unit tests；必要时补缺实现
-  - 验证：`cargo test`
-  - 文件：`src/store/*`，`src/request/*`，`.codex/progress/daemon.md`
-
 # 已完成工作
+
+- tests/port-store-client-unit：迁移 client-go `internal/client/*_test.go` 的可迁移语义到 Rust `src/store/*`
+  - 关键：补齐 store-level error traits 单测（region error 提取 + SetRegionError）；补齐连接入口对非法地址的 fast-fail（对应 Go conn/fast-fail 类语义）
+  - 覆盖：Vec region_errors 聚合+消费；SetRegionError 写回；TikvConnect invalid addr 返回 transport/uri error
+  - 验证：`cargo test`
+  - 文件：`src/store/client.rs`，`src/store/errors.rs`，`.codex/progress/daemon.md`
 
 - tests/port-pd-oracle-low-res-ts：迁移 PD oracle low-resolution TS / update interval/adaptive interval 相关语义（Go `oracle/oracles/pd_test.go`）
   - 关键：实现 low-res ts cache + per-scope update loop；实现 adaptive interval state machine（normal/adapting/recovering/unadjustable）+ shrink 通知；SetLowResolutionTimestampUpdateInterval 对齐“非自适应/缩短时立即生效”

@@ -278,6 +278,7 @@ mod test {
     use super::HasKeyErrors;
     use crate::common::Error;
     use crate::internal_err;
+    use crate::proto::errorpb;
     use crate::proto::kvrpcpb;
     #[test]
     fn result_haslocks() {
@@ -306,5 +307,46 @@ mod test {
             Error::KvError { message } => assert_eq!(message, "boom"),
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn vec_region_errors_are_collected_and_consumed() {
+        use super::HasRegionErrors;
+
+        let mut r1 = kvrpcpb::GetResponse::default();
+        r1.region_error = Some(errorpb::Error {
+            message: "e1".to_owned(),
+            ..Default::default()
+        });
+        let mut r2 = kvrpcpb::GetResponse::default();
+        r2.region_error = Some(errorpb::Error {
+            message: "e2".to_owned(),
+            ..Default::default()
+        });
+
+        let mut responses = vec![r1, r2];
+        let errs = responses
+            .region_errors()
+            .expect("expected region errors to be extracted");
+        assert_eq!(errs.len(), 2);
+        assert_eq!(errs[0].message, "e1");
+        assert_eq!(errs[1].message, "e2");
+
+        // `region_error()` uses `take()`, so a second extraction should see none.
+        assert!(responses.region_errors().is_none());
+    }
+
+    #[test]
+    fn set_region_error_sets_response_field() {
+        use super::SetRegionError;
+
+        let mut resp = kvrpcpb::GetResponse::default();
+        assert!(resp.region_error.is_none());
+
+        resp.set_region_error(errorpb::Error {
+            message: "boom".to_owned(),
+            ..Default::default()
+        });
+        assert_eq!(resp.region_error.as_ref().unwrap().message, "boom");
     }
 }

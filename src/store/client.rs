@@ -62,6 +62,8 @@ impl KvClient for KvRpcClient {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use tonic::transport::Endpoint;
 
@@ -163,5 +165,16 @@ mod tests {
             .await
             .expect_err("KvRpcClient must propagate request errors");
         assert!(matches!(err, crate::Error::Unimplemented));
+    }
+
+    #[tokio::test]
+    async fn tikv_connect_connect_rejects_invalid_address() {
+        let connect =
+            TikvConnect::new(Arc::new(SecurityManager::default()), Duration::from_secs(1));
+        let err = match connect.connect("not a valid address").await {
+            Ok(_) => panic!("expected invalid address to fail fast"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, crate::Error::Grpc(_) | crate::Error::Url(_)));
     }
 }
