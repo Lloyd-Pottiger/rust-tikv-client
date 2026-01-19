@@ -108,15 +108,20 @@ impl StaleTsOracle {
             .try_into()
             .map_err(|_| StaleTimestampError::InvalidPrevSecond { prev_second })?;
 
-        crate::timestamp::compose_ts(stale_physical_ms, 0)
-            .map_err(|e| StaleTimestampError::Compose {
+        crate::timestamp::compose_ts(stale_physical_ms, 0).map_err(|e| {
+            StaleTimestampError::Compose {
                 message: e.to_string(),
-            })
+            }
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::thread;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
@@ -133,9 +138,8 @@ mod tests {
         let last_ts = crate::timestamp::time_to_ts(start).unwrap();
         o.set_last_ts_for_test(crate::GLOBAL_TXN_SCOPE, last_ts);
 
-        let lock_ts = crate::timestamp::time_to_ts(start + Duration::from_millis(lock_after_ms))
-            .unwrap()
-            + 1;
+        let lock_ts =
+            crate::timestamp::time_to_ts(start + Duration::from_millis(lock_after_ms)).unwrap() + 1;
         let wait_ms = o.until_expired(lock_ts, lock_exp_ms, crate::GLOBAL_TXN_SCOPE);
         assert_eq!(wait_ms, (lock_after_ms + lock_exp_ms) as i64);
     }
@@ -148,9 +152,7 @@ mod tests {
         let last_ts = crate::timestamp::time_to_ts(start).unwrap();
         o.set_last_ts_for_test(crate::GLOBAL_TXN_SCOPE, last_ts);
 
-        let ts = o
-            .get_stale_timestamp(crate::GLOBAL_TXN_SCOPE, 10)
-            .unwrap();
+        let ts = o.get_stale_timestamp(crate::GLOBAL_TXN_SCOPE, 10).unwrap();
         let stale_time = crate::timestamp::get_time_from_ts(ts);
 
         let expected = start - Duration::from_secs(10);
@@ -173,5 +175,45 @@ mod tests {
             .expect_err("expected invalid prevSecond error");
         assert!(err.to_string().contains("invalid prevSecond"));
     }
-}
 
+    #[test]
+    fn non_future_stale_tso_matches_client_go_test() {
+        let o = Arc::new(StaleTsOracle::default());
+        o.set_last_ts_for_test(
+            crate::GLOBAL_TXN_SCOPE,
+            crate::timestamp::time_to_ts(SystemTime::now()).unwrap(),
+        );
+
+        for i in 0..100 {
+            thread::sleep(Duration::from_millis(10));
+
+            let now = SystemTime::now();
+            let upper_bound = now + Duration::from_millis(5); // allow 5ms time drift
+            let start = Instant::now();
+
+            let done = Arc::new(AtomicBool::new(false));
+            let o2 = Arc::clone(&o);
+            let done2 = Arc::clone(&done);
+            let handle = thread::spawn(move || {
+                thread::sleep(Duration::from_micros(100));
+                o2.set_last_ts_for_test(
+                    crate::GLOBAL_TXN_SCOPE,
+                    crate::timestamp::time_to_ts(now).unwrap(),
+                );
+                done2.store(true, Ordering::Release);
+            });
+
+            while !done.load(Ordering::Acquire) {
+                let ts = o.get_stale_timestamp(crate::GLOBAL_TXN_SCOPE, 0).unwrap();
+                let stale_time = crate::timestamp::get_time_from_ts(ts);
+                if stale_time > upper_bound && start.elapsed() < Duration::from_millis(1) {
+                    panic!(
+                        "stale ts should not be in the future: iter={i}, stale_time={stale_time:?}, upper_bound={upper_bound:?}",
+                    );
+                }
+            }
+
+            handle.join().unwrap();
+        }
+    }
+}
