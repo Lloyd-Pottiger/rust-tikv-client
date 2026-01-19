@@ -12,10 +12,16 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 ---
 
 # 正在进行的工作
- 
+
 # 待做工作
 
 # 已完成工作
+
+- tests/port-unit-more：迁移可独立运行的 client-go 单测（trace flags + keyspace apicodec parse/decode）
+  - 决策：Rust crate 未暴露 apicodec decode API，先用 `cfg(test)` 的最小 helper 覆盖语义，避免 `dead_code`/clippy
+  - 变更：`TraceControlFlags` 支持 `|`/`|=`；补齐 flags chaining 测试；补 keyspace ParseKeyspaceID/DecodeKey 与 prefixes sorted 测试
+  - 验证：`cargo test`；`make check`
+  - 文件：`src/trace.rs`，`src/request/keyspace.rs`
 
 - tests/port-client-go：盘点 client-go 全量测试并做 Rust 覆盖映射（out-of-scope 明确化 + 缺口列表）
   - 决策：遵循 parity checklist 的 out-of-scope 约束（Go context/unionstore/mockstore 等不做 1:1）；以“等价语义覆盖”替代文件级对齐

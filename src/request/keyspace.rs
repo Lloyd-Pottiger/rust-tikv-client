@@ -3,6 +3,8 @@
 use std::ops::{Bound, Range};
 
 use serde_derive::{Deserialize, Serialize};
+#[cfg(test)]
+use thiserror::Error;
 
 use crate::transaction::Mutation;
 use crate::{proto::kvrpcpb, Key};
@@ -11,6 +13,11 @@ use crate::{BoundRange, KvPair};
 pub const RAW_KEY_PREFIX: u8 = b'r';
 pub const TXN_KEY_PREFIX: u8 = b'x';
 pub const KEYSPACE_PREFIX_LEN: usize = 4;
+
+#[cfg(test)]
+pub(crate) const CODEC_V2_PREFIXES: [[u8; 1]; 2] = [[RAW_KEY_PREFIX], [TXN_KEY_PREFIX]];
+#[cfg(test)]
+pub(crate) const CODEC_V1_EXCLUDE_PREFIXES: [[u8; 1]; 2] = CODEC_V2_PREFIXES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Keyspace {
@@ -195,6 +202,51 @@ fn pretruncate_bytes<const N: usize>(vec: &mut Vec<u8>) {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub(crate) enum KeyspaceDecodeError {
+    #[error("invalid api v2 key: too short")]
+    TooShort,
+    #[error("invalid api v2 key: unknown mode prefix {prefix:#x}")]
+    UnknownModePrefix { prefix: u8 },
+}
+
+#[cfg(test)]
+fn check_v2_key(encoded: &[u8]) -> Result<(), KeyspaceDecodeError> {
+    if encoded.len() < KEYSPACE_PREFIX_LEN {
+        return Err(KeyspaceDecodeError::TooShort);
+    }
+    match encoded[0] {
+        RAW_KEY_PREFIX | TXN_KEY_PREFIX => Ok(()),
+        prefix => Err(KeyspaceDecodeError::UnknownModePrefix { prefix }),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn parse_keyspace_id(encoded: &[u8]) -> Result<u32, KeyspaceDecodeError> {
+    check_v2_key(encoded)?;
+    Ok(u32::from_be_bytes([0, encoded[1], encoded[2], encoded[3]]))
+}
+
+#[cfg(test)]
+pub(crate) fn decode_key(
+    encoded: &[u8],
+    version: crate::proto::kvrpcpb::ApiVersion,
+) -> Result<(&[u8], &[u8]), KeyspaceDecodeError> {
+    match version {
+        crate::proto::kvrpcpb::ApiVersion::V1 | crate::proto::kvrpcpb::ApiVersion::V1ttl => {
+            Ok((&[], encoded))
+        }
+        crate::proto::kvrpcpb::ApiVersion::V2 => {
+            check_v2_key(encoded)?;
+            Ok((
+                &encoded[..KEYSPACE_PREFIX_LEN],
+                &encoded[KEYSPACE_PREFIX_LEN..],
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -308,5 +360,71 @@ mod tests {
         let mut short = vec![1, 2, 3];
         pretruncate_bytes::<N>(&mut short);
         assert_eq!(short, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_parse_keyspace_id_matches_apicodec() {
+        assert_eq!(
+            parse_keyspace_id(&[b'x', 1, 2, 3, 1, 2, 3]).unwrap(),
+            0x010203
+        );
+        assert_eq!(
+            parse_keyspace_id(&[b'r', 1, 2, 3, 1, 2, 3, 4]).unwrap(),
+            0x010203
+        );
+
+        assert_eq!(
+            parse_keyspace_id(&[b't', 0, 0]).unwrap_err(),
+            KeyspaceDecodeError::TooShort
+        );
+        assert_eq!(
+            parse_keyspace_id(&[b't', 0, 0, 1, 1, 2, 3]).unwrap_err(),
+            KeyspaceDecodeError::UnknownModePrefix { prefix: b't' }
+        );
+    }
+
+    #[test]
+    fn test_decode_key_matches_apicodec() {
+        let (prefix, key) = decode_key(
+            &[b'r', 1, 2, 3, 1, 2, 3, 4],
+            crate::proto::kvrpcpb::ApiVersion::V2,
+        )
+        .unwrap();
+        assert_eq!(prefix, &[b'r', 1, 2, 3]);
+        assert_eq!(key, &[1, 2, 3, 4]);
+
+        let (prefix, key) = decode_key(
+            &[b'x', 1, 2, 3, 1, 2, 3, 4],
+            crate::proto::kvrpcpb::ApiVersion::V2,
+        )
+        .unwrap();
+        assert_eq!(prefix, &[b'x', 1, 2, 3]);
+        assert_eq!(key, &[1, 2, 3, 4]);
+
+        let (prefix, key) = decode_key(
+            &[b't', 1, 2, 3, 1, 2, 3, 4],
+            crate::proto::kvrpcpb::ApiVersion::V1,
+        )
+        .unwrap();
+        assert!(prefix.is_empty());
+        assert_eq!(key, &[b't', 1, 2, 3, 1, 2, 3, 4]);
+
+        assert_eq!(
+            decode_key(
+                &[b't', 1, 2, 3, 1, 2, 3, 4],
+                crate::proto::kvrpcpb::ApiVersion::V2,
+            )
+            .unwrap_err(),
+            KeyspaceDecodeError::UnknownModePrefix { prefix: b't' }
+        );
+    }
+
+    #[test]
+    fn test_keyspace_mode_prefixes_are_sorted() {
+        // Mirrors client-go `CodecV2Prefixes()` / `CodecV1ExcludePrefixes()` ordering.
+        assert!(CODEC_V2_PREFIXES.is_sorted());
+        assert!(CODEC_V1_EXCLUDE_PREFIXES.is_sorted());
+        assert_eq!(CODEC_V2_PREFIXES, [[b'r'], [b'x']]);
+        assert_eq!(CODEC_V1_EXCLUDE_PREFIXES, [[b'r'], [b'x']]);
     }
 }

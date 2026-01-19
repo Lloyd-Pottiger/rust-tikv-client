@@ -8,6 +8,7 @@
 //! When built with the `tracing` Cargo feature, `enable_tracing_events` installs a global sink
 //! that forwards client-side trace events to the `tracing` ecosystem.
 
+use std::ops::{BitOr, BitOrAssign};
 use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
 
@@ -175,6 +176,20 @@ impl TraceControlFlags {
     }
 }
 
+impl BitOr for TraceControlFlags {
+    type Output = TraceControlFlags;
+
+    fn bitor(self, rhs: TraceControlFlags) -> Self::Output {
+        TraceControlFlags(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for TraceControlFlags {
+    fn bitor_assign(&mut self, rhs: TraceControlFlags) {
+        self.0 |= rhs.0;
+    }
+}
+
 pub const FLAG_IMMEDIATE_LOG: TraceControlFlags = TraceControlFlags(1 << 0);
 pub const FLAG_TIKV_CATEGORY_REQUEST: TraceControlFlags = TraceControlFlags(1 << 1);
 pub const FLAG_TIKV_CATEGORY_WRITE_DETAILS: TraceControlFlags = TraceControlFlags(1 << 2);
@@ -183,6 +198,68 @@ pub const FLAG_TIKV_CATEGORY_READ_DETAILS: TraceControlFlags = TraceControlFlags
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_control_flags_has() {
+        let flags = FLAG_IMMEDIATE_LOG | FLAG_TIKV_CATEGORY_REQUEST;
+
+        assert!(flags.has(FLAG_IMMEDIATE_LOG));
+        assert!(flags.has(FLAG_TIKV_CATEGORY_REQUEST));
+        assert!(!flags.has(FLAG_TIKV_CATEGORY_WRITE_DETAILS));
+        assert!(!flags.has(FLAG_TIKV_CATEGORY_READ_DETAILS));
+
+        let empty = TraceControlFlags(0);
+        assert!(!empty.has(FLAG_IMMEDIATE_LOG));
+    }
+
+    #[test]
+    fn trace_control_flags_with_is_idempotent() {
+        let mut flags = TraceControlFlags(0);
+        flags = flags.with(FLAG_IMMEDIATE_LOG);
+        assert!(flags.has(FLAG_IMMEDIATE_LOG));
+        assert!(!flags.has(FLAG_TIKV_CATEGORY_REQUEST));
+
+        flags = flags.with(FLAG_TIKV_CATEGORY_REQUEST);
+        assert!(flags.has(FLAG_IMMEDIATE_LOG));
+        assert!(flags.has(FLAG_TIKV_CATEGORY_REQUEST));
+
+        flags = flags.with(FLAG_IMMEDIATE_LOG);
+        assert!(flags.has(FLAG_IMMEDIATE_LOG));
+    }
+
+    #[test]
+    fn trace_control_flags_combined_operations() {
+        let flags = TraceControlFlags(0)
+            .with(FLAG_IMMEDIATE_LOG)
+            .with(FLAG_TIKV_CATEGORY_REQUEST)
+            .with(FLAG_TIKV_CATEGORY_WRITE_DETAILS)
+            .with(FLAG_TIKV_CATEGORY_READ_DETAILS);
+
+        assert!(flags.has(FLAG_IMMEDIATE_LOG));
+        assert!(flags.has(FLAG_TIKV_CATEGORY_REQUEST));
+        assert!(flags.has(FLAG_TIKV_CATEGORY_WRITE_DETAILS));
+        assert!(flags.has(FLAG_TIKV_CATEGORY_READ_DETAILS));
+    }
+
+    #[test]
+    fn trace_control_flags_bit_values_are_stable() {
+        assert_eq!(FLAG_IMMEDIATE_LOG, TraceControlFlags(1 << 0));
+        assert_eq!(FLAG_TIKV_CATEGORY_REQUEST, TraceControlFlags(1 << 1));
+        assert_eq!(FLAG_TIKV_CATEGORY_WRITE_DETAILS, TraceControlFlags(1 << 2));
+        assert_eq!(FLAG_TIKV_CATEGORY_READ_DETAILS, TraceControlFlags(1 << 3));
+
+        assert_eq!(FLAG_IMMEDIATE_LOG.0 & FLAG_TIKV_CATEGORY_REQUEST.0, 0);
+        assert_eq!(
+            FLAG_TIKV_CATEGORY_WRITE_DETAILS.0 & FLAG_TIKV_CATEGORY_READ_DETAILS.0,
+            0
+        );
+
+        let all = FLAG_IMMEDIATE_LOG
+            | FLAG_TIKV_CATEGORY_REQUEST
+            | FLAG_TIKV_CATEGORY_WRITE_DETAILS
+            | FLAG_TIKV_CATEGORY_READ_DETAILS;
+        assert_eq!(all, TraceControlFlags(0b1111));
+    }
 
     #[test]
     fn trace_event_is_guarded_by_category() {
