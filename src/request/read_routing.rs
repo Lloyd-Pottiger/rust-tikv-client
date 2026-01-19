@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use super::store_health::StoreHealthMap;
@@ -22,6 +24,7 @@ pub(crate) struct ReadRouting {
     input_request_source: Option<Arc<str>>,
     store_match: Arc<[StoreId]>,
     store_health: StoreHealthMap,
+    pinned_stores: Arc<Mutex<HashMap<u64, StoreId>>>,
 }
 
 impl Default for ReadRouting {
@@ -34,6 +37,7 @@ impl Default for ReadRouting {
             input_request_source: None,
             store_match: Arc::from([]),
             store_health: StoreHealthMap::default(),
+            pinned_stores: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -77,6 +81,26 @@ impl ReadRouting {
 
     pub(crate) fn mark_store_slow_for(&self, store_id: crate::region::StoreId, duration: Duration) {
         self.store_health.mark_slow_for(store_id, duration);
+    }
+
+    pub(crate) fn pin_store_for_region(&self, region_id: u64, store_id: StoreId) {
+        let mut pinned = self
+            .pinned_stores
+            .lock()
+            .expect("read routing pinned store lock poisoned");
+        pinned.insert(region_id, store_id);
+    }
+
+    pub(crate) fn clear_pinned_store_for_region(&self, region_id: u64) {
+        let mut pinned = self
+            .pinned_stores
+            .lock()
+            .expect("read routing pinned store lock poisoned");
+        pinned.remove(&region_id);
+    }
+
+    pub(crate) fn is_replica_read_mode(&self) -> bool {
+        self.replica_read.is_follower_read() || self.stale_read
     }
 
     #[cfg(test)]
@@ -146,6 +170,30 @@ impl ReadRouting {
         // Overrides (e.g. stale-read meeting locks, forcing leader re-read).
         if respect_overrides && self.is_forced_leader() {
             return Ok(ReadPeer::leader(leader.clone()));
+        }
+
+        if respect_overrides && attempt > 0 {
+            let pinned_store = {
+                let pinned = self
+                    .pinned_stores
+                    .lock()
+                    .expect("read routing pinned store lock poisoned");
+                pinned.get(&region.id()).copied()
+            };
+            if let Some(store_id) = pinned_store {
+                if let Some(peer) = region
+                    .region
+                    .peers
+                    .iter()
+                    .find(|peer| !peer.is_witness && peer.store_id == store_id)
+                {
+                    return Ok(ReadPeer {
+                        target_peer: peer.clone(),
+                        replica_read: !self.stale_read && peer.store_id != leader.store_id,
+                        stale_read: self.stale_read,
+                    });
+                }
+            }
         }
 
         if self.stale_read {
@@ -674,6 +722,38 @@ mod tests {
             FLAG_LABEL_MATCHES | FLAG_NORMAL_PEER | FLAG_NOT_SLOW | FLAG_NOT_ATTEMPTED
         );
 
+        // tryLeader treats the leader as a normal peer when label matching is disabled.
+        let leader_score = calculate_score(
+            &leader,
+            true,
+            &health,
+            &[],
+            ScoreStrategy {
+                try_leader: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            leader_score.0,
+            FLAG_LABEL_MATCHES | FLAG_NORMAL_PEER | FLAG_NOT_SLOW | FLAG_NOT_ATTEMPTED
+        );
+
+        // preferLeader prefers the leader only when it is not slow.
+        let leader_score = calculate_score(
+            &leader,
+            true,
+            &health,
+            &[],
+            ScoreStrategy {
+                prefer_leader: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            leader_score.0,
+            FLAG_LABEL_MATCHES | FLAG_PREFER_LEADER | FLAG_NOT_SLOW | FLAG_NOT_ATTEMPTED
+        );
+
         // Slow store loses the NotSlow bit.
         health.mark_slow_for(2, Duration::from_secs(60));
         let follower_score =
@@ -683,11 +763,57 @@ mod tests {
             FLAG_LABEL_MATCHES | FLAG_NORMAL_PEER | FLAG_NOT_ATTEMPTED
         );
 
-        // tryLeader prefers the leader only when label matching is enabled.
+        health.mark_slow_for(1, Duration::from_secs(60));
         let leader_score = calculate_score(
             &leader,
             true,
             &health,
+            &[],
+            ScoreStrategy {
+                prefer_leader: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            leader_score.0,
+            FLAG_LABEL_MATCHES | FLAG_NORMAL_PEER | FLAG_NOT_ATTEMPTED
+        );
+
+        // learnerOnly: only learners get the "normal peer" bit.
+        let learner = make_peer(3, metapb::PeerRole::Learner);
+        let score = calculate_score(
+            &follower,
+            false,
+            &health,
+            &[],
+            ScoreStrategy {
+                learner_only: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(score.0, FLAG_LABEL_MATCHES | FLAG_NOT_ATTEMPTED);
+
+        let score = calculate_score(
+            &learner,
+            false,
+            &health,
+            &[],
+            ScoreStrategy {
+                learner_only: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            score.0,
+            FLAG_LABEL_MATCHES | FLAG_NORMAL_PEER | FLAG_NOT_SLOW | FLAG_NOT_ATTEMPTED
+        );
+
+        // tryLeader prefers the leader only when label matching is enabled.
+        let fresh_health = StoreHealthMap::default();
+        let leader_score = calculate_score(
+            &leader,
+            true,
+            &fresh_health,
             &[2],
             ScoreStrategy {
                 try_leader: true,

@@ -13,15 +13,26 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
+- tests/port-region-cache-tests-more：继续迁移 client-go `internal/locate/region_cache_test.go` 缺失语义（重点：invalidate/TTL/并发/region-split/resolve-loop）
+  - 计划：按 go 用例拆分到 Rust 单测；补齐 RegionCache 在 invalidate/refresh 场景的行为一致性
+  - 步骤：对照 go test list；逐条加 Rust 测试；必要时补 RegionCache API/hooks 以可测
+  - 验证：`cargo test`
+  - 文件：`src/region_cache.rs`，`.codex/progress/daemon.md`
+
 # 待做工作
 
-- tests/port-region-request-replica-selector-errors：迁移/等价覆盖 replica selector 在 region error 下的重试/切 peer 语义（Go `region_request3_test.go`）
-  - 计划：把 “StaleCommand 不 backoff 立即切 peer / ServerIsBusy 等保持同 replica 重试 / 跑光副本 invalidates region” 的可迁移语义变成 Rust 单测
-  - 步骤：先梳理 Rust `ReadRouting`/store selection；补足最小可测 hooks/mock；逐条加单测并对齐行为
-  - 验证：`cargo test`
-  - 文件：`src/request/read_routing.rs`，`src/request/plan.rs`，`src/store/*`，`.codex/progress/daemon.md`
-
 # 已完成工作
+
+- tests/port-read-routing-score-tests：扩展 `ReadRouting`/replica selection 的 score/seed/slow-store 语义覆盖（对齐 go `replica_selector_test.go` 的可迁移部分）
+  - 覆盖：补齐 calculate_score（tryLeader/preferLeader/learnerOnly/slow-store）关键 flag 断言；补齐 pinned store override + witness 排除等路径的单测
+  - 验证：`cargo test`
+  - 文件：`src/request/read_routing.rs`，`.codex/progress/daemon.md`
+
+- tests/port-region-request-replica-selector-errors：迁移/等价覆盖 replica selector 在 region error 下的重试/切 peer 语义（Go `region_request3_test.go`）
+  - 关键：ReadRouting 增加 per-region pinned store；replica-read 下 StaleCommand 不 backoff 直接切 peer（并用 non-witness peer 数限制 fast-retry 防止无限递归）
+  - 覆盖：replica-read stale-command 切 peer；ServerIsBusy/MaxTsNotSynced/ReadIndexNotReady/ProposalInMergingMode backoff+重试同 store；handle_region_error 对上述错误改为 backoff(不 invalidate)
+  - 验证：`cargo test`
+  - 文件：`src/request/read_routing.rs`，`src/request/plan.rs`，`.codex/progress/daemon.md`
 
 - tests/port-region-request-unknown-region-error：对齐 unknown region error 的 invalidate/backoff 语义（对齐 client-go `internal/locate/region_request*_test.go`）
   - 关键：unknown region error -> invalidate region cache（不 invalidate store）；归类为 unresolved，走 backoff budget（避免无限递归/stack overflow）

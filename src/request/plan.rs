@@ -382,6 +382,52 @@ where
                 )
                 .await;
             }
+
+            let region_id = region_store.region_with_leader.id();
+            let keep_peer = e.server_is_busy.is_some()
+                || e.max_timestamp_not_synced.is_some()
+                || e.read_index_not_ready.is_some()
+                || e.proposal_in_merging_mode.is_some();
+            if keep_peer {
+                if let Ok(store_id) = region_store.region_with_leader.get_store_id() {
+                    read_routing.pin_store_for_region(region_id, store_id);
+                }
+            } else {
+                read_routing.clear_pinned_store_for_region(region_id);
+            }
+
+            if read_routing.is_replica_read_mode() && e.stale_command.is_some() {
+                // client-go's replica selector does not backoff on stale-command; it simply tries
+                // another peer. Keep a small bound (number of non-witness peers) to avoid
+                // unbounded recursion when all peers keep returning stale-command.
+                read_routing.clear_pinned_store_for_region(region_id);
+                let non_witness_peers = region_store
+                    .region_with_leader
+                    .region
+                    .peers
+                    .iter()
+                    .filter(|peer| !peer.is_witness)
+                    .count();
+                if attempt + 1 >= non_witness_peers {
+                    pd_client
+                        .invalidate_region_cache(region_store.region_with_leader.ver_id())
+                        .await;
+                    return Err(Error::RegionError(Box::new(e)));
+                }
+
+                return Self::single_plan_handler(
+                    pd_client,
+                    plan,
+                    backoff,
+                    permits,
+                    preserve_region_results,
+                    request_context.clone(),
+                    read_routing,
+                    attempt + 1,
+                )
+                .await;
+            }
+
             let region_error = e.clone();
             let region_error_resolved =
                 handle_region_error(pd_client.clone(), e, region_store).await?;
@@ -421,6 +467,7 @@ where
                 None => Err(Error::RegionError(Box::new(region_error))),
             }
         } else {
+            read_routing.clear_pinned_store_for_region(region_store.region_with_leader.id());
             Ok(vec![Ok(resp)])
         }
     }
@@ -514,9 +561,12 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
     } else if e.server_is_busy.is_some()
-        || e.raft_entry_too_large.is_some()
         || e.max_timestamp_not_synced.is_some()
+        || e.read_index_not_ready.is_some()
+        || e.proposal_in_merging_mode.is_some()
     {
+        Ok(false)
+    } else if e.raft_entry_too_large.is_some() {
         Err(Error::RegionError(Box::new(e)))
     } else {
         debug!("handle_region_error: unknown region error: {:?}", e);
@@ -2102,6 +2152,172 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_retryable_multi_region_replica_read_stale_command_switches_peer_without_backoff(
+    ) -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+        let store_ids = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let store_ids_for_hook = store_ids.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let store_id = req
+                    .context
+                    .as_ref()
+                    .and_then(|ctx| ctx.peer.as_ref())
+                    .map(|peer| peer.store_id)
+                    .expect("store_id should be set");
+                store_ids_for_hook.lock().unwrap().push(store_id);
+
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            stale_command: Some(errorpb::StaleCommand::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+
+        let mut read_routing = ReadRouting::default();
+        read_routing.set_replica_read(crate::ReplicaReadType::PreferLeader);
+        read_routing.set_seed(0);
+
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // No backoff budget: replica reads should switch peers immediately on stale-command.
+            backoff: Backoff::no_jitter_backoff(50, 50, 0),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing,
+        };
+
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(&*store_ids.lock().unwrap(), &[1, 2]);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    async fn run_replica_read_keep_peer_region_error_test(
+        region_error: errorpb::Error,
+    ) -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+        let store_ids = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let store_ids_for_hook = store_ids.clone();
+
+        let region_error_for_hook = region_error.clone();
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let store_id = req
+                    .context
+                    .as_ref()
+                    .and_then(|ctx| ctx.peer.as_ref())
+                    .map(|peer| peer.store_id)
+                    .expect("store_id should be set");
+                store_ids_for_hook.lock().unwrap().push(store_id);
+
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(region_error_for_hook.clone()),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+
+        let mut read_routing = ReadRouting::default();
+        read_routing.set_replica_read(crate::ReplicaReadType::PreferLeader);
+        read_routing.set_seed(0);
+
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // One retry is enough; use a 0ms delay to keep the test deterministic.
+            backoff: Backoff::no_jitter_backoff(0, 0, 1),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing,
+        };
+
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(&*store_ids.lock().unwrap(), &[1, 1]);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_multi_region_replica_read_keep_peer_errors_retry_same_store(
+    ) -> Result<()> {
+        for region_error in [
+            errorpb::Error {
+                server_is_busy: Some(errorpb::ServerIsBusy::default()),
+                ..Default::default()
+            },
+            errorpb::Error {
+                max_timestamp_not_synced: Some(errorpb::MaxTimestampNotSynced::default()),
+                ..Default::default()
+            },
+            errorpb::Error {
+                read_index_not_ready: Some(errorpb::ReadIndexNotReady::default()),
+                ..Default::default()
+            },
+            errorpb::Error {
+                proposal_in_merging_mode: Some(errorpb::ProposalInMergingMode::default()),
+                ..Default::default()
+            },
+        ] {
+            run_replica_read_keep_peer_region_error_test(region_error).await?;
+        }
+        Ok(())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_retryable_multi_region_stale_command_backoffs() -> Result<()> {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -2629,7 +2845,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_handle_region_error_server_is_busy_is_fatal() {
+    async fn test_handle_region_error_server_is_busy_backoffs_without_invalidation() -> Result<()> {
         let pd_client = Arc::new(CountingPdClient::default());
         let region_store =
             RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
@@ -2638,12 +2854,61 @@ mod test {
             ..Default::default()
         };
 
-        let err = handle_region_error(pd_client.clone(), err, region_store)
-            .await
-            .expect_err("server_is_busy should be propagated as a RegionError");
-        assert!(matches!(err, Error::RegionError(_)));
+        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
         assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
         assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_max_timestamp_not_synced_backoffs_without_invalidation(
+    ) -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            max_timestamp_not_synced: Some(errorpb::MaxTimestampNotSynced::default()),
+            ..Default::default()
+        };
+
+        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_read_index_not_ready_backoffs_without_invalidation(
+    ) -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            read_index_not_ready: Some(errorpb::ReadIndexNotReady::default()),
+            ..Default::default()
+        };
+
+        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_proposal_in_merging_mode_backoffs_without_invalidation(
+    ) -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            proposal_in_merging_mode: Some(errorpb::ProposalInMergingMode::default()),
+            ..Default::default()
+        };
+
+        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
     }
 
     #[tokio::test]
