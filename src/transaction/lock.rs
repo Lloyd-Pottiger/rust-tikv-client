@@ -611,4 +611,63 @@ mod tests {
         assert_eq!(check_count.load(Ordering::SeqCst), 1);
         assert_eq!(batch_count.load(Ordering::SeqCst), 1);
     }
+
+    #[rstest::rstest]
+    #[case(Keyspace::Disable)]
+    #[case(Keyspace::Enable { keyspace_id: 0 })]
+    #[tokio::test]
+    async fn test_lock_resolver_uses_resolved_cache_and_skips_rpc(#[case] keyspace: Keyspace) {
+        let txn_id = 1_u64;
+        let commit_ts = 10_u64;
+        let primary_key = b"k1".to_vec();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    panic!("CheckTxnStatusRequest should be served from ResolveLocksContext cache");
+                }
+                if req
+                    .downcast_ref::<kvrpcpb::CheckSecondaryLocksRequest>()
+                    .is_some()
+                {
+                    panic!("CheckSecondaryLocksRequest should not be issued for a committed txn");
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    assert_eq!(req.txn_infos.len(), 1);
+                    assert_eq!(req.txn_infos[0].txn, txn_id);
+                    assert_eq!(req.txn_infos[0].status, commit_ts);
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()) as Box<dyn Any>);
+                }
+                panic!("unexpected request type in lock resolver cache test");
+            },
+        )));
+
+        let mut ctx = ResolveLocksContext::default();
+        ctx.save_resolved(
+            txn_id,
+            Arc::new(TransactionStatus {
+                kind: TransactionStatusKind::Committed(Timestamp::from_version(commit_ts)),
+                action: kvrpcpb::Action::NoAction,
+                is_expired: false,
+            }),
+        )
+        .await;
+
+        let store = pd_client
+            .clone()
+            .map_region_to_store(MockPdClient::region1())
+            .await
+            .unwrap();
+
+        let mut lock_info = kvrpcpb::LockInfo::default();
+        lock_info.lock_version = txn_id;
+        lock_info.primary_lock = primary_key;
+        lock_info.lock_type = kvrpcpb::Op::Put as i32;
+
+        let mut resolver = LockResolver::new(ctx, pd_client, keyspace);
+        resolver.cleanup_locks(store, vec![lock_info]).await.unwrap();
+    }
 }

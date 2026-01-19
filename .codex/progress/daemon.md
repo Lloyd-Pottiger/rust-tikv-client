@@ -17,6 +17,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- tests/port-lock-resolver-cache：迁移 Go `txnkv/txnlock/lock_resolver_test.go::TestLockResolverCache`（resolved cache 语义）
+  - 关键：预填 `ResolveLocksContext.resolved` 的 committed status；`LockResolver::check_txn_status` 命中缓存，不触发 CheckTxnStatus/CheckSecondaryLocks RPC
+  - 覆盖：新增 `cleanup_locks` 单测（RPC 触发即 panic；ResolveLock 正常返回）
+  - 验证：`cargo test`
+  - 文件：`src/transaction/lock.rs`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+
 - tests/audit-retry-backoffer-parity：对齐 Go `config/retry/backoff_test.go` 的可迁移 backoff/backoffer 语义（可迁移部分）
   - 关键：对齐 `MayBackoffForRegionError`：fake EpochNotMatch（CurrentRegions 为空）视为 region-miss，需要 backoff（Rust: `on_region_epoch_not_match` 返回 backoff）
   - 决策：Go Backoffer 的 per-error-type state/excludedSleep/longestSleep 细节不做 1:1（Rust 用统一 Backoff + plan-level 分类）

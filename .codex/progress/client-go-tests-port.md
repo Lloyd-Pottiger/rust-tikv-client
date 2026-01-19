@@ -22,6 +22,7 @@
 - TLS/security: `client-go/config/security_test.go` -> `src/common/security.rs#L123`
 - Retry/backoff algorithms: Go backoff jitter / attempt cap -> `src/backoff.rs#L207`（注：Go Backoffer 的 “error-type longest sleep / excluded sleep” 不做 1:1；已对齐 `MayBackoffForRegionError` fake EpochNotMatch -> backoff（`src/request/plan.rs` 单测））
 - Latch: `client-go/internal/latch/*` -> `src/transaction/latch.rs#L483`
+- LockResolver cache: `client-go/txnkv/txnlock/lock_resolver_test.go` -> `src/transaction/lock.rs`（resolved cache 命中不触发 secondary-check RPC）
 - Region cache core invariants: `client-go/internal/locate/region_cache_test.go`(部分语义) -> `src/region_cache.rs#L423`
 - Interceptor chain basics: `client-go/tikvrpc/interceptor/*` -> `src/interceptor.rs#L309`
 - KV primitives: `client-go/kv/*` -> `src/kv/*`（Key/BoundRange/codec 单测）
