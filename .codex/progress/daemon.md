@@ -13,15 +13,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-# 待做工作
-
-- tests/port-keyspace-epoch-not-match：对齐 apicodec v2 decodeRegionError(EpochNotMatch)（keyspace range intersect + prefix stripping）
-  - 范围：`client-go/internal/apicodec/codec_v2_test.go`（`TestDecodeEpochNotMatch`）
-  - 计划：
-    - 实现/补齐 `errorpb::EpochNotMatch.current_regions` 的 keyspace 解码/裁剪（decode bytes + intersect keyspace range + strip prefix）
-    - 在 keyspace enabled 的 region-error path 应用（避免对外暴露 encoded key/range）
-  - 验证：`cargo test`；`make check`
-
 - tests/port-keyspace-bucket-keys：对齐 apicodec v2 DecodeBucketKeys（decode bytes + keyspace range filter）
   - 范围：`client-go/internal/apicodec/codec_v2_test.go`（`TestDecodeBucketKeys`）
   - 计划：
@@ -36,7 +27,15 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
     - 覆盖 RawGet/Commit（含 PrimaryKey 非空场景）等关键 case
   - 验证：`cargo test`；`make check`
 
+# 待做工作
+
 # 已完成工作
+
+- tests/port-keyspace-epoch-not-match：对齐 apicodec v2 decodeRegionError(EpochNotMatch)（decode bytes + keyspace range intersect + prefix stripping）
+  - 决策：对外不暴露 apicodec API；通过 `TruncateKeyspace` 在 region-error 返回路径做 best-effort decode+裁剪，避免泄露 encoded key/range
+  - 覆盖：`EpochNotMatch.current_regions` memcomparable decode；按 keyspace range 裁剪并去 prefix；空交集 region 过滤
+  - 验证：`cargo test`
+  - 文件：`src/request/keyspace.rs`，`.codex/progress/daemon.md`
 
 - tests/keyspace-apicodec-v2：对齐 keyspace codec v2 的 prefix 语义（encode/decode/error stripping）
   - 覆盖：ParseKeyspaceID/DecodeKey；prefixes sorted；endKey 4-byte carry-increment；decodeKeyError strip prefix；keyspace enabled 的 error path 统一 truncate（避免对外暴露 encoded key）

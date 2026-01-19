@@ -7,6 +7,7 @@ use serde_derive::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::transaction::Mutation;
+use crate::{proto::errorpb, proto::metapb};
 use crate::{proto::kvrpcpb, Key};
 use crate::{BoundRange, KvPair};
 
@@ -346,6 +347,97 @@ impl TruncateKeyspace for kvrpcpb::KeyError {
     }
 }
 
+impl TruncateKeyspace for errorpb::Error {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        let Keyspace::Enable { keyspace_id } = keyspace else {
+            return self;
+        };
+
+        if let Some(epoch_not_match) = self.epoch_not_match.take() {
+            self.epoch_not_match = Some(
+                truncate_epoch_not_match(epoch_not_match.clone(), keyspace_id)
+                    // Best-effort: keep the original error payload if we fail to decode.
+                    .unwrap_or(epoch_not_match),
+            );
+        }
+
+        self
+    }
+}
+
+fn truncate_epoch_not_match(
+    mut err: errorpb::EpochNotMatch,
+    keyspace_id: u32,
+) -> crate::Result<errorpb::EpochNotMatch> {
+    // The TiKV/PD region metadata keys are memcomparable encoded. Decode them first, then
+    // intersect with the current keyspace range and strip the keyspace prefix. This mirrors
+    // client-go's apicodec v2 behavior and avoids leaking encoded keys/ranges to callers.
+    for region in &mut err.current_regions {
+        crate::kv::codec::decode_bytes_in_place(&mut region.start_key, false)?;
+        crate::kv::codec::decode_bytes_in_place(&mut region.end_key, false)?;
+    }
+
+    let key_mode = err
+        .current_regions
+        .iter()
+        .find_map(|r| infer_key_mode_from_region(r))
+        .unwrap_or(KeyMode::Raw);
+    let keyspace_prefix = keyspace_prefix(keyspace_id, key_mode).to_vec();
+    let keyspace_end = keyspace_end_prefix(keyspace_id, key_mode).to_vec();
+
+    let mut regions = Vec::with_capacity(err.current_regions.len());
+    for mut region in err.current_regions.into_iter() {
+        let mut start_key = std::mem::take(&mut region.start_key);
+        let mut end_key = std::mem::take(&mut region.end_key);
+
+        if !end_key.is_empty() && end_key <= keyspace_prefix {
+            continue;
+        }
+        if !start_key.is_empty() && start_key >= keyspace_end {
+            continue;
+        }
+
+        if start_key.is_empty() || start_key < keyspace_prefix {
+            start_key = keyspace_prefix.clone();
+        }
+        if end_key.is_empty() || end_key > keyspace_end {
+            end_key = keyspace_end.clone();
+        }
+
+        if start_key >= end_key {
+            continue;
+        }
+
+        region.start_key = if start_key == keyspace_prefix {
+            Vec::new()
+        } else {
+            start_key.split_off(KEYSPACE_PREFIX_LEN)
+        };
+        region.end_key = if end_key == keyspace_end {
+            Vec::new()
+        } else {
+            end_key.split_off(KEYSPACE_PREFIX_LEN)
+        };
+
+        regions.push(region);
+    }
+
+    err.current_regions = regions;
+    Ok(err)
+}
+
+fn infer_key_mode_from_region(region: &metapb::Region) -> Option<KeyMode> {
+    infer_key_mode_from_key(&region.start_key).or_else(|| infer_key_mode_from_key(&region.end_key))
+}
+
+fn infer_key_mode_from_key(key: &[u8]) -> Option<KeyMode> {
+    match key.first().copied() {
+        Some(RAW_KEY_PREFIX) => Some(KeyMode::Raw),
+        Some(TXN_KEY_PREFIX) => Some(KeyMode::Txn),
+        _ => None,
+    }
+}
+
 fn keyspace_prefix(keyspace_id: u32, key_mode: KeyMode) -> [u8; KEYSPACE_PREFIX_LEN] {
     let mut prefix = keyspace_id.to_be_bytes();
     prefix[0] = match key_mode {
@@ -391,6 +483,9 @@ impl TruncateKeyspace for crate::Error {
         }
 
         match self {
+            crate::Error::RegionError(err) => {
+                crate::Error::RegionError(Box::new((*err).truncate_keyspace(keyspace)))
+            }
             crate::Error::WriteConflict(mut conflict) => {
                 conflict.key = Key::from(conflict.key).truncate_keyspace(keyspace).into();
                 conflict.primary = Key::from(conflict.primary)
@@ -513,6 +608,14 @@ pub(crate) fn decode_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn encode_memcomparable(key: &[u8]) -> Vec<u8> {
+        use crate::kv::codec::{max_encoded_bytes_size, BytesEncoder};
+
+        let mut encoded = Vec::with_capacity(max_encoded_bytes_size(key.len()));
+        encoded.encode_bytes(key, false).unwrap();
+        encoded
+    }
 
     #[test]
     fn test_keyspace_prefix() {
@@ -832,5 +935,94 @@ mod tests {
         assert!(CODEC_V1_EXCLUDE_PREFIXES.is_sorted());
         assert_eq!(CODEC_V2_PREFIXES, [[b'r'], [b'x']]);
         assert_eq!(CODEC_V1_EXCLUDE_PREFIXES, [[b'r'], [b'x']]);
+    }
+
+    #[test]
+    fn decode_epoch_not_match_intersects_keyspace_range_and_strips_prefix() {
+        let keyspace_id = 4242;
+        let keyspace = Keyspace::Enable { keyspace_id };
+
+        // Keys below are ordered as following:
+        // before_prefix, keyspace_prefix, inside_left, inside_right, keyspace_end_key, after_end_key
+        // where valid keyspace range is [keyspace_prefix, keyspace_end_key).
+        let keyspace_prefix = keyspace_prefix(keyspace_id, KeyMode::Raw).to_vec();
+        let keyspace_end = keyspace_end_prefix(keyspace_id, KeyMode::Raw).to_vec();
+
+        let before_prefix = vec![RAW_KEY_PREFIX, 0, 0, 1];
+        let after_end_key = vec![RAW_KEY_PREFIX, 1, 0, 0];
+
+        let mut inside_left = keyspace_prefix.clone();
+        inside_left.push(100);
+        let mut inside_right = keyspace_prefix.clone();
+        inside_right.push(200);
+
+        let err = errorpb::Error {
+            epoch_not_match: Some(errorpb::EpochNotMatch {
+                current_regions: vec![
+                    metapb::Region {
+                        id: 1,
+                        start_key: encode_memcomparable(&keyspace_prefix),
+                        end_key: encode_memcomparable(&keyspace_end),
+                        ..Default::default()
+                    },
+                    metapb::Region {
+                        id: 2,
+                        start_key: encode_memcomparable(&before_prefix),
+                        end_key: encode_memcomparable(&after_end_key),
+                        ..Default::default()
+                    },
+                    metapb::Region {
+                        id: 3,
+                        start_key: encode_memcomparable(&before_prefix),
+                        end_key: encode_memcomparable(&inside_left),
+                        ..Default::default()
+                    },
+                    metapb::Region {
+                        id: 4,
+                        start_key: encode_memcomparable(&inside_left),
+                        end_key: encode_memcomparable(&inside_right),
+                        ..Default::default()
+                    },
+                    // Region 5 (empty intersection, should be removed).
+                    metapb::Region {
+                        id: 5,
+                        start_key: encode_memcomparable(&before_prefix),
+                        end_key: encode_memcomparable(&keyspace_prefix),
+                        ..Default::default()
+                    },
+                    // Region 6 (empty intersection, should be removed).
+                    metapb::Region {
+                        id: 6,
+                        start_key: encode_memcomparable(&keyspace_end),
+                        end_key: encode_memcomparable(&after_end_key),
+                        ..Default::default()
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+
+        let decoded = err.truncate_keyspace(keyspace);
+        let regions = decoded
+            .epoch_not_match
+            .expect("epoch_not_match must be present after truncation")
+            .current_regions;
+
+        assert_eq!(regions.len(), 4);
+        assert_eq!(regions[0].id, 1);
+        assert!(regions[0].start_key.is_empty());
+        assert!(regions[0].end_key.is_empty());
+
+        assert_eq!(regions[1].id, 2);
+        assert!(regions[1].start_key.is_empty());
+        assert!(regions[1].end_key.is_empty());
+
+        assert_eq!(regions[2].id, 3);
+        assert!(regions[2].start_key.is_empty());
+        assert_eq!(regions[2].end_key.as_slice(), &[100]);
+
+        assert_eq!(regions[3].id, 4);
+        assert_eq!(regions[3].start_key.as_slice(), &[100]);
+        assert_eq!(regions[3].end_key.as_slice(), &[200]);
     }
 }
