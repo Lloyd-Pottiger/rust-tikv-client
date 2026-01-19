@@ -507,7 +507,7 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
         Ok(true)
     } else if let Some(epoch_not_match) = e.epoch_not_match {
         on_region_epoch_not_match(pd_client.clone(), region_store, epoch_not_match).await
-    } else if e.region_not_found.is_some() {
+    } else if e.region_not_found.is_some() || e.key_not_in_region.is_some() {
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(true)
     } else if e.stale_command.is_some() {
@@ -1934,6 +1934,65 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_retryable_multi_region_key_not_in_region_retries_without_backoff() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            key_not_in_region: Some(errorpb::KeyNotInRegion {
+                                key: vec![1],
+                                region_id: 1,
+                                start_key: vec![],
+                                end_key: vec![10],
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // No backoff attempts available: key_not_in_region must be handled without backoff.
+            backoff: Backoff::no_jitter_backoff(50, 50, 0),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_retryable_multi_region_stale_command_backoffs() -> Result<()> {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -2484,6 +2543,23 @@ mod test {
         let region_store =
             RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
         let err = errorpb::Error {
+            message: "unknown".to_owned(),
+            ..Default::default()
+        };
+
+        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_key_not_in_region_invalidates_region_and_retries(
+    ) -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
             key_not_in_region: Some(errorpb::KeyNotInRegion {
                 key: vec![1],
                 region_id: 1,
@@ -2493,9 +2569,9 @@ mod test {
             ..Default::default()
         };
 
-        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert!(handle_region_error(pd_client.clone(), err, region_store).await?);
         assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
-        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
         Ok(())
     }
 

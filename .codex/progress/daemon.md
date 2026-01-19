@@ -13,14 +13,27 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- tests/port-region-request-key-not-in-region：对齐 KeyNotInRegion 的 invalidate/retry 语义（对齐 client-go `internal/locate/region_request*_test.go`）
-  - 计划：KeyNotInRegion -> invalidate region（不 invalidate store）+ 立即重试（不消耗 backoff）
-  - 验证：`cargo test`
-  - 文件：`src/request/plan.rs`，`.codex/progress/daemon.md`
-
 # 待做工作
 
+- tests/port-region-request-unknown-region-error：对齐 unknown region error 的 invalidate/backoff 语义（对齐 client-go `internal/locate/region_request*_test.go`）
+  - 计划：补齐 Rust request 侧对 unknown region error 的处理策略；补单测覆盖（是否 invalidate region/store、是否 backoff、是否重试）
+  - 步骤：对照 Go `onRegionError` default 分支；先写 Rust 单测，再改实现；必要时补 read_routing/replica 选择侧的行为
+  - 验证：`cargo test`
+  - 文件：`src/request/plan.rs`，`src/request/read_routing.rs`（如需），`.codex/progress/daemon.md`
+
+- tests/port-region-request-replica-selector-errors：迁移/等价覆盖 replica selector 在 region error 下的重试/切 peer 语义（Go `region_request3_test.go`）
+  - 计划：把 “StaleCommand 不 backoff 立即切 peer / ServerIsBusy 等保持同 replica 重试 / 跑光副本 invalidates region” 的可迁移语义变成 Rust 单测
+  - 步骤：先梳理 Rust `ReadRouting`/store selection；补足最小可测 hooks/mock；逐条加单测并对齐行为
+  - 验证：`cargo test`
+  - 文件：`src/request/read_routing.rs`，`src/request/plan.rs`，`src/store/*`，`.codex/progress/daemon.md`
+
 # 已完成工作
+
+- tests/port-region-request-key-not-in-region：对齐 KeyNotInRegion 的 invalidate/retry 语义（对齐 client-go `internal/locate/region_request*_test.go`）
+  - 关键：KeyNotInRegion -> 仅 invalidate region cache（不 invalidate store）+ 立即重试（resolved，不消耗 backoff）
+  - 覆盖：handle_region_error 单测 + RetryableMultiRegion 端到端重试不 backoff 断言（backoff=0 也能成功）
+  - 验证：`cargo test`
+  - 文件：`src/request/plan.rs`，`.codex/progress/daemon.md`
 
 - core/request+cache-retry-parity：对齐 client-go region/cache/request retry 关键语义（plan retry、NotLeader/backoff、region cache inflight）
   - 关键：resolved region errors（NotLeader(with leader)/StoreNotMatch/RegionNotFound/EpochNotMatch when behind）立即重试不消耗 backoff；需要等待的错误（NotLeader(no leader)/StaleCommand/EpochNotMatch when cache ahead）才 backoff；RegionCache `get_region_by_{id,key}` in-flight singleflight（成功/失败都清理并唤醒）
