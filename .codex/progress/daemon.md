@@ -15,7 +15,28 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
+- tests/audit-tikvrpc-tests：梳理 Go `tikvrpc/*_test.go` 的可迁移语义并补齐映射/标注 N/A
+  - 计划：逐文件判定（BatchCommands/batch-client 相关 -> N/A；可迁移纯逻辑 -> Rust unit test）
+  - 步骤：更新 `.codex/progress/client-go-tests-port.md`；必要时补 Rust 单测
+  - 验证：`cargo test`
+
+- tests/port-apicodec-v2-more：对齐 Go `internal/apicodec/codec_v2_test.go` 的 keyspace v2 编解码边界
+  - 计划：只迁移可用纯函数/无 mockstore 的 key/range/KeyError 编解码语义；不引入新 public API
+  - 步骤：补齐 `src/request/keyspace.rs` 单测覆盖（invalid keyspace id/mode、end-prefix carry、encode request 局部语义等）
+  - 验证：`cargo test`
+
+- tests/audit-retry-backoffer-parity：对齐 Go `config/retry/backoff_test.go` 的可迁移 backoff/backoffer 语义
+  - 计划：优先补齐“region error -> backoff/no-backoff”与“excluded sleep”类语义；不强行 1:1 复制 Go Backoffer 架构
+  - 步骤：补/改 `src/request/*` 或 `src/backoff.rs` 的逻辑与单测；更新映射文档
+  - 验证：`cargo test`
+
 # 已完成工作
+
+- tests/port-util-gc-time：迁移 Go `util/misc_test.go::TestCompatibleParseGCTime`（兼容解析 GC time string）
+  - 关键：两段式解析（完整解析失败 -> 丢弃最后一个 space-field 再试），严格限制最多容忍 1 个尾随字段（对齐 Go 行为）
+  - 覆盖：valid/invalid cases + `+0800`（Asia/Shanghai fixed offset）格式化断言
+  - 验证：`cargo test`
+  - 文件：`src/util/gc_time.rs`，`src/util/mod.rs`，`.codex/progress/daemon.md`
 
 - tests/oracle-parity：迁移 client-go oracle 相关关键测试语义（pd oracle + local oracle）
   - 关键：per-txn-scope singleflight GetTS + low-res ts cache；stale-ts/UntilExpired 用 physical 差值；local oracle 用 SystemTime + per-ms logical counter + time hook；测试用 tokio paused time 避免 flake
