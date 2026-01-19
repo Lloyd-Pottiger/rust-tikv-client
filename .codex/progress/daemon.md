@@ -13,9 +13,17 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
+- review/overall-tests-port-status：复核 client-go `_test.go` 覆盖映射，补齐遗漏/新增待做任务
+  - 步骤：按目录抽样扫 `client-go/**/_test.go`，确认均已覆盖或 N/A；将“仍可迁移但未覆盖”的用例拆成具体任务加入待做
+  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+
 # 待做工作
 
 # 已完成工作
+
+- tests/verify-integration-tests-compile：校验 Rust integration tests feature gate 可编译（对齐 Go integration_tests 映射）
+  - 结果：`cargo test --features integration-tests --no-run` 通过（仅编译，不依赖 cluster）
+  - 文件：`.codex/progress/daemon.md`
 
 - tests/port-kv-options-value-entry：迁移 Go `kv/kv_test.go`（Get/BatchGet options + ValueEntry 基础语义）
   - 关键：新增 `ValueEntry`（value+commit_ts）与 `GetOptions/BatchGetOptions`（return_commit_ts）；提供 `with_return_commit_ts` + `batch_get_to_get_options`
