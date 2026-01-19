@@ -56,6 +56,10 @@ pub trait RpcInterceptor: Send + Sync + 'static {
     /// A stable name used for de-duplication in [`RpcInterceptorChain`].
     fn name(&self) -> &str;
 
+    fn as_chain(&self) -> Option<&RpcInterceptorChain> {
+        None
+    }
+
     /// Called right before sending a request to a TiKV store.
     ///
     /// Implementations may mutate `ctx` (e.g. set resource control fields).
@@ -137,6 +141,13 @@ impl RpcInterceptorChain {
     ///
     /// If another interceptor with the same name exists, the old one is replaced.
     pub fn link(&mut self, it: Arc<dyn RpcInterceptor>) {
+        if let Some(chain) = it.as_chain() {
+            for inner in &chain.chain {
+                self.link(inner.clone());
+            }
+            return;
+        }
+
         if let Some(pos) = self.chain.iter().position(|x| x.name() == it.name()) {
             self.chain.remove(pos);
         }
@@ -161,6 +172,10 @@ impl RpcInterceptorChain {
 impl RpcInterceptor for RpcInterceptorChain {
     fn name(&self) -> &str {
         self.name()
+    }
+
+    fn as_chain(&self) -> Option<&RpcInterceptorChain> {
+        Some(self)
     }
 
     fn before_send(&self, info: &RpcContextInfo, ctx: &mut kvrpcpb::Context) {
@@ -338,6 +353,67 @@ mod tests {
         assert_eq!(mgr.begin_count(), 2);
         assert_eq!(mgr.end_count(), 2);
         assert_eq!(mgr.exec_log(), vec!["i1".to_owned(), "i2".to_owned()]);
+    }
+
+    #[test]
+    fn chain_rpc_interceptors_flattens_chains_and_dedups_by_name() {
+        fn assert_chain_exec(
+            mgr: &MockInterceptorManager,
+            it: &Arc<dyn RpcInterceptor>,
+            expected_len: usize,
+            expected_exec: &[String],
+        ) {
+            let Some(chain) = it.as_chain() else {
+                panic!("expected RpcInterceptorChain");
+            };
+            assert_eq!(chain.len(), expected_len);
+
+            mgr.reset();
+            let base: RpcInterceptorFunc = Arc::new(|_, _| {});
+            let wrapped = it.clone().wrap(base);
+
+            let info = RpcContextInfo::default();
+            let mut ctx = kvrpcpb::Context::default();
+            wrapped(&info, &mut ctx);
+
+            assert_eq!(mgr.begin_count(), expected_len);
+            assert_eq!(mgr.end_count(), expected_len);
+            assert_eq!(mgr.exec_log(), expected_exec);
+        }
+
+        let mgr = MockInterceptorManager::new();
+        let mk = |name: &str| mgr.create_mock_interceptor(name.to_owned());
+
+        let mut it = chain_rpc_interceptors(mk("0"), Vec::<Arc<dyn RpcInterceptor>>::new());
+        let mut expected = vec!["0".to_owned()];
+        assert_chain_exec(&mgr, &it, 1, &expected);
+
+        for i in 1..3 {
+            it = chain_rpc_interceptors(it, vec![mk(&i.to_string())]);
+            expected.push(i.to_string());
+            assert_chain_exec(&mgr, &it, i + 1, &expected);
+        }
+
+        let it2 = chain_rpc_interceptors(mk("3"), vec![mk("4")]);
+        assert_chain_exec(&mgr, &it2, 2, &["3".to_owned(), "4".to_owned()]);
+
+        let chain = chain_rpc_interceptors(it, vec![it2]);
+        assert_chain_exec(
+            &mgr,
+            &chain,
+            5,
+            &["0", "1", "2", "3", "4"].map(str::to_owned),
+        );
+
+        // Add a duplicated interceptor (by name). The old one should be replaced, and the new one
+        // should become the last interceptor in the chain.
+        let chain = chain_rpc_interceptors(chain, vec![mk("1")]);
+        assert_chain_exec(
+            &mgr,
+            &chain,
+            5,
+            &["0", "2", "3", "4", "1"].map(str::to_owned),
+        );
     }
 
     #[test]

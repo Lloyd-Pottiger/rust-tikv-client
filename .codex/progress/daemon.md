@@ -15,9 +15,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port-store-client-behavior：对照 client-go `internal/client/*_test.go` 补齐 Rust store client/dispatch 的可观测语义
-  - 计划：挑选可迁移 case（timeout/cancel/interceptor/context patch/retry attempt）映射到 `src/store/` + `src/request/plan*.rs`
-  - 计划：补齐缺失 hook（如 dispatch 前后拦截器调用顺序/去重、Context 字段覆盖优先级、timeout 应用点）
+- tests/port-store-client-behavior-timeout-cancel：对照 client-go `internal/client/*_test.go` 补齐 Rust dispatch timeout/cancel 语义覆盖
+  - 计划：挑选可迁移 case（timeout 应用点、cancel/oneshot drop、retry attempt 与拦截器/Context patch 交互）映射到 `src/store/` + `src/request/plan*.rs`
   - 验证：`cargo test`；必要时 `make check`
   - 文件：`src/store/*.rs`，`src/request/*.rs`，`.codex/progress/daemon.md`
 
@@ -34,6 +33,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 文件：`src/*`（新 helper），`.codex/progress/daemon.md`
 
 # 已完成工作
+
+- tests/port-interceptor-chain-flatten-dedup：对齐 client-go `RPCInterceptorChain.Link`/`ChainRPCInterceptors` 的 chain 拼接语义
+  - 关键：`RpcInterceptorChain::link` 支持递归 flatten 嵌套 chain；dedup by name 时保留最后一个并移动到队尾（执行顺序可预期）
+  - 覆盖：新增单测对齐 Go `TestAppendChainedInterceptor`（chain 递归拼接 + duplicated name move-to-end）
+  - 验证：`cargo test`；`make check`
+  - 文件：`src/interceptor.rs`，`.codex/progress/daemon.md`
 
 - tests/port-error-debug-info-json-redaction：移植 client-go `error/error_test.go` ExtractDebugInfoStrFromKeyErr 等价语义
   - 决策：不扩张 public API；用 `cfg(test)` helper 生成 DebugInfo JSON 串（bytes base64）并用 JSON 结构断言；redaction 开关也仅测试内使用
