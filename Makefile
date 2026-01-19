@@ -7,6 +7,7 @@ export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
 export TIKV_VERSION ?= v8.5.1
 export TIUP_KV      ?= 3
+COVERAGE_FAIL_UNDER ?= 80
 
 ALL_FEATURES := integration-tests
 
@@ -127,9 +128,8 @@ coverage:
 		cargo llvm-cov clean --workspace --profraw-only >/dev/null 2>&1 || true; \
 		cargo llvm-cov --package tikv-client --no-default-features --lib --tests \
 			--ignore-filename-regex 'src/generated/' \
-			--fail-under-lines 80 \
-			--html; \
-		echo "Coverage report: target/llvm-cov/html/index.html"; \
+			--fail-under-lines $(COVERAGE_FAIL_UNDER) \
+			--html && echo "Coverage report: target/llvm-cov/html/index.html"; \
 	else \
 		# Keep the suggested version compatible with rust-toolchain.toml (MSRV). \
 		echo "cargo llvm-cov not installed. Install with: cargo install cargo-llvm-cov --version 0.6.21 --locked"; \
@@ -142,9 +142,8 @@ coverage-integration:
 		cargo llvm-cov clean --workspace --profraw-only >/dev/null 2>&1 || true; \
 		PD_ADDRS="$(PD_ADDRS)" cargo llvm-cov --package tikv-client --no-default-features --features "integration-tests" --lib --tests \
 			--ignore-filename-regex 'src/generated/' \
-			--fail-under-lines 80 \
-			--html -- --test-threads 1; \
-		echo "Coverage report: target/llvm-cov/html/index.html"; \
+			--fail-under-lines $(COVERAGE_FAIL_UNDER) \
+			--html -- --test-threads 1 && echo "Coverage report: target/llvm-cov/html/index.html"; \
 	else \
 		# Keep the suggested version compatible with rust-toolchain.toml (MSRV). \
 		echo "cargo llvm-cov not installed. Install with: cargo install cargo-llvm-cov --version 0.6.21 --locked"; \

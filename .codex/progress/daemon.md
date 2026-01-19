@@ -23,7 +23,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 文件：`src/*`，`tests/*`，`doc/*`
 
 - infra/devex：统一本地/CI 验证入口（Makefile/CI/doc），并固化 coverage/doc-test/workflow
-  - 变更：修复/整理 `make all`（新增 `integration-test-if-ready`：PD 可达才跑 integration tests）；coverage 增加 profraw 清理；文档同步（development/README/AGENTS）
+  - 变更：修复/整理 `make all`（新增 `integration-test-if-ready`：PD 可达才跑 integration tests）；coverage 增加 profraw 清理 + 失败正确透传（支持 `COVERAGE_FAIL_UNDER`）；文档同步（development/README/AGENTS）
   - 文件：`Makefile`，`.github/workflows/ci.yml`，`doc/development.md`，`getting-started.md`，`README.md`，`AGENTS.md`，`.gitignore`
 
 - final/review：复核整体目标达成 + 全量验证
