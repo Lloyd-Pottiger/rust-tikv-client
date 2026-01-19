@@ -504,6 +504,175 @@ macro_rules! internal_err {
 mod tests {
     use super::*;
     use crate::proto::deadlock;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde_json::Value;
+    use serial_test::serial;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static REDACT_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+    struct RedactLogGuard {
+        prev: bool,
+    }
+
+    impl RedactLogGuard {
+        fn set(enabled: bool) -> Self {
+            let prev = REDACT_LOG_ENABLED.swap(enabled, Ordering::SeqCst);
+            Self { prev }
+        }
+    }
+
+    impl Drop for RedactLogGuard {
+        fn drop(&mut self) {
+            REDACT_LOG_ENABLED.store(self.prev, Ordering::SeqCst);
+        }
+    }
+
+    fn encode_bytes(bytes: &[u8]) -> String {
+        let bytes: &[u8] = if REDACT_LOG_ENABLED.load(Ordering::SeqCst) && !bytes.is_empty() {
+            b"?"
+        } else {
+            bytes
+        };
+        STANDARD.encode(bytes)
+    }
+
+    fn debug_info_to_json(debug_info: &kvrpcpb::DebugInfo) -> Value {
+        use serde_json::{Map, Value};
+
+        let mvcc_info = debug_info
+            .mvcc_info
+            .iter()
+            .map(|mvcc_debug_info| {
+                let mut mvcc_debug_info_json = Map::new();
+                if !mvcc_debug_info.key.is_empty() {
+                    mvcc_debug_info_json.insert(
+                        "key".to_owned(),
+                        Value::String(encode_bytes(&mvcc_debug_info.key)),
+                    );
+                }
+                if let Some(mvcc) = mvcc_debug_info.mvcc.as_ref() {
+                    let mut mvcc_json = Map::new();
+
+                    if let Some(lock) = mvcc.lock.as_ref() {
+                        let mut lock_json = Map::new();
+                        if lock.r#type != 0 {
+                            lock_json.insert("type".to_owned(), lock.r#type.into());
+                        }
+                        if lock.start_ts != 0 {
+                            lock_json.insert("start_ts".to_owned(), lock.start_ts.into());
+                        }
+                        if !lock.primary.is_empty() {
+                            lock_json.insert(
+                                "primary".to_owned(),
+                                Value::String(encode_bytes(&lock.primary)),
+                            );
+                        }
+                        if !lock.short_value.is_empty() {
+                            lock_json.insert(
+                                "short_value".to_owned(),
+                                Value::String(encode_bytes(&lock.short_value)),
+                            );
+                        }
+                        if !lock.secondaries.is_empty() {
+                            lock_json.insert(
+                                "secondaries".to_owned(),
+                                Value::Array(
+                                    lock.secondaries
+                                        .iter()
+                                        .map(|secondary| Value::String(encode_bytes(secondary)))
+                                        .collect(),
+                                ),
+                            );
+                        }
+
+                        mvcc_json.insert("lock".to_owned(), Value::Object(lock_json));
+                    }
+
+                    if !mvcc.writes.is_empty() {
+                        mvcc_json.insert(
+                            "writes".to_owned(),
+                            Value::Array(
+                                mvcc.writes
+                                    .iter()
+                                    .map(|write| {
+                                        let mut write_json = Map::new();
+                                        if write.r#type != 0 {
+                                            write_json
+                                                .insert("type".to_owned(), write.r#type.into());
+                                        }
+                                        if write.start_ts != 0 {
+                                            write_json.insert(
+                                                "start_ts".to_owned(),
+                                                write.start_ts.into(),
+                                            );
+                                        }
+                                        if write.commit_ts != 0 {
+                                            write_json.insert(
+                                                "commit_ts".to_owned(),
+                                                write.commit_ts.into(),
+                                            );
+                                        }
+                                        if !write.short_value.is_empty() {
+                                            write_json.insert(
+                                                "short_value".to_owned(),
+                                                Value::String(encode_bytes(&write.short_value)),
+                                            );
+                                        }
+                                        Value::Object(write_json)
+                                    })
+                                    .collect(),
+                            ),
+                        );
+                    }
+
+                    if !mvcc.values.is_empty() {
+                        mvcc_json.insert(
+                            "values".to_owned(),
+                            Value::Array(
+                                mvcc.values
+                                    .iter()
+                                    .map(|mvcc_value| {
+                                        let mut value_json = Map::new();
+                                        if mvcc_value.start_ts != 0 {
+                                            value_json.insert(
+                                                "start_ts".to_owned(),
+                                                mvcc_value.start_ts.into(),
+                                            );
+                                        }
+                                        if !mvcc_value.value.is_empty() {
+                                            value_json.insert(
+                                                "value".to_owned(),
+                                                Value::String(encode_bytes(&mvcc_value.value)),
+                                            );
+                                        }
+                                        Value::Object(value_json)
+                                    })
+                                    .collect(),
+                            ),
+                        );
+                    }
+
+                    mvcc_debug_info_json.insert("mvcc".to_owned(), Value::Object(mvcc_json));
+                }
+
+                Value::Object(mvcc_debug_info_json)
+            })
+            .collect();
+
+        let mut debug_info_json = Map::new();
+        debug_info_json.insert("mvcc_info".to_owned(), Value::Array(mvcc_info));
+        Value::Object(debug_info_json)
+    }
+
+    fn extract_debug_info_str_from_key_err(key_error: &kvrpcpb::KeyError) -> String {
+        let Some(debug_info) = key_error.debug_info.as_ref() else {
+            return String::new();
+        };
+
+        serde_json::to_string(&debug_info_to_json(debug_info))
+            .expect("debug_info_to_json should always be serializable")
+    }
 
     #[test]
     fn key_error_conflict_maps_to_write_conflict() {
@@ -729,5 +898,77 @@ mod tests {
         let err = crate::internal_err!("boom");
         let msg = err.to_string();
         assert!(msg.contains("boom"), "{msg}");
+    }
+
+    #[test]
+    #[serial]
+    fn extract_debug_info_str_from_key_err_matches_client_go() {
+        let debug_info = kvrpcpb::DebugInfo {
+            mvcc_info: vec![kvrpcpb::MvccDebugInfo {
+                key: b"byte".to_vec(),
+                mvcc: Some(kvrpcpb::MvccInfo {
+                    lock: Some(kvrpcpb::MvccLock {
+                        r#type: kvrpcpb::Op::Del as i32,
+                        start_ts: 128,
+                        primary: b"k1".to_vec(),
+                        secondaries: vec![b"k1".to_vec(), b"k2".to_vec()],
+                        short_value: b"v1".to_vec(),
+                        ..Default::default()
+                    }),
+                    writes: vec![kvrpcpb::MvccWrite {
+                        r#type: kvrpcpb::Op::Insert as i32,
+                        start_ts: 64,
+                        commit_ts: 86,
+                        short_value: vec![0x1, 0x2, 0x3, 0x4, 0x5, 0x6],
+                        ..Default::default()
+                    }],
+                    values: vec![kvrpcpb::MvccValue {
+                        start_ts: 64,
+                        value: vec![0x11, 0x12],
+                    }],
+                }),
+            }],
+        };
+
+        {
+            let _guard = RedactLogGuard::set(false);
+            assert_eq!(
+                extract_debug_info_str_from_key_err(&kvrpcpb::KeyError {
+                    txn_lock_not_found: Some(kvrpcpb::TxnLockNotFound {
+                        key: b"byte".to_vec(),
+                    }),
+                    ..Default::default()
+                }),
+                ""
+            );
+
+            let expected_str = r#"{"mvcc_info":[{"key":"Ynl0ZQ==","mvcc":{"lock":{"type":1,"start_ts":128,"primary":"azE=","short_value":"djE=","secondaries":["azE=","azI="]},"writes":[{"type":4,"start_ts":64,"commit_ts":86,"short_value":"AQIDBAUG"}],"values":[{"start_ts":64,"value":"ERI="}]}}]}"#;
+            let actual = extract_debug_info_str_from_key_err(&kvrpcpb::KeyError {
+                txn_lock_not_found: Some(kvrpcpb::TxnLockNotFound {
+                    key: b"byte".to_vec(),
+                }),
+                debug_info: Some(debug_info.clone()),
+                ..Default::default()
+            });
+
+            let expected_json: Value = serde_json::from_str(expected_str).unwrap();
+            let actual_json: Value = serde_json::from_str(&actual).unwrap();
+            assert_eq!(actual_json, expected_json);
+        }
+
+        {
+            let _guard = RedactLogGuard::set(true);
+            let expected_str = r#"{"mvcc_info":[{"key":"Pw==","mvcc":{"lock":{"type":1,"start_ts":128,"primary":"Pw==","short_value":"Pw==","secondaries":["Pw==","Pw=="]},"writes":[{"type":4,"start_ts":64,"commit_ts":86,"short_value":"Pw=="}],"values":[{"start_ts":64,"value":"Pw=="}]}}]}"#;
+            let actual = extract_debug_info_str_from_key_err(&kvrpcpb::KeyError {
+                txn_lock_not_found: Some(kvrpcpb::TxnLockNotFound {
+                    key: b"byte".to_vec(),
+                }),
+                debug_info: Some(debug_info),
+                ..Default::default()
+            });
+            let expected_json: Value = serde_json::from_str(expected_str).unwrap();
+            let actual_json: Value = serde_json::from_str(&actual).unwrap();
+            assert_eq!(actual_json, expected_json);
+        }
     }
 }

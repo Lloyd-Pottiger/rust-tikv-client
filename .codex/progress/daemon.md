@@ -15,7 +15,31 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
+- tests/port-store-client-behavior：对照 client-go `internal/client/*_test.go` 补齐 Rust store client/dispatch 的可观测语义
+  - 计划：挑选可迁移 case（timeout/cancel/interceptor/context patch/retry attempt）映射到 `src/store/` + `src/request/plan*.rs`
+  - 计划：补齐缺失 hook（如 dispatch 前后拦截器调用顺序/去重、Context 字段覆盖优先级、timeout 应用点）
+  - 验证：`cargo test`；必要时 `make check`
+  - 文件：`src/store/*.rs`，`src/request/*.rs`，`.codex/progress/daemon.md`
+
+- tests/port-region-request-and-cache：扩展 region cache + region request sender 覆盖面（对齐 client-go `internal/locate/region_request*_test.go`）
+  - 计划：补齐 stale-region/epoch-not-match/leader-change/retry state 关键路径的等价用例
+  - 计划：对齐错误注入方式：MockPd/MockKv + Plan retry；避免依赖真实 cluster
+  - 验证：`cargo test`
+  - 文件：`src/region_cache.rs`，`src/request/plan*.rs`，`src/store/*.rs`，`.codex/progress/daemon.md`
+
+- tests/port-util-misc-time-detail：移植 client-go `util/misc_test.go` 可迁移部分（TimeDetail 格式化等）
+  - 计划：为 `kvrpcpb::TimeDetail` 提供 Rust 侧格式化 helper（避免改 generated），用等价字符串断言覆盖
+  - 计划：评估 `CompatibleParseGCTime` 在 Rust 侧是否需要；若无入口则标注 out-of-scope 并用等价 Rust 用例覆盖必要行为
+  - 验证：`cargo test`
+  - 文件：`src/*`（新 helper），`.codex/progress/daemon.md`
+
 # 已完成工作
+
+- tests/port-error-debug-info-json-redaction：移植 client-go `error/error_test.go` ExtractDebugInfoStrFromKeyErr 等价语义
+  - 决策：不扩张 public API；用 `cfg(test)` helper 生成 DebugInfo JSON 串（bytes base64）并用 JSON 结构断言；redaction 开关也仅测试内使用
+  - 覆盖：无 debug_info -> 空串；redaction on/off（bytes -> `b"?"` / base64=`Pw==`）
+  - 验证：`cargo test`；`make check`
+  - 文件：`src/common/errors.rs`，`Cargo.toml`，`Cargo.lock`，`.codex/progress/daemon.md`
 
 - tests/port-replica-selector-fast-retry：移植 client-go fast retry/avoid slow store 的等价语义（最小可测覆盖）
   - 关键：PreferLeader retry path 走 score 选点，基于 StoreHealthMap 的 slow 标记避开失败 store；gRPC transport error 触发 mark slow 后可换点重试
