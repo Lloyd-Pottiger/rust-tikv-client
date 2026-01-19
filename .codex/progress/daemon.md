@@ -17,6 +17,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- tests/audit-client-go-tests-port-map：对齐 client-go 全量 `_test.go` 用例的 Rust 覆盖/标注 N/A
+  - 关键：核对 go `_test.go` 文件数(101)/Test 用例数(294)/Top dirs 分布；补齐 map 文档对 `kv/trace/error/rawkv/tikv/txnkv` 目录的覆盖说明
+  - 决策：mocktikv/mockstore 强绑定用例统一标注 N/A（Rust 用 real-cluster E2E + unit-test mocks 覆盖等价语义）
+  - 验证：`cargo test`
+  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+
 - tests/port-store-client-unit：迁移 client-go `internal/client/*_test.go` 的可迁移语义到 Rust `src/store/*`
   - 关键：补齐 store-level error traits 单测（region error 提取 + SetRegionError）；补齐连接入口对非法地址的 fast-fail（对应 Go conn/fast-fail 类语义）
   - 覆盖：Vec region_errors 聚合+消费；SetRegionError 写回；TikvConnect invalid addr 返回 transport/uri error
