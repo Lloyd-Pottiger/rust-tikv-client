@@ -10,6 +10,9 @@ From the repo root:
 # Compile + rustfmt + clippy (warnings are denied).
 make check
 
+# Compile all feature combinations (no fmt/clippy; smoke compile only).
+make check-all-features
+
 # Compile rustdoc examples (doc tests).
 make doc-test
 

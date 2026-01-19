@@ -16,6 +16,7 @@
 ```bash
 make generate               # (re)generate protobuf bindings (requires protoc)
 make check                  # generate + cargo check + fmt --check + clippy (warnings denied)
+make check-all-features     # generate + cargo check --all-features (feature matrix compile check)
 make unit-test              # unit tests (uses cargo-nextest if installed)
 make doc                    # rustdoc (warnings denied)
 make tiup-up                # start local PD+TiKV playground (logs: target/tiup-playground.log)
