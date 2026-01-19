@@ -131,6 +131,15 @@ We welcome your contributions! Contributing code is great, we also appreciate fi
 
 See `doc/development.md` for a consolidated, CI-aligned development workflow.
 
+For a CI-like local run:
+
+```
+make all
+```
+
+`make all` runs integration tests only when PD is reachable at `PD_ADDRS` (otherwise they are
+skipped).
+
 We use the standard Cargo workflows, e.g., `cargo build` and `cargo test`. For faster test runs we
 recommend [nextest](https://nexte.st/index.html):
 

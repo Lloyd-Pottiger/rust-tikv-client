@@ -101,7 +101,8 @@ make all
 ```
 
 This runs: proto generation, `cargo check`, `cargo fmt --check`, `cargo clippy`, rustdoc, unit
-tests, doc tests, and (optionally) integration tests when a cluster is available.
+tests, doc tests, and (optionally) integration tests when a cluster is available (PD is reachable
+at `PD_ADDRS`; otherwise they are skipped).
 
 ## Coverage (Optional)
 

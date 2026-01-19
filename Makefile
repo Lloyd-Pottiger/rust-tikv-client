@@ -1,7 +1,7 @@
 export RUSTFLAGS=-Dwarnings
 export RUSTDOCFLAGS=-Dwarnings
 
-.PHONY: default check unit-test generate integration-test integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc doc-test coverage coverage-integration tiup-coverage-integration tiup tiup-up tiup-down tiup-clean all clean
+.PHONY: default check unit-test generate integration-test integration-test-if-ready integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc doc-test coverage coverage-integration tiup-coverage-integration tiup tiup-up tiup-down tiup-clean all clean
 
 export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
@@ -43,6 +43,29 @@ unit-test: generate
 	fi
 
 integration-test: integration-test-txn integration-test-raw
+
+# Run integration tests only when PD is reachable. This keeps `make all` usable on machines
+# without a running cluster while still covering integration tests automatically when available.
+integration-test-if-ready: generate
+	@set -e; \
+	pd_addrs="$(PD_ADDRS)"; \
+	pd_addr="$${pd_addrs%%,*}"; \
+	pd_url="http://$$pd_addr"; \
+	case "$$pd_addr" in \
+		http://*|https://*) pd_url="$$pd_addr" ;; \
+	esac; \
+	if command -v curl >/dev/null 2>&1 && curl -fsS "$$pd_url/pd/api/v1/version" >/dev/null 2>&1; then \
+		echo "PD is ready at $$pd_url; running integration tests..."; \
+		if cargo nextest --version >/dev/null 2>&1; then \
+			$(RUN_INTEGRATION_TEST) txn_; \
+			$(RUN_INTEGRATION_TEST) raw_; \
+		else \
+			$(CARGO_TEST_INTEGRATION) txn_ $(CARGO_TEST_INTEGRATION_RUNNER_ARGS); \
+			$(CARGO_TEST_INTEGRATION) raw_ $(CARGO_TEST_INTEGRATION_RUNNER_ARGS); \
+		fi; \
+	else \
+		echo "PD not reachable at $$pd_url; skipping integration tests (run \`make tiup-up\` then \`make integration-test\`)."; \
+	fi
 
 integration-test-txn: generate
 	@if cargo nextest --version >/dev/null 2>&1; then \
@@ -101,6 +124,7 @@ doc-test:
 coverage:
 	@if cargo llvm-cov --version >/dev/null 2>&1; then \
 		rustup component add llvm-tools-preview >/dev/null 2>&1 || true; \
+		cargo llvm-cov clean --workspace --profraw-only >/dev/null 2>&1 || true; \
 		cargo llvm-cov --package tikv-client --no-default-features --lib --tests \
 			--ignore-filename-regex 'src/generated/' \
 			--fail-under-lines 80 \
@@ -115,6 +139,7 @@ coverage:
 coverage-integration:
 	@if cargo llvm-cov --version >/dev/null 2>&1; then \
 		rustup component add llvm-tools-preview >/dev/null 2>&1 || true; \
+		cargo llvm-cov clean --workspace --profraw-only >/dev/null 2>&1 || true; \
 		PD_ADDRS="$(PD_ADDRS)" cargo llvm-cov --package tikv-client --no-default-features --features "integration-tests" --lib --tests \
 			--ignore-filename-regex 'src/generated/' \
 			--fail-under-lines 80 \
@@ -266,7 +291,7 @@ tiup-clean: tiup-down
 
 tiup: tiup-up
 
-all: generate check doc-test doc test
+all: generate check doc-test doc unit-test integration-test-if-ready
 
 clean:
 	cargo clean

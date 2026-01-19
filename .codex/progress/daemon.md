@@ -58,3 +58,13 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 验证：`make all` / `make coverage` / `make coverage-integration`
   - 备注：`make coverage-integration` 仍可能打印 llvm-cov "mismatched data" warning，但不影响 fail-under/报告产出
   - 文件：`.codex/progress/daemon.md`
+
+- devex/make-all：`make all` 无集群可用时跳过 integration tests（PD 可达才运行）
+  - 决策：新增 `integration-test-if-ready`（curl 探测 `PD_ADDRS` 的 `/pd/api/v1/version`）；保留 `make integration-test*` 作为强制入口
+  - 验证：`make all`（有集群）；`PD_ADDRS=127.0.0.1:1 make integration-test-if-ready`（跳过）
+  - 文件：`Makefile`，`doc/development.md`，`README.md`
+
+- infra/coverage：`make coverage*` 先清理旧 profraw，降低 llvm-cov 合并异常概率
+  - 决策：用 `cargo llvm-cov clean --workspace --profraw-only`（不清 build 产物）
+  - 验证：`make coverage` / `make coverage-integration`（warning 仍可能出现，暂不阻断）
+  - 文件：`Makefile`
