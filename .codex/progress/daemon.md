@@ -15,9 +15,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port-pd-oracle-low-res-ts：迁移 PD oracle low-resolution TS / stale-ts / interval update 相关语义（Go `oracle/oracles/pd_test.go` 其余用例）
-  - 计划：实现 low-res ts cache + update loop（tokio time 可控，避免 sleep flake）；补齐 stale timestamp/expired 计算；补齐/替换为 Rust 等价 API
-  - 步骤：梳理 Go `GetLowResolutionTimestamp/GetStaleTimestamp/UntilExpired/SetLowResolutionTimestampUpdateInterval`；设计 Rust oracle abstraction（或 pd/client 内部组件）；按用例拆 test（mock PD + tokio time pause/advance）
+- tests/port-pd-oracle-low-res-ts：迁移 PD oracle low-resolution TS / update interval/adaptive interval 相关语义（Go `oracle/oracles/pd_test.go`）
+  - 计划：实现 low-res ts update loop + interval 配置；必要时用 tokio time pause/advance 降 flake
+  - 步骤：对齐 `SetLowResolutionTimestampUpdateInterval` + `TestAdaptiveUpdateTSInterval`；把 timing 断言改成可控 clock；补齐 `SetLastTSAlwaysPushTS`
   - 验证：`cargo test`
   - 文件：`src/pd/*`，`src/timestamp.rs`，`src/transaction/*`，`.codex/progress/daemon.md`
 
@@ -28,6 +28,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 文件：`src/store/*`，`src/request/*`，`.codex/progress/daemon.md`
 
 # 已完成工作
+
+- tests/port-pd-oracle-stale-ts：迁移 PD oracle `GetStaleTimestamp/UntilExpired` 语义（Go `oracle/oracles/pd_test.go`）
+  - 关键：按 `physical(last_ts)+elapsed-arrival-prevSecond` 估算 stale ts；UntilExpired 用 physical 差值计算等待 ms；invalid prevSecond 直接报错
+  - 覆盖：`TestPDOracle_UntilExpired`；`TestPdOracle_GetStaleTimestamp`（含 invalid prevSecond 大值/MaxUint64）
+  - 验证：`cargo test`
+  - 文件：`src/pd/stale_timestamp.rs`，`src/pd/mod.rs`，`.codex/progress/daemon.md`
 
 - tests/port-pd-oracle-validate-read-ts：迁移 PD oracle ValidateReadTS/stale-read read-ts 校验语义（Go `oracle/oracles/pd_test.go`）
   - 关键：实现 per-txn-scope singleflight GetTS + low-res ts 缓存；readTS>currentTS 时最多重试一次避免 singleflight 复用导致的 false-positive；单 waiter cancel 不传播到共享 GetTS
