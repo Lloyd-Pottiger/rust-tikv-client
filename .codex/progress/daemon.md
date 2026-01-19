@@ -17,6 +17,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- tests/port-local-oracle：迁移 Go local oracle 的时间戳/过期语义（Go `oracle/oracles/local_test.go`）
+  - 关键：用 test-only `LocalOracle` 复刻语义（SystemTime + per-ms logical counter）；可 hook current time 保证确定性
+  - 覆盖：unique ts；IsExpired/UntilExpired 边界与 Go 对齐
+  - 验证：`cargo test`
+  - 文件：`src/timestamp.rs`，`src/timestamp/local_oracle.rs`，`.codex/progress/daemon.md`
+
 - tests/port-kv-prefix-next-key：迁移 Go `kv.PrefixNextKey` 边界语义（全 0xFF -> empty）
   - 关键：新增 `Key::next_prefix_key`（byte carry）；全 0xFF 时返回 empty（对齐 client-go）
   - 覆盖：`client-go/kv/key_test.go::TestPrefixNextKey`

@@ -172,3 +172,6 @@ mod tests {
         assert!(compose_ts(-1, 0).is_err());
     }
 }
+
+#[cfg(test)]
+mod local_oracle;
