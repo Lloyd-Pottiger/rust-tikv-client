@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
-use futures::future::try_join_all;
+use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use log::debug;
 use log::info;
@@ -36,7 +36,6 @@ use crate::transaction::resolve_locks;
 use crate::transaction::HasLocks;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
-use crate::util::iter::FlatMapOkIterExt;
 use crate::Error;
 use crate::RequestContext;
 use crate::Result;
@@ -153,7 +152,7 @@ where
         for shard in shards {
             let (shard, region) = shard?;
             let clone = current_plan.clone_then_apply_shard(shard);
-            let handle = tokio::spawn(Self::single_shard_handler(
+            let fut = Self::single_shard_handler(
                 pd_client.clone(),
                 clone,
                 region,
@@ -163,27 +162,26 @@ where
                 request_context.clone(),
                 read_routing.clone(),
                 attempt,
-            ));
-            handles.push(handle);
+            );
+            handles.push(fut);
         }
 
-        let results = try_join_all(handles).await?;
+        let mut tasks: FuturesUnordered<_> = handles.into_iter().collect();
         if preserve_region_results {
-            Ok(results
-                .into_iter()
-                .flat_map_ok(|x| x)
-                .map(|x| match x {
-                    Ok(r) => r,
-                    Err(e) => Err(e),
-                })
-                .collect())
+            let mut results = Vec::new();
+            while let Some(res) = tasks.next().await {
+                match res {
+                    Ok(v) => results.extend(v),
+                    Err(e) => results.push(Err(e)),
+                }
+            }
+            Ok(results)
         } else {
-            Ok(results
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .flatten()
-                .collect())
+            let mut results = Vec::new();
+            while let Some(res) = tasks.next().await {
+                results.extend(res?);
+            }
+            Ok(results)
         }
     }
 
@@ -627,19 +625,23 @@ where
     async fn execute(&self) -> Result<Self::Result> {
         let concurrency_permits = Arc::new(Semaphore::new(MULTI_STORES_CONCURRENCY));
         let stores = self.pd_client.clone().all_stores().await?;
-        let mut handles = Vec::with_capacity(stores.len());
+        let mut tasks = FuturesUnordered::new();
         for store in stores {
             let mut clone = self.inner.clone();
             clone.apply_store(&store);
-            let handle = tokio::spawn(Self::single_store_handler(
+            let fut = Self::single_store_handler(
                 clone,
                 self.backoff.clone(),
                 concurrency_permits.clone(),
-            ));
-            handles.push(handle);
+            );
+            tasks.push(fut);
         }
-        let results = try_join_all(handles).await?;
-        Ok(results.into_iter().collect::<Vec<_>>())
+
+        let mut results = Vec::new();
+        while let Some(res) = tasks.next().await {
+            results.push(res);
+        }
+        Ok(results)
     }
 }
 
@@ -1356,6 +1358,29 @@ mod test {
     }
 
     #[derive(Clone)]
+    struct NotifyPlan {
+        started: Arc<AtomicUsize>,
+        finished: Arc<AtomicUsize>,
+        gate: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl Plan for NotifyPlan {
+        type Result = MockStoreResponse;
+
+        async fn execute(&self) -> Result<Self::Result> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.gate.notified().await;
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            Ok(MockStoreResponse::default())
+        }
+    }
+
+    impl StoreRequest for NotifyPlan {
+        fn apply_store(&mut self, _store: &Store) {}
+    }
+
+    #[derive(Clone)]
     struct FlakyGrpcPlan {
         calls: Arc<AtomicUsize>,
     }
@@ -1993,6 +2018,41 @@ mod test {
 
         assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_all_stores_execute_is_cancel_safe() {
+        let gate = Arc::new(Notify::new());
+        let started = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+
+        let plan = NotifyPlan {
+            started: started.clone(),
+            finished: finished.clone(),
+            gate: gate.clone(),
+        };
+
+        let outer = RetryableAllStores {
+            inner: plan,
+            pd_client: Arc::new(MockPdClient::default()),
+            backoff: Backoff::no_backoff(),
+        };
+
+        let handle = tokio::spawn(async move { outer.execute().await });
+
+        while started.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        handle.abort();
+        let _ = handle.await;
+
+        // If inner tasks were detached, releasing the gate would allow them to complete and bump
+        // `finished`. Cancellation should prevent that.
+        gate.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(finished.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

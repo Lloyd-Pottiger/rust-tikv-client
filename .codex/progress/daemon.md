@@ -15,11 +15,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port-store-client-behavior-timeout-cancel：对照 client-go `internal/client/*_test.go` 补齐 Rust dispatch timeout/cancel 语义覆盖
-  - 计划：挑选可迁移 case（timeout 应用点、cancel/oneshot drop、retry attempt 与拦截器/Context patch 交互）映射到 `src/store/` + `src/request/plan*.rs`
-  - 验证：`cargo test`；必要时 `make check`
-  - 文件：`src/store/*.rs`，`src/request/*.rs`，`.codex/progress/daemon.md`
-
 - tests/port-region-request-and-cache：扩展 region cache + region request sender 覆盖面（对齐 client-go `internal/locate/region_request*_test.go`）
   - 计划：补齐 stale-region/epoch-not-match/leader-change/retry state 关键路径的等价用例
   - 计划：对齐错误注入方式：MockPd/MockKv + Plan retry；避免依赖真实 cluster
@@ -27,6 +22,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 文件：`src/region_cache.rs`，`src/request/plan*.rs`，`src/store/*.rs`，`.codex/progress/daemon.md`
 
 # 已完成工作
+
+- tests/port-store-client-behavior-timeout-cancel：修复并覆盖 plan 并发执行的 cancel 行为（避免脱管 tokio task）
+  - 关键：`RetryableMultiRegion`/`RetryableAllStores` 用 `FuturesUnordered` 执行并发 shard/store handler，替代 `tokio::spawn + try_join_all`；外层 future drop/abort 会连带取消内层 handler
+  - 覆盖：新增 `RetryableAllStores::execute` cancel regression（abort 外层后 notify gate，不应再完成内层计划）
+  - 验证：`cargo test`；`make check`
+  - 文件：`src/request/plan.rs`，`.codex/progress/daemon.md`
 
 - tests/port-util-misc-time-detail：移植 client-go util.TimeDetail 的字符串格式化语义（映射到 kvproto TimeDetail/TimeDetailV2）
   - 关键：为 `kvrpcpb::TimeDetail`/`TimeDetailV2` 实现 `Display`（只输出非零字段；字段名/顺序对齐 client-go；ms/ns 转换 + 轻量 duration 格式化）
