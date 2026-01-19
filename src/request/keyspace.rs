@@ -380,7 +380,7 @@ fn truncate_epoch_not_match(
     let key_mode = err
         .current_regions
         .iter()
-        .find_map(|r| infer_key_mode_from_region(r))
+        .find_map(infer_key_mode_from_region)
         .unwrap_or(KeyMode::Raw);
     let keyspace_prefix = keyspace_prefix(keyspace_id, key_mode).to_vec();
     let keyspace_end = keyspace_end_prefix(keyspace_id, key_mode).to_vec();

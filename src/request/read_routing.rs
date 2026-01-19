@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::store_health::StoreHealthMap;
 use crate::proto::metapb;
-use crate::region::RegionWithLeader;
+use crate::region::{RegionWithLeader, StoreId};
 use crate::Error;
 use crate::ReplicaReadType;
 use crate::Result;
@@ -20,6 +20,7 @@ pub(crate) struct ReadRouting {
     seed: u32,
     force_leader: Arc<AtomicBool>,
     input_request_source: Option<Arc<str>>,
+    store_match: Arc<[StoreId]>,
     store_health: StoreHealthMap,
 }
 
@@ -31,6 +32,7 @@ impl Default for ReadRouting {
             seed: 0,
             force_leader: Arc::new(AtomicBool::new(false)),
             input_request_source: None,
+            store_match: Arc::from([]),
             store_health: StoreHealthMap::default(),
         }
     }
@@ -64,6 +66,12 @@ impl ReadRouting {
 
     pub(crate) fn with_seed(mut self, seed: u32) -> Self {
         self.seed = seed;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_store_match(mut self, stores: impl Into<Vec<StoreId>>) -> Self {
+        self.store_match = Arc::<[StoreId]>::from(stores.into());
         self
     }
 
@@ -168,13 +176,33 @@ impl ReadRouting {
         let target = match self.replica_read {
             ReplicaReadType::Leader => leader.clone(),
             ReplicaReadType::PreferLeader if attempt == 0 => {
-                if self.store_health.is_slow_now(leader.store_id) {
+                if self.store_health.is_slow_now(leader.store_id)
+                    && (!followers.is_empty() || !learners.is_empty())
+                {
+                    // Strongly avoid a slow leader on the first attempt when replicas exist.
                     let mut replicas = followers;
                     replicas.extend(learners);
-                    pick_peer(&replicas, region.id(), self.seed, attempt)
-                        .unwrap_or_else(|| leader.clone())
+                    self.select_peer_by_score(
+                        region.id(),
+                        attempt,
+                        leader,
+                        &replicas,
+                        ScoreStrategy {
+                            prefer_leader: true,
+                            ..Default::default()
+                        },
+                    )
                 } else {
-                    leader.clone()
+                    self.select_peer_by_score(
+                        region.id(),
+                        attempt,
+                        leader,
+                        &region.region.peers,
+                        ScoreStrategy {
+                            prefer_leader: true,
+                            ..Default::default()
+                        },
+                    )
                 }
             }
             ReplicaReadType::Follower if attempt == 0 => {
@@ -185,12 +213,13 @@ impl ReadRouting {
                 pick_peer(&learners, region.id(), self.seed, attempt)
                     .unwrap_or_else(|| leader.clone())
             }
-            ReplicaReadType::Mixed if attempt == 0 => {
-                let mut replicas = followers;
-                replicas.extend(learners);
-                pick_peer(&replicas, region.id(), self.seed, attempt)
-                    .unwrap_or_else(|| leader.clone())
-            }
+            ReplicaReadType::Mixed if attempt == 0 => self.select_peer_by_score(
+                region.id(),
+                attempt,
+                leader,
+                &region.region.peers,
+                ScoreStrategy::default(),
+            ),
             // Retry fallback: prefer leader reads when we have already retried once.
             ReplicaReadType::Follower
             | ReplicaReadType::Learner
@@ -213,6 +242,43 @@ impl ReadRouting {
             target_peer: target,
         })
     }
+
+    fn select_peer_by_score(
+        &self,
+        region_id: u64,
+        attempt: usize,
+        leader: &metapb::Peer,
+        peers: &[metapb::Peer],
+        strategy: ScoreStrategy,
+    ) -> metapb::Peer {
+        let mut max_score: StoreSelectionScore = StoreSelectionScore(-1);
+        let mut max_peers: Vec<metapb::Peer> = Vec::new();
+
+        for peer in peers {
+            if peer.is_witness {
+                continue;
+            }
+            let is_leader = peer.store_id == leader.store_id;
+            let score = calculate_score(
+                peer,
+                is_leader,
+                &self.store_health,
+                &self.store_match,
+                strategy,
+            );
+            match score.cmp(&max_score) {
+                std::cmp::Ordering::Greater => {
+                    max_score = score;
+                    max_peers.clear();
+                    max_peers.push(peer.clone());
+                }
+                std::cmp::Ordering::Equal => max_peers.push(peer.clone()),
+                std::cmp::Ordering::Less => {}
+            }
+        }
+
+        pick_peer(&max_peers, region_id, self.seed, attempt).unwrap_or_else(|| leader.clone())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -230,6 +296,76 @@ impl ReadPeer {
             stale_read: false,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ScoreStrategy {
+    try_leader: bool,
+    prefer_leader: bool,
+    learner_only: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+struct StoreSelectionScore(i64);
+
+const FLAG_NOT_ATTEMPTED: i64 = 1 << 0;
+const FLAG_NORMAL_PEER: i64 = 1 << 1;
+const FLAG_PREFER_LEADER: i64 = 1 << 2;
+const FLAG_LABEL_MATCHES: i64 = 1 << 3;
+const FLAG_NOT_SLOW: i64 = 1 << 4;
+
+fn calculate_score(
+    peer: &metapb::Peer,
+    is_leader: bool,
+    store_health: &StoreHealthMap,
+    store_match: &[StoreId],
+    strategy: ScoreStrategy,
+) -> StoreSelectionScore {
+    let mut score = StoreSelectionScore(0);
+
+    let label_matching_enabled = !store_match.is_empty();
+    let label_matches = store_match.is_empty() || store_match.contains(&peer.store_id);
+    if label_matches {
+        score.0 |= FLAG_LABEL_MATCHES;
+    }
+
+    let is_slow = store_health.is_slow_now(peer.store_id);
+    if !is_slow {
+        score.0 |= FLAG_NOT_SLOW;
+    }
+
+    // We do not currently track per-peer attempts like client-go; treat the first plan attempt as
+    // "not attempted" for score purposes.
+    score.0 |= FLAG_NOT_ATTEMPTED;
+
+    let role = metapb::PeerRole::try_from(peer.role).unwrap_or(metapb::PeerRole::Voter);
+    if is_leader {
+        if strategy.prefer_leader {
+            // Compatible with client-go: only "prefer" the leader when it is not slow; otherwise
+            // treat it as a normal peer.
+            if !is_slow {
+                score.0 |= FLAG_PREFER_LEADER;
+            } else {
+                score.0 |= FLAG_NORMAL_PEER;
+            }
+        } else if strategy.try_leader {
+            // Compatible with client-go: when label matching is enabled, prefer selecting the
+            // leader among replicas with the same label-matching result.
+            if label_matching_enabled {
+                score.0 |= FLAG_PREFER_LEADER;
+            } else {
+                score.0 |= FLAG_NORMAL_PEER;
+            }
+        }
+    } else if strategy.learner_only {
+        if role == metapb::PeerRole::Learner {
+            score.0 |= FLAG_NORMAL_PEER;
+        }
+    } else {
+        score.0 |= FLAG_NORMAL_PEER;
+    }
+
+    score
 }
 
 fn pick_peer(
@@ -483,6 +619,82 @@ mod tests {
         assert_eq!(selected.target_peer.store_id, 1);
         assert!(!selected.replica_read);
         assert!(!selected.stale_read);
+    }
+
+    #[test]
+    fn score_prefers_leader_when_replicas_are_slow() {
+        let health = StoreHealthMap::default();
+        health.mark_slow_for(2, Duration::from_secs(60));
+        health.mark_slow_for(3, Duration::from_secs(60));
+
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::Mixed);
+        routing.set_seed(0);
+        let routing = routing.with_store_health(health);
+
+        let region = make_region_with_id(1, 1, &[2, 3], &[], &[]);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+    }
+
+    #[test]
+    fn score_prefers_label_matched_replica_over_prefer_leader() {
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::PreferLeader);
+
+        let region = make_region_with_id(1, 1, &[2], &[], &[]);
+        let selected = routing
+            .with_store_match(vec![2])
+            .select_peer(&region, 0)
+            .unwrap();
+        assert_eq!(selected.target_peer.store_id, 2);
+        assert!(selected.replica_read);
+    }
+
+    #[test]
+    fn calculate_score_matches_client_go_semantics_for_key_cases() {
+        let health = StoreHealthMap::default();
+        let leader = make_peer(1, metapb::PeerRole::Voter);
+        let follower = make_peer(2, metapb::PeerRole::Voter);
+
+        let leader_score = calculate_score(&leader, true, &health, &[], ScoreStrategy::default());
+        assert_eq!(
+            leader_score.0,
+            FLAG_LABEL_MATCHES | FLAG_NOT_SLOW | FLAG_NOT_ATTEMPTED
+        );
+
+        let follower_score =
+            calculate_score(&follower, false, &health, &[], ScoreStrategy::default());
+        assert_eq!(
+            follower_score.0,
+            FLAG_LABEL_MATCHES | FLAG_NORMAL_PEER | FLAG_NOT_SLOW | FLAG_NOT_ATTEMPTED
+        );
+
+        // Slow store loses the NotSlow bit.
+        health.mark_slow_for(2, Duration::from_secs(60));
+        let follower_score =
+            calculate_score(&follower, false, &health, &[], ScoreStrategy::default());
+        assert_eq!(
+            follower_score.0,
+            FLAG_LABEL_MATCHES | FLAG_NORMAL_PEER | FLAG_NOT_ATTEMPTED
+        );
+
+        // tryLeader prefers the leader only when label matching is enabled.
+        let leader_score = calculate_score(
+            &leader,
+            true,
+            &health,
+            &[2],
+            ScoreStrategy {
+                try_leader: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            leader_score.0,
+            FLAG_PREFER_LEADER | FLAG_NOT_SLOW | FLAG_NOT_ATTEMPTED
+        );
     }
 
     #[test]

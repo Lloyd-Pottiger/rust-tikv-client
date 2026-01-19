@@ -13,22 +13,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-# 待做工作
-
-- feat/replica-selection-score：实现最小 score 选择（label match + role + slow penalty + prefer leader）
-  - 范围：`src/request/read_routing.rs`（或新模块）
-  - 计划：
-    - 引入 score 计算与排序；在 Mixed/PreferLeader 分支优先选高分 replica
-    - 与现有 deterministic seed 保持兼容（同 score 时再按 seed/attempt 打散）
-  - 验证：`cargo test`；`make check`
-
-- tests/port-replica-selector-score：移植 client-go `TestReplicaSelectorCalculateScore` 的等价语义
-  - 范围：`client-go/internal/locate/replica_selector_test.go`，`src/request/read_routing.rs`
-  - 计划：
-    - 抽取 3~5 个 score 组合 case（leader/follower/slow/label match/tryLeader/preferLeader）
-    - Rust 单测验证 score 排序与最终选点
-  - 验证：`cargo test`；`make check`
-
 - tests/port-replica-selector-fast-retry：移植 client-go fast retry/avoid slow store 的等价语义
   - 范围：`client-go/internal/locate/replica_selector_test.go`，`src/request/plan.rs`
   - 计划：
@@ -36,7 +20,15 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
     - 验证 retry/backoff 行为与 request_source/attempt observability
   - 验证：`cargo test`；`make check`
 
+# 待做工作
+
 # 已完成工作
+
+- feat+tests/replica-selection-score：实现最小 score 选择并移植 client-go `TestReplicaSelectorCalculateScore` 的等价语义
+  - 关键：引入 score bits（NotSlow/LabelMatches/PreferLeader/NormalPeer/NotAttempted）；Mixed/PreferLeader attempt=0 走 score 选点；同 score 用 seed/attempt 做 deterministic tie-break
+  - 覆盖：leader/follower/slow/label match/tryLeader/preferLeader 关键 case；补齐「replicas 全 slow -> Mixed 回落 leader」用例
+  - 验证：`cargo test`；`cargo fmt -- --check`
+  - 文件：`src/request/read_routing.rs`，`src/store/mod.rs`，`.codex/progress/daemon.md`
 
 - tests/keyspace-apicodec-v2-port：移植 client-go keyspace apicodec v2 关键语义与用例（prefix + region error + encode request）
   - 决策：不暴露 apicodec 对外 API；用 `cfg(test)` helper + `TruncateKeyspace` 做“等价语义覆盖”，避免泄露 encoded key/range；CommitRequest 用新增 ctor 支持 primary_key prefix（不破坏原 ctor）

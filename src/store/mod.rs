@@ -218,8 +218,10 @@ mod tests {
     #[test]
     fn region_store_apply_sets_retry_flag_and_patched_request_source() {
         let region = MockPdClient::region1();
-        let mut store =
-            RegionStore::new(region, Arc::new(MockKvClient::default()) as Arc<dyn KvClient + Send + Sync>);
+        let mut store = RegionStore::new(
+            region,
+            Arc::new(MockKvClient::default()) as Arc<dyn KvClient + Send + Sync>,
+        );
         store.attempt = 1;
         store.patched_request_source = Some("patched".to_owned());
         store.replica_read = true;
@@ -244,8 +246,10 @@ mod tests {
     #[test]
     fn region_store_apply_invokes_resource_group_tagger_only_when_tag_unset() {
         let region = MockPdClient::region1();
-        let base_store =
-            RegionStore::new(region, Arc::new(MockKvClient::default()) as Arc<dyn KvClient + Send + Sync>);
+        let base_store = RegionStore::new(
+            region,
+            Arc::new(MockKvClient::default()) as Arc<dyn KvClient + Send + Sync>,
+        );
 
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_cloned = calls.clone();
@@ -260,7 +264,8 @@ mod tests {
         // No fixed tag -> tagger runs.
         {
             let mut store = base_store.clone();
-            let request_context = RequestContext::default().with_resource_group_tagger(tagger.clone());
+            let request_context =
+                RequestContext::default().with_resource_group_tagger(tagger.clone());
             store.request_context = request_context.clone();
 
             let mut req = request_context.apply_to(TestRequest::default());
@@ -293,8 +298,10 @@ mod tests {
     #[test]
     fn region_store_apply_runs_rpc_interceptors_with_context_info() {
         let region = MockPdClient::region1();
-        let mut store =
-            RegionStore::new(region, Arc::new(MockKvClient::default()) as Arc<dyn KvClient + Send + Sync>);
+        let mut store = RegionStore::new(
+            region,
+            Arc::new(MockKvClient::default()) as Arc<dyn KvClient + Send + Sync>,
+        );
         store.attempt = 2;
         store.replica_read = true;
         store.stale_read = true;
@@ -302,21 +309,18 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_cloned = seen.clone();
         let interceptor = rpc_interceptor("capture", move |info, ctx| {
-            seen_cloned
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((
-                    info.label.to_owned(),
-                    info.attempt,
-                    info.region_id,
-                    info.store_id,
-                    info.replica_read,
-                    info.stale_read,
-                    ctx.is_retry_request,
-                    ctx.request_source.clone(),
-                    ctx.replica_read,
-                    ctx.stale_read,
-                ));
+            seen_cloned.lock().unwrap_or_else(|e| e.into_inner()).push((
+                info.label.to_owned(),
+                info.attempt,
+                info.region_id,
+                info.store_id,
+                info.replica_read,
+                info.stale_read,
+                ctx.is_retry_request,
+                ctx.request_source.clone(),
+                ctx.replica_read,
+                ctx.stale_read,
+            ));
         });
         let mut chain = RpcInterceptorChain::new();
         chain.link(interceptor);
