@@ -1,10 +1,12 @@
 mod client;
 mod cluster;
 #[cfg(test)]
+mod low_resolution_ts;
+#[cfg(test)]
 mod read_ts_validation;
+mod retry;
 #[cfg(test)]
 mod stale_timestamp;
-mod retry;
 mod timestamp;
 
 pub use self::client::PdClient;

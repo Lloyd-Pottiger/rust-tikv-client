@@ -15,19 +15,25 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port-pd-oracle-low-res-ts：迁移 PD oracle low-resolution TS / update interval/adaptive interval 相关语义（Go `oracle/oracles/pd_test.go`）
-  - 计划：实现 low-res ts update loop + interval 配置；必要时用 tokio time pause/advance 降 flake
-  - 步骤：对齐 `SetLowResolutionTimestampUpdateInterval` + `TestAdaptiveUpdateTSInterval`；把 timing 断言改成可控 clock；补齐 `SetLastTSAlwaysPushTS`
-  - 验证：`cargo test`
-  - 文件：`src/pd/*`，`src/timestamp.rs`，`src/transaction/*`，`.codex/progress/daemon.md`
-
 - tests/port-store-client-unit：迁移 client-go `internal/client/*_test.go` 的可迁移语义到 Rust `src/store/*`
   - 计划：补齐 dispatch error 分类/timeout/ctx 应用；与 PlanBuilder retry/invalidate 的组合测试
   - 步骤：列出 go 测试与 Rust 对应点；为 `KvRpcClient`/`Store` 增加 mock + unit tests；必要时补缺实现
   - 验证：`cargo test`
   - 文件：`src/store/*`，`src/request/*`，`.codex/progress/daemon.md`
 
+- tests/port-pd-oracle-non-future-stale-ts：迁移 stale ts 不返回 future 的并发语义（Go `TestNonFutureStaleTSO`）
+  - 计划：补齐并发 set last ts + GetStaleTimestamp(0) 场景；避免 sleep flake
+  - 步骤：在 Rust stale-ts helper 上补齐并发测试；必要时引入 monotonic arrival 保护
+  - 验证：`cargo test`
+  - 文件：`src/pd/stale_timestamp.rs`，`.codex/progress/daemon.md`
+
 # 已完成工作
+
+- tests/port-pd-oracle-low-res-ts：迁移 PD oracle low-resolution TS / update interval/adaptive interval 相关语义（Go `oracle/oracles/pd_test.go`）
+  - 关键：实现 low-res ts cache + per-scope update loop；实现 adaptive interval state machine（normal/adapting/recovering/unadjustable）+ shrink 通知；SetLowResolutionTimestampUpdateInterval 对齐“非自适应/缩短时立即生效”
+  - 覆盖：`TestPdOracle_SetLowResolutionTimestampUpdateInterval`（用 tokio paused time 替换 time bounds）；`TestAdaptiveUpdateTSInterval`；`TestSetLastTSAlwaysPushTS`
+  - 验证：`cargo test`
+  - 文件：`src/pd/low_resolution_ts.rs`，`src/pd/mod.rs`，`.codex/progress/daemon.md`
 
 - tests/port-pd-oracle-stale-ts：迁移 PD oracle `GetStaleTimestamp/UntilExpired` 语义（Go `oracle/oracles/pd_test.go`）
   - 关键：按 `physical(last_ts)+elapsed-arrival-prevSecond` 估算 stale ts；UntilExpired 用 physical 差值计算等待 ms；invalid prevSecond 直接报错
