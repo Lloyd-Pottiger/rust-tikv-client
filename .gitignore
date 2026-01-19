@@ -11,5 +11,8 @@ client-rust/
 .vscode/
 
 # codex workflow
-.codex
+.codex/*
+!.codex/progress/
+.codex/progress/*
+!.codex/progress/daemon.md
 AGENTS.override.md

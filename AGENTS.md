@@ -20,7 +20,8 @@ make unit-test              # unit tests (uses cargo-nextest if installed)
 make doc                    # rustdoc (warnings denied)
 make tiup-up                # start local PD+TiKV playground (logs: target/tiup-playground.log)
 make integration-test-smoke # quick integration subset (cluster required)
-make all                    # CI-like run
+make integration-test-if-ready # run integration tests if PD is reachable at PD_ADDRS; otherwise skip
+make all                    # CI-like run (integration tests run only when a cluster is reachable)
 
 cargo run --example raw -- --pd 127.0.0.1:2379
 ```
