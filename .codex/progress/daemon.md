@@ -30,3 +30,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：新增 `Transaction::get_with_options`/`Snapshot::get_with_options`（返回 `ValueEntry`）与 `Transaction::batch_get_with_options`/`Snapshot::batch_get_with_options`（返回 key->`ValueEntry`）；Get/BatchGet request 支持 `need_commit_ts`；`KvPair.commit_ts` 公开并从 proto 透传；keyspace 下 batch_get 返回 key decode 正常；单测 mock kv 校验 need_commit_ts+commit_ts（含 cached->refetch）
   - 验证：`cargo test`
   - 文件：`src/kv/kvpair.rs`，`src/request/keyspace.rs`，`src/transaction/transaction.rs`，`src/transaction/snapshot.rs`，`src/transaction/buffer.rs`，`src/transaction/requests.rs`，`src/transaction/lowering.rs`，`examples/raw.rs`，`.codex/progress/daemon.md`
+
+- review/overall-goals-audit：复核整体目标与测试/集成用例映射；修复因 `KvPair` API 调整导致的 integration-tests 编译回归
+  - 结果：`cargo test` + `cargo test --features integration-tests --no-run` + `cargo clippy` 通过（integration-tests 仅编译，不依赖 cluster）
+  - 文件：`tests/integration_tests.rs`，`.codex/progress/daemon.md`

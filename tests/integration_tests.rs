@@ -123,7 +123,7 @@ async fn txn_crud() -> Result<()> {
     let batch_get_res: HashMap<Key, Value> = txn
         .batch_get(vec!["foo".to_owned(), "bar".to_owned()])
         .await?
-        .map(|pair| (pair.0, pair.1))
+        .map(|pair| (pair.key, pair.value))
         .collect();
     assert_eq!(
         batch_get_res.get(&Key::from("foo".to_owned())),
@@ -144,7 +144,7 @@ async fn txn_crud() -> Result<()> {
     let batch_get_res: HashMap<Key, Value> = txn
         .batch_get(vec!["foo".to_owned(), "bar".to_owned()])
         .await?
-        .map(|pair| (pair.0, pair.1))
+        .map(|pair| (pair.key, pair.value))
         .collect();
     assert_eq!(
         batch_get_res.get(&Key::from("foo".to_owned())),
@@ -166,7 +166,7 @@ async fn txn_crud() -> Result<()> {
     let batch_get_res: HashMap<Key, Value> = snapshot
         .batch_get(vec!["foo".to_owned(), "bar".to_owned()])
         .await?
-        .map(|pair| (pair.0, pair.1))
+        .map(|pair| (pair.key, pair.value))
         .collect();
     assert_eq!(
         batch_get_res.get(&Key::from("foo".to_owned())),
@@ -671,8 +671,8 @@ async fn raw_req() -> Result<()> {
         .batch_get(vec!["k1".to_owned(), "k2".to_owned(), "k3".to_owned()])
         .await?;
     assert_eq!(res.len(), 2);
-    assert_eq!(res[0].1, "v1".as_bytes());
-    assert_eq!(res[1].1, "v2".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v1".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v2".as_bytes());
 
     // k1,k2; batch_put then batch_get
     client
@@ -729,23 +729,23 @@ async fn raw_req() -> Result<()> {
 
     let res = client.scan("k2".to_owned()..="k5".to_owned(), 5).await?;
     assert_eq!(res.len(), 4);
-    assert_eq!(res[0].1, "v2".as_bytes());
-    assert_eq!(res[1].1, "v3".as_bytes());
-    assert_eq!(res[2].1, "v4".as_bytes());
-    assert_eq!(res[3].1, "v5".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v2".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v3".as_bytes());
+    assert_eq!(res[2].value.as_slice(), "v4".as_bytes());
+    assert_eq!(res[3].value.as_slice(), "v5".as_bytes());
 
     let res = client.scan("k2".to_owned().."k5".to_owned(), 2).await?;
     assert_eq!(res.len(), 2);
-    assert_eq!(res[0].1, "v2".as_bytes());
-    assert_eq!(res[1].1, "v3".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v2".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v3".as_bytes());
 
     let res = client.scan("k1".to_owned().., 20).await?;
     assert_eq!(res.len(), 5);
-    assert_eq!(res[0].1, "v1".as_bytes());
-    assert_eq!(res[1].1, "v2".as_bytes());
-    assert_eq!(res[2].1, "v3".as_bytes());
-    assert_eq!(res[3].1, "v4".as_bytes());
-    assert_eq!(res[4].1, "v5".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v1".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v2".as_bytes());
+    assert_eq!(res[2].value.as_slice(), "v3".as_bytes());
+    assert_eq!(res[3].value.as_slice(), "v4".as_bytes());
+    assert_eq!(res[4].value.as_slice(), "v5".as_bytes());
 
     let res = client
         .batch_scan(
@@ -771,13 +771,13 @@ async fn raw_req() -> Result<()> {
         )
         .await?;
     assert_eq!(res.len(), 7);
-    assert_eq!(res[0].1, "v1".as_bytes());
-    assert_eq!(res[1].1, "v2".as_bytes());
-    assert_eq!(res[2].1, "v3".as_bytes());
-    assert_eq!(res[3].1, "v2".as_bytes());
-    assert_eq!(res[4].1, "v3".as_bytes());
-    assert_eq!(res[5].1, "v4".as_bytes());
-    assert_eq!(res[6].1, "v5".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v1".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v2".as_bytes());
+    assert_eq!(res[2].value.as_slice(), "v3".as_bytes());
+    assert_eq!(res[3].value.as_slice(), "v2".as_bytes());
+    assert_eq!(res[4].value.as_slice(), "v3".as_bytes());
+    assert_eq!(res[5].value.as_slice(), "v4".as_bytes());
+    assert_eq!(res[6].value.as_slice(), "v5".as_bytes());
 
     // reverse scan
 
@@ -786,17 +786,17 @@ async fn raw_req() -> Result<()> {
         .scan_reverse("k2".to_owned().."k5".to_owned(), 5)
         .await?;
     assert_eq!(res.len(), 3);
-    assert_eq!(res[0].1, "v4".as_bytes());
-    assert_eq!(res[1].1, "v3".as_bytes());
-    assert_eq!(res[2].1, "v2".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v4".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v3".as_bytes());
+    assert_eq!(res[2].value.as_slice(), "v2".as_bytes());
 
     // by default end key in exclusive and start key is inclusive but now exclude start key
     let res = client
         .scan_reverse("k2\0".to_owned().."k5".to_owned(), 5)
         .await?;
     assert_eq!(res.len(), 2);
-    assert_eq!(res[0].1, "v4".as_bytes());
-    assert_eq!(res[1].1, "v3".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v4".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v3".as_bytes());
 
     // reverse scan
     // by default end key is exclusive and start key is inclusive but now include end key
@@ -804,36 +804,36 @@ async fn raw_req() -> Result<()> {
         .scan_reverse("k2".to_owned()..="k5".to_owned(), 5)
         .await?;
     assert_eq!(res.len(), 4);
-    assert_eq!(res[0].1, "v5".as_bytes());
-    assert_eq!(res[1].1, "v4".as_bytes());
-    assert_eq!(res[2].1, "v3".as_bytes());
-    assert_eq!(res[3].1, "v2".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v5".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v4".as_bytes());
+    assert_eq!(res[2].value.as_slice(), "v3".as_bytes());
+    assert_eq!(res[3].value.as_slice(), "v2".as_bytes());
 
     // by default end key is exclusive and start key is inclusive but now include end key and exclude start key
     let res = client
         .scan_reverse("k2\0".to_owned()..="k5".to_owned(), 5)
         .await?;
     assert_eq!(res.len(), 3);
-    assert_eq!(res[0].1, "v5".as_bytes());
-    assert_eq!(res[1].1, "v4".as_bytes());
-    assert_eq!(res[2].1, "v3".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v5".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v4".as_bytes());
+    assert_eq!(res[2].value.as_slice(), "v3".as_bytes());
 
     // limit results to first 2
     let res = client
         .scan_reverse("k2".to_owned().."k5".to_owned(), 2)
         .await?;
     assert_eq!(res.len(), 2);
-    assert_eq!(res[0].1, "v4".as_bytes());
-    assert_eq!(res[1].1, "v3".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v4".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v3".as_bytes());
 
     // if endKey is not provided then it scan everything including end key
     let range = BoundRange::range_from(Key::from("k2".to_owned()));
     let res = client.scan_reverse(range, 20).await?;
     assert_eq!(res.len(), 4);
-    assert_eq!(res[0].1, "v5".as_bytes());
-    assert_eq!(res[1].1, "v4".as_bytes());
-    assert_eq!(res[2].1, "v3".as_bytes());
-    assert_eq!(res[3].1, "v2".as_bytes());
+    assert_eq!(res[0].value.as_slice(), "v5".as_bytes());
+    assert_eq!(res[1].value.as_slice(), "v4".as_bytes());
+    assert_eq!(res[2].value.as_slice(), "v3".as_bytes());
+    assert_eq!(res[3].value.as_slice(), "v2".as_bytes());
 
     Ok(())
 }
@@ -851,7 +851,7 @@ async fn raw_delete_range() -> Result<()> {
 
     async fn scan_all(client: &RawClient) -> Result<BTreeMap<Key, Value>> {
         let mut data = BTreeMap::new();
-        for KvPair(key, value) in client.scan(.., 1024).await? {
+        for KvPair { key, value, .. } in client.scan(.., 1024).await? {
             data.insert(key, value);
         }
         Ok(data)
@@ -963,13 +963,13 @@ async fn raw_write_million() -> Result<()> {
     let mut r = client.scan(.., limit).await?;
     assert_eq!(r.len(), 256);
     for (i, val) in r.iter().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8);
     }
     r = client.scan(vec![100, 0, 0, 0].., limit).await?;
     assert_eq!(r.len(), 156);
     for (i, val) in r.iter().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 100);
     }
     r = client
@@ -977,7 +977,7 @@ async fn raw_write_million() -> Result<()> {
         .await?;
     assert_eq!(r.len(), 195);
     for (i, val) in r.iter().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 5);
     }
     r = client
@@ -985,7 +985,7 @@ async fn raw_write_million() -> Result<()> {
         .await?;
     assert_eq!(r.len(), 196);
     for (i, val) in r.iter().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 5);
     }
     r = client
@@ -993,7 +993,7 @@ async fn raw_write_million() -> Result<()> {
         .await?;
     assert_eq!(r.len(), 251);
     for (i, val) in r.iter().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 5);
     }
     r = client
@@ -1007,13 +1007,13 @@ async fn raw_write_million() -> Result<()> {
     let mut r = client.scan(.., limit).await?;
     assert_eq!(r.len(), limit as usize);
     for (i, val) in r.iter().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8);
     }
     r = client.scan(vec![100, 0, 0, 0].., limit).await?;
     assert_eq!(r.len(), limit as usize);
     for (i, val) in r.iter().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 100);
     }
     r = client
@@ -1021,7 +1021,7 @@ async fn raw_write_million() -> Result<()> {
         .await?;
     assert_eq!(r.len(), limit as usize);
     for (i, val) in r.iter().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 5);
     }
     r = client
@@ -1029,7 +1029,7 @@ async fn raw_write_million() -> Result<()> {
         .await?;
     assert_eq!(r.len(), limit as usize);
     for (i, val) in r.iter().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 5);
     }
     r = client
@@ -1037,7 +1037,7 @@ async fn raw_write_million() -> Result<()> {
         .await?;
     assert_eq!(r.len(), limit as usize);
     for (i, val) in r.iter().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 5);
     }
     r = client
@@ -1057,13 +1057,13 @@ async fn raw_write_million() -> Result<()> {
     let mut r = client.scan_reverse(.., limit).await?;
     assert_eq!(r.len(), 256);
     for (i, val) in r.iter().rev().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8);
     }
     r = client.scan_reverse(vec![100, 0, 0, 0].., limit).await?;
     assert_eq!(r.len(), 156);
     for (i, val) in r.iter().rev().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 100);
     }
     r = client
@@ -1071,7 +1071,7 @@ async fn raw_write_million() -> Result<()> {
         .await?;
     assert_eq!(r.len(), 195);
     for (i, val) in r.iter().rev().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 5);
     }
     r = client
@@ -1079,7 +1079,7 @@ async fn raw_write_million() -> Result<()> {
         .await?;
     assert_eq!(r.len(), 196);
     for (i, val) in r.iter().rev().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 5);
     }
     r = client
@@ -1087,7 +1087,7 @@ async fn raw_write_million() -> Result<()> {
         .await?;
     assert_eq!(r.len(), 251);
     for (i, val) in r.iter().rev().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + 5);
     }
     r = client
@@ -1102,14 +1102,14 @@ async fn raw_write_million() -> Result<()> {
     let mut expected_start: u8 = 255 - limit as u8 + 1; // including endKey
     assert_eq!(r.len(), limit as usize);
     for (i, val) in r.iter().rev().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + expected_start);
     }
     r = client.scan_reverse(vec![100, 0, 0, 0].., limit).await?;
     expected_start = 255 - limit as u8 + 1; // including endKey
     assert_eq!(r.len(), limit as usize);
     for (i, val) in r.iter().rev().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + expected_start);
     }
     r = client
@@ -1118,7 +1118,7 @@ async fn raw_write_million() -> Result<()> {
     expected_start = 200 - limit as u8;
     assert_eq!(r.len(), limit as usize);
     for (i, val) in r.iter().rev().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + expected_start);
     }
     r = client
@@ -1127,7 +1127,7 @@ async fn raw_write_million() -> Result<()> {
     expected_start = 200 - limit as u8 + 1; // including endKey
     assert_eq!(r.len(), limit as usize);
     for (i, val) in r.iter().rev().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + expected_start);
     }
     r = client
@@ -1136,7 +1136,7 @@ async fn raw_write_million() -> Result<()> {
     expected_start = 255 - limit as u8 + 1; // including endKey
     assert_eq!(r.len(), limit as usize);
     for (i, val) in r.iter().rev().enumerate() {
-        let k: Vec<u8> = val.0.clone().into();
+        let k: Vec<u8> = val.key.clone().into();
         assert_eq!(k[0], i as u8 + expected_start);
     }
     r = client
@@ -1197,7 +1197,10 @@ async fn raw_large_batch_put() -> Result<()> {
 
     client.batch_put(pairs.clone()).await?;
 
-    let keys = pairs.iter().map(|pair| pair.0.clone()).collect::<Vec<_>>();
+    let keys = pairs
+        .iter()
+        .map(|pair| pair.key.clone())
+        .collect::<Vec<_>>();
     // split into multiple batch_get to avoid response too large error
     const BATCH_SIZE: usize = 1000;
     let mut got = Vec::with_capacity(num_pairs);
@@ -1717,7 +1720,7 @@ async fn txn_scan_reverse() -> Result<()> {
         let resp = t2
             .scan_reverse(bound_range, 3)
             .await?
-            .map(|kv| (kv.0, kv.1))
+            .map(|kv| (kv.key, kv.value))
             .collect::<Vec<(Key, Vec<u8>)>>();
         assert_eq!(
             resp,
@@ -1734,7 +1737,7 @@ async fn txn_scan_reverse() -> Result<()> {
         let resp = t2
             .scan_reverse(bound_range, 3)
             .await?
-            .map(|kv| (kv.0, kv.1))
+            .map(|kv| (kv.key, kv.value))
             .collect::<Vec<(Key, Vec<u8>)>>();
         assert_eq!(
             resp,
@@ -1752,7 +1755,7 @@ async fn txn_scan_reverse() -> Result<()> {
         let resp = t2
             .scan_reverse(bound_range, 3)
             .await?
-            .map(|kv| (kv.0, kv.1))
+            .map(|kv| (kv.key, kv.value))
             .collect::<Vec<(Key, Vec<u8>)>>();
         assert_eq!(resp, vec![(Key::from(k2), v2),]);
     }
@@ -1799,7 +1802,7 @@ async fn txn_scan_reverse_multi_regions() -> Result<()> {
     let resp = t2
         .scan_reverse(bound_range, 100)
         .await?
-        .map(|kv| (kv.0, kv.1))
+        .map(|kv| (kv.key, kv.value))
         .collect::<Vec<(Key, Vec<u8>)>>();
     assert_eq!(resp, reverse_resp);
     t2.commit().await?;
@@ -1933,7 +1936,7 @@ async fn verify_mutate(is_pessimistic: bool) -> Result<()> {
         .batch_get(vec!["k0".to_owned(), "k1".to_owned(), "k2".to_owned()])
         .await
         .unwrap()
-        .map(|pair| (pair.0, pair.1))
+        .map(|pair| (pair.key, pair.value))
         .collect();
     assert_eq!(res.len(), 2);
     assert_eq!(
@@ -2070,7 +2073,7 @@ async fn txn_pipelined_flush() -> Result<()> {
         let got: HashMap<Key, Value> = snapshot
             .batch_get(keys.clone())
             .await?
-            .map(|pair| (pair.0, pair.1))
+            .map(|pair| (pair.key, pair.value))
             .collect();
         if got.len() == expected.len() {
             assert_eq!(got, expected);
@@ -2084,7 +2087,7 @@ async fn txn_pipelined_flush() -> Result<()> {
     let got: HashMap<Key, Value> = snapshot
         .batch_get(keys)
         .await?
-        .map(|pair| (pair.0, pair.1))
+        .map(|pair| (pair.key, pair.value))
         .collect();
     assert_eq!(got, expected);
     Ok(())
