@@ -11,6 +11,8 @@
 - `client-go/util/request_source*_test.go`: Go-style `context.Context` keys/RequestSource struct/BuildRequestSource (parity checklist already标注 N/A)
 - `client-go/util/async/*_test.go`: Go-specific runloop/goroutine utilities
 - `client-go/util/rate_limit_test.go`: Go channel token limiter utility
+- `client-go/tikvrpc/tikvrpc_test.go`: Go BatchCommands request/response wrappers + marshal/race regression（Rust 目前无 batch-client/BatchCommands 发送环）
+- `client-go/tikvrpc/*/main_test.go`: Go `goleak` harness
 - `client-go/config/config_test.go`: DSN ParsePath / failpoint 注入 TxnScope / gRPC keepalive timeout 细节（Rust 入口是 PD endpoints + `Config`）
 - `client-go/internal/unionstore/**`: Go memdb/art/rbt/staging/snapshot/memory-footprint 细节；Rust 事务 buffer 采用不同结构（只迁移“事务本地 buffer 语义”相关测试）
 - `client-go/internal/mockstore/**`: Go mocktikv/mockstore 生态；Rust 使用 `src/mock.rs`（不做 1:1 mock server 迁移）

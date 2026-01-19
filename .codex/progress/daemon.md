@@ -13,11 +13,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- tests/audit-tikvrpc-tests：梳理 Go `tikvrpc/*_test.go` 的可迁移语义并补齐映射/标注 N/A
-  - 计划：逐文件判定（BatchCommands/batch-client 相关 -> N/A；可迁移纯逻辑 -> Rust unit test）
-  - 步骤：更新 `.codex/progress/client-go-tests-port.md`；必要时补 Rust 单测
-  - 验证：`cargo test`
-
 # 待做工作
 
 - tests/audit-retry-backoffer-parity：对齐 Go `config/retry/backoff_test.go` 的可迁移 backoff/backoffer 语义
@@ -26,6 +21,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 验证：`cargo test`
 
 # 已完成工作
+
+- tests/audit-tikvrpc-tests：梳理 Go `tikvrpc/*_test.go` 的可迁移语义并补齐映射/标注 N/A
+  - 结论：BatchCommands/batch-client 相关用例（`tikvrpc_test.go`）标注 N/A；interceptor 用例已由 `src/interceptor.rs` 单测覆盖
+  - 验证：`cargo test`
+  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
 
 - tests/port-apicodec-v2-more：对齐 Go `internal/apicodec/codec_v2_test.go` 的 keyspace v2 编解码边界（可迁移部分）
   - 关键：新增 `Keyspace::try_enable` 校验 24-bit keyspace id；避免 silent truncate（用 `InternalError` 报错，不引入新 public error variant）
