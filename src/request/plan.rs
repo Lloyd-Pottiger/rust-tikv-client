@@ -504,10 +504,13 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
         if let Ok(store_id) = store_id {
             pd_client.invalidate_store_cache(store_id).await;
         }
-        Ok(false)
+        Ok(true)
     } else if let Some(epoch_not_match) = e.epoch_not_match {
         on_region_epoch_not_match(pd_client.clone(), region_store, epoch_not_match).await
-    } else if e.stale_command.is_some() || e.region_not_found.is_some() {
+    } else if e.region_not_found.is_some() {
+        pd_client.invalidate_region_cache(ver_id).await;
+        Ok(true)
+    } else if e.stale_command.is_some() {
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
     } else if e.server_is_busy.is_some()
@@ -1226,6 +1229,7 @@ mod test {
         client: MockKvClient,
         region: Mutex<RegionWithLeader>,
         invalidated_regions: AtomicUsize,
+        invalidated_stores: AtomicUsize,
         update_leader_calls: AtomicUsize,
     }
 
@@ -1267,6 +1271,7 @@ mod test {
                     leader: Some(leader),
                 }),
                 invalidated_regions: AtomicUsize::new(0),
+                invalidated_stores: AtomicUsize::new(0),
                 update_leader_calls: AtomicUsize::new(0),
             }
         }
@@ -1383,7 +1388,9 @@ mod test {
             self.invalidated_regions.fetch_add(1, Ordering::SeqCst);
         }
 
-        async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {
+            self.invalidated_stores.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[derive(Debug, Default)]
@@ -1819,6 +1826,333 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_retryable_multi_region_region_not_found_retries_without_backoff() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            region_not_found: Some(errorpb::RegionNotFound::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // No backoff attempts available: region_not_found must be handled without backoff.
+            backoff: Backoff::no_jitter_backoff(50, 50, 0),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_multi_region_store_not_match_retries_without_backoff() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            store_not_match: Some(errorpb::StoreNotMatch::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // No backoff attempts available: store_not_match must be handled without backoff.
+            backoff: Backoff::no_jitter_backoff(50, 50, 0),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_retryable_multi_region_stale_command_backoffs() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            stale_command: Some(errorpb::StaleCommand::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            backoff: Backoff::no_jitter_backoff(50, 50, 1),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let handle = tokio::spawn(async move { plan.execute().await });
+
+        while calls.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(49)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+
+        let results = handle.await.expect("task panicked")?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_multi_region_epoch_not_match_resolved_does_not_consume_backoff(
+    ) -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            epoch_not_match: Some(errorpb::EpochNotMatch {
+                                current_regions: vec![metapb::Region {
+                                    id: 1,
+                                    region_epoch: Some(metapb::RegionEpoch {
+                                        conf_ver: 10,
+                                        version: 10,
+                                    }),
+                                    ..Default::default()
+                                }],
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        // Ensure the cached epoch is behind, so epoch-not-match is "resolved" (retry immediately).
+        pd_client.region.lock().unwrap().region.region_epoch = Some(metapb::RegionEpoch {
+            conf_ver: 1,
+            version: 1,
+        });
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // No backoff attempts available: resolved epoch-not-match must not consume backoff.
+            backoff: Backoff::no_jitter_backoff(50, 50, 0),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_retryable_multi_region_epoch_not_match_unresolved_backoffs() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            epoch_not_match: Some(errorpb::EpochNotMatch {
+                                current_regions: vec![metapb::Region {
+                                    id: 1,
+                                    region_epoch: Some(metapb::RegionEpoch {
+                                        conf_ver: 1,
+                                        version: 1,
+                                    }),
+                                    ..Default::default()
+                                }],
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        // Ensure the cached epoch is ahead, so epoch-not-match is "unresolved" (backoff).
+        pd_client.region.lock().unwrap().region.region_epoch = Some(metapb::RegionEpoch {
+            conf_ver: 10,
+            version: 10,
+        });
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            backoff: Backoff::no_jitter_backoff(50, 50, 1),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let handle = tokio::spawn(async move { plan.execute().await });
+
+        while calls.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(49)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+
+        let results = handle.await.expect("task panicked")?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
     #[derive(Clone)]
     struct MultiStorePdClient {
         client: MockKvClient,
@@ -2105,7 +2439,7 @@ mod test {
             ..Default::default()
         };
 
-        assert!(!handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert!(handle_region_error(pd_client.clone(), err, region_store).await?);
         assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
         assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 1);
         Ok(())

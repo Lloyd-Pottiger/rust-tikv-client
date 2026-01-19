@@ -13,8 +13,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- tests/port-region-request-error-retry-semantics：扩展 region_request sender 的 region error retry/backoff 覆盖面（对齐 client-go `internal/locate/region_request*_test.go`）
-  - 计划：补齐 StaleCommand/RegionNotFound/StoreNotMatch/EpochNotMatch 的 retry vs backoff 语义（resolved 不消耗 backoff；unresolved 才 backoff）
+- tests/port-region-request-key-not-in-region：对齐 KeyNotInRegion 的 invalidate/retry 语义（对齐 client-go `internal/locate/region_request*_test.go`）
+  - 计划：KeyNotInRegion -> invalidate region（不 invalidate store）+ 立即重试（不消耗 backoff）
   - 验证：`cargo test`
   - 文件：`src/request/plan.rs`，`.codex/progress/daemon.md`
 
@@ -23,7 +23,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 # 已完成工作
 
 - core/request+cache-retry-parity：对齐 client-go region/cache/request retry 关键语义（plan retry、NotLeader/backoff、region cache inflight）
-  - 关键：resolved region error 不消耗 backoff；NotLeader(leader present) -> update_leader+retry；NotLeader(no leader) -> invalidate+backoff；RegionCache `get_region_by_{id,key}` in-flight singleflight（成功/失败都清理并唤醒）
+  - 关键：resolved region errors（NotLeader(with leader)/StoreNotMatch/RegionNotFound/EpochNotMatch when behind）立即重试不消耗 backoff；需要等待的错误（NotLeader(no leader)/StaleCommand/EpochNotMatch when cache ahead）才 backoff；RegionCache `get_region_by_{id,key}` in-flight singleflight（成功/失败都清理并唤醒）
   - 覆盖：新增/扩展 plan/region_cache 单测（tokio start_paused backoff 断言；并发 get_region* 只触发一次 PD fetch）
   - 验证：`cargo test`
   - 文件：`src/request/plan.rs`，`src/region_cache.rs`，`Cargo.toml`，`.codex/progress/daemon.md`
