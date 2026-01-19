@@ -44,6 +44,8 @@ mod plan_builder;
 mod read_routing;
 mod shard;
 mod store_health;
+#[cfg(test)]
+mod metrics_collector;
 
 /// Abstracts any request sent to a TiKV server.
 #[async_trait]

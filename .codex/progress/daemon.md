@@ -13,15 +13,21 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- tests/port-metrics-collector：迁移 locate/network collector 的可迁移指标语义（Go `internal/locate/metrics_collector_test.go`）
-  - 计划：对齐 request/response bytes 统计、stale-read metrics；缺失的 prom 指标先用 Rust stats 等价覆盖
-  - 步骤：定位 Rust 对应 stats/metrics 模块；补单测验证 counter 增量；必要时加 feature-gated prometheus 集成
-  - 验证：`cargo test`
-  - 文件：`src/stats/*`，`src/request/*`，`.codex/progress/daemon.md`
-
 # 待做工作
 
+- tests/port-resourcecontrol-request-info：迁移 resource control RequestInfo 语义（Go `internal/resourcecontrol/resource_control_test.go`）
+  - 计划：实现 should_bypass(request_source) + write_bytes(prewrite/commit) + store_id(ctx.peer) 提取；不做 PD/NextGen 全链路
+  - 步骤：新增 RequestInfo helper + 单测覆盖 BatchGet/Prewrite/Commit/ nil peer；对齐 write-bytes 计算（mutations + primary_lock + keys）
+  - 验证：`cargo test`
+  - 文件：`src/*`，`.codex/progress/daemon.md`
+
 # 已完成工作
+
+- tests/port-metrics-collector：迁移 locate/network collector 的 request/response bytes + stale-read metrics（Go `internal/locate/metrics_collector_test.go`）
+  - 决策：用 `prost::Message::encoded_len` 对齐 Go proto.Size；stale-read metrics 在 gRPC dispatch 处按 `Context.stale_read` 统计（暂按 local-zone）
+  - 覆盖：ExecDetails unpacked bytes（local/cross-zone）；stale-read out/in bytes + req counter（prometheus）
+  - 验证：`cargo test`
+  - 文件：`src/stats.rs`，`src/store/request.rs`，`src/request/metrics_collector.rs`，`src/request/mod.rs`，`.codex/progress/daemon.md`
 
 - tests/port-store-client-tests：补齐 store/rpc client 并发/错误路径单测（对齐 go `internal/client/*_test.go` 的可迁移部分）
   - 覆盖：KvRpcClient dispatch error 透传；RetryableMultiRegion 遇到 gRPC Status（unavailable/deadline_exceeded）会 invalidate region+store cache 且依赖 backoff budget 重试

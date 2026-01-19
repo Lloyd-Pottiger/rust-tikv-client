@@ -4,6 +4,7 @@ use std::any::Any;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use prost::Message;
 use tonic::transport::Channel;
 use tonic::IntoRequest;
 
@@ -59,14 +60,25 @@ macro_rules! impl_request {
                 client: &TikvClient<Channel>,
                 timeout: Duration,
             ) -> Result<Box<dyn Any>> {
+                let stale_read = self
+                    .context
+                    .as_ref()
+                    .map(|ctx| ctx.stale_read)
+                    .unwrap_or(false);
+                if stale_read {
+                    // Access locality is not tracked in the Rust client yet; treat it as local-zone.
+                    crate::stats::observe_stale_read_request(false, self.encoded_len());
+                }
+
                 let mut req = self.clone().into_request();
                 req.set_timeout(timeout);
-                client
-                    .clone()
-                    .$fun(req)
-                    .await
-                    .map(|r| Box::new(r.into_inner()) as Box<dyn Any>)
-                    .map_err(Error::GrpcAPI)
+                let resp = client.clone().$fun(req).await.map_err(Error::GrpcAPI)?;
+                let inner = resp.into_inner();
+                if stale_read {
+                    // Access locality is not tracked in the Rust client yet; treat it as local-zone.
+                    crate::stats::observe_stale_read_response(false, inner.encoded_len());
+                }
+                Ok(Box::new(inner) as Box<dyn Any>)
             }
 
             fn label(&self) -> &'static str {

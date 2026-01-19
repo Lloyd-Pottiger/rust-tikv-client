@@ -24,6 +24,11 @@ mod imp {
 
     use crate::Result;
 
+    const LABEL_LOCAL: &str = "local";
+    const LABEL_CROSS_ZONE: &str = "cross-zone";
+    const LABEL_IN: &str = "in";
+    const LABEL_OUT: &str = "out";
+
     struct Metrics {
         tikv_request_duration: Option<HistogramVec>,
         tikv_request_total: Option<IntCounterVec>,
@@ -36,6 +41,9 @@ mod imp {
         pd_failed_request_duration: Option<HistogramVec>,
         pd_failed_request_total: Option<IntCounterVec>,
         pd_tso_batch_size: Option<Histogram>,
+
+        stale_read_req_total: Option<IntCounterVec>,
+        stale_read_bytes: Option<IntCounterVec>,
     }
 
     static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -134,6 +142,17 @@ mod imp {
                     "pd_tso_batch_size",
                     "Bucketed histogram of TSO request batch size",
                 ),
+
+                stale_read_req_total: Self::register_int_counter_vec(
+                    "tikv_stale_read_req_total",
+                    "Total number of stale read requests",
+                    &["location"],
+                ),
+                stale_read_bytes: Self::register_int_counter_vec(
+                    "tikv_stale_read_bytes_total",
+                    "Total bytes of stale read requests and responses",
+                    &["location", "direction"],
+                ),
             }
         }
     }
@@ -227,6 +246,75 @@ mod imp {
         }
     }
 
+    pub(crate) fn observe_stale_read_request(is_cross_zone: bool, bytes: usize) {
+        let location = if is_cross_zone {
+            LABEL_CROSS_ZONE
+        } else {
+            LABEL_LOCAL
+        };
+        if let Some(c) = metrics().stale_read_req_total.as_ref() {
+            c.with_label_values(&[location]).inc();
+        }
+        if let Some(c) = metrics().stale_read_bytes.as_ref() {
+            c.with_label_values(&[location, LABEL_OUT])
+                .inc_by(bytes as u64);
+        }
+    }
+
+    pub(crate) fn observe_stale_read_response(is_cross_zone: bool, bytes: usize) {
+        let location = if is_cross_zone {
+            LABEL_CROSS_ZONE
+        } else {
+            LABEL_LOCAL
+        };
+        if let Some(c) = metrics().stale_read_bytes.as_ref() {
+            c.with_label_values(&[location, LABEL_IN])
+                .inc_by(bytes as u64);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stale_read_out_bytes(is_cross_zone: bool) -> u64 {
+        let location = if is_cross_zone {
+            LABEL_CROSS_ZONE
+        } else {
+            LABEL_LOCAL
+        };
+        metrics()
+            .stale_read_bytes
+            .as_ref()
+            .map(|c| c.with_label_values(&[location, LABEL_OUT]).get())
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stale_read_in_bytes(is_cross_zone: bool) -> u64 {
+        let location = if is_cross_zone {
+            LABEL_CROSS_ZONE
+        } else {
+            LABEL_LOCAL
+        };
+        metrics()
+            .stale_read_bytes
+            .as_ref()
+            .map(|c| c.with_label_values(&[location, LABEL_IN]).get())
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stale_read_req_count(is_cross_zone: bool) -> u64 {
+        let location = if is_cross_zone {
+            LABEL_CROSS_ZONE
+        } else {
+            LABEL_LOCAL
+        };
+        metrics()
+            .stale_read_req_total
+            .as_ref()
+            .map(|c| c.with_label_values(&[location]).get())
+            .unwrap_or(0)
+    }
+
     /// Convert Duration to seconds.
     #[inline]
     fn duration_to_sec(d: Duration) -> f64 {
@@ -265,6 +353,27 @@ mod imp {
 
     #[allow(dead_code)]
     pub(crate) fn ensure_metrics_registered() {}
+
+    #[allow(dead_code)]
+    pub(crate) fn observe_stale_read_request(_is_cross_zone: bool, _bytes: usize) {}
+
+    #[allow(dead_code)]
+    pub(crate) fn observe_stale_read_response(_is_cross_zone: bool, _bytes: usize) {}
+
+    #[cfg(test)]
+    pub(crate) fn stale_read_out_bytes(_is_cross_zone: bool) -> u64 {
+        0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stale_read_in_bytes(_is_cross_zone: bool) -> u64 {
+        0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stale_read_req_count(_is_cross_zone: bool) -> u64 {
+        0
+    }
 }
 
 pub use imp::*;
