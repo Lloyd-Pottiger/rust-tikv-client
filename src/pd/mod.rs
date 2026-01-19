@@ -1,5 +1,7 @@
 mod client;
 mod cluster;
+#[cfg(test)]
+mod read_ts_validation;
 mod retry;
 mod timestamp;
 

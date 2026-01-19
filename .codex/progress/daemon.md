@@ -15,13 +15,25 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port-pd-oracle-validate-read-ts：迁移 PD oracle ValidateReadTS/stale-read read-ts 校验语义（Go `oracle/oracles/pd_test.go`）
-  - 计划：补齐 validate_read_ts 相关接口/缓存/interval 调整；先做 unit-test + mock PD
-  - 步骤：梳理 Rust `src/pd/*` timestamp/oracle；实现 validate_read_ts API（含不同 source 的隔离/复用）；按 go 用例拆小测试
+- tests/port-pd-oracle-low-res-ts：迁移 PD oracle low-resolution TS / stale-ts / interval update 相关语义（Go `oracle/oracles/pd_test.go` 其余用例）
+  - 计划：实现 low-res ts cache + update loop（tokio time 可控，避免 sleep flake）；补齐 stale timestamp/expired 计算；补齐/替换为 Rust 等价 API
+  - 步骤：梳理 Go `GetLowResolutionTimestamp/GetStaleTimestamp/UntilExpired/SetLowResolutionTimestampUpdateInterval`；设计 Rust oracle abstraction（或 pd/client 内部组件）；按用例拆 test（mock PD + tokio time pause/advance）
   - 验证：`cargo test`
-  - 文件：`src/pd/*`，`src/timestamp.rs`，`.codex/progress/daemon.md`
+  - 文件：`src/pd/*`，`src/timestamp.rs`，`src/transaction/*`，`.codex/progress/daemon.md`
+
+- tests/port-store-client-unit：迁移 client-go `internal/client/*_test.go` 的可迁移语义到 Rust `src/store/*`
+  - 计划：补齐 dispatch error 分类/timeout/ctx 应用；与 PlanBuilder retry/invalidate 的组合测试
+  - 步骤：列出 go 测试与 Rust 对应点；为 `KvRpcClient`/`Store` 增加 mock + unit tests；必要时补缺实现
+  - 验证：`cargo test`
+  - 文件：`src/store/*`，`src/request/*`，`.codex/progress/daemon.md`
 
 # 已完成工作
+
+- tests/port-pd-oracle-validate-read-ts：迁移 PD oracle ValidateReadTS/stale-read read-ts 校验语义（Go `oracle/oracles/pd_test.go`）
+  - 关键：实现 per-txn-scope singleflight GetTS + low-res ts 缓存；readTS>currentTS 时最多重试一次避免 singleflight 复用导致的 false-positive；单 waiter cancel 不传播到共享 GetTS
+  - 覆盖：MaxUint64 sentinel（stale/normal）；MaxInt64..MaxUint64 invalid range；ts+1/ts+2 pass，ts+3 fail；并发校验阻塞/取消；singleflight reuse + retry
+  - 验证：`cargo test`
+  - 文件：`src/pd/read_ts_validation.rs`，`src/pd/mod.rs`，`.codex/progress/daemon.md`
 
 - tests/core-request-retry-parity：对齐 client-go region/cache/request retry + replica selection 关键语义（region errors 分类、backoff budget、cache invalidate、TTL/inflight、pinned store/slow-store score）
   - 关键：replica-read stale-command 不 backoff 直接切 peer（加 non-witness fast-retry 上限）；unknown region errors -> invalidate region cache + unresolved backoff；KeyNotInRegion resolved 立即重试
