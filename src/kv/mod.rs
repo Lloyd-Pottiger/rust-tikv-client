@@ -5,14 +5,24 @@ mod bound_range;
 pub mod codec;
 mod key;
 mod kvpair;
+mod options;
 mod value;
+mod value_entry;
 
 pub use bound_range::BoundRange;
 pub use bound_range::IntoOwnedRange;
 pub use key::Key;
 pub use key::KvPairTTL;
 pub use kvpair::KvPair;
+pub use options::batch_get_to_get_options;
+pub use options::with_return_commit_ts;
+pub use options::BatchGetOption;
+pub use options::BatchGetOptions;
+pub use options::GetOption;
+pub use options::GetOptions;
+pub use options::GetOrBatchGetOption;
 pub use value::Value;
+pub use value_entry::ValueEntry;
 
 struct HexRepr<'a>(pub &'a [u8]);
 

@@ -25,7 +25,7 @@
 - LockResolver cache: `client-go/txnkv/txnlock/lock_resolver_test.go` -> `src/transaction/lock.rs`（resolved cache 命中不触发 secondary-check RPC）
 - Region cache core invariants: `client-go/internal/locate/region_cache_test.go`(部分语义) -> `src/region_cache.rs#L423`
 - Interceptor chain basics: `client-go/tikvrpc/interceptor/*` -> `src/interceptor.rs#L309`
-- KV primitives: `client-go/kv/*` -> `src/kv/*`（Key/BoundRange/codec 单测）
+- KV primitives: `client-go/kv/*` -> `src/kv/*`（Key/BoundRange/codec + Get/BatchGet options + ValueEntry 单测）
 - Trace flags/events: `client-go/trace/*` -> `src/trace.rs#L189`
 - KeyError debug-info redaction: `client-go/error/error_test.go` -> `src/common/errors.rs#L905`
 - Raw/Txn request context injection: 覆盖在 `src/raw/client.rs` / `src/transaction/transaction.rs` 的单元测试 + `tests/integration_tests.rs`

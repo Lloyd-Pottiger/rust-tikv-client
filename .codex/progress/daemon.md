@@ -17,6 +17,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- tests/port-kv-options-value-entry：迁移 Go `kv/kv_test.go`（Get/BatchGet options + ValueEntry 基础语义）
+  - 关键：新增 `ValueEntry`（value+commit_ts）与 `GetOptions/BatchGetOptions`（return_commit_ts）；提供 `with_return_commit_ts` + `batch_get_to_get_options`
+  - 覆盖：Apply/convert 语义 + `is_value_empty`（对齐 Go 单测）
+  - 验证：`cargo test`
+  - 文件：`src/kv/options.rs`，`src/kv/value_entry.rs`，`src/kv/mod.rs`，`src/lib.rs`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+
 - tests/port-lock-resolver-cache：迁移 Go `txnkv/txnlock/lock_resolver_test.go::TestLockResolverCache`（resolved cache 语义）
   - 关键：预填 `ResolveLocksContext.resolved` 的 committed status；`LockResolver::check_txn_status` 命中缓存，不触发 CheckTxnStatus/CheckSecondaryLocks RPC
   - 覆盖：新增 `cleanup_locks` 单测（RPC 触发即 panic；ResolveLock 正常返回）
