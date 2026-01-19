@@ -13,16 +13,15 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- tests/port-replica-selector-fast-retry：移植 client-go fast retry/avoid slow store 的等价语义
-  - 范围：`client-go/internal/locate/replica_selector_test.go`，`src/request/plan.rs`
-  - 计划：
-    - 用 MockKvClient 构造：首个 replica 返回特定错误 -> 标记 slow -> 次次选择不同 replica
-    - 验证 retry/backoff 行为与 request_source/attempt observability
-  - 验证：`cargo test`；`make check`
-
 # 待做工作
 
 # 已完成工作
+
+- tests/port-replica-selector-fast-retry：移植 client-go fast retry/avoid slow store 的等价语义（最小可测覆盖）
+  - 关键：PreferLeader retry path 走 score 选点，基于 StoreHealthMap 的 slow 标记避开失败 store；gRPC transport error 触发 mark slow 后可换点重试
+  - 覆盖：MockKvClient 第一次打到 replica->gRPC error->标 slow；第二次避开 slow replica；同时断言 `Context.is_retry_request` 与 patched request_source
+  - 验证：`cargo test`；`make check`
+  - 文件：`src/request/read_routing.rs`，`src/request/plan.rs`，`.codex/progress/daemon.md`
 
 - feat+tests/replica-selection-score：实现最小 score 选择并移植 client-go `TestReplicaSelectorCalculateScore` 的等价语义
   - 关键：引入 score bits（NotSlow/LabelMatches/PreferLeader/NormalPeer/NotAttempted）；Mixed/PreferLeader attempt=0 走 score 选点；同 score 用 seed/attempt 做 deterministic tie-break

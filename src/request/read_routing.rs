@@ -226,10 +226,13 @@ impl ReadRouting {
             | ReplicaReadType::Mixed
             | ReplicaReadType::PreferLeader => {
                 if self.replica_read == ReplicaReadType::PreferLeader {
-                    let mut replicas = followers;
-                    replicas.extend(learners);
-                    pick_peer(&replicas, region.id(), self.seed, attempt)
-                        .unwrap_or_else(|| leader.clone())
+                    self.select_peer_by_score(
+                        region.id(),
+                        attempt,
+                        leader,
+                        &region.region.peers,
+                        ScoreStrategy::default(),
+                    )
                 } else {
                     leader.clone()
                 }

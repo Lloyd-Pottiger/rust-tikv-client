@@ -1180,6 +1180,7 @@ mod test {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use futures::stream::BoxStream;
     use futures::stream::{self};
@@ -1498,6 +1499,182 @@ mod test {
         assert_eq!(results.len(), 1);
         let response = results.into_iter().next().unwrap()?;
         assert!(response.not_found);
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct MultiStorePdClient {
+        client: MockKvClient,
+        region: RegionWithLeader,
+    }
+
+    impl MultiStorePdClient {
+        fn new(client: MockKvClient) -> Self {
+            let leader = metapb::Peer {
+                id: 101,
+                store_id: 1,
+                role: metapb::PeerRole::Voter as i32,
+                is_witness: false,
+            };
+            let follower_1 = metapb::Peer {
+                id: 102,
+                store_id: 2,
+                role: metapb::PeerRole::Voter as i32,
+                is_witness: false,
+            };
+            let follower_2 = metapb::Peer {
+                id: 103,
+                store_id: 3,
+                role: metapb::PeerRole::Voter as i32,
+                is_witness: false,
+            };
+
+            let mut region = metapb::Region::default();
+            region.id = 1;
+            region.start_key = vec![];
+            region.end_key = vec![];
+            region.region_epoch = Some(metapb::RegionEpoch {
+                conf_ver: 0,
+                version: 0,
+            });
+            region.peers = vec![leader.clone(), follower_1, follower_2];
+
+            Self {
+                client,
+                region: RegionWithLeader {
+                    region,
+                    leader: Some(leader),
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PdClient for MultiStorePdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            region: RegionWithLeader,
+        ) -> Result<RegionStore> {
+            Ok(RegionStore::new(region, Arc::new(self.client.clone())))
+        }
+
+        async fn region_for_key(&self, _key: &Key) -> Result<RegionWithLeader> {
+            Ok(self.region.clone())
+        }
+
+        async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+            Ok(self.region.clone())
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Ok(Timestamp::default())
+        }
+
+        async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+            Ok(Timestamp::default())
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Ok(keyspacepb::KeyspaceMeta {
+                id: 0,
+                name: keyspace.to_owned(),
+                state: keyspacepb::KeyspaceState::Enabled as i32,
+                ..Default::default()
+            })
+        }
+
+        async fn all_stores(&self) -> Result<Vec<Store>> {
+            Ok(vec![Store::new(Arc::new(self.client.clone()))])
+        }
+
+        async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {}
+
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+    }
+
+    #[tokio::test]
+    async fn test_fast_retry_avoids_slow_store_after_grpc_error() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_hook = seen.clone();
+
+        let pd_client = Arc::new(MultiStorePdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let ctx = req
+                    .context
+                    .as_ref()
+                    .expect("missing context on RawGetRequest");
+                let peer = ctx.peer.as_ref().expect("missing peer in context");
+                seen_for_hook.lock().unwrap().push((
+                    peer.store_id,
+                    ctx.is_retry_request,
+                    ctx.request_source.clone(),
+                ));
+
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    return Err(Error::GrpcAPI(Status::unavailable("grpc error")));
+                }
+                Ok(Box::new(kvrpcpb::RawGetResponse {
+                    not_found: true,
+                    ..Default::default()
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+
+        let read_routing = ReadRouting::new(crate::ReplicaReadType::PreferLeader, false)
+            .with_seed(1)
+            .with_request_source(Some(Arc::<str>::from("fast-retry")));
+        // Force the first attempt to pick a replica; then assert we avoid it after it becomes slow.
+        read_routing.mark_store_slow_for(1, Duration::from_secs(60));
+
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            backoff: Backoff::no_jitter_backoff(0, 0, 1),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing,
+        };
+
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+
+        let response = results.into_iter().next().unwrap()?;
+        assert!(response.not_found);
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, 2);
+        assert!(!seen[0].1);
+        assert_eq!(seen[0].2, "follower_fast-retry");
+
+        assert_eq!(seen[1].0, 3);
+        assert!(seen[1].1);
+        assert_eq!(seen[1].2, "retry_follower_follower_fast-retry");
         Ok(())
     }
 
