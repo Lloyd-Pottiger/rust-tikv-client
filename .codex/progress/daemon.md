@@ -14,8 +14,13 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 # 正在进行的工作
 
 # 待做工作
-
 # 已完成工作
+
+- tests/port-keyspace-endkey：补齐 apicodec v2 的 keyspace endKey/range 编码边界测试并修正实现
+  - 变更：新增 `keyspace_end_prefix`（4-byte prefix carry-increment）；修正空 range end：不再 `keyspace_id+1`，改为 byte-level 进位（覆盖 mode byte 溢出）
+  - 覆盖：补 `1<<8-1`/`1<<16-1`/`1<<24-1` endKey；补 v2 key ranges 的空 key/start/end 编码断言
+  - 验证：`cargo test`；`make check`
+  - 文件：`src/request/keyspace.rs`
 
 - tests/port-unit-more：迁移可独立运行的 client-go 单测（trace flags + keyspace apicodec parse/decode）
   - 决策：Rust crate 未暴露 apicodec decode API，先用 `cfg(test)` 的最小 helper 覆盖语义，避免 `dead_code`/clippy

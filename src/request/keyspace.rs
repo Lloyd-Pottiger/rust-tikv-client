@@ -88,14 +88,12 @@ impl EncodeKeyspace for BoundRange {
                 Bound::Excluded(key.encode_keyspace(keyspace, key_mode))
             }
             _ => {
-                let key = Key::from(vec![]);
-                let keyspace = match keyspace {
-                    Keyspace::Disable => Keyspace::Disable,
-                    Keyspace::Enable { keyspace_id } => Keyspace::Enable {
-                        keyspace_id: keyspace_id + 1,
-                    },
-                };
-                Bound::Excluded(key.encode_keyspace(keyspace, key_mode))
+                let mut key = Key::from(vec![]);
+                if let Keyspace::Enable { keyspace_id } = keyspace {
+                    let prefix = keyspace_end_prefix(keyspace_id, key_mode);
+                    prepend_bytes(&mut key.0, &prefix);
+                }
+                Bound::Excluded(key)
             }
         };
         self
@@ -184,6 +182,18 @@ fn keyspace_prefix(keyspace_id: u32, key_mode: KeyMode) -> [u8; KEYSPACE_PREFIX_
     prefix
 }
 
+fn keyspace_end_prefix(keyspace_id: u32, key_mode: KeyMode) -> [u8; KEYSPACE_PREFIX_LEN] {
+    let mut end = keyspace_prefix(keyspace_id, key_mode);
+    for byte in end.iter_mut().rev() {
+        let (value, overflow) = byte.overflowing_add(1);
+        *byte = value;
+        if !overflow {
+            break;
+        }
+    }
+    end
+}
+
 fn prepend_bytes<const N: usize>(vec: &mut Vec<u8>, prefix: &[u8; N]) {
     let original_len = vec.len();
     vec.reserve_exact(N);
@@ -264,6 +274,26 @@ mod tests {
     }
 
     #[test]
+    fn test_keyspace_end_prefix_carries_over_mode_byte() {
+        assert_eq!(
+            keyspace_end_prefix((1 << 8) - 1, KeyMode::Txn),
+            [b'x', 0, 1, 0]
+        );
+        assert_eq!(
+            keyspace_end_prefix((1 << 16) - 1, KeyMode::Txn),
+            [b'x', 1, 0, 0]
+        );
+        assert_eq!(
+            keyspace_end_prefix((1 << 24) - 2, KeyMode::Raw),
+            [b'r', 255, 255, 255]
+        );
+        assert_eq!(
+            keyspace_end_prefix((1 << 24) - 1, KeyMode::Raw),
+            [b's', 0, 0, 0]
+        );
+    }
+
+    #[test]
     fn test_encode_version() {
         let keyspace = Keyspace::Enable {
             keyspace_id: 0xDEAD,
@@ -311,6 +341,49 @@ mod tests {
             mutation.encode_keyspace(keyspace, key_mode),
             expected_mutation
         );
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: (1 << 24) - 1,
+        };
+        let expected_bound: BoundRange =
+            (Key::from(vec![b'r', 255, 255, 255])..Key::from(vec![b's', 0, 0, 0])).into();
+        let bound: BoundRange = (..).into();
+        assert_eq!(
+            bound.encode_keyspace(keyspace, KeyMode::Raw),
+            expected_bound
+        );
+    }
+
+    #[test]
+    fn test_encode_v2_key_ranges_matches_apicodec() {
+        let keyspace = Keyspace::Enable { keyspace_id: 4242 };
+        let key_mode = KeyMode::Raw;
+
+        let key_ranges: [BoundRange; 4] = [
+            (Key::from(vec![])..Key::from(vec![])).into(),
+            (Key::from(vec![])..Key::from(vec![b'z'])).into(),
+            (Key::from(vec![b'a'])..Key::from(vec![])).into(),
+            (Key::from(vec![b'a'])..Key::from(vec![b'z'])).into(),
+        ];
+
+        let keyspace_prefix = vec![b'r', 0, 16, 146];
+        let keyspace_end = vec![b'r', 0, 16, 147];
+
+        let mut keyspace_prefix_z = keyspace_prefix.clone();
+        keyspace_prefix_z.push(b'z');
+        let mut keyspace_prefix_a = keyspace_prefix.clone();
+        keyspace_prefix_a.push(b'a');
+
+        let expected: [BoundRange; 4] = [
+            (Key::from(keyspace_prefix.clone())..Key::from(keyspace_end.clone())).into(),
+            (Key::from(keyspace_prefix.clone())..Key::from(keyspace_prefix_z.clone())).into(),
+            (Key::from(keyspace_prefix_a.clone())..Key::from(keyspace_end.clone())).into(),
+            (Key::from(keyspace_prefix_a)..Key::from(keyspace_prefix_z)).into(),
+        ];
+
+        for (range, expected) in key_ranges.into_iter().zip(expected) {
+            assert_eq!(range.encode_keyspace(keyspace, key_mode), expected);
+        }
     }
 
     #[test]
