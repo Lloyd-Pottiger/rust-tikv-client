@@ -15,6 +15,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
+- infra/coverage：调查 llvm-cov “mismatched data” warning（尽量降噪/定位原因）
+  - 计划：用 `cargo llvm-cov -v`/`--failure-mode`/分目标运行定位；若不可消除则在 `doc/development.md` 解释来源与影响
+  - 验证：`make coverage-integration`
+  - 文件：`Makefile`，`doc/development.md`
+
 # 已完成工作
 
 - core/parity+quality：完成 client-go(v2) 关键能力与 Public API 对齐（Rust-idiomatic），并补齐关键测试/文档
@@ -30,3 +35,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 核对：`.codex/progress/parity-checklist.md` 无未勾选项；`rg TODO|todo!|unimplemented!|FIXME` 仅命中 `src/generated/**`
   - 验证：`make all` / `make coverage` / `make coverage-integration`（llvm-cov “mismatched data” warning 仍可能出现，但不影响 fail-under/报告）
   - 文件：`.codex/progress/daemon.md`
+
+- style/tests：清理集成测试的 wildcard import
+  - 变更：移除 `tests/integration_tests.rs` 的 `use futures::prelude::*;`；改为显式 `futures::future::join_all`
+  - 验证：`make check` / `make unit-test`
+  - 文件：`tests/integration_tests.rs`

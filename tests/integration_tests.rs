@@ -13,7 +13,6 @@
 mod common;
 use common::*;
 use fail::FailScenario;
-use futures::prelude::*;
 use rand::seq::IteratorRandom;
 use rand::thread_rng;
 use rand::Rng;
@@ -78,7 +77,7 @@ async fn txn_get_timestamp() -> Result<()> {
         TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
             .await?;
 
-    let mut versions = future::join_all((0..COUNT).map(|_| client.current_timestamp()))
+    let mut versions = futures::future::join_all((0..COUNT).map(|_| client.current_timestamp()))
         .await
         .into_iter()
         .map(|res| res.map(|ts| (ts.physical << 18) + ts.logical))
