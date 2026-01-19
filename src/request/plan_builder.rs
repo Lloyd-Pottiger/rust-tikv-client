@@ -736,4 +736,66 @@ mod tests {
         let _ = plan.execute().await?;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_plan_builder_retry_increments_attempt_and_patches_request_source() -> Result<()> {
+        use crate::proto::errorpb;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let expected_source = "unit-test-retry".to_owned();
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let dispatches_cloned = dispatches.clone();
+
+        let expected_source_for_hook = expected_source.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type in retry attempt test");
+                };
+                let ctx = req.context.as_ref().expect("context should be set");
+
+                let attempt = dispatches_cloned.fetch_add(1, Ordering::SeqCst);
+                match attempt {
+                    0 => {
+                        assert!(!ctx.is_retry_request);
+                        assert_eq!(
+                            ctx.request_source,
+                            format!("leader_{expected_source_for_hook}")
+                        );
+                        let mut resp = kvrpcpb::RawGetResponse::default();
+                        resp.region_error = Some(errorpb::Error::default());
+                        Ok(Box::new(resp) as Box<dyn Any>)
+                    }
+                    1 => {
+                        assert!(ctx.is_retry_request);
+                        assert_eq!(
+                            ctx.request_source,
+                            format!("retry_leader_leader_{expected_source_for_hook}")
+                        );
+                        Ok(Box::new(kvrpcpb::RawGetResponse {
+                            not_found: true,
+                            ..Default::default()
+                        }) as Box<dyn Any>)
+                    }
+                    other => unreachable!("unexpected dispatch attempt {other}"),
+                }
+            },
+        )));
+
+        let mut req = kvrpcpb::RawGetRequest::default();
+        // Choose a key in `MockPdClient::region1`.
+        req.key = vec![5];
+
+        let plan = PlanBuilder::new(pd_client, Keyspace::Disable, req)
+            .with_request_source(expected_source)
+            .retry_multi_region(Backoff::no_jitter_backoff(0, 0, 1))
+            .merge(CollectSingle)
+            .post_process_default()
+            .plan();
+
+        let value = plan.execute().await?;
+        assert!(value.is_none());
+        assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
 }
