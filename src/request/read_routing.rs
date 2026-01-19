@@ -360,6 +360,27 @@ mod tests {
     }
 
     #[test]
+    fn prefer_leader_retry_attempts_spread_across_replicas_deterministically() {
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::PreferLeader);
+        routing.set_seed(0);
+
+        let region = make_region_with_id(1, 1, &[2, 3], &[], &[]);
+
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+
+        let selected = routing.select_peer(&region, 1).unwrap();
+        assert_eq!(selected.target_peer.store_id, 2);
+        assert!(selected.replica_read);
+
+        let selected = routing.select_peer(&region, 2).unwrap();
+        assert_eq!(selected.target_peer.store_id, 3);
+        assert!(selected.replica_read);
+    }
+
+    #[test]
     fn learner_read_prefers_learner_then_falls_back_to_leader() {
         let mut routing = ReadRouting::default();
         routing.set_replica_read(ReplicaReadType::Learner);
@@ -403,6 +424,22 @@ mod tests {
         let selected = routing.select_peer(&region, 0).unwrap();
         assert_eq!(selected.target_peer.store_id, 1);
         assert!(!selected.replica_read);
+    }
+
+    #[test]
+    fn mixed_read_retry_falls_back_to_leader() {
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::Mixed);
+
+        let region = make_region_with_id(1, 1, &[2], &[3], &[]);
+
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert!(selected.replica_read, "first attempt should prefer replicas");
+
+        let selected = routing.select_peer(&region, 1).unwrap();
+        assert_eq!(selected.target_peer.store_id, 1);
+        assert!(!selected.replica_read);
+        assert!(!selected.stale_read);
     }
 
     #[test]

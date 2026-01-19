@@ -15,14 +15,20 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/expand-read-routing：继续补齐 replica read selection 单测覆盖（对齐 client-go `replica_selector_test.go` 的关键语义）
-  - 范围：`src/request/read_routing.rs`
+- design/replica-read-health-selection：补齐 client-go replica_selector 的健康/评分/fast-retry 语义（实现 + 测试）
+  - 范围：`src/request/read_routing.rs`，`src/region_cache.rs`（或新模块）
   - 计划：
-    - 补齐 “pending-backoff/avoid-slow-store” 等分支（若 Rust 逻辑缺失则先实现最小等价行为再加测）
-    - 覆盖 Mixed/Learner/Witness 组合的稳定选择（deterministic seed）
+    - 设计：store health 状态（slow/need-backoff/attempted）+ score 计算（label matches + role + slow penalty + prefer leader）
+    - 实现：在 ReadRouting/Plan 里引入最小 “avoid slow store / fast retry” 行为（不依赖 Go 的 mocktikv）
+    - 单测：移植 `client-go/internal/locate/replica_selector_test.go` 的 score/fast-retry 关键 case（等价语义覆盖）
   - 验证：`cargo test`；`make check`
 
 # 已完成工作
+
+- tests/expand-read-routing：补齐 read_routing 的 retry/边界 case 单测（基于当前 Rust 选择器）
+  - 覆盖：Mixed retry fallback-to-leader（attempt>0）；PreferLeader 多次 retry 在 replicas 间稳定轮转
+  - 验证：`cargo test`
+  - 文件：`src/request/read_routing.rs`，`.codex/progress/daemon.md`
 
 - tests/expand-store-client：扩展 store/rpc dispatch 行为单测（timeout/context/label + 与 PlanBuilder/Retry 组合）
   - 覆盖：region retry attempt 递增 -> `Context.is_retry_request`/patched request_source；补齐 PlanBuilder retry 语义用例
