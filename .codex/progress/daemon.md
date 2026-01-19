@@ -15,12 +15,13 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/audit-retry-backoffer-parity：对齐 Go `config/retry/backoff_test.go` 的可迁移 backoff/backoffer 语义
-  - 计划：优先补齐“region error -> backoff/no-backoff”与“excluded sleep”类语义；不强行 1:1 复制 Go Backoffer 架构
-  - 步骤：补/改 `src/request/*` 或 `src/backoff.rs` 的逻辑与单测；更新映射文档
-  - 验证：`cargo test`
-
 # 已完成工作
+
+- tests/audit-retry-backoffer-parity：对齐 Go `config/retry/backoff_test.go` 的可迁移 backoff/backoffer 语义（可迁移部分）
+  - 关键：对齐 `MayBackoffForRegionError`：fake EpochNotMatch（CurrentRegions 为空）视为 region-miss，需要 backoff（Rust: `on_region_epoch_not_match` 返回 backoff）
+  - 决策：Go Backoffer 的 per-error-type state/excludedSleep/longestSleep 细节不做 1:1（Rust 用统一 Backoff + plan-level 分类）
+  - 验证：`cargo test`
+  - 文件：`src/request/plan.rs`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
 
 - tests/audit-tikvrpc-tests：梳理 Go `tikvrpc/*_test.go` 的可迁移语义并补齐映射/标注 N/A
   - 结论：BatchCommands/batch-client 相关用例（`tikvrpc_test.go`）标注 N/A；interceptor 用例已由 `src/interceptor.rs` 单测覆盖

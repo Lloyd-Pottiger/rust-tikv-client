@@ -587,7 +587,8 @@ pub(crate) async fn on_region_epoch_not_match<PdC: PdClient>(
     let ver_id = region_store.region_with_leader.ver_id();
     if error.current_regions.is_empty() {
         pd_client.invalidate_region_cache(ver_id).await;
-        return Ok(true);
+        // client-go treats this as a "fake" EpochNotMatch and backs off (MayBackoffForRegionError).
+        return Ok(false);
     }
 
     for r in error.current_regions {
@@ -3058,6 +3059,19 @@ mod test {
         };
 
         assert!(on_region_epoch_not_match(pd_client.clone(), region_store, err).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_on_region_epoch_not_match_empty_current_regions_invalidates_and_backoffs(
+    ) -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let region_store =
+            RegionStore::new(MockPdClient::region1(), Arc::new(MockKvClient::default()));
+        let err = EpochNotMatch::default();
+
+        assert!(!on_region_epoch_not_match(pd_client.clone(), region_store, err).await?);
         assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
         Ok(())
     }

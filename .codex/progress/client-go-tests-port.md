@@ -20,7 +20,7 @@
 
 ## Mostly Covered (Existing Rust Tests)
 - TLS/security: `client-go/config/security_test.go` -> `src/common/security.rs#L123`
-- Retry/backoff algorithms: Go backoff jitter / attempt cap -> `src/backoff.rs#L207`（注：Go Backoffer 的 “error-type longest sleep / excluded sleep” 语义不完全等价）
+- Retry/backoff algorithms: Go backoff jitter / attempt cap -> `src/backoff.rs#L207`（注：Go Backoffer 的 “error-type longest sleep / excluded sleep” 不做 1:1；已对齐 `MayBackoffForRegionError` fake EpochNotMatch -> backoff（`src/request/plan.rs` 单测））
 - Latch: `client-go/internal/latch/*` -> `src/transaction/latch.rs#L483`
 - Region cache core invariants: `client-go/internal/locate/region_cache_test.go`(部分语义) -> `src/region_cache.rs#L423`
 - Interceptor chain basics: `client-go/tikvrpc/interceptor/*` -> `src/interceptor.rs#L309`
