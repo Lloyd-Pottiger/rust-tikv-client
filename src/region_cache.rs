@@ -1284,6 +1284,88 @@ mod test {
     }
 
     #[test]
+    fn test_region_cache_ttl_check_and_refresh() {
+        use std::sync::atomic::AtomicI64;
+        use std::sync::atomic::Ordering;
+
+        let ttl = super::RegionCacheTtl::new(Duration::from_secs(10), Duration::from_secs(0));
+        let now = 100;
+
+        // Far in the future: keep TTL, do not refresh.
+        let value = AtomicI64::new(now + 100);
+        assert!(ttl.check_and_refresh(&value, now));
+        assert_eq!(value.load(Ordering::Relaxed), now + 100);
+
+        // Close enough to expire: refresh to now + base.
+        let value = AtomicI64::new(now + 5);
+        assert!(ttl.check_and_refresh(&value, now));
+        assert_eq!(value.load(Ordering::Relaxed), now + 10);
+
+        // Already expired.
+        let value = AtomicI64::new(now - 1);
+        assert!(!ttl.check_and_refresh(&value, now));
+        assert_eq!(value.load(Ordering::Relaxed), now - 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_region_by_id_expired_ttl_refetches() -> Result<()> {
+        use std::sync::atomic::Ordering;
+
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(
+            retry_client.clone(),
+            Duration::from_secs(10),
+            Duration::ZERO,
+        );
+
+        retry_client.regions.lock().await.insert(
+            1,
+            RegionWithLeader {
+                region: metapb::Region {
+                    id: 1,
+                    start_key: vec![],
+                    end_key: vec![100],
+                    region_epoch: Some(RegionEpoch {
+                        conf_ver: 0,
+                        version: 0,
+                    }),
+                    ..Default::default()
+                },
+                leader: Some(metapb::Peer {
+                    store_id: 1,
+                    ..Default::default()
+                }),
+            },
+        );
+
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+        cache.get_region_by_id(1).await?;
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 1);
+
+        // Force-expire the cached TTL.
+        let now = super::now_epoch_sec();
+        {
+            let guard = cache.region_cache.read().await;
+            let ver_id = guard
+                .id_to_ver_id
+                .get(&1)
+                .expect("region should be cached")
+                .clone();
+            let cached = guard
+                .ver_id_to_region
+                .get(&ver_id)
+                .expect("region cache entry should exist");
+            cached
+                .ttl_epoch_sec
+                .store(now.saturating_sub(1), Ordering::Relaxed);
+        }
+
+        cache.get_region_by_id(1).await?;
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 2);
+        Ok(())
+    }
+
+    #[test]
     fn test_is_valid_tikv_store() {
         let mut store = metapb::Store::default();
         assert!(is_valid_tikv_store(&store));

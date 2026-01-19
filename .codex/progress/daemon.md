@@ -13,15 +13,26 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- tests/port-region-cache-tests-more：继续迁移 client-go `internal/locate/region_cache_test.go` 缺失语义（重点：invalidate/TTL/并发/region-split/resolve-loop）
-  - 计划：按 go 用例拆分到 Rust 单测；补齐 RegionCache 在 invalidate/refresh 场景的行为一致性
-  - 步骤：对照 go test list；逐条加 Rust 测试；必要时补 RegionCache API/hooks 以可测
+- tests/port-store-client-tests：补齐 store/rpc client 并发/错误路径单测（对齐 go `internal/client/*_test.go` 的可迁移部分）
+  - 计划：重点覆盖 dispatch timeout、grpc error->invalidate store、request_source/interceptor 与 retry 链条交互
+  - 步骤：先梳理 Rust `src/store/client.rs` 当前覆盖；按 go 用例拆最小可测 mock；逐条补单测
   - 验证：`cargo test`
-  - 文件：`src/region_cache.rs`，`.codex/progress/daemon.md`
+  - 文件：`src/store/client.rs`，`src/request/plan.rs`（如需），`.codex/progress/daemon.md`
 
 # 待做工作
 
+- tests/port-metrics-collector：迁移 locate/network collector 的可迁移指标语义（Go `internal/locate/metrics_collector_test.go`）
+  - 计划：对齐 request/response bytes 统计、stale-read metrics；缺失的 prom 指标先用 Rust stats 等价覆盖
+  - 步骤：定位 Rust 对应 stats/metrics 模块；补单测验证 counter 增量；必要时加 feature-gated prometheus 集成
+  - 验证：`cargo test`
+  - 文件：`src/stats/*`，`src/request/*`，`.codex/progress/daemon.md`
+
 # 已完成工作
+
+- tests/port-region-cache-tests-more：继续迁移 client-go `internal/locate/region_cache_test.go` 缺失语义（重点：invalidate/TTL/并发/region-split/resolve-loop）
+  - 覆盖：补 RegionCache TTL check_and_refresh 单测；补 expired TTL 触发 read-through refetch 的集成单测
+  - 验证：`cargo test`
+  - 文件：`src/region_cache.rs`，`.codex/progress/daemon.md`
 
 - tests/port-read-routing-score-tests：扩展 `ReadRouting`/replica selection 的 score/seed/slow-store 语义覆盖（对齐 go `replica_selector_test.go` 的可迁移部分）
   - 覆盖：补齐 calculate_score（tryLeader/preferLeader/learnerOnly/slow-store）关键 flag 断言；补齐 pinned store override + witness 排除等路径的单测
