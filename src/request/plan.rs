@@ -325,6 +325,11 @@ where
             Ok(resp) => resp,
             Err(e) if is_grpc_error(&e) => {
                 debug!("single_shard_handler:execute: grpc error: {:?}", e);
+                if let Ok(store_id) = region_store.region_with_leader.get_store_id() {
+                    // Best-effort: treat transport errors as a signal that the target store may be
+                    // unhealthy and should be deprioritized on subsequent replica selections.
+                    read_routing.mark_store_slow_for(store_id, Duration::from_millis(500));
+                }
                 return Self::handle_other_error(
                     pd_client,
                     plan,

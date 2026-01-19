@@ -43,6 +43,7 @@ pub mod plan;
 mod plan_builder;
 mod read_routing;
 mod shard;
+mod store_health;
 
 /// Abstracts any request sent to a TiKV server.
 #[async_trait]

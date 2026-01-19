@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
+use super::store_health::StoreHealthMap;
 use crate::proto::metapb;
 use crate::region::RegionWithLeader;
 use crate::Error;
@@ -18,6 +20,7 @@ pub(crate) struct ReadRouting {
     seed: u32,
     force_leader: Arc<AtomicBool>,
     input_request_source: Option<Arc<str>>,
+    store_health: StoreHealthMap,
 }
 
 impl Default for ReadRouting {
@@ -28,6 +31,7 @@ impl Default for ReadRouting {
             seed: 0,
             force_leader: Arc::new(AtomicBool::new(false)),
             input_request_source: None,
+            store_health: StoreHealthMap::default(),
         }
     }
 }
@@ -60,6 +64,16 @@ impl ReadRouting {
 
     pub(crate) fn with_seed(mut self, seed: u32) -> Self {
         self.seed = seed;
+        self
+    }
+
+    pub(crate) fn mark_store_slow_for(&self, store_id: crate::region::StoreId, duration: Duration) {
+        self.store_health.mark_slow_for(store_id, duration);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_store_health(mut self, store_health: StoreHealthMap) -> Self {
+        self.store_health = store_health;
         self
     }
 
@@ -153,7 +167,16 @@ impl ReadRouting {
 
         let target = match self.replica_read {
             ReplicaReadType::Leader => leader.clone(),
-            ReplicaReadType::PreferLeader if attempt == 0 => leader.clone(),
+            ReplicaReadType::PreferLeader if attempt == 0 => {
+                if self.store_health.is_slow_now(leader.store_id) {
+                    let mut replicas = followers;
+                    replicas.extend(learners);
+                    pick_peer(&replicas, region.id(), self.seed, attempt)
+                        .unwrap_or_else(|| leader.clone())
+                } else {
+                    leader.clone()
+                }
+            }
             ReplicaReadType::Follower if attempt == 0 => {
                 pick_peer(&followers, region.id(), self.seed, attempt)
                     .unwrap_or_else(|| leader.clone())
@@ -229,6 +252,7 @@ fn pick_peer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn make_peer(store_id: u64, role: metapb::PeerRole) -> metapb::Peer {
         metapb::Peer {
@@ -360,6 +384,22 @@ mod tests {
     }
 
     #[test]
+    fn prefer_leader_avoids_slow_leader_on_first_attempt() {
+        let health = StoreHealthMap::default();
+        health.mark_slow_for(1, Duration::from_secs(60));
+
+        let mut routing = ReadRouting::default();
+        routing.set_replica_read(ReplicaReadType::PreferLeader);
+        let routing = routing.with_store_health(health);
+
+        let region = make_region(1, &[2], &[]);
+        let selected = routing.select_peer(&region, 0).unwrap();
+        assert_eq!(selected.target_peer.store_id, 2);
+        assert!(selected.replica_read);
+        assert!(!selected.stale_read);
+    }
+
+    #[test]
     fn prefer_leader_retry_attempts_spread_across_replicas_deterministically() {
         let mut routing = ReadRouting::default();
         routing.set_replica_read(ReplicaReadType::PreferLeader);
@@ -434,7 +474,10 @@ mod tests {
         let region = make_region_with_id(1, 1, &[2], &[3], &[]);
 
         let selected = routing.select_peer(&region, 0).unwrap();
-        assert!(selected.replica_read, "first attempt should prefer replicas");
+        assert!(
+            selected.replica_read,
+            "first attempt should prefer replicas"
+        );
 
         let selected = routing.select_peer(&region, 1).unwrap();
         assert_eq!(selected.target_peer.store_id, 1);

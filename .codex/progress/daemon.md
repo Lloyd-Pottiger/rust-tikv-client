@@ -15,61 +15,41 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- design/replica-read-health-selection：补齐 client-go replica_selector 的健康/评分/fast-retry 语义（实现 + 测试）
-  - 范围：`src/request/read_routing.rs`，`src/region_cache.rs`（或新模块）
+- feat/replica-selection-score：实现最小 score 选择（label match + role + slow penalty + prefer leader）
+  - 范围：`src/request/read_routing.rs`（或新模块）
   - 计划：
-    - 设计：store health 状态（slow/need-backoff/attempted）+ score 计算（label matches + role + slow penalty + prefer leader）
-    - 实现：在 ReadRouting/Plan 里引入最小 “avoid slow store / fast retry” 行为（不依赖 Go 的 mocktikv）
-    - 单测：移植 `client-go/internal/locate/replica_selector_test.go` 的 score/fast-retry 关键 case（等价语义覆盖）
+    - 引入 score 计算与排序；在 Mixed/PreferLeader 分支优先选高分 replica
+    - 与现有 deterministic seed 保持兼容（同 score 时再按 seed/attempt 打散）
+  - 验证：`cargo test`；`make check`
+
+- tests/port-replica-selector-score：移植 client-go `TestReplicaSelectorCalculateScore` 的等价语义
+  - 范围：`client-go/internal/locate/replica_selector_test.go`，`src/request/read_routing.rs`
+  - 计划：
+    - 抽取 3~5 个 score 组合 case（leader/follower/slow/label match/tryLeader/preferLeader）
+    - Rust 单测验证 score 排序与最终选点
+  - 验证：`cargo test`；`make check`
+
+- tests/port-replica-selector-fast-retry：移植 client-go fast retry/avoid slow store 的等价语义
+  - 范围：`client-go/internal/locate/replica_selector_test.go`，`src/request/plan.rs`
+  - 计划：
+    - 用 MockKvClient 构造：首个 replica 返回特定错误 -> 标记 slow -> 次次选择不同 replica
+    - 验证 retry/backoff 行为与 request_source/attempt observability
   - 验证：`cargo test`；`make check`
 
 # 已完成工作
 
-- tests/expand-read-routing：补齐 read_routing 的 retry/边界 case 单测（基于当前 Rust 选择器）
-  - 覆盖：Mixed retry fallback-to-leader（attempt>0）；PreferLeader 多次 retry 在 replicas 间稳定轮转
-  - 验证：`cargo test`
-  - 文件：`src/request/read_routing.rs`，`.codex/progress/daemon.md`
-
-- tests/expand-store-client：扩展 store/rpc dispatch 行为单测（timeout/context/label + 与 PlanBuilder/Retry 组合）
-  - 覆盖：region retry attempt 递增 -> `Context.is_retry_request`/patched request_source；补齐 PlanBuilder retry 语义用例
-  - 验证：`cargo test`
-  - 文件：`src/request/plan_builder.rs`，`.codex/progress/daemon.md`
-
-- tests/store-regionstore-apply：补齐 `RegionStore::apply_to_request` 语义单测（request_source/resource_group_tag/interceptors/retry flag）
-  - 覆盖：`attempt>0` -> `is_retry_request`；patched request_source 覆盖；tagger 仅在未显式设置 tag 时触发；interceptors 可观测 `RpcContextInfo`（label/attempt/region/store/flags）
-  - 验证：`cargo test`
-  - 文件：`src/store/mod.rs`，`.codex/progress/daemon.md`
-
-- tests/port-keyspace-encode-request：对齐 apicodec v2 EncodeRequest（key fields prefixing）
-  - 覆盖：RawGet key prefix；CommitRequest.keys/primary_key prefix（PrimaryKey 非空场景）
-  - 决策：commit request 通过新增 ctor 支持设置 primary_key（保持原 ctor 不破坏兼容）；测试用 mock dispatch 截获 kvproto request
-  - 验证：`cargo test`
-  - 文件：`src/raw/client.rs`，`src/transaction/transaction.rs`，`src/transaction/lowering.rs`，`src/transaction/requests.rs`，`.codex/progress/daemon.md`
-
-- tests/port-keyspace-bucket-keys：对齐 apicodec v2 DecodeBucketKeys（decode bytes + keyspace range filter）
-  - 覆盖：bucket keys memcomparable decode；keyspace range filter；`{}` 边界规范化（prev-prefix/endKey -> `{}`，inside strip prefix）
-  - 决策：作为 `cfg(test)` helper 仅做语义覆盖（当前代码路径未消费 buckets）；避免引入对外 API
-  - 验证：`cargo test`
-  - 文件：`src/request/keyspace.rs`，`.codex/progress/daemon.md`
-
-- tests/port-keyspace-epoch-not-match：对齐 apicodec v2 decodeRegionError(EpochNotMatch)（decode bytes + keyspace range intersect + prefix stripping）
-  - 决策：对外不暴露 apicodec API；通过 `TruncateKeyspace` 在 region-error 返回路径做 best-effort decode+裁剪，避免泄露 encoded key/range
-  - 覆盖：`EpochNotMatch.current_regions` memcomparable decode；按 keyspace range 裁剪并去 prefix；空交集 region 过滤
-  - 验证：`cargo test`
-  - 文件：`src/request/keyspace.rs`，`.codex/progress/daemon.md`
-
-- tests/keyspace-apicodec-v2：对齐 keyspace codec v2 的 prefix 语义（encode/decode/error stripping）
-  - 覆盖：ParseKeyspaceID/DecodeKey；prefixes sorted；endKey 4-byte carry-increment；decodeKeyError strip prefix；keyspace enabled 的 error path 统一 truncate（避免对外暴露 encoded key）
-  - 决策：Rust crate 未暴露 apicodec decode API，用 `cfg(test)` 的最小 helper 覆盖语义；对外以“等价语义覆盖”替代 Go 文件级对齐
+- tests/keyspace-apicodec-v2-port：移植 client-go keyspace apicodec v2 关键语义与用例（prefix + region error + encode request）
+  - 决策：不暴露 apicodec 对外 API；用 `cfg(test)` helper + `TruncateKeyspace` 做“等价语义覆盖”，避免泄露 encoded key/range；CommitRequest 用新增 ctor 支持 primary_key prefix（不破坏原 ctor）
+  - 覆盖：decodeKey/ParseKeyspaceID/endKey carry；EpochNotMatch decode+range intersect+strip；bucket keys decode+range filter+`{}` 边界；RawGet/CommitRequest keys/primary_key prefix
   - 验证：`cargo test`；`make check`
-  - 文件：`src/request/keyspace.rs`，`src/raw/client.rs`，`src/transaction/client.rs`，`src/transaction/transaction.rs`，`src/trace.rs`
+  - 文件：`src/request/keyspace.rs`，`src/raw/client.rs`，`src/transaction/client.rs`，`src/transaction/transaction.rs`，`src/transaction/lowering.rs`，`src/transaction/requests.rs`，`src/trace.rs`，`.codex/progress/daemon.md`
 
-- tests/client-go-port：盘点 client-go 全量测试并做 Rust 覆盖映射 + 迁移可独立单测/关键 E2E 语义
-  - 映射：`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`
-  - 覆盖：read routing/replica read；plan 并发 semaphore；txn buffer overlay；raw delete-range E2E（含空区间与 `\\0` 边界）
-  - 验证：`cargo test`；`make check`；`make integration-test-if-ready`
-  - 文件：`src/request/read_routing.rs`，`src/request/plan.rs`，`src/transaction/buffer.rs`，`tests/integration_tests.rs`，`src/raw/client.rs`
+- tests/routing+retry-observability：补齐 read routing/plan/store dispatch 单测（retry attempt/request_source/slow-store）
+  - 覆盖：Mixed retry fallback-to-leader；PreferLeader retry 打散；RegionStore::apply_to_request（retry flag/request_source/tagger/interceptors）；Plan retry attempt->Context.is_retry_request；gRPC transport error -> mark store slow(500ms)；PreferLeader attempt=0 避开 slow leader
+  - 决策：Backoff::no_backoff 不会触发重试；需要重试的用例用 `Backoff::no_jitter_backoff(0, 0, N)`（0ms sleep + N attempts）
+  - 验证：`cargo test`
+  - 文件：`src/request/read_routing.rs`，`src/request/plan.rs`，`src/request/plan_builder.rs`，`src/request/store_health.rs`，`src/request/mod.rs`，`src/store/mod.rs`，`.codex/progress/daemon.md`
 
-- infra/devex+coverage：统一验证入口 + 解释 coverage warning（降噪）
-  - 覆盖：`make all`/`integration-test-if-ready`/`check-all-features`；CI/doc 同步；integration tests import 清理；llvm-cov “mismatched data” 来源与影响说明
-  - 文件：`Makefile`，`.github/workflows/ci.yml`，`doc/development.md`，`README.md`，`getting-started.md`，`AGENTS.md`，`.gitignore`，`tests/integration_tests.rs`，`.codex/progress/daemon.md`
+- infra/test-mapping+replica-read-design：client-go 测试盘点映射 + 验证入口/文档同步 + replica_selector 迁移设计
+  - 覆盖：`.codex/progress/client-go-*-port.md` 映射；`make all`/`integration-test-if-ready`/`check-all-features`；CI/doc 同步；integration tests import 清理；replica_selector health/score/fast-retry 集成点设计与拆解
+  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/replica-read-health-selection.md`，`Makefile`，`.github/workflows/ci.yml`，`doc/development.md`，`README.md`，`getting-started.md`，`AGENTS.md`，`.gitignore`，`tests/integration_tests.rs`，`.codex/progress/daemon.md`
