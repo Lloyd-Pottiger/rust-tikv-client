@@ -15,11 +15,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- infra/coverage：调查 llvm-cov “mismatched data” warning（尽量降噪/定位原因）
-  - 计划：用 `cargo llvm-cov -v`/`--failure-mode`/分目标运行定位；若不可消除则在 `doc/development.md` 解释来源与影响
-  - 验证：`make coverage-integration`
-  - 文件：`Makefile`，`doc/development.md`
-
 # 已完成工作
 
 - core/parity+quality：完成 client-go(v2) 关键能力与 Public API 对齐（Rust-idiomatic），并补齐关键测试/文档
@@ -40,3 +35,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 变更：移除 `tests/integration_tests.rs` 的 `use futures::prelude::*;`；改为显式 `futures::future::join_all`
   - 验证：`make check` / `make unit-test`
   - 文件：`tests/integration_tests.rs`
+
+- infra/coverage：解释 llvm-cov “mismatched data” warning 的来源与影响（降噪）
+  - 结论：warning 出现在合并多个 test binary 的 profraw（单个 `--test integration_tests` 不触发）；对本 crate lines 覆盖率阈值/报告无影响
+  - 验证：`make coverage-integration`
+  - 文件：`doc/development.md`

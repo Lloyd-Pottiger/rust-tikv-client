@@ -130,6 +130,8 @@ Notes:
 - Coverage ignores generated protobuf sources under `src/generated/**`.
 - `coverage-integration` runs tests with `--test-threads 1` to match the integration test
   assumptions around region boundaries.
+- `llvm-profdata` may print a "mismatched data" warning when merging profiles from multiple test
+  binaries; this is expected and does not affect the line coverage threshold/report for this crate.
 
 If you want a one-shot command that manages the playground lifecycle automatically:
 
