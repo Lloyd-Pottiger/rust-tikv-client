@@ -459,6 +459,64 @@ fn keyspace_end_prefix(keyspace_id: u32, key_mode: KeyMode) -> [u8; KEYSPACE_PRE
     end
 }
 
+#[cfg(test)]
+pub(crate) fn decode_bucket_keys(
+    bucket_keys: impl IntoIterator<Item = Vec<u8>>,
+    keyspace: Keyspace,
+    key_mode: KeyMode,
+) -> crate::Result<Vec<Vec<u8>>> {
+    let Keyspace::Enable { keyspace_id } = keyspace else {
+        return Ok(bucket_keys.into_iter().collect());
+    };
+
+    let keyspace_prefix = keyspace_prefix(keyspace_id, key_mode).to_vec();
+    let keyspace_end = keyspace_end_prefix(keyspace_id, key_mode).to_vec();
+
+    let mut decoded = Vec::new();
+    for mut key in bucket_keys.into_iter() {
+        if key.is_empty() {
+            push_dedup_key(&mut decoded, Vec::new());
+            continue;
+        }
+
+        crate::kv::codec::decode_bytes_in_place(&mut key, false)?;
+        if key.is_empty() {
+            push_dedup_key(&mut decoded, Vec::new());
+            continue;
+        }
+
+        if key < keyspace_prefix {
+            continue;
+        }
+        if key >= keyspace_end {
+            push_dedup_key(&mut decoded, Vec::new());
+            break;
+        }
+        if key.len() < KEYSPACE_PREFIX_LEN || !key.starts_with(&keyspace_prefix) {
+            // This should not happen for keyspace-prefixed v2 bucket keys.
+            continue;
+        }
+        push_dedup_key(&mut decoded, key.split_off(KEYSPACE_PREFIX_LEN));
+    }
+
+    if decoded.first().map(|k| !k.is_empty()).unwrap_or(true) {
+        decoded.insert(0, Vec::new());
+    }
+    if decoded.last().map(|k| !k.is_empty()).unwrap_or(true) {
+        decoded.push(Vec::new());
+    }
+
+    Ok(decoded)
+}
+
+#[cfg(test)]
+fn push_dedup_key(keys: &mut Vec<Vec<u8>>, key: Vec<u8>) {
+    if keys.last().is_some_and(|prev| prev == &key) {
+        return;
+    }
+    keys.push(key);
+}
+
 fn prepend_bytes<const N: usize>(vec: &mut Vec<u8>, prefix: &[u8; N]) {
     let original_len = vec.len();
     vec.reserve_exact(N);
@@ -1024,5 +1082,78 @@ mod tests {
         assert_eq!(regions[3].id, 4);
         assert_eq!(regions[3].start_key.as_slice(), &[100]);
         assert_eq!(regions[3].end_key.as_slice(), &[200]);
+    }
+
+    #[test]
+    fn decode_bucket_keys_intersects_keyspace_range_and_strips_prefix() {
+        let keyspace_id = 4242;
+        let keyspace = Keyspace::Enable { keyspace_id };
+
+        let prev_prefix = keyspace_prefix(keyspace_id - 1, KeyMode::Raw).to_vec();
+        let keyspace_prefix = keyspace_prefix(keyspace_id, KeyMode::Raw).to_vec();
+        let keyspace_end = keyspace_end_prefix(keyspace_id, KeyMode::Raw).to_vec();
+
+        let encode_with_prefix = |prefix: &[u8], key: &[u8]| {
+            let mut raw = Vec::with_capacity(prefix.len() + key.len());
+            raw.extend_from_slice(prefix);
+            raw.extend_from_slice(key);
+            encode_memcomparable(&raw)
+        };
+
+        let expected = vec![
+            Vec::new(),
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"c".to_vec(),
+            Vec::new(),
+        ];
+
+        let bucket_keys = vec![
+            encode_with_prefix(&prev_prefix, b"a"),
+            encode_with_prefix(&prev_prefix, b"b"),
+            encode_with_prefix(&prev_prefix, b"c"),
+            encode_with_prefix(&keyspace_prefix, b"a"),
+            encode_with_prefix(&keyspace_prefix, b"b"),
+            encode_with_prefix(&keyspace_prefix, b"c"),
+            encode_with_prefix(&keyspace_end, b""),
+            encode_with_prefix(&keyspace_end, b"a"),
+            encode_with_prefix(&keyspace_end, b"b"),
+            encode_with_prefix(&keyspace_end, b"c"),
+        ];
+        assert_eq!(
+            decode_bucket_keys(bucket_keys, keyspace, KeyMode::Raw).unwrap(),
+            expected
+        );
+
+        let bucket_keys = vec![
+            encode_with_prefix(&prev_prefix, b"a"),
+            encode_with_prefix(&prev_prefix, b"b"),
+            encode_with_prefix(&prev_prefix, b"c"),
+            encode_with_prefix(&keyspace_prefix, b""),
+            encode_with_prefix(&keyspace_prefix, b"a"),
+            encode_with_prefix(&keyspace_prefix, b"b"),
+            encode_with_prefix(&keyspace_prefix, b"c"),
+            Vec::new(),
+        ];
+        assert_eq!(
+            decode_bucket_keys(bucket_keys, keyspace, KeyMode::Raw).unwrap(),
+            expected
+        );
+
+        let bucket_keys = vec![
+            Vec::new(),
+            encode_with_prefix(&prev_prefix, b"a"),
+            encode_with_prefix(&prev_prefix, b"b"),
+            encode_with_prefix(&prev_prefix, b"c"),
+            encode_with_prefix(&keyspace_prefix, b""),
+            encode_with_prefix(&keyspace_prefix, b"a"),
+            encode_with_prefix(&keyspace_prefix, b"b"),
+            encode_with_prefix(&keyspace_prefix, b"c"),
+            Vec::new(),
+        ];
+        assert_eq!(
+            decode_bucket_keys(bucket_keys, keyspace, KeyMode::Raw).unwrap(),
+            expected
+        );
     }
 }
