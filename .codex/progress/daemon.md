@@ -15,7 +15,26 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
+- tests/expand-read-routing：继续补齐 replica read selection 单测覆盖（对齐 client-go `replica_selector_test.go` 的关键语义）
+  - 范围：`src/request/read_routing.rs`
+  - 计划：
+    - 补齐 “pending-backoff/avoid-slow-store” 等分支（若 Rust 逻辑缺失则先实现最小等价行为再加测）
+    - 覆盖 Mixed/Learner/Witness 组合的稳定选择（deterministic seed）
+  - 验证：`cargo test`；`make check`
+
+- tests/expand-store-client：扩展 store/rpc dispatch 行为单测（timeout/context/label + 与 PlanBuilder/Retry 组合）
+  - 范围：`src/store/client.rs`，`src/request/plan_builder.rs`
+  - 计划：
+    - 增加 mock request/response 覆盖 timeout 透传、context 注入顺序、retry attempt 递增语义
+    - 覆盖 interceptor 在重试链条中的可观测性（attempt/region/store id）
+  - 验证：`cargo test`；`make check`
+
 # 已完成工作
+
+- tests/store-regionstore-apply：补齐 `RegionStore::apply_to_request` 语义单测（request_source/resource_group_tag/interceptors/retry flag）
+  - 覆盖：`attempt>0` -> `is_retry_request`；patched request_source 覆盖；tagger 仅在未显式设置 tag 时触发；interceptors 可观测 `RpcContextInfo`（label/attempt/region/store/flags）
+  - 验证：`cargo test`
+  - 文件：`src/store/mod.rs`，`.codex/progress/daemon.md`
 
 - tests/port-keyspace-encode-request：对齐 apicodec v2 EncodeRequest（key fields prefixing）
   - 覆盖：RawGet key prefix；CommitRequest.keys/primary_key prefix（PrimaryKey 非空场景）
