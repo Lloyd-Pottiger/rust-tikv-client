@@ -822,18 +822,18 @@ mod test {
         let scan = plan.execute().await.unwrap();
 
         let expected = (1_u8..50)
-            .map(|i| KvPair(vec![i].into(), Vec::new()))
+            .map(|i| KvPair::new(vec![i], Vec::new()))
             .collect::<Vec<_>>();
         assert_eq!(scan, expected);
     }
 
     #[tokio::test]
     async fn test_raw_batch_put() -> Result<()> {
-        let region1_kvs = vec![KvPair(vec![9].into(), vec![12])];
+        let region1_kvs = vec![KvPair::new(vec![9], vec![12])];
         let region1_ttls = vec![0];
         let region2_kvs = vec![
-            KvPair(vec![11].into(), vec![12]),
-            KvPair("FFF".to_string().as_bytes().to_vec().into(), vec![12]),
+            KvPair::new(vec![11], vec![12]),
+            KvPair::new("FFF".to_string().as_bytes().to_vec(), vec![12]),
         ];
         let region2_ttls = vec![0, 1];
 

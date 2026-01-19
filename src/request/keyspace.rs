@@ -83,7 +83,7 @@ impl EncodeKeyspace for Key {
 
 impl EncodeKeyspace for KvPair {
     fn encode_keyspace(mut self, keyspace: Keyspace, key_mode: KeyMode) -> Self {
-        self.0 = self.0.encode_keyspace(keyspace, key_mode);
+        self.key = self.key.encode_keyspace(keyspace, key_mode);
         self
     }
 }
@@ -141,7 +141,7 @@ impl TruncateKeyspace for Key {
 
 impl TruncateKeyspace for KvPair {
     fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
-        self.0 = self.0.truncate_keyspace(keyspace);
+        self.key = self.key.truncate_keyspace(keyspace);
         self
     }
 }

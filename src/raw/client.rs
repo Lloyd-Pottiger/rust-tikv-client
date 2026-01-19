@@ -1178,8 +1178,8 @@ mod tests {
             request_context: crate::RequestContext::default(),
         };
         let pairs = vec![
-            KvPair(vec![11].into(), vec![12]),
-            KvPair(vec![11].into(), vec![12]),
+            KvPair::new(vec![11], vec![12]),
+            KvPair::new(vec![11], vec![12]),
         ];
         let ttls = vec![0, 0];
         assert!(client.batch_put_with_ttl(pairs, ttls).await.is_ok());
@@ -1369,7 +1369,7 @@ mod tests {
 
         let pairs = client.batch_scan(ranges.clone(), each_limit).await?;
         assert_eq!(pairs.len(), 6);
-        let keys: Vec<Vec<u8>> = pairs.into_iter().map(|p| p.0.into()).collect();
+        let keys: Vec<Vec<u8>> = pairs.into_iter().map(|p| p.key.into()).collect();
         assert_eq!(
             keys,
             vec![

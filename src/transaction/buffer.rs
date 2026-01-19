@@ -145,7 +145,7 @@ impl Buffer {
                 .partition(|(_, v)| *v == MutationValue::Undetermined);
 
             let cached_results = cached_results.into_iter().filter_map(|(k, v)| match v {
-                MutationValue::Determined(Some(v)) => Some(KvPair(k, v)),
+                MutationValue::Determined(Some(v)) => Some(KvPair::new(k, v)),
                 MutationValue::Determined(None) | MutationValue::Undetermined => None,
             });
 
@@ -155,8 +155,8 @@ impl Buffer {
 
         let fetched_results = f(Box::new(undetermined_keys)).await?;
         for kvpair in &fetched_results {
-            let key = kvpair.0.clone();
-            let value = Some(kvpair.1.clone());
+            let key = kvpair.key.clone();
+            let value = Some(kvpair.value.clone());
             self.update_cache(key, value)?;
         }
 
@@ -590,7 +590,7 @@ mod tests {
                 .await
                 .unwrap()
                 .collect::<Vec<_>>(),
-            vec![KvPair(Key::from(b"key1".to_vec()), b"value".to_vec(),),]
+            vec![KvPair::new(Key::from(b"key1".to_vec()), b"value".to_vec())]
         );
     }
 
@@ -621,7 +621,7 @@ mod tests {
                 .await
                 .unwrap()
                 .collect::<Vec<_>>(),
-            vec![KvPair(Key::from(b"key1".to_vec()), b"value".to_vec()),]
+            vec![KvPair::new(Key::from(b"key1".to_vec()), b"value".to_vec())]
         );
     }
 
@@ -664,14 +664,14 @@ mod tests {
         assert_eq!(
             r1.unwrap().collect::<Vec<_>>(),
             vec![
-                KvPair(k1.clone(), v1.clone()),
-                KvPair(k2.clone(), v2.clone())
+                KvPair::new(k1.clone(), v1.clone()),
+                KvPair::new(k2.clone(), v2.clone())
             ]
         );
         assert_eq!(r2.unwrap().unwrap(), v2);
         assert_eq!(
             r3.unwrap().collect::<Vec<_>>(),
-            vec![KvPair(k1, v1), KvPair(k2, v2)]
+            vec![KvPair::new(k1, v1), KvPair::new(k2, v2)]
         );
     }
 

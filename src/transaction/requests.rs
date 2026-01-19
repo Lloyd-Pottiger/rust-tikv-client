@@ -132,9 +132,18 @@ impl Process<kvrpcpb::GetResponse> for DefaultProcessor {
 }
 
 pub fn new_batch_get_request(keys: Vec<Vec<u8>>, timestamp: u64) -> kvrpcpb::BatchGetRequest {
+    new_batch_get_request_with_need_commit_ts(keys, timestamp, false)
+}
+
+pub fn new_batch_get_request_with_need_commit_ts(
+    keys: Vec<Vec<u8>>,
+    timestamp: u64,
+    need_commit_ts: bool,
+) -> kvrpcpb::BatchGetRequest {
     let mut req = kvrpcpb::BatchGetRequest::default();
     req.keys = keys;
     req.version = timestamp;
+    req.need_commit_ts = need_commit_ts;
     req
 }
 

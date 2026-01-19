@@ -27,61 +27,80 @@ use crate::proto::kvrpcpb;
 /// types (Like a `(Key, Value)`) can be passed directly to those functions.
 #[derive(Default, Clone, Eq, PartialEq, Hash)]
 #[cfg_attr(test, derive(Arbitrary))]
-pub struct KvPair(pub Key, pub Value);
+pub struct KvPair {
+    pub key: Key,
+    pub value: Value,
+    /// Commit timestamp of this value (when requested). `0` means "unknown / not requested".
+    pub commit_ts: u64,
+}
 
 impl KvPair {
     /// Create a new `KvPair`.
     #[inline]
     pub fn new(key: impl Into<Key>, value: impl Into<Value>) -> Self {
-        KvPair(key.into(), value.into())
+        Self::new_with_commit_ts(key, value, 0)
+    }
+
+    /// Create a new `KvPair` with the given commit timestamp.
+    #[inline]
+    pub fn new_with_commit_ts(
+        key: impl Into<Key>,
+        value: impl Into<Value>,
+        commit_ts: u64,
+    ) -> Self {
+        KvPair {
+            key: key.into(),
+            value: value.into(),
+            commit_ts,
+        }
     }
 
     /// Immutably borrow the `Key` part of the `KvPair`.
     #[inline]
     pub fn key(&self) -> &Key {
-        &self.0
+        &self.key
     }
 
     /// Immutably borrow the `Value` part of the `KvPair`.
     #[inline]
     pub fn value(&self) -> &Value {
-        &self.1
+        &self.value
     }
 
     /// Consume `self` and return the `Key` part.
     #[inline]
     pub fn into_key(self) -> Key {
-        self.0
+        self.key
     }
 
     /// Consume `self` and return the `Value` part.
     #[inline]
     pub fn into_value(self) -> Value {
-        self.1
+        self.value
     }
 
     /// Mutably borrow the `Key` part of the `KvPair`.
     #[inline]
     pub fn key_mut(&mut self) -> &mut Key {
-        &mut self.0
+        &mut self.key
     }
 
     /// Mutably borrow the `Value` part of the `KvPair`.
     #[inline]
     pub fn value_mut(&mut self) -> &mut Value {
-        &mut self.1
+        &mut self.value
     }
 
     /// Set the `Key` part of the `KvPair`.
     #[inline]
     pub fn set_key(&mut self, k: impl Into<Key>) {
-        self.0 = k.into();
+        self.key = k.into();
     }
 
     /// Set the `Value` part of the `KvPair`.
     #[inline]
     pub fn set_value(&mut self, v: impl Into<Value>) {
-        self.1 = v.into();
+        self.value = v.into();
     }
 }
 
@@ -91,56 +110,67 @@ where
     V: Into<Value>,
 {
     fn from((k, v): (K, V)) -> Self {
-        KvPair(k.into(), v.into())
+        KvPair::new(k, v)
     }
 }
 
 impl From<KvPair> for (Key, Value) {
     fn from(pair: KvPair) -> Self {
-        (pair.0, pair.1)
+        (pair.key, pair.value)
     }
 }
 
 impl From<KvPair> for Key {
     fn from(pair: KvPair) -> Self {
-        pair.0
+        pair.key
     }
 }
 
 impl From<kvrpcpb::KvPair> for KvPair {
     fn from(pair: kvrpcpb::KvPair) -> Self {
-        KvPair(Key::from(pair.key), pair.value)
+        KvPair::new_with_commit_ts(Key::from(pair.key), pair.value, pair.commit_ts)
     }
 }
 
 impl From<KvPair> for kvrpcpb::KvPair {
     fn from(pair: KvPair) -> Self {
         let mut result = kvrpcpb::KvPair::default();
-        let (key, value) = pair.into();
-        result.key = key.into();
-        result.value = value;
+        result.key = pair.key.into();
+        result.value = pair.value;
+        result.commit_ts = pair.commit_ts;
         result
     }
 }
 
 impl AsRef<Key> for KvPair {
     fn as_ref(&self) -> &Key {
-        &self.0
+        &self.key
     }
 }
 
 impl AsRef<Value> for KvPair {
     fn as_ref(&self) -> &Value {
-        &self.1
+        &self.value
     }
 }
 
 impl fmt::Debug for KvPair {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let KvPair(key, value) = self;
-        match str::from_utf8(value) {
-            Ok(s) => write!(f, "KvPair({}, {:?})", HexRepr(&key.0), s),
-            Err(_) => write!(f, "KvPair({}, {})", HexRepr(&key.0), HexRepr(value)),
+        match str::from_utf8(&self.value) {
+            Ok(s) => write!(
+                f,
+                "KvPair({}, {:?}, commit_ts={})",
+                HexRepr(&self.key.0),
+                s,
+                self.commit_ts
+            ),
+            Err(_) => write!(
+                f,
+                "KvPair({}, {}, commit_ts={})",
+                HexRepr(&self.key.0),
+                HexRepr(&self.value),
+                self.commit_ts
+            ),
         }
     }
 }
@@ -166,11 +196,11 @@ mod tests {
         assert!(pair.value().ends_with(b"Y"));
 
         let key: Key = pair.clone().into();
-        assert_eq!(key, pair.0);
+        assert_eq!(key, pair.key);
 
         let (k, v): (Key, Value) = pair.clone().into();
-        assert_eq!(k, pair.0);
-        assert_eq!(v, pair.1);
+        assert_eq!(k, pair.key);
+        assert_eq!(v, pair.value);
     }
 
     #[test]
@@ -188,7 +218,7 @@ mod tests {
 
     #[test]
     fn proto_round_trip() {
-        let pair = KvPair::new("k".to_owned(), vec![1, 2, 3]);
+        let pair = KvPair::new_with_commit_ts("k".to_owned(), vec![1, 2, 3], 9);
         let proto: kvrpcpb::KvPair = pair.clone().into();
         let back: KvPair = proto.into();
         assert_eq!(back, pair);

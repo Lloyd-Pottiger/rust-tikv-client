@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
         .expect("Could not batch scan");
     let vals: Vec<_> = kv_pairs
         .into_iter()
-        .map(|p| String::from_utf8(p.1).unwrap())
+        .map(|p| String::from_utf8(p.value).unwrap())
         .collect();
     assert_eq!(
         &vals,

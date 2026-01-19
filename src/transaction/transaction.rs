@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::collections::HashMap;
 use std::iter;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU8;
@@ -50,7 +51,7 @@ use crate::RequestContext;
 use crate::Result;
 use crate::Value;
 use crate::ValueEntry;
-use crate::{GetOption, GetOptions};
+use crate::{BatchGetOption, BatchGetOptions, GetOption, GetOptions};
 
 /// Options for TiKV's pipelined DML transaction protocol.
 ///
@@ -642,7 +643,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             let mut pairs = self.pessimistic_lock(iter::once(key), options).await?;
             debug_assert!(pairs.len() <= 1);
             match pairs.pop() {
-                Some(pair) => Ok(Some(pair.1)),
+                Some(pair) => Ok(Some(pair.value)),
                 None => Ok(None),
             }
         }
@@ -687,7 +688,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// let _result: HashMap<Key, Value> = txn
     ///     .batch_get(keys)
     ///     .await?
-    ///     .map(|pair| (pair.0, pair.1))
+    ///     .map(|pair| (pair.key, pair.value))
     ///     .collect();
     /// // Finish the transaction...
     /// txn.commit().await?;
@@ -728,6 +729,112 @@ impl<PdC: PdClient> Transaction<PdC> {
             })
             .await
             .map(move |pairs| pairs.map(move |pair| pair.truncate_keyspace(keyspace)))
+    }
+
+    /// Create a new 'batch get' request with read options.
+    ///
+    /// When `BatchGetOption::ReturnCommitTs` is set, TiKV will return the commit timestamp of each
+    /// returned value.
+    ///
+    /// Non-existent entries will not appear in the result. The order of the keys is not retained
+    /// in the result.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use std::collections::HashMap;
+    /// # use tikv_client::{Key, Result, TransactionClient, ValueEntry, with_return_commit_ts};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
+    /// let keys = vec!["TiKV".to_owned(), "TiDB".to_owned()];
+    /// let _result: HashMap<Key, ValueEntry> =
+    ///     txn.batch_get_with_options(keys, &[with_return_commit_ts().into()])
+    ///         .await?;
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn batch_get_with_options(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+        options: &[BatchGetOption],
+    ) -> Result<HashMap<Key, ValueEntry>> {
+        debug!("invoking transactional batch_get request with options");
+        self.check_allow_operation().await?;
+
+        let mut opts = BatchGetOptions::default();
+        opts.apply(options);
+        let need_commit_ts = opts.return_commit_ts();
+
+        let timestamp = self.timestamp.clone();
+        let rpc = self.rpc.clone();
+        let keyspace = self.keyspace;
+        let retry_options = self.options.retry_options.clone();
+        let request_context = self.request_context.clone();
+        let read_routing = ReadRouting::new(self.options.replica_read, self.options.stale_read)
+            .with_seed(timestamp.version() as u32)
+            .with_request_source(request_context.request_source());
+
+        let mut out = HashMap::new();
+        let mut remote_keys = Vec::new();
+
+        for key in keys
+            .into_iter()
+            .map(|k| k.into().encode_keyspace(keyspace, KeyMode::Txn))
+        {
+            match self.buffer.read_value_state(&key) {
+                ReadValueState::Local(Some(value)) => {
+                    let out_key = key.clone().truncate_keyspace(keyspace);
+                    out.insert(out_key, ValueEntry::new(value, 0));
+                }
+                ReadValueState::Local(None) | ReadValueState::Cached(None) => {}
+                ReadValueState::Cached(Some(value)) if !need_commit_ts => {
+                    let out_key = key.clone().truncate_keyspace(keyspace);
+                    out.insert(out_key, ValueEntry::new(value, 0));
+                }
+                ReadValueState::Cached(Some(value)) => {
+                    if let Some(commit_ts) = self.buffer.cached_commit_ts(&key) {
+                        if commit_ts != 0 {
+                            let out_key = key.clone().truncate_keyspace(keyspace);
+                            out.insert(out_key, ValueEntry::new(value, commit_ts));
+                            continue;
+                        }
+                    }
+                    remote_keys.push(key);
+                }
+                ReadValueState::Undetermined => remote_keys.push(key),
+            }
+        }
+
+        if remote_keys.is_empty() {
+            return Ok(out);
+        }
+
+        let request = request_context.apply_to(new_batch_get_request_with_need_commit_ts(
+            remote_keys.into_iter(),
+            timestamp,
+            need_commit_ts,
+        ));
+        let plan = PlanBuilder::new(rpc, keyspace, request)
+            .with_request_context(request_context)
+            .with_read_routing(read_routing)
+            .resolve_lock(retry_options.lock_backoff, keyspace)
+            .retry_multi_region(retry_options.region_backoff)
+            .merge(Collect)
+            .plan();
+        let pairs = plan.execute().await?;
+
+        for pair in pairs {
+            let commit_ts = if need_commit_ts { pair.commit_ts } else { 0 };
+            self.buffer
+                .update_read_cache(pair.key.clone(), Some(pair.value.clone()), commit_ts)?;
+
+            let out_key = pair.key.truncate_keyspace(keyspace);
+            out.insert(out_key, ValueEntry::new(pair.value, commit_ts));
+        }
+
+        Ok(out)
     }
 
     /// Create a new 'batch get for update' request.
@@ -2627,6 +2734,8 @@ mod tests {
     use crate::proto::metapb;
     use crate::proto::pdpb::Timestamp;
     use crate::region::{RegionId, RegionVerId, RegionWithLeader, StoreId};
+    use crate::request::EncodeKeyspace;
+    use crate::request::KeyMode;
     use crate::request::Keyspace;
     use crate::resource_manager;
     use crate::store::{RegionStore, Store};
@@ -2638,6 +2747,7 @@ mod tests {
     use crate::with_return_commit_ts;
     use crate::CommandPriority;
     use crate::Error;
+    use crate::Key;
     use crate::ReplicaReadType;
     use crate::RequestContext;
     use crate::Transaction;
@@ -2790,6 +2900,79 @@ mod tests {
             .await?;
         assert_eq!(entry, Some(ValueEntry::new(b"v".to_vec(), 77)));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_with_options_preserves_commit_ts_and_decodes_keyspace(
+    ) -> crate::Result<()> {
+        let keyspace = Keyspace::Enable { keyspace_id: 42 };
+        let encoded_a = Key::from("a".to_owned()).encode_keyspace(keyspace, KeyMode::Txn);
+        let encoded_b = Key::from("b".to_owned()).encode_keyspace(keyspace, KeyMode::Txn);
+        let encoded_d = Key::from("d".to_owned()).encode_keyspace(keyspace, KeyMode::Txn);
+
+        let expected_keys = vec![
+            Vec::<u8>::from(encoded_a.clone()),
+            Vec::<u8>::from(encoded_b.clone()),
+            Vec::<u8>::from(encoded_d.clone()),
+        ];
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::BatchGetRequest>() else {
+                    unreachable!("unexpected request type: {:?}", req.type_id());
+                };
+                assert!(req.need_commit_ts);
+                assert_eq!(req.keys, expected_keys);
+
+                let resp = kvrpcpb::BatchGetResponse {
+                    pairs: vec![
+                        kvrpcpb::KvPair {
+                            key: Vec::<u8>::from(encoded_a.clone()),
+                            value: b"a1".to_vec(),
+                            commit_ts: 11,
+                            ..Default::default()
+                        },
+                        kvrpcpb::KvPair {
+                            key: Vec::<u8>::from(encoded_b.clone()),
+                            value: b"b1".to_vec(),
+                            commit_ts: 22,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                };
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(42),
+            pd_client,
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            keyspace,
+            RequestContext::default(),
+            None,
+        );
+
+        let entries = txn
+            .batch_get_with_options(
+                ["a".to_owned(), "b".to_owned(), "d".to_owned()],
+                &[with_return_commit_ts().into()],
+            )
+            .await?;
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries.get(&Key::from("a".to_owned())),
+            Some(&ValueEntry::new(b"a1".to_vec(), 11))
+        );
+        assert_eq!(
+            entries.get(&Key::from("b".to_owned())),
+            Some(&ValueEntry::new(b"b1".to_vec(), 22))
+        );
+        assert!(entries.get(&Key::from("d".to_owned())).is_none());
 
         Ok(())
     }

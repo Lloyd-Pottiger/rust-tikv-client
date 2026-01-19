@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use derive_new::new;
@@ -9,6 +10,7 @@ use crate::interceptor::RpcContextInfo;
 use crate::interceptor::RpcInterceptor;
 use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
+use crate::BatchGetOption;
 use crate::BoundRange;
 use crate::CommandPriority;
 use crate::GetOption;
@@ -118,6 +120,16 @@ impl<PdC: PdClient> Snapshot<PdC> {
     ) -> Result<impl Iterator<Item = KvPair>> {
         debug!("invoking batch_get request on snapshot");
         self.transaction.batch_get(keys).await
+    }
+
+    /// Get the values associated with the given keys with read options.
+    pub async fn batch_get_with_options(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+        options: &[BatchGetOption],
+    ) -> Result<HashMap<Key, ValueEntry>> {
+        debug!("invoking batch_get_with_options request on snapshot");
+        self.transaction.batch_get_with_options(keys, options).await
     }
 
     /// Scan a range, return at most `limit` key-value pairs that lying in the range.

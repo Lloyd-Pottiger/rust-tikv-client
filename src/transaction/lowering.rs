@@ -41,6 +41,18 @@ pub fn new_batch_get_request(
     requests::new_batch_get_request(keys.map(Into::into).collect(), timestamp.version())
 }
 
+pub fn new_batch_get_request_with_need_commit_ts(
+    keys: impl Iterator<Item = Key>,
+    timestamp: Timestamp,
+    need_commit_ts: bool,
+) -> kvrpcpb::BatchGetRequest {
+    requests::new_batch_get_request_with_need_commit_ts(
+        keys.map(Into::into).collect(),
+        timestamp.version(),
+        need_commit_ts,
+    )
+}
+
 pub fn new_scan_request(
     range: BoundRange,
     timestamp: Timestamp,

@@ -13,11 +13,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- feature/txn-batch-get-return-commit-ts：补齐 `BatchGetRequest.need_commit_ts` + `KvPair.commit_ts` 的公开 API（对齐 Go BatchGet + ValueEntry）
-  - 步骤：新增 batch_get variant（返回 key->ValueEntry，包含 commit_ts）；按 `BatchGetOptions` 设置 need_commit_ts；补单测（commit_ts 保留且 keyspace decode 正常）
-  - 验证：`cargo test`
-  - 文件：`src/transaction/transaction.rs`，`src/transaction/requests.rs`，`src/kv/*`，`.codex/progress/daemon.md`
-
 # 待做工作
 
 # 已完成工作
@@ -31,7 +26,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 结果：go tests inventory 101 files/294 cases；`cargo test --features integration-tests --no-run` 通过
   - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/daemon.md`
 
-- feature/txn-get-return-commit-ts：txn get 支持 ReturnCommitTS（need_commit_ts + commit_ts 透传）
-  - 关键：新增 `Transaction::get_with_options`/`Snapshot::get_with_options` 返回 `ValueEntry`；GetRequest 支持 `need_commit_ts`；buffer 记录 read commit_ts；单测 mock kv 校验 need_commit_ts+commit_ts（含 cached->refetch）
+- feature/txn-read-return-commit-ts：txn get/batch_get 支持 ReturnCommitTS（need_commit_ts + commit_ts 透传）
+  - 关键：新增 `Transaction::get_with_options`/`Snapshot::get_with_options`（返回 `ValueEntry`）与 `Transaction::batch_get_with_options`/`Snapshot::batch_get_with_options`（返回 key->`ValueEntry`）；Get/BatchGet request 支持 `need_commit_ts`；`KvPair.commit_ts` 公开并从 proto 透传；keyspace 下 batch_get 返回 key decode 正常；单测 mock kv 校验 need_commit_ts+commit_ts（含 cached->refetch）
   - 验证：`cargo test`
-  - 文件：`src/transaction/transaction.rs`，`src/transaction/snapshot.rs`，`src/transaction/buffer.rs`，`src/transaction/requests.rs`，`src/transaction/lowering.rs`，`.codex/progress/daemon.md`
+  - 文件：`src/kv/kvpair.rs`，`src/request/keyspace.rs`，`src/transaction/transaction.rs`，`src/transaction/snapshot.rs`，`src/transaction/buffer.rs`，`src/transaction/requests.rs`，`src/transaction/lowering.rs`，`examples/raw.rs`，`.codex/progress/daemon.md`
