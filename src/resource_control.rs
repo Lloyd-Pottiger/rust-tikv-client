@@ -161,4 +161,3 @@ mod tests {
         assert_eq!(info.store_id(), 0);
     }
 }
-

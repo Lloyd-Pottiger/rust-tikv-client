@@ -156,7 +156,21 @@ pub use config::PdRetryConfig;
 #[doc(inline)]
 pub use crate::backoff::Backoff;
 #[doc(inline)]
+pub use crate::kv::batch_get_to_get_options;
+#[doc(inline)]
+pub use crate::kv::with_return_commit_ts;
+#[doc(inline)]
+pub use crate::kv::BatchGetOption;
+#[doc(inline)]
+pub use crate::kv::BatchGetOptions;
+#[doc(inline)]
 pub use crate::kv::BoundRange;
+#[doc(inline)]
+pub use crate::kv::GetOption;
+#[doc(inline)]
+pub use crate::kv::GetOptions;
+#[doc(inline)]
+pub use crate::kv::GetOrBatchGetOption;
 #[doc(inline)]
 pub use crate::kv::IntoOwnedRange;
 #[doc(inline)]
@@ -167,20 +181,6 @@ pub use crate::kv::KvPair;
 pub use crate::kv::Value;
 #[doc(inline)]
 pub use crate::kv::ValueEntry;
-#[doc(inline)]
-pub use crate::kv::GetOption;
-#[doc(inline)]
-pub use crate::kv::GetOptions;
-#[doc(inline)]
-pub use crate::kv::BatchGetOption;
-#[doc(inline)]
-pub use crate::kv::BatchGetOptions;
-#[doc(inline)]
-pub use crate::kv::GetOrBatchGetOption;
-#[doc(inline)]
-pub use crate::kv::batch_get_to_get_options;
-#[doc(inline)]
-pub use crate::kv::with_return_commit_ts;
 #[doc(inline)]
 pub use crate::raw::lowering as raw_lowering;
 #[doc(inline)]

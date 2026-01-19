@@ -26,6 +26,14 @@ pub fn new_get_request(key: Key, timestamp: Timestamp) -> kvrpcpb::GetRequest {
     requests::new_get_request(key.into(), timestamp.version())
 }
 
+pub fn new_get_request_with_need_commit_ts(
+    key: Key,
+    timestamp: Timestamp,
+    need_commit_ts: bool,
+) -> kvrpcpb::GetRequest {
+    requests::new_get_request_with_need_commit_ts(key.into(), timestamp.version(), need_commit_ts)
+}
+
 pub fn new_batch_get_request(
     keys: impl Iterator<Item = Key>,
     timestamp: Timestamp,

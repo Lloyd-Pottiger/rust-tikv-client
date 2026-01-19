@@ -80,9 +80,13 @@ impl From<GetOrBatchGetOption> for BatchGetOption {
 
 pub fn batch_get_to_get_options(options: Option<&[BatchGetOption]>) -> Vec<GetOption> {
     match options {
-        Some(opts) => opts.iter().copied().map(|o| match o {
-            BatchGetOption::ReturnCommitTs => GetOption::ReturnCommitTs,
-        }).collect(),
+        Some(opts) => opts
+            .iter()
+            .copied()
+            .map(|o| match o {
+                BatchGetOption::ReturnCommitTs => GetOption::ReturnCommitTs,
+            })
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -122,4 +126,3 @@ mod tests {
         assert!(opts.return_commit_ts());
     }
 }
-

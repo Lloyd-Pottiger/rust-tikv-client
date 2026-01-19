@@ -11,11 +11,13 @@ use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
 use crate::BoundRange;
 use crate::CommandPriority;
+use crate::GetOption;
 use crate::Key;
 use crate::KvPair;
 use crate::Result;
 use crate::Transaction;
 use crate::Value;
+use crate::ValueEntry;
 
 /// A read-only transaction which reads at the given timestamp.
 ///
@@ -91,6 +93,16 @@ impl<PdC: PdClient> Snapshot<PdC> {
     pub async fn get(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         trace!("invoking get request on snapshot");
         self.transaction.get(key).await
+    }
+
+    /// Get the value associated with the given key with read options.
+    pub async fn get_with_options(
+        &mut self,
+        key: impl Into<Key>,
+        options: &[GetOption],
+    ) -> Result<Option<ValueEntry>> {
+        trace!("invoking get_with_options request on snapshot");
+        self.transaction.get_with_options(key, options).await
     }
 
     /// Check whether the key exists.

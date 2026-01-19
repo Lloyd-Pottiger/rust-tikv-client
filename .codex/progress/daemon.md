@@ -13,63 +13,25 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- review/overall-tests-port-status：复核 client-go `_test.go` 覆盖映射，补齐遗漏/新增待做任务
-  - 步骤：按目录抽样扫 `client-go/**/_test.go`，确认均已覆盖或 N/A；将“仍可迁移但未覆盖”的用例拆成具体任务加入待做
-  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+- feature/txn-batch-get-return-commit-ts：补齐 `BatchGetRequest.need_commit_ts` + `KvPair.commit_ts` 的公开 API（对齐 Go BatchGet + ValueEntry）
+  - 步骤：新增 batch_get variant（返回 key->ValueEntry，包含 commit_ts）；按 `BatchGetOptions` 设置 need_commit_ts；补单测（commit_ts 保留且 keyspace decode 正常）
+  - 验证：`cargo test`
+  - 文件：`src/transaction/transaction.rs`，`src/transaction/requests.rs`，`src/kv/*`，`.codex/progress/daemon.md`
 
 # 待做工作
 
 # 已完成工作
 
-- tests/verify-integration-tests-compile：校验 Rust integration tests feature gate 可编译（对齐 Go integration_tests 映射）
-  - 结果：`cargo test --features integration-tests --no-run` 通过（仅编译，不依赖 cluster）
-  - 文件：`.codex/progress/daemon.md`
-
-- tests/port-kv-options-value-entry：迁移 Go `kv/kv_test.go`（Get/BatchGet options + ValueEntry 基础语义）
-  - 关键：新增 `ValueEntry`（value+commit_ts）与 `GetOptions/BatchGetOptions`（return_commit_ts）；提供 `with_return_commit_ts` + `batch_get_to_get_options`
-  - 覆盖：Apply/convert 语义 + `is_value_empty`（对齐 Go 单测）
+- tests/port-client-go-core-suite：迁移 client-go 可迁移单测语义（kv/options+ValueEntry，lock resolver cache，backoff/backoffer，keyspace codec，gc time，oracle，core request/retry/resource-control 等）
+  - 关键：resolved cache 命中不触发 secondary-check RPC；EpochNotMatch(empty CurrentRegions)->backoff；Keyspace::try_enable 限制 24-bit id；GC time 兼容解析（最多容忍 1 个尾随字段）；oracle(singleflight+lowres cache + local oracle time hook)；Key.next_prefix_key 边界 + region cache/retry fast-path + stale-read metrics + resource-control bypass
   - 验证：`cargo test`
-  - 文件：`src/kv/options.rs`，`src/kv/value_entry.rs`，`src/kv/mod.rs`，`src/lib.rs`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+  - 文件：`src/kv/*`，`src/transaction/lock.rs`，`src/request/*`，`src/request/keyspace.rs`，`src/util/gc_time.rs`，`src/pd/*`，`src/timestamp/*`，`src/store/*`，`src/region_cache.rs`，`src/resource_control.rs`
 
-- tests/port-lock-resolver-cache：迁移 Go `txnkv/txnlock/lock_resolver_test.go::TestLockResolverCache`（resolved cache 语义）
-  - 关键：预填 `ResolveLocksContext.resolved` 的 committed status；`LockResolver::check_txn_status` 命中缓存，不触发 CheckTxnStatus/CheckSecondaryLocks RPC
-  - 覆盖：新增 `cleanup_locks` 单测（RPC 触发即 panic；ResolveLock 正常返回）
-  - 验证：`cargo test`
-  - 文件：`src/transaction/lock.rs`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
-
-- tests/audit-retry-backoffer-parity：对齐 Go `config/retry/backoff_test.go` 的可迁移 backoff/backoffer 语义（可迁移部分）
-  - 关键：对齐 `MayBackoffForRegionError`：fake EpochNotMatch（CurrentRegions 为空）视为 region-miss，需要 backoff（Rust: `on_region_epoch_not_match` 返回 backoff）
-  - 决策：Go Backoffer 的 per-error-type state/excludedSleep/longestSleep 细节不做 1:1（Rust 用统一 Backoff + plan-level 分类）
-  - 验证：`cargo test`
-  - 文件：`src/request/plan.rs`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
-
-- tests/audit-tikvrpc-tests：梳理 Go `tikvrpc/*_test.go` 的可迁移语义并补齐映射/标注 N/A
-  - 结论：BatchCommands/batch-client 相关用例（`tikvrpc_test.go`）标注 N/A；interceptor 用例已由 `src/interceptor.rs` 单测覆盖
-  - 验证：`cargo test`
-  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
-
-- tests/port-apicodec-v2-more：对齐 Go `internal/apicodec/codec_v2_test.go` 的 keyspace v2 编解码边界（可迁移部分）
-  - 关键：新增 `Keyspace::try_enable` 校验 24-bit keyspace id；避免 silent truncate（用 `InternalError` 报错，不引入新 public error variant）
-  - 覆盖：invalid keyspace id 拒绝；其余 key/range/KeyError/EpochNotMatch/bucket keys 语义已在 `keyspace.rs` 单测覆盖
-  - 验证：`cargo test`
-  - 文件：`src/request/keyspace.rs`，`src/raw/client.rs`，`src/transaction/client.rs`，`.codex/progress/daemon.md`
-
-- tests/port-util-gc-time：迁移 Go `util/misc_test.go::TestCompatibleParseGCTime`（兼容解析 GC time string）
-  - 关键：两段式解析（完整解析失败 -> 丢弃最后一个 space-field 再试），严格限制最多容忍 1 个尾随字段（对齐 Go 行为）
-  - 覆盖：valid/invalid cases + `+0800`（Asia/Shanghai fixed offset）格式化断言
-  - 验证：`cargo test`
-  - 文件：`src/util/gc_time.rs`，`src/util/mod.rs`，`.codex/progress/daemon.md`
-
-- tests/oracle-parity：迁移 client-go oracle 相关关键测试语义（pd oracle + local oracle）
-  - 关键：per-txn-scope singleflight GetTS + low-res ts cache；stale-ts/UntilExpired 用 physical 差值；local oracle 用 SystemTime + per-ms logical counter + time hook；测试用 tokio paused time 避免 flake
-  - 验证：`cargo test`
-  - 文件：`src/pd/*`，`src/timestamp.rs`，`src/timestamp/local_oracle.rs`，`.codex/progress/daemon.md`
-
-- tests/core-parity：迁移 client-go 核心请求/重试/kv/misc 可迁移测试语义
-  - 关键：`Key::next_prefix_key` 边界（全 0xFF -> empty）；region/cache/retry 的 fast-retry+invalidate；stale-read bytes/req metrics；resource-control bypass request_source `internal_others`
-  - 验证：`cargo test`
-  - 文件：`src/kv/key.rs`，`src/store/*`，`src/request/*`，`src/region_cache.rs`，`src/stats.rs`，`src/resource_control.rs`，`.codex/progress/daemon.md`
-
-- infra/test-mapping+docs：维护 client-go 测试清单/覆盖映射与集成测试文档入口
-  - 关键：统计 go tests（101 files/294 cases）并标注 N/A（mockstore/mocktikv 强绑定）；维护 integration_tests 高层映射
+- infra/test-mapping+integration-docs：维护 go tests 覆盖映射 + integration_tests 映射；校验 integration-tests feature gate 可编译
+  - 结果：go tests inventory 101 files/294 cases；`cargo test --features integration-tests --no-run` 通过
   - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/daemon.md`
+
+- feature/txn-get-return-commit-ts：txn get 支持 ReturnCommitTS（need_commit_ts + commit_ts 透传）
+  - 关键：新增 `Transaction::get_with_options`/`Snapshot::get_with_options` 返回 `ValueEntry`；GetRequest 支持 `need_commit_ts`；buffer 记录 read commit_ts；单测 mock kv 校验 need_commit_ts+commit_ts（含 cached->refetch）
+  - 验证：`cargo test`
+  - 文件：`src/transaction/transaction.rs`，`src/transaction/snapshot.rs`，`src/transaction/buffer.rs`，`src/transaction/requests.rs`，`src/transaction/lowering.rs`，`.codex/progress/daemon.md`

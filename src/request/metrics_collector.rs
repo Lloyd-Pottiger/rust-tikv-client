@@ -160,9 +160,7 @@ mod tests {
             Some(&details),
         );
         assert_eq!(
-            details
-                .unpacked_bytes_sent_kv_total
-                .load(Ordering::SeqCst),
+            details.unpacked_bytes_sent_kv_total.load(Ordering::SeqCst),
             10
         );
         assert_eq!(
@@ -178,9 +176,7 @@ mod tests {
             Some(&details),
         );
         assert_eq!(
-            details
-                .unpacked_bytes_sent_kv_total
-                .load(Ordering::SeqCst),
+            details.unpacked_bytes_sent_kv_total.load(Ordering::SeqCst),
             20
         );
     }
@@ -234,10 +230,7 @@ mod tests {
             Some(&details),
         );
 
-        assert_eq!(
-            crate::stats::stale_read_out_bytes(false) - before_out,
-            10
-        );
+        assert_eq!(crate::stats::stale_read_out_bytes(false) - before_out, 10);
         assert_eq!(crate::stats::stale_read_req_count(false) - before_req, 1);
     }
 
@@ -315,9 +308,7 @@ mod tests {
             Some(&details),
         );
         assert_eq!(
-            details
-                .unpacked_bytes_sent_kv_total
-                .load(Ordering::SeqCst),
+            details.unpacked_bytes_sent_kv_total.load(Ordering::SeqCst),
             10
         );
         assert_eq!(

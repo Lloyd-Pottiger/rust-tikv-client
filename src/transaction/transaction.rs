@@ -35,6 +35,7 @@ use crate::request::RetryOptions;
 use crate::request::TruncateKeyspace;
 use crate::timestamp::TimestampExt;
 use crate::transaction::buffer::Buffer;
+use crate::transaction::buffer::ReadValueState;
 use crate::transaction::lowering::*;
 use crate::transaction::FlagsOp;
 use crate::transaction::KeyFlags;
@@ -48,6 +49,8 @@ use crate::ReplicaReadType;
 use crate::RequestContext;
 use crate::Result;
 use crate::Value;
+use crate::ValueEntry;
+use crate::{GetOption, GetOptions};
 
 /// Options for TiKV's pipelined DML transaction protocol.
 ///
@@ -476,6 +479,101 @@ impl<PdC: PdClient> Transaction<PdC> {
                 plan.execute().await
             })
             .await
+    }
+
+    /// Get the value associated with the given key with read options.
+    ///
+    /// When `GetOption::ReturnCommitTs` is set, TiKV will return the commit timestamp of the value.
+    /// The returned [`ValueEntry`] contains the value and its commit timestamp (`0` means
+    /// "unknown / not requested").
+    ///
+    /// Retuning `Ok(None)` indicates the key does not exist in TiKV.
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// # use tikv_client::{Result, TransactionClient, ValueEntry, with_return_commit_ts};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await?;
+    /// let mut txn = client.begin_optimistic().await?;
+    /// let key = "TiKV".to_owned();
+    /// let _entry: Option<ValueEntry> =
+    ///     txn.get_with_options(key, &[with_return_commit_ts().into()]).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_with_options(
+        &mut self,
+        key: impl Into<Key>,
+        options: &[GetOption],
+    ) -> Result<Option<ValueEntry>> {
+        trace!("invoking transactional get request with options");
+        self.check_allow_operation().await?;
+
+        let mut opts = GetOptions::default();
+        opts.apply(options);
+        let need_commit_ts = opts.return_commit_ts();
+
+        let timestamp = self.timestamp.clone();
+        let rpc = self.rpc.clone();
+        let keyspace = self.keyspace;
+        let key = key.into().encode_keyspace(keyspace, KeyMode::Txn);
+        let retry_options = self.options.retry_options.clone();
+        let request_context = self.request_context.clone();
+        let read_routing = ReadRouting::new(self.options.replica_read, self.options.stale_read)
+            .with_seed(timestamp.version() as u32)
+            .with_request_source(request_context.request_source());
+
+        // Fast path: local mutations always return commit_ts=0; cached reads can be served when
+        // commit_ts is not requested (or already cached).
+        match self.buffer.read_value_state(&key) {
+            ReadValueState::Local(value) => {
+                return Ok(value.map(|value| ValueEntry::new(value, 0)));
+            }
+            ReadValueState::Cached(None) => return Ok(None),
+            ReadValueState::Cached(Some(value)) if !need_commit_ts => {
+                return Ok(Some(ValueEntry::new(value, 0)));
+            }
+            ReadValueState::Cached(Some(value)) => {
+                if let Some(commit_ts) = self.buffer.cached_commit_ts(&key) {
+                    if commit_ts != 0 {
+                        return Ok(Some(ValueEntry::new(value, commit_ts)));
+                    }
+                }
+            }
+            ReadValueState::Undetermined => {}
+        }
+
+        let request = request_context.apply_to(new_get_request_with_need_commit_ts(
+            key.clone(),
+            timestamp,
+            need_commit_ts,
+        ));
+        let plan = PlanBuilder::new(rpc, keyspace, request)
+            .with_request_context(request_context)
+            .with_read_routing(read_routing)
+            .resolve_lock(retry_options.lock_backoff, keyspace)
+            .retry_multi_region(retry_options.region_backoff)
+            .merge(CollectSingle)
+            .plan();
+        let resp = plan.execute().await?;
+
+        let entry = if resp.not_found {
+            None
+        } else {
+            Some(ValueEntry::new(
+                resp.value,
+                if need_commit_ts { resp.commit_ts } else { 0 },
+            ))
+        };
+
+        // Keep buffer cache consistent with the fetched result.
+        let (value, commit_ts) = match &entry {
+            Some(entry) => (Some(entry.value.clone()), entry.commit_ts),
+            None => (None, 0),
+        };
+        self.buffer.update_read_cache(key, value, commit_ts)?;
+
+        Ok(entry)
     }
 
     /// Create a `get for update` request.
@@ -2537,12 +2635,14 @@ mod tests {
     use crate::transaction::FlagsOp;
     use crate::transaction::HeartbeatOption;
     use crate::transaction::LockOptions;
+    use crate::with_return_commit_ts;
     use crate::CommandPriority;
     use crate::Error;
     use crate::ReplicaReadType;
     use crate::RequestContext;
     use crate::Transaction;
     use crate::TransactionOptions;
+    use crate::ValueEntry;
 
     #[test]
     fn heartbeat_txn_not_found_error_is_detected() {
@@ -2642,6 +2742,55 @@ mod tests {
         let res = txn.get("key".to_owned()).await;
         assert!(matches!(res, Err(Error::RegionError(_))));
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_with_options_sets_need_commit_ts_and_returns_commit_ts() -> crate::Result<()>
+    {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_cloned = calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    unreachable!("unexpected request type: {:?}", req.type_id());
+                };
+
+                let call = calls_cloned.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    assert!(!req.need_commit_ts);
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    resp.value = b"v".to_vec();
+                    Ok(Box::new(resp) as Box<dyn Any>)
+                } else {
+                    assert!(req.need_commit_ts);
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    resp.value = b"v".to_vec();
+                    resp.commit_ts = 77;
+                    Ok(Box::new(resp) as Box<dyn Any>)
+                }
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(42),
+            pd_client,
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        let value = txn.get("k".to_owned()).await?;
+        assert_eq!(value, Some(b"v".to_vec()));
+
+        let entry = txn
+            .get_with_options("k".to_owned(), &[with_return_commit_ts().into()])
+            .await?;
+        assert_eq!(entry, Some(ValueEntry::new(b"v".to_vec(), 77)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
         Ok(())
     }
 

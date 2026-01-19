@@ -38,4 +38,3 @@ mod tests {
         assert!(!ValueEntry::new(vec![b'x'], 0).is_value_empty());
     }
 }
-

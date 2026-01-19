@@ -27,7 +27,9 @@ pub enum Keyspace {
     /// Enable APIv2 keyspace encoding.
     ///
     /// Note: TiKV keyspace IDs are 24-bit; values above `2^24-1` are invalid.
-    Enable { keyspace_id: u32 },
+    Enable {
+        keyspace_id: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

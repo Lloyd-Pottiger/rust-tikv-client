@@ -91,9 +91,18 @@ macro_rules! error_locks {
 }
 
 pub fn new_get_request(key: Vec<u8>, timestamp: u64) -> kvrpcpb::GetRequest {
+    new_get_request_with_need_commit_ts(key, timestamp, false)
+}
+
+pub fn new_get_request_with_need_commit_ts(
+    key: Vec<u8>,
+    timestamp: u64,
+    need_commit_ts: bool,
+) -> kvrpcpb::GetRequest {
     let mut req = kvrpcpb::GetRequest::default();
     req.key = key;
     req.version = timestamp;
+    req.need_commit_ts = need_commit_ts;
     req
 }
 

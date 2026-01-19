@@ -668,6 +668,9 @@ mod tests {
         lock_info.lock_type = kvrpcpb::Op::Put as i32;
 
         let mut resolver = LockResolver::new(ctx, pd_client, keyspace);
-        resolver.cleanup_locks(store, vec![lock_info]).await.unwrap();
+        resolver
+            .cleanup_locks(store, vec![lock_info])
+            .await
+            .unwrap();
     }
 }

@@ -21,7 +21,18 @@ pub struct Buffer {
     primary_key: Option<Key>,
     entry_map: BTreeMap<Key, BufferEntry>,
     key_flags: HashMap<Key, KeyFlags>,
+    read_commit_ts: HashMap<Key, u64>,
     is_pessimistic: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadValueState {
+    /// A value determined by local mutations (`put`/`insert`/`delete`).
+    Local(Option<Value>),
+    /// A value cached from a previous read request.
+    Cached(Option<Value>),
+    /// The buffer cannot determine the value and should fetch from TiKV.
+    Undetermined,
 }
 
 impl Buffer {
@@ -30,6 +41,7 @@ impl Buffer {
             primary_key: None,
             entry_map: BTreeMap::new(),
             key_flags: HashMap::new(),
+            read_commit_ts: HashMap::new(),
             is_pessimistic,
         }
     }
@@ -51,6 +63,41 @@ impl Buffer {
             MutationValue::Determined(value) => value,
             MutationValue::Undetermined => None,
         }
+    }
+
+    pub(crate) fn read_value_state(&self, key: &Key) -> ReadValueState {
+        match self.entry_map.get(key) {
+            Some(BufferEntry::Put(value)) | Some(BufferEntry::Insert(value)) => {
+                ReadValueState::Local(Some(value.clone()))
+            }
+            Some(BufferEntry::Del) | Some(BufferEntry::CheckNotExist) => {
+                ReadValueState::Local(None)
+            }
+            Some(BufferEntry::Cached(value)) => ReadValueState::Cached(value.clone()),
+            Some(BufferEntry::Locked(Some(value))) => ReadValueState::Cached(value.clone()),
+            Some(BufferEntry::Locked(None)) | None => ReadValueState::Undetermined,
+        }
+    }
+
+    pub(crate) fn cached_commit_ts(&self, key: &Key) -> Option<u64> {
+        self.read_commit_ts.get(key).copied()
+    }
+
+    pub(crate) fn update_read_cache(
+        &mut self,
+        key: Key,
+        value: Option<Value>,
+        commit_ts: u64,
+    ) -> Result<()> {
+        let value_is_none = value.is_none();
+        let key_for_ts = key.clone();
+        self.update_cache(key, value)?;
+        if value_is_none {
+            self.read_commit_ts.remove(&key_for_ts);
+        } else if commit_ts != 0 {
+            self.read_commit_ts.insert(key_for_ts, commit_ts);
+        }
+        Ok(())
     }
 
     /// Get a value from the buffer. If the value is not present, run `f` to get
