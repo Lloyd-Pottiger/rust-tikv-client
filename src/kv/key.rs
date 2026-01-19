@@ -157,6 +157,29 @@ impl Key {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
+    /// Return the next prefix key in byte-order.
+    ///
+    /// This matches client-go's `kv.PrefixNextKey` semantics:
+    /// - increment the key as a big-endian byte slice (carry propagation),
+    /// - if the key is all `0xff`, return the empty key.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "client-go parity helper (PrefixNextKey); may be used by prefix scan helpers"
+        )
+    )]
+    pub(crate) fn next_prefix_key(&self) -> Key {
+        let mut buf = self.0.clone();
+        for i in (0..buf.len()).rev() {
+            buf[i] = buf[i].wrapping_add(1);
+            if buf[i] != 0 {
+                return Key(buf);
+            }
+        }
+        Key::EMPTY
+    }
 }
 
 impl From<Vec<u8>> for Key {
@@ -224,5 +247,22 @@ mod tests {
         let k2: &Key = v.as_ref();
         let bytes2: &[u8] = k2.into();
         assert_eq!(bytes2, v.as_slice());
+    }
+
+    #[test]
+    fn next_prefix_key_matches_client_go_key_test() {
+        let k1 = Key::from(vec![0xff]);
+        let k2 = Key::from(vec![0xff, 0xff]);
+        let k3 = Key::from(vec![0xff, 0xff, 0xff, 0xff]);
+
+        assert_eq!(k1.next_prefix_key(), Key::EMPTY);
+        assert_eq!(k2.next_prefix_key(), Key::EMPTY);
+        assert_eq!(k3.next_prefix_key(), Key::EMPTY);
+
+        let k = Key::from(vec![0x01, 0x02]);
+        assert_eq!(k.next_prefix_key(), Key::from(vec![0x01, 0x03]));
+
+        let k = Key::from(vec![0x01, 0xff]);
+        assert_eq!(k.next_prefix_key(), Key::from(vec![0x02, 0x00]));
     }
 }

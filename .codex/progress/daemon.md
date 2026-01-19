@@ -17,6 +17,12 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- tests/port-kv-prefix-next-key：迁移 Go `kv.PrefixNextKey` 边界语义（全 0xFF -> empty）
+  - 关键：新增 `Key::next_prefix_key`（byte carry）；全 0xFF 时返回 empty（对齐 client-go）
+  - 覆盖：`client-go/kv/key_test.go::TestPrefixNextKey`
+  - 验证：`cargo test`
+  - 文件：`src/kv/key.rs`，`.codex/progress/daemon.md`
+
 - tests/audit-client-go-tests-port-map：对齐 client-go 全量 `_test.go` 用例的 Rust 覆盖/标注 N/A
   - 关键：核对 go `_test.go` 文件数(101)/Test 用例数(294)/Top dirs 分布；补齐 map 文档对 `kv/trace/error/rawkv/tikv/txnkv` 目录的覆盖说明
   - 决策：mocktikv/mockstore 强绑定用例统一标注 N/A（Rust 用 real-cluster E2E + unit-test mocks 覆盖等价语义）
