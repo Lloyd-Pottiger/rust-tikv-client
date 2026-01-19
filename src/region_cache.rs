@@ -153,6 +153,7 @@ impl RegionCacheMap {
 pub struct RegionCache<Client = RetryClient<Cluster>> {
     region_cache: RwLock<RegionCacheMap>,
     store_cache: RwLock<HashMap<StoreId, Store>>,
+    in_flight_region_by_key: Mutex<HashMap<Key, Arc<Notify>>>,
     in_flight_region_by_id: Mutex<HashMap<RegionId, Arc<Notify>>>,
     inner_client: Arc<Client>,
     ttl: RegionCacheTtl,
@@ -167,6 +168,7 @@ impl<Client> RegionCache<Client> {
         RegionCache {
             region_cache: RwLock::new(RegionCacheMap::new()),
             store_cache: RwLock::new(HashMap::new()),
+            in_flight_region_by_key: Mutex::new(HashMap::new()),
             in_flight_region_by_id: Mutex::new(HashMap::new()),
             inner_client,
             ttl: RegionCacheTtl::new(region_cache_ttl, region_cache_ttl_jitter),
@@ -177,22 +179,76 @@ impl<Client> RegionCache<Client> {
 impl<C: RetryClientTrait> RegionCache<C> {
     // Retrieve cache entry by key. If there's no entry, query PD and update cache.
     pub async fn get_region_by_key(&self, key: &Key) -> Result<RegionWithLeader> {
-        let now = now_epoch_sec();
-        {
-            let region_cache_guard = self.region_cache.read().await;
-            if let Some((_, candidate_ver_id)) =
-                region_cache_guard.key_to_ver_id.range(..=key).next_back()
+        let key = key.clone();
+        loop {
+            // Fast path: cache hit.
+            let now = now_epoch_sec();
             {
-                if let Some(cached) = region_cache_guard.ver_id_to_region.get(candidate_ver_id) {
-                    if self.ttl.check_and_refresh(&cached.ttl_epoch_sec, now)
-                        && cached.region.contains(key)
+                let region_cache_guard = self.region_cache.read().await;
+                if let Some((_, candidate_ver_id)) =
+                    region_cache_guard.key_to_ver_id.range(..=&key).next_back()
+                {
+                    if let Some(cached) = region_cache_guard.ver_id_to_region.get(candidate_ver_id)
                     {
-                        return Ok(cached.region.clone());
+                        if self.ttl.check_and_refresh(&cached.ttl_epoch_sec, now)
+                            && cached.region.contains(&key)
+                        {
+                            return Ok(cached.region.clone());
+                        }
                     }
                 }
             }
+
+            // Slow path: join an in-flight load, or become the loader.
+            let (notify, should_fetch) = {
+                let mut in_flight = self.in_flight_region_by_key.lock().await;
+                match in_flight.entry(key.clone()) {
+                    std::collections::hash_map::Entry::Occupied(e) => (e.get().clone(), false),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        let notify = Arc::new(Notify::new());
+                        e.insert(notify.clone());
+                        (notify, true)
+                    }
+                }
+            };
+
+            if !should_fetch {
+                notify.notified().await;
+                continue;
+            }
+
+            // Double-check after becoming the loader (another path may have filled the cache).
+            let now = now_epoch_sec();
+            {
+                let region_cache_guard = self.region_cache.read().await;
+                if let Some((_, candidate_ver_id)) =
+                    region_cache_guard.key_to_ver_id.range(..=&key).next_back()
+                {
+                    if let Some(cached) = region_cache_guard.ver_id_to_region.get(candidate_ver_id)
+                    {
+                        if self.ttl.check_and_refresh(&cached.ttl_epoch_sec, now)
+                            && cached.region.contains(&key)
+                        {
+                            let mut in_flight = self.in_flight_region_by_key.lock().await;
+                            in_flight.remove(&key);
+                            drop(in_flight);
+                            notify.notify_waiters();
+                            return Ok(cached.region.clone());
+                        }
+                    }
+                }
+            }
+
+            // Fetch from PD without holding any cache locks.
+            let fetched = self.read_through_region_by_key(key.clone()).await;
+
+            // Always clear the in-flight marker first, then wake waiters.
+            let mut in_flight = self.in_flight_region_by_key.lock().await;
+            in_flight.remove(&key);
+            drop(in_flight);
+            notify.notify_waiters();
+            return fetched;
         }
-        self.read_through_region_by_key(key.clone()).await
     }
 
     // Retrieve cache entry by RegionId. If there's no entry, query PD and update cache.
@@ -433,6 +489,7 @@ mod test {
 
     use async_trait::async_trait;
     use tokio::sync::Mutex;
+    use tokio::sync::Notify;
 
     use super::RegionCache;
     use crate::common::Error;
@@ -450,6 +507,82 @@ mod test {
     struct MockRetryClient {
         pub regions: Mutex<HashMap<RegionId, RegionWithLeader>>,
         pub get_region_count: AtomicU64,
+    }
+
+    struct BlockingGetRegionByIdClient {
+        region: RegionWithLeader,
+        started: Notify,
+        release: Notify,
+        calls: AtomicU64,
+    }
+
+    impl BlockingGetRegionByIdClient {
+        fn new(region: RegionWithLeader) -> BlockingGetRegionByIdClient {
+            BlockingGetRegionByIdClient {
+                region,
+                started: Notify::new(),
+                release: Notify::new(),
+                calls: AtomicU64::new(0),
+            }
+        }
+    }
+
+    struct FlakyGetRegionByIdClient {
+        region: RegionWithLeader,
+        started: Notify,
+        release_first: Notify,
+        calls: AtomicU64,
+    }
+
+    impl FlakyGetRegionByIdClient {
+        fn new(region: RegionWithLeader) -> FlakyGetRegionByIdClient {
+            FlakyGetRegionByIdClient {
+                region,
+                started: Notify::new(),
+                release_first: Notify::new(),
+                calls: AtomicU64::new(0),
+            }
+        }
+    }
+
+    struct BlockingGetRegionByKeyClient {
+        region: RegionWithLeader,
+        expected_key: Vec<u8>,
+        started: Notify,
+        release: Notify,
+        calls: AtomicU64,
+    }
+
+    impl BlockingGetRegionByKeyClient {
+        fn new(region: RegionWithLeader, expected_key: Vec<u8>) -> BlockingGetRegionByKeyClient {
+            BlockingGetRegionByKeyClient {
+                region,
+                expected_key,
+                started: Notify::new(),
+                release: Notify::new(),
+                calls: AtomicU64::new(0),
+            }
+        }
+    }
+
+    struct FlakyGetRegionByKeyClient {
+        region: RegionWithLeader,
+        expected_key: Vec<u8>,
+        started: Notify,
+        release_first: Notify,
+        calls: AtomicU64,
+    }
+
+    impl FlakyGetRegionByKeyClient {
+        fn new(region: RegionWithLeader, expected_key: Vec<u8>) -> FlakyGetRegionByKeyClient {
+            FlakyGetRegionByKeyClient {
+                region,
+                expected_key,
+                started: Notify::new(),
+                release_first: Notify::new(),
+                calls: AtomicU64::new(0),
+            }
+        }
     }
 
     #[async_trait]
@@ -492,6 +625,188 @@ mod test {
         }
 
         async fn get_all_stores(self: Arc<Self>) -> Result<Vec<crate::proto::metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_min_ts(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    #[async_trait]
+    impl RetryClientTrait for BlockingGetRegionByIdClient {
+        async fn get_region(self: Arc<Self>, _key: Vec<u8>) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_region_by_id(
+            self: Arc<Self>,
+            region_id: RegionId,
+        ) -> Result<RegionWithLeader> {
+            self.calls.fetch_add(1, SeqCst);
+            self.started.notify_one();
+            self.release.notified().await;
+            if region_id != self.region.id() {
+                return Err(Error::StringError(
+                    "MockRetryClient: region not found".to_owned(),
+                ));
+            }
+            Ok(self.region.clone())
+        }
+
+        async fn get_store(self: Arc<Self>, _id: crate::region::StoreId) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_min_ts(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    #[async_trait]
+    impl RetryClientTrait for FlakyGetRegionByIdClient {
+        async fn get_region(self: Arc<Self>, _key: Vec<u8>) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_region_by_id(
+            self: Arc<Self>,
+            region_id: RegionId,
+        ) -> Result<RegionWithLeader> {
+            let call = self.calls.fetch_add(1, SeqCst);
+            if call == 0 {
+                self.started.notify_one();
+                self.release_first.notified().await;
+                return Err(Error::StringError("injected error".to_owned()));
+            }
+            if region_id != self.region.id() {
+                return Err(Error::StringError(
+                    "MockRetryClient: region not found".to_owned(),
+                ));
+            }
+            Ok(self.region.clone())
+        }
+
+        async fn get_store(self: Arc<Self>, _id: crate::region::StoreId) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_min_ts(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    #[async_trait]
+    impl RetryClientTrait for BlockingGetRegionByKeyClient {
+        async fn get_region(self: Arc<Self>, key: Vec<u8>) -> Result<RegionWithLeader> {
+            self.calls.fetch_add(1, SeqCst);
+            assert_eq!(key, self.expected_key);
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(self.region.clone())
+        }
+
+        async fn get_region_by_id(
+            self: Arc<Self>,
+            _region_id: RegionId,
+        ) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_store(self: Arc<Self>, _id: crate::region::StoreId) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_min_ts(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    #[async_trait]
+    impl RetryClientTrait for FlakyGetRegionByKeyClient {
+        async fn get_region(self: Arc<Self>, key: Vec<u8>) -> Result<RegionWithLeader> {
+            let call = self.calls.fetch_add(1, SeqCst);
+            assert_eq!(key, self.expected_key);
+            if call == 0 {
+                self.started.notify_one();
+                self.release_first.notified().await;
+                return Err(Error::StringError("injected error".to_owned()));
+            }
+            Ok(self.region.clone())
+        }
+
+        async fn get_region_by_id(
+            self: Arc<Self>,
+            _region_id: RegionId,
+        ) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_store(self: Arc<Self>, _id: crate::region::StoreId) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
             Err(Error::Unimplemented)
         }
 
@@ -624,6 +939,186 @@ mod test {
 
         cache.get_region_by_id(1).await?;
         assert_eq!(retry_client.get_region_count.load(SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_region_by_id_deduplicates_in_flight_fetch() -> Result<()> {
+        let client = Arc::new(BlockingGetRegionByIdClient::new(region(1, vec![], vec![])));
+        let cache = Arc::new(RegionCache::new_with_ttl(
+            client.clone(),
+            Duration::from_secs(600),
+            Duration::from_secs(60),
+        ));
+
+        let task1 = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.get_region_by_id(1).await })
+        };
+        let task2 = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.get_region_by_id(1).await })
+        };
+
+        client.started.notified().await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(client.calls.load(SeqCst), 1);
+
+        client.release.notify_one();
+
+        let r1 = tokio::time::timeout(Duration::from_secs(1), task1)
+            .await
+            .expect("timeout waiting for task1")
+            .expect("task1 panicked")?;
+        let r2 = tokio::time::timeout(Duration::from_secs(1), task2)
+            .await
+            .expect("timeout waiting for task2")
+            .expect("task2 panicked")?;
+
+        assert_eq!(client.calls.load(SeqCst), 1);
+        assert_eq!(r1.id(), 1);
+        assert_eq!(r2.id(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_region_by_id_clears_in_flight_on_error() -> Result<()> {
+        let client = Arc::new(FlakyGetRegionByIdClient::new(region(1, vec![], vec![])));
+        let cache = Arc::new(RegionCache::new_with_ttl(
+            client.clone(),
+            Duration::from_secs(600),
+            Duration::from_secs(60),
+        ));
+
+        let task1 = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.get_region_by_id(1).await })
+        };
+        let task2 = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.get_region_by_id(1).await })
+        };
+
+        client.started.notified().await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(client.calls.load(SeqCst), 1);
+
+        client.release_first.notify_one();
+
+        let r1 = tokio::time::timeout(Duration::from_secs(1), task1)
+            .await
+            .expect("timeout waiting for task1")
+            .expect("task1 panicked");
+        let r2 = tokio::time::timeout(Duration::from_secs(1), task2)
+            .await
+            .expect("timeout waiting for task2")
+            .expect("task2 panicked");
+
+        assert_eq!(client.calls.load(SeqCst), 2);
+        assert!(r1.is_err() ^ r2.is_err());
+        let ok = r1.or(r2)?;
+        assert_eq!(ok.id(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_region_by_key_deduplicates_in_flight_fetch() -> Result<()> {
+        let expected_key = vec![5];
+        let client = Arc::new(BlockingGetRegionByKeyClient::new(
+            region(1, vec![], vec![]),
+            expected_key.clone(),
+        ));
+        let cache = Arc::new(RegionCache::new_with_ttl(
+            client.clone(),
+            Duration::from_secs(600),
+            Duration::from_secs(60),
+        ));
+
+        let key: Key = expected_key.clone().into();
+        let task1 = {
+            let cache = cache.clone();
+            let key = key.clone();
+            tokio::spawn(async move { cache.get_region_by_key(&key).await })
+        };
+        let task2 = {
+            let cache = cache.clone();
+            let key = key.clone();
+            tokio::spawn(async move { cache.get_region_by_key(&key).await })
+        };
+
+        client.started.notified().await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(client.calls.load(SeqCst), 1);
+
+        client.release.notify_one();
+
+        let r1 = tokio::time::timeout(Duration::from_secs(1), task1)
+            .await
+            .expect("timeout waiting for task1")
+            .expect("task1 panicked")?;
+        let r2 = tokio::time::timeout(Duration::from_secs(1), task2)
+            .await
+            .expect("timeout waiting for task2")
+            .expect("task2 panicked")?;
+
+        assert_eq!(client.calls.load(SeqCst), 1);
+        assert_eq!(r1.id(), 1);
+        assert_eq!(r2.id(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_region_by_key_clears_in_flight_on_error() -> Result<()> {
+        let expected_key = vec![5];
+        let client = Arc::new(FlakyGetRegionByKeyClient::new(
+            region(1, vec![], vec![]),
+            expected_key.clone(),
+        ));
+        let cache = Arc::new(RegionCache::new_with_ttl(
+            client.clone(),
+            Duration::from_secs(600),
+            Duration::from_secs(60),
+        ));
+
+        let key: Key = expected_key.clone().into();
+        let task1 = {
+            let cache = cache.clone();
+            let key = key.clone();
+            tokio::spawn(async move { cache.get_region_by_key(&key).await })
+        };
+        let task2 = {
+            let cache = cache.clone();
+            let key = key.clone();
+            tokio::spawn(async move { cache.get_region_by_key(&key).await })
+        };
+
+        client.started.notified().await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(client.calls.load(SeqCst), 1);
+
+        client.release_first.notify_one();
+
+        let r1 = tokio::time::timeout(Duration::from_secs(1), task1)
+            .await
+            .expect("timeout waiting for task1")
+            .expect("task1 panicked");
+        let r2 = tokio::time::timeout(Duration::from_secs(1), task2)
+            .await
+            .expect("timeout waiting for task2")
+            .expect("task2 panicked");
+
+        assert_eq!(client.calls.load(SeqCst), 2);
+        assert!(r1.is_err() ^ r2.is_err());
+        let ok = r1.or(r2)?;
+        assert_eq!(ok.id(), 1);
         Ok(())
     }
 
