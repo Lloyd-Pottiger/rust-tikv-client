@@ -173,6 +173,179 @@ impl TruncateKeyspace for Vec<crate::proto::kvrpcpb::LockInfo> {
     }
 }
 
+impl TruncateKeyspace for kvrpcpb::LockInfo {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        take_mut::take(&mut self.key, |key| {
+            Key::from(key).truncate_keyspace(keyspace).into()
+        });
+        take_mut::take(&mut self.primary_lock, |primary| {
+            Key::from(primary).truncate_keyspace(keyspace).into()
+        });
+        for secondary in self.secondaries.iter_mut() {
+            take_mut::take(secondary, |secondary| {
+                Key::from(secondary).truncate_keyspace(keyspace).into()
+            });
+        }
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::PrimaryMismatch {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        self.lock_info = self
+            .lock_info
+            .take()
+            .map(|lock| lock.truncate_keyspace(keyspace));
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::TxnLockNotFound {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        take_mut::take(&mut self.key, |key| {
+            Key::from(key).truncate_keyspace(keyspace).into()
+        });
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::MvccDebugInfo {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        take_mut::take(&mut self.key, |key| {
+            Key::from(key).truncate_keyspace(keyspace).into()
+        });
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::DebugInfo {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        self.mvcc_info = self
+            .mvcc_info
+            .into_iter()
+            .map(|info| info.truncate_keyspace(keyspace))
+            .collect();
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::WriteConflict {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        take_mut::take(&mut self.key, |key| {
+            Key::from(key).truncate_keyspace(keyspace).into()
+        });
+        take_mut::take(&mut self.primary, |primary| {
+            Key::from(primary).truncate_keyspace(keyspace).into()
+        });
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::AlreadyExist {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        take_mut::take(&mut self.key, |key| {
+            Key::from(key).truncate_keyspace(keyspace).into()
+        });
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::CommitTsExpired {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        take_mut::take(&mut self.key, |key| {
+            Key::from(key).truncate_keyspace(keyspace).into()
+        });
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::TxnNotFound {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        take_mut::take(&mut self.primary_key, |primary| {
+            Key::from(primary).truncate_keyspace(keyspace).into()
+        });
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::AssertionFailed {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        take_mut::take(&mut self.key, |key| {
+            Key::from(key).truncate_keyspace(keyspace).into()
+        });
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::Deadlock {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        take_mut::take(&mut self.lock_key, |key| {
+            Key::from(key).truncate_keyspace(keyspace).into()
+        });
+        take_mut::take(&mut self.deadlock_key, |key| {
+            Key::from(key).truncate_keyspace(keyspace).into()
+        });
+        for entry in &mut self.wait_chain {
+            take_mut::take(&mut entry.key, |key| {
+                Key::from(key).truncate_keyspace(keyspace).into()
+            });
+        }
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::KeyError {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        if let Keyspace::Disable = keyspace {
+            return self;
+        }
+
+        self.locked = self
+            .locked
+            .take()
+            .map(|lock| lock.truncate_keyspace(keyspace));
+        self.primary_mismatch = self
+            .primary_mismatch
+            .take()
+            .map(|mismatch| mismatch.truncate_keyspace(keyspace));
+        self.txn_lock_not_found = self
+            .txn_lock_not_found
+            .take()
+            .map(|not_found| not_found.truncate_keyspace(keyspace));
+        self.debug_info = self
+            .debug_info
+            .take()
+            .map(|debug| debug.truncate_keyspace(keyspace));
+
+        self.conflict = self
+            .conflict
+            .take()
+            .map(|conflict| conflict.truncate_keyspace(keyspace));
+        self.already_exist = self
+            .already_exist
+            .take()
+            .map(|exist| exist.truncate_keyspace(keyspace));
+        self.deadlock = self
+            .deadlock
+            .take()
+            .map(|deadlock| deadlock.truncate_keyspace(keyspace));
+        self.commit_ts_expired = self
+            .commit_ts_expired
+            .take()
+            .map(|expired| expired.truncate_keyspace(keyspace));
+        self.txn_not_found = self
+            .txn_not_found
+            .take()
+            .map(|not_found| not_found.truncate_keyspace(keyspace));
+        self.assertion_failed = self
+            .assertion_failed
+            .take()
+            .map(|failed| failed.truncate_keyspace(keyspace));
+
+        self
+    }
+}
+
 fn keyspace_prefix(keyspace_id: u32, key_mode: KeyMode) -> [u8; KEYSPACE_PREFIX_LEN] {
     let mut prefix = keyspace_id.to_be_bytes();
     prefix[0] = match key_mode {
@@ -209,6 +382,87 @@ fn pretruncate_bytes<const N: usize>(vec: &mut Vec<u8>) {
     let original_len = vec.len();
     vec.copy_within(N..original_len, 0);
     vec.truncate(original_len - N);
+}
+
+impl TruncateKeyspace for crate::Error {
+    fn truncate_keyspace(self, keyspace: Keyspace) -> Self {
+        if let Keyspace::Disable = keyspace {
+            return self;
+        }
+
+        match self {
+            crate::Error::WriteConflict(mut conflict) => {
+                conflict.key = Key::from(conflict.key).truncate_keyspace(keyspace).into();
+                conflict.primary = Key::from(conflict.primary)
+                    .truncate_keyspace(keyspace)
+                    .into();
+                crate::Error::WriteConflict(conflict)
+            }
+            crate::Error::Deadlock(mut deadlock) => {
+                deadlock.lock_key = Key::from(deadlock.lock_key)
+                    .truncate_keyspace(keyspace)
+                    .into();
+                deadlock.deadlock_key = Key::from(deadlock.deadlock_key)
+                    .truncate_keyspace(keyspace)
+                    .into();
+                for entry in &mut deadlock.wait_chain {
+                    take_mut::take(&mut entry.key, |key| {
+                        Key::from(key).truncate_keyspace(keyspace).into()
+                    });
+                }
+                crate::Error::Deadlock(deadlock)
+            }
+            crate::Error::KeyExists(mut exist) => {
+                exist.key = Key::from(exist.key).truncate_keyspace(keyspace).into();
+                crate::Error::KeyExists(exist)
+            }
+            crate::Error::AssertionFailed(mut failed) => {
+                failed.key = Key::from(failed.key).truncate_keyspace(keyspace).into();
+                crate::Error::AssertionFailed(failed)
+            }
+            crate::Error::ResolveLockError(locks) => {
+                crate::Error::ResolveLockError(locks.truncate_keyspace(keyspace))
+            }
+            crate::Error::KeyError(key_error) => {
+                crate::Error::KeyError(Box::new((*key_error).truncate_keyspace(keyspace)))
+            }
+            crate::Error::PessimisticLockError {
+                inner,
+                success_keys,
+            } => {
+                let success_keys = success_keys
+                    .into_iter()
+                    .map(|key| Key::from(key).truncate_keyspace(keyspace).into())
+                    .collect();
+                crate::Error::PessimisticLockError {
+                    inner: Box::new(inner.truncate_keyspace(keyspace)),
+                    success_keys,
+                }
+            }
+            crate::Error::UndeterminedError(inner) => {
+                crate::Error::UndeterminedError(Box::new(inner.truncate_keyspace(keyspace)))
+            }
+            crate::Error::MultipleKeyErrors(errors) => crate::Error::MultipleKeyErrors(
+                errors
+                    .into_iter()
+                    .map(|err| err.truncate_keyspace(keyspace))
+                    .collect(),
+            ),
+            crate::Error::ExtractedErrors(errors) => crate::Error::ExtractedErrors(
+                errors
+                    .into_iter()
+                    .map(|err| err.truncate_keyspace(keyspace))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+}
+
+impl<T> TruncateKeyspace for std::result::Result<T, crate::Error> {
+    fn truncate_keyspace(self, keyspace: Keyspace) -> Self {
+        self.map_err(|err| err.truncate_keyspace(keyspace))
+    }
 }
 
 #[cfg(test)]
@@ -489,6 +743,85 @@ mod tests {
             )
             .unwrap_err(),
             KeyspaceDecodeError::UnknownModePrefix { prefix: b't' }
+        );
+    }
+
+    #[test]
+    fn truncate_key_error_strips_keyspace_prefixes() {
+        let keyspace = Keyspace::Enable { keyspace_id: 4242 };
+
+        let prefix = keyspace_prefix(4242, KeyMode::Raw).to_vec();
+        let mut encoded_key = prefix.clone();
+        encoded_key.extend_from_slice(b"key1");
+
+        let mut err = kvrpcpb::KeyError::default();
+        err.txn_lock_not_found = Some(kvrpcpb::TxnLockNotFound {
+            key: encoded_key.clone(),
+        });
+        err.debug_info = Some(kvrpcpb::DebugInfo {
+            mvcc_info: vec![kvrpcpb::MvccDebugInfo {
+                key: encoded_key.clone(),
+                mvcc: Some(kvrpcpb::MvccInfo::default()),
+            }],
+        });
+
+        let decoded = err.truncate_keyspace(keyspace);
+        assert_eq!(
+            decoded.txn_lock_not_found.as_ref().unwrap().key.as_slice(),
+            b"key1"
+        );
+        assert_eq!(
+            decoded
+                .debug_info
+                .as_ref()
+                .unwrap()
+                .mvcc_info
+                .first()
+                .unwrap()
+                .key
+                .as_slice(),
+            b"key1"
+        );
+    }
+
+    #[test]
+    fn truncate_error_propagates_to_key_error_payload() {
+        let keyspace = Keyspace::Enable { keyspace_id: 4242 };
+
+        let prefix = keyspace_prefix(4242, KeyMode::Raw).to_vec();
+        let mut encoded_key = prefix.clone();
+        encoded_key.extend_from_slice(b"key1");
+
+        let mut err = kvrpcpb::KeyError::default();
+        err.txn_lock_not_found = Some(kvrpcpb::TxnLockNotFound {
+            key: encoded_key.clone(),
+        });
+        err.debug_info = Some(kvrpcpb::DebugInfo {
+            mvcc_info: vec![kvrpcpb::MvccDebugInfo {
+                key: encoded_key.clone(),
+                mvcc: Some(kvrpcpb::MvccInfo::default()),
+            }],
+        });
+
+        let err = crate::Error::from(err).truncate_keyspace(keyspace);
+        let crate::Error::KeyError(decoded) = err else {
+            panic!("expected Error::KeyError");
+        };
+        assert_eq!(
+            decoded.txn_lock_not_found.as_ref().unwrap().key.as_slice(),
+            b"key1"
+        );
+        assert_eq!(
+            decoded
+                .debug_info
+                .as_ref()
+                .unwrap()
+                .mvcc_info
+                .first()
+                .unwrap()
+                .key
+                .as_slice(),
+            b"key1"
         );
     }
 

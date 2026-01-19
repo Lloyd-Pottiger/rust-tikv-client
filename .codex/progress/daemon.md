@@ -14,59 +14,42 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 # 正在进行的工作
 
 # 待做工作
+
+- tests/port-keyspace-epoch-not-match：对齐 apicodec v2 decodeRegionError(EpochNotMatch)（keyspace range intersect + prefix stripping）
+  - 范围：`client-go/internal/apicodec/codec_v2_test.go`（`TestDecodeEpochNotMatch`）
+  - 计划：
+    - 实现/补齐 `errorpb::EpochNotMatch.current_regions` 的 keyspace 解码/裁剪（decode bytes + intersect keyspace range + strip prefix）
+    - 在 keyspace enabled 的 region-error path 应用（避免对外暴露 encoded key/range）
+  - 验证：`cargo test`；`make check`
+
+- tests/port-keyspace-bucket-keys：对齐 apicodec v2 DecodeBucketKeys（decode bytes + keyspace range filter）
+  - 范围：`client-go/internal/apicodec/codec_v2_test.go`（`TestDecodeBucketKeys`）
+  - 计划：
+    - 补齐 bucket keys 的 decode 行为（支持 `{}` 边界；prev-prefix/endKey 归一为 `{}`；inside keys strip prefix）
+    - 单测覆盖（等价语义覆盖，不做 1:1 文件对齐）
+  - 验证：`cargo test`；`make check`
+
+- tests/port-keyspace-encode-request：对齐 apicodec v2 EncodeRequest（key fields prefixing）
+  - 范围：`client-go/internal/apicodec/codec_v2_test.go`（`TestEncodeRequest`）
+  - 计划：
+    - 补 raw/txn 请求构造层的 keyspace encode 断言（mock dispatch 截获 kvproto request）
+    - 覆盖 RawGet/Commit（含 PrimaryKey 非空场景）等关键 case
+  - 验证：`cargo test`；`make check`
+
 # 已完成工作
 
-- tests/port-keyspace-endkey：补齐 apicodec v2 的 keyspace endKey/range 编码边界测试并修正实现
-  - 变更：新增 `keyspace_end_prefix`（4-byte prefix carry-increment）；修正空 range end：不再 `keyspace_id+1`，改为 byte-level 进位（覆盖 mode byte 溢出）
-  - 覆盖：补 `1<<8-1`/`1<<16-1`/`1<<24-1` endKey；补 v2 key ranges 的空 key/start/end 编码断言
+- tests/keyspace-apicodec-v2：对齐 keyspace codec v2 的 prefix 语义（encode/decode/error stripping）
+  - 覆盖：ParseKeyspaceID/DecodeKey；prefixes sorted；endKey 4-byte carry-increment；decodeKeyError strip prefix；keyspace enabled 的 error path 统一 truncate（避免对外暴露 encoded key）
+  - 决策：Rust crate 未暴露 apicodec decode API，用 `cfg(test)` 的最小 helper 覆盖语义；对外以“等价语义覆盖”替代 Go 文件级对齐
   - 验证：`cargo test`；`make check`
-  - 文件：`src/request/keyspace.rs`
+  - 文件：`src/request/keyspace.rs`，`src/raw/client.rs`，`src/transaction/client.rs`，`src/transaction/transaction.rs`，`src/trace.rs`
 
-- tests/port-unit-more：迁移可独立运行的 client-go 单测（trace flags + keyspace apicodec parse/decode）
-  - 决策：Rust crate 未暴露 apicodec decode API，先用 `cfg(test)` 的最小 helper 覆盖语义，避免 `dead_code`/clippy
-  - 变更：`TraceControlFlags` 支持 `|`/`|=`；补齐 flags chaining 测试；补 keyspace ParseKeyspaceID/DecodeKey 与 prefixes sorted 测试
-  - 验证：`cargo test`；`make check`
-  - 文件：`src/trace.rs`，`src/request/keyspace.rs`
+- tests/client-go-port：盘点 client-go 全量测试并做 Rust 覆盖映射 + 迁移可独立单测/关键 E2E 语义
+  - 映射：`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`
+  - 覆盖：read routing/replica read；plan 并发 semaphore；txn buffer overlay；raw delete-range E2E（含空区间与 `\\0` 边界）
+  - 验证：`cargo test`；`make check`；`make integration-test-if-ready`
+  - 文件：`src/request/read_routing.rs`，`src/request/plan.rs`，`src/transaction/buffer.rs`，`tests/integration_tests.rs`，`src/raw/client.rs`
 
-- tests/port-client-go：盘点 client-go 全量测试并做 Rust 覆盖映射（out-of-scope 明确化 + 缺口列表）
-  - 决策：遵循 parity checklist 的 out-of-scope 约束（Go context/unionstore/mockstore 等不做 1:1）；以“等价语义覆盖”替代文件级对齐
-  - 文件：`.codex/progress/client-go-tests-port.md`
-
-- tests/port-unit：补齐可迁移的单元/逻辑测试覆盖（不依赖 TiKV 集群）
-  - 变更：增强 read routing/replica read 用例；补 plan 并发 semaphore 用例；补 transaction buffer scan/delete overlay 用例
-  - 验证：`cargo test`；`make check`
-  - 文件：`src/request/read_routing.rs`，`src/request/plan.rs`，`src/transaction/buffer.rs`
-
-- tests/port-mockstore：对 Go mockstore/unionstore 测试做语义迁移（不做 1:1 mock server）
-  - 决策：Go unionstore/memdb/mocktikv 属于实现细节；Rust 用更小的 mock + 关键语义单测替代（聚焦 buffer/plan/routing）
-  - 文件：`src/request/plan.rs`，`src/transaction/buffer.rs`
-
-- tests/port-integration：对齐 client-go `integration_tests/` 的关键 E2E 语义并补缺口
-  - 变更：新增 raw delete-range E2E（覆盖 `start==end` 空区间与 `\\0` 边界技巧）；补齐 delete-range 空区间为 no-op（避免 TiKV 报 invalid range）
-  - 映射：`.codex/progress/client-go-integration-tests-port.md`
-  - 验证：`make integration-test-if-ready`
-  - 文件：`tests/integration_tests.rs`，`src/raw/client.rs`
-
-- core/parity+quality：完成 client-go(v2) 关键能力与 Public API 对齐（Rust-idiomatic），并补齐关键测试/文档
-  - 决策：显式 `Config/TransactionOptions`；低层 `request::PlanBuilder` + typed kvproto（不复刻 Go `tikvrpc` mega-wrapper）
-  - 覆盖：Raw/Txn/PD/RegionCache/Backoff；2PC/1PC/async-commit/pipelined；replica/stale read；resource control；keyspace；raw checksum
-  - 文件：`src/*`，`tests/*`，`doc/*`
-
-- infra/devex：统一本地/CI 验证入口（Makefile/CI/doc），并固化 coverage/doc-test/workflow
-  - 变更：修复/整理 `make all`（新增 `integration-test-if-ready`：PD 可达才跑 integration tests）；coverage 增加 profraw 清理 + 失败正确透传（支持 `COVERAGE_FAIL_UNDER`）；补充 `make check-all-features`；文档同步（development/README/AGENTS）
-  - 文件：`Makefile`，`.github/workflows/ci.yml`，`doc/development.md`，`getting-started.md`，`README.md`，`AGENTS.md`，`.gitignore`
-
-- final/review：复核整体目标达成 + 全量验证
-  - 核对：`.codex/progress/parity-checklist.md` 无未勾选项；`rg TODO|todo!|unimplemented!|FIXME` 仅命中 `src/generated/**`
-  - 验证：`make all` / `make coverage` / `make coverage-integration`（llvm-cov “mismatched data” warning 仍可能出现，但不影响 fail-under/报告）
-  - 文件：`.codex/progress/daemon.md`
-
-- style/tests：清理集成测试的 wildcard import
-  - 变更：移除 `tests/integration_tests.rs` 的 `use futures::prelude::*;`；改为显式 `futures::future::join_all`
-  - 验证：`make check` / `make unit-test`
-  - 文件：`tests/integration_tests.rs`
-
-- infra/coverage：解释 llvm-cov “mismatched data” warning 的来源与影响（降噪）
-  - 结论：warning 出现在合并多个 test binary 的 profraw（单个 `--test integration_tests` 不触发）；对本 crate lines 覆盖率阈值/报告无影响
-  - 验证：`make coverage-integration`
-  - 文件：`doc/development.md`
+- infra/devex+coverage：统一验证入口 + 解释 coverage warning（降噪）
+  - 覆盖：`make all`/`integration-test-if-ready`/`check-all-features`；CI/doc 同步；integration tests import 清理；llvm-cov “mismatched data” 来源与影响说明
+  - 文件：`Makefile`，`.github/workflows/ci.yml`，`doc/development.md`，`README.md`，`getting-started.md`，`AGENTS.md`，`.gitignore`，`tests/integration_tests.rs`，`.codex/progress/daemon.md`

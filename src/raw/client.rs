@@ -369,7 +369,7 @@ impl<PdC: PdClient> Client<PdC> {
             .merge(CollectSingle)
             .post_process_default()
             .plan();
-        plan.execute().await
+        plan.execute().await.truncate_keyspace(self.keyspace)
     }
 
     /// Create a new 'batch get' request.
@@ -403,11 +403,14 @@ impl<PdC: PdClient> Client<PdC> {
             .retry_multi_region(self.backoff.clone())
             .merge(Collect)
             .plan();
-        plan.execute().await.map(|r| {
-            r.into_iter()
-                .map(|pair| pair.truncate_keyspace(self.keyspace))
-                .collect()
-        })
+        plan.execute()
+            .await
+            .truncate_keyspace(self.keyspace)
+            .map(|r| {
+                r.into_iter()
+                    .map(|pair| pair.truncate_keyspace(self.keyspace))
+                    .collect()
+            })
     }
 
     /// Create a new 'get key ttl' request.
@@ -437,7 +440,7 @@ impl<PdC: PdClient> Client<PdC> {
             .merge(CollectSingle)
             .post_process_default()
             .plan();
-        plan.execute().await
+        plan.execute().await.truncate_keyspace(self.keyspace)
     }
 
     /// Create a new 'put' request.
@@ -480,7 +483,7 @@ impl<PdC: PdClient> Client<PdC> {
             .merge(CollectSingle)
             .extract_error()
             .plan();
-        plan.execute().await?;
+        plan.execute().await.truncate_keyspace(self.keyspace)?;
         Ok(())
     }
 
@@ -527,7 +530,7 @@ impl<PdC: PdClient> Client<PdC> {
             .retry_multi_region(self.backoff.clone())
             .extract_error()
             .plan();
-        plan.execute().await?;
+        plan.execute().await.truncate_keyspace(self.keyspace)?;
         Ok(())
     }
 
@@ -558,7 +561,7 @@ impl<PdC: PdClient> Client<PdC> {
             .merge(CollectSingle)
             .extract_error()
             .plan();
-        plan.execute().await?;
+        plan.execute().await.truncate_keyspace(self.keyspace)?;
         Ok(())
     }
 
@@ -591,7 +594,7 @@ impl<PdC: PdClient> Client<PdC> {
             .retry_multi_region(self.backoff.clone())
             .extract_error()
             .plan();
-        plan.execute().await?;
+        plan.execute().await.truncate_keyspace(self.keyspace)?;
         Ok(())
     }
 
@@ -628,7 +631,7 @@ impl<PdC: PdClient> Client<PdC> {
             .retry_multi_region(self.backoff.clone())
             .extract_error()
             .plan();
-        plan.execute().await?;
+        plan.execute().await.truncate_keyspace(self.keyspace)?;
         Ok(())
     }
 
@@ -667,7 +670,7 @@ impl<PdC: PdClient> Client<PdC> {
             .retry_multi_region(self.backoff.clone())
             .merge(Collect)
             .plan();
-        plan.execute().await
+        plan.execute().await.truncate_keyspace(self.keyspace)
     }
 
     /// Create a new 'scan' request.
@@ -880,7 +883,7 @@ impl<PdC: PdClient> Client<PdC> {
             .merge(CollectSingle)
             .post_process_default()
             .plan();
-        plan.execute().await
+        plan.execute().await.truncate_keyspace(self.keyspace)
     }
 
     pub async fn coprocessor(
@@ -920,7 +923,8 @@ impl<PdC: PdClient> Client<PdC> {
             .plan();
         Ok(plan
             .execute()
-            .await?
+            .await
+            .truncate_keyspace(self.keyspace)?
             .into_iter()
             .map(|(ranges, data)| (ranges.truncate_keyspace(keyspace), data))
             .collect())

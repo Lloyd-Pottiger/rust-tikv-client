@@ -1456,7 +1456,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             .retry_multi_region(self.options.retry_options.region_backoff.clone())
             .extract_error()
             .plan();
-        plan.execute().await?;
+        plan.execute().await.truncate_keyspace(self.keyspace)?;
 
         for key in keys {
             self.buffer.unlock(&key);
@@ -2411,13 +2411,14 @@ impl<PdC: PdClient> Committer<PdC> {
             new_commit_request(keys, self.start_version, commit_version)
         };
         let req = self.request_context.apply_to(req);
-        let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
+        let keyspace = self.keyspace;
+        let plan = PlanBuilder::new(self.rpc, keyspace, req)
             .with_request_context(self.request_context.clone())
-            .resolve_lock(self.options.retry_options.lock_backoff, self.keyspace)
+            .resolve_lock(self.options.retry_options.lock_backoff, keyspace)
             .retry_multi_region(self.options.retry_options.region_backoff)
             .extract_error()
             .plan();
-        plan.execute().await?;
+        plan.execute().await.truncate_keyspace(keyspace)?;
         Ok(())
     }
 
@@ -2426,29 +2427,30 @@ impl<PdC: PdClient> Committer<PdC> {
         if self.commit_keys.is_empty() {
             return Ok(());
         }
+        let keyspace = self.keyspace;
         let keys = self.commit_keys.into_iter().map(Key::from);
         match self.options.kind {
             TransactionKind::Optimistic => {
                 let req = new_batch_rollback_request(keys, self.start_version);
                 let req = self.request_context.apply_to(req);
-                let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
+                let plan = PlanBuilder::new(self.rpc, keyspace, req)
                     .with_request_context(self.request_context.clone())
-                    .resolve_lock(self.options.retry_options.lock_backoff, self.keyspace)
+                    .resolve_lock(self.options.retry_options.lock_backoff, keyspace)
                     .retry_multi_region(self.options.retry_options.region_backoff)
                     .extract_error()
                     .plan();
-                plan.execute().await?;
+                plan.execute().await.truncate_keyspace(keyspace)?;
             }
             TransactionKind::Pessimistic(for_update_ts) => {
                 let req = new_pessimistic_rollback_request(keys, self.start_version, for_update_ts);
                 let req = self.request_context.apply_to(req);
-                let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
+                let plan = PlanBuilder::new(self.rpc, keyspace, req)
                     .with_request_context(self.request_context.clone())
-                    .resolve_lock(self.options.retry_options.lock_backoff, self.keyspace)
+                    .resolve_lock(self.options.retry_options.lock_backoff, keyspace)
                     .retry_multi_region(self.options.retry_options.region_backoff)
                     .extract_error()
                     .plan();
-                plan.execute().await?;
+                plan.execute().await.truncate_keyspace(keyspace)?;
             }
         }
         Ok(())

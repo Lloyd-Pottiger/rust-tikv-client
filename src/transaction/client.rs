@@ -18,6 +18,7 @@ use crate::request::EncodeKeyspace;
 use crate::request::KeyMode;
 use crate::request::Keyspace;
 use crate::request::Plan;
+use crate::request::TruncateKeyspace;
 use crate::timestamp::TimestampExt;
 use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_scan_lock_request;
@@ -430,7 +431,7 @@ impl<PdC: PdClient> Client<PdC> {
             .extract_error()
             .merge(crate::request::Collect)
             .plan();
-        plan.execute().await
+        plan.execute().await.truncate_keyspace(self.keyspace)
     }
 
     // For test.
@@ -442,8 +443,6 @@ impl<PdC: PdClient> Client<PdC> {
         range: impl Into<BoundRange>,
         batch_size: u32,
     ) -> Result<Vec<crate::proto::kvrpcpb::LockInfo>> {
-        use crate::request::TruncateKeyspace;
-
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let req = self
             .request_context
@@ -452,7 +451,8 @@ impl<PdC: PdClient> Client<PdC> {
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .merge(crate::request::Collect)
             .plan();
-        Ok(plan.execute().await?.truncate_keyspace(self.keyspace))
+        let locks = plan.execute().await.truncate_keyspace(self.keyspace)?;
+        Ok(locks.truncate_keyspace(self.keyspace))
     }
 
     /// Cleans up all keys in a range and quickly reclaim disk space.
@@ -471,7 +471,7 @@ impl<PdC: PdClient> Client<PdC> {
             .all_stores(DEFAULT_STORE_BACKOFF)
             .merge(crate::request::Collect)
             .plan();
-        plan.execute().await
+        plan.execute().await.truncate_keyspace(self.keyspace)
     }
 
     fn new_transaction(
