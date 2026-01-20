@@ -3073,6 +3073,24 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_handle_region_error_store_not_match_without_leader_only_invalidates_region(
+    ) -> Result<()> {
+        let pd_client = Arc::new(CountingPdClient::default());
+        let mut region = MockPdClient::region1();
+        region.leader = None;
+        let region_store = RegionStore::new(region, Arc::new(MockKvClient::default()));
+        let err = errorpb::Error {
+            store_not_match: Some(errorpb::StoreNotMatch::default()),
+            ..Default::default()
+        };
+
+        assert!(handle_region_error(pd_client.clone(), err, region_store).await?);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_handle_region_error_stale_command_invalidates_region() -> Result<()> {
         let pd_client = Arc::new(CountingPdClient::default());
         let region_store =

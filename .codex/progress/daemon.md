@@ -17,9 +17,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port/locate-region-request：补齐 Go `internal/locate/region_request*_test.go` 可迁移语义覆盖（retry/backoff/patch/request_source）
-  - 步骤：对齐缺失分支；为 plan_builder/plan/read_routing 增补单测；更新 `.codex/progress/client-go-tests-file-map.md` notes/status
-
 - tests/port/rawkv-rawkv_test-minimal：从 Go `client-go/rawkv/rawkv_test.go` 挑选可迁移纯逻辑子集，落到 Rust mock/unit tests
   - 步骤：挑选不依赖 mocktikv MVCC 的语义（addr cache / store-not-match / re-resolve interval 等）；用 `MockKvClient`/hooks 覆盖；更新 mapping notes/status
 
@@ -47,3 +44,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：新增 `SafeTsManager`（store safe_ts + per-scope min_safe_ts；0/max 处理；PD per-store map 优先，invalid->StoreSafeTS fallback；混合路径对齐 Go）；新增 `TransactionClient::{refresh_safe_ts_cache,min_safe_ts}`（store-side StoreSafeTS 刷新）
   - 验证：`make check` + `make unit-test`
   - 文件：`src/store/safe_ts.rs`，`src/pd/client.rs`，`src/transaction/client.rs`，`src/store/mod.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+
+- tests/port/locate-region-request：补齐 Go `internal/locate/region_request*_test.go` 可迁移语义覆盖的映射与关键分支单测
+  - 完成：将 `region_request{,3,_state}_test.go` 从 N/A 收敛为 partial（明确对应 Rust 覆盖点：`src/request/plan.rs`/`src/request/plan_builder.rs`/`src/request/read_routing.rs`/integration stale-read）；补 `StoreNotMatch` 但 leader 缺失时不触发 store invalidation 的分支单测
+  - 验证：`make check` + `make unit-test`
+  - 文件：`src/request/plan.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`

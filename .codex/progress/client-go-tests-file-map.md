@@ -60,9 +60,9 @@
 | `client-go/internal/locate/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/internal/locate/metrics_collector_test.go` | covered | `src/request/metrics_collector.rs` + `src/store/request.rs`（stale-read req/resp metrics） |
 | `client-go/internal/locate/region_cache_test.go` | covered | `src/region_cache.rs` |
-| `client-go/internal/locate/region_request3_test.go` | n/a | mocktikv/forwarding/conn-pool 架构特定；可迁移 region retry/backoff/replica routing 语义见 `src/request/plan.rs` 单测 |
-| `client-go/internal/locate/region_request_state_test.go` | n/a | mocktikv FSM/region request sender 特定；stale/replica read 等价语义由 `src/request/plan.rs` + `tests/integration_tests.rs` 覆盖 |
-| `client-go/internal/locate/region_request_test.go` | n/a | mocktikv/region request sender 特定；关键 retry/backoff/request_source patch 等价语义见 `src/request/plan.rs`/`src/request/plan_builder.rs` |
+| `client-go/internal/locate/region_request3_test.go` | partial | 关键可迁移语义（peer/region retry、server-is-busy pending-backoff、stale/replica 选路）由 Rust 侧覆盖：`src/request/plan.rs` + `src/request/read_routing.rs` 单测；mocktikv/conn-pool/token-limit 细节 N/A |
+| `client-go/internal/locate/region_request_state_test.go` | partial | stale/replica read 选路与 retry fallback 等价语义：`src/request/read_routing.rs` + `src/transaction/transaction.rs` 单测 + `tests/integration_tests.rs` `txn_stale_read_snapshot_get`；mocktikv FSM/async reload N/A |
+| `client-go/internal/locate/region_request_test.go` | partial | region error 处理（NotLeader/StoreNotMatch/StaleCommand/EpochNotMatch）、gRPC timeout/backoff budget、request_source patch/attempt 递增：`src/request/plan.rs`/`src/request/plan_builder.rs` 单测；Go conn close/pool 细节 N/A |
 | `client-go/internal/locate/replica_selector_test.go` | covered | `src/request/read_routing.rs` + `src/request/plan.rs`（stale-command/keep-peer/fast-retry） |
 | `client-go/internal/mockstore/deadlock/deadlock_test.go` | covered | Rust 侧等价 deadlock detector + 单测：`src/mock/deadlock_detector.rs` |
 | `client-go/internal/mockstore/deadlock/main_test.go` | n/a | Go `TestMain` harness |
