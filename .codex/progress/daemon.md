@@ -60,3 +60,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：`make check` 仅覆盖 `integration-tests`；补充 `make check-all-features` 覆盖 `tracing`/`test-util` 等 feature 组合
   - 文件：`.github/workflows/ci.yml`，`.codex/progress/daemon.md`
   - 验证：`make check`；`make check-all-features`
+
+- quality/coverage-integration：验证 `make coverage-integration` 也能通过（`--no-default-features --features integration-tests`）
+  - 关键：对齐 client-go `checkAllSecondaries/addKeys` 语义：仅在“部分 secondary lock 缺失”时信任 response `commit_ts`；否则忽略 `commit_ts`，使用 `max(lock.min_commit_ts)` 避免 `CommitTsExpired`
+  - 文件：`src/transaction/lock.rs`，`.codex/progress/daemon.md`
+  - 验证：`make coverage-integration`；`make all`

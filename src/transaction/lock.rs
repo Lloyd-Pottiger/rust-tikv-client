@@ -19,7 +19,7 @@ use crate::proto::kvrpcpb;
 use crate::proto::kvrpcpb::TxnInfo;
 use crate::proto::pdpb::Timestamp;
 use crate::region::RegionVerId;
-use crate::request::Collect;
+use crate::request::CollectError;
 use crate::request::CollectSingle;
 use crate::request::Keyspace;
 use crate::request::Plan;
@@ -314,7 +314,11 @@ impl<PdC: PdClient> LockResolver<PdC> {
             // Then we need to check the secondary locks to determine the final status of the transaction.
             if let TransactionStatusKind::Locked(_, lock_info) = &status.kind {
                 let secondary_status = self
-                    .check_all_secondaries(lock_info.secondaries.clone(), txn_id)
+                    .check_all_secondaries(
+                        lock_info.secondaries.clone(),
+                        txn_id,
+                        lock_info.min_commit_ts,
+                    )
                     .await?;
                 debug!(
                     "secondary status, txn_id:{}, commit_ts:{:?}, min_commit_version:{}, fallback_2pc:{}",
@@ -443,16 +447,86 @@ impl<PdC: PdClient> LockResolver<PdC> {
         &mut self,
         keys: Vec<Vec<u8>>,
         txn_id: u64,
+        primary_min_commit_ts: u64,
     ) -> Result<SecondaryLocksStatus> {
         let req = self
             .request_context
             .apply_to(new_check_secondary_locks_request(keys, txn_id));
         let plan = crate::request::PlanBuilder::new(self.pd_client.clone(), self.keyspace, req)
+            .preserve_shard()
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .extract_error()
-            .merge(Collect)
+            .merge(CollectError)
             .plan();
-        plan.execute().await
+
+        // Go client parity: `LockResolver.checkAllSecondaries`.
+        //
+        // - Start with the primary lock's min_commit_ts.
+        // - If any response returns fewer locks than requested, the txn status is determined by
+        //   `commit_ts` (0 means rolled back).
+        // - Otherwise (all locks present), resolve using the largest `min_commit_ts` among all locks.
+        //
+        // TiKV may set `commit_ts` even when all locks are present; it must be ignored in that case.
+        let responses = plan.execute().await?;
+
+        let mut status = SecondaryLocksStatus {
+            commit_ts: None,
+            min_commit_ts: primary_min_commit_ts,
+            fallback_2pc: false,
+        };
+        let mut min_commit_ts = primary_min_commit_ts;
+        let mut missing_lock = false;
+        let mut determined_commit_ts: Option<u64> = None;
+
+        for crate::request::ResponseWithShard(resp, shard) in responses {
+            let expected = shard.len();
+            let locks = resp.locks;
+
+            if locks.len() < expected {
+                missing_lock = true;
+                let resp_commit_ts = resp.commit_ts;
+                match determined_commit_ts {
+                    None => {
+                        if resp_commit_ts != 0 && resp_commit_ts < min_commit_ts {
+                            return Err(crate::internal_err!(
+                                "commit ts must be >= min commit ts: commit_ts={}, min_commit_ts={}",
+                                resp_commit_ts,
+                                min_commit_ts
+                            ));
+                        }
+                        determined_commit_ts = Some(resp_commit_ts);
+                    }
+                    Some(prev) if prev == resp_commit_ts => {}
+                    Some(prev) => {
+                        return Err(crate::internal_err!(
+                            "commit ts mismatch in async commit recovery: {} and {}",
+                            prev,
+                            resp_commit_ts
+                        ));
+                    }
+                }
+                continue;
+            }
+
+            for lock in locks {
+                if !lock.use_async_commit {
+                    status.fallback_2pc = true;
+                    return Ok(status);
+                }
+                if !missing_lock {
+                    min_commit_ts = min_commit_ts.max(lock.min_commit_ts);
+                }
+            }
+        }
+
+        if let Some(commit_ts) = determined_commit_ts {
+            status.commit_ts = Timestamp::try_from_version(commit_ts);
+            status.min_commit_ts = commit_ts;
+        } else {
+            status.min_commit_ts = min_commit_ts;
+        }
+
+        Ok(status)
     }
 
     async fn batch_resolve_locks(
