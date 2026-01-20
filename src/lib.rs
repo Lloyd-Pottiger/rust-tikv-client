@@ -96,6 +96,8 @@
 #![allow(clippy::field_reassign_with_default)]
 
 pub mod backoff;
+#[cfg(any(test, feature = "test-util"))]
+mod backoffer;
 pub mod interceptor;
 pub mod metrics;
 #[doc(hidden)]

@@ -15,7 +15,19 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
+- infra/resolve-client-go-test-file-partials：清零 go test file map 的 `partial`（升级为 covered 或标注 N/A + 指向 Rust 覆盖点）
+  - 目标：`client-go/internal/client/client_test.go`、`client-go/internal/locate/region_request*_test.go` 等 4 个 `partial` 不再保留 partial 状态（主要为 mocktikv/BatchCommands/forwarding 架构差异）
+  - 计划：逐文件核对可迁移语义已被哪些 Rust 单测覆盖；将文件状态改为 `n/a`（或 `covered`）并补充更明确 notes；保持 source-of-truth 映射一致
+  - 验证：`cargo test`
+  - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
+
 # 已完成工作
+
+- tests/port-client-go-retry-backoffer：补齐 Go Backoffer 等价语义并迁移 `client-go/config/retry/backoff_test.go`
+  - 关键：实现 maxSleep/excludedSleep/longestSleep 预算模型；支持 clone/fork/update；实现 MayBackoffForRegionError（EpochNotMatch current_regions 为空视为 fake -> backoff）
+  - 决策：Backoffer 仅用于 parity/unit tests（`cfg(test)`/`test-util`），不影响生产请求 backoff（仍由 `src/backoff.rs` + `src/request/plan.rs` 驱动）
+  - 文件：`src/backoffer.rs`，`src/lib.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
+  - 验证：`cargo test`
 
 - tests/port-client-go-core-suite：迁移 client-go 可迁移单测语义（kv/options+ValueEntry，lock resolver cache，backoff/backoffer，keyspace codec，gc time，oracle，core request/retry/resource-control 等）
   - 关键：resolved cache 命中不触发 secondary-check RPC；EpochNotMatch(empty CurrentRegions)->backoff；Keyspace::try_enable 限制 24-bit id；GC time 兼容解析（最多容忍 1 个尾随字段）；oracle(singleflight+lowres cache + local oracle time hook)；Key.next_prefix_key 边界 + region cache/retry fast-path + stale-read metrics + resource-control bypass

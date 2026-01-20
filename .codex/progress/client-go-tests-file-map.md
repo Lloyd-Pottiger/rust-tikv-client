@@ -9,7 +9,7 @@
 |---|---|---|
 | `client-go/config/config_test.go` | n/a | Go DSN/txn-scope/failpoint 注入；Rust `Config` 入口不同 |
 | `client-go/config/main_test.go` | n/a | Go `TestMain` harness |
-| `client-go/config/retry/backoff_test.go` | partial | Backoffer 内部计数/clone/fork N/A；可迁移 region backoff 语义见 `src/request/plan.rs` + `src/backoff.rs` |
+| `client-go/config/retry/backoff_test.go` | covered | Rust 侧实现 client-go Backoffer 等价语义 + 单测：`src/backoffer.rs`（maxSleep/excludedSleep/longestSleep/clone+fork+update + MayBackoffForRegionError） |
 | `client-go/config/retry/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/config/security_test.go` | covered | `src/common/security.rs` |
 | `client-go/error/error_test.go` | covered | `src/common/errors.rs`（KeyError debug-info redact 等） |
