@@ -55,3 +55,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：client-go `101` 个 `_test.go` 在 `.codex/progress/client-go-tests-file-map.md` 均有归因（covered/partial/n/a）；`make check-all-features` 暴露的 test-util dead-code 与 bench 返回类型不匹配问题已修复
   - 文件：`src/lib.rs`，`src/util/mod.rs`，`benches/plan.rs`，`.gitignore`，`.codex/progress/daemon.md`
   - 验证：`make all`；`make coverage`；`make check-all-features`
+
+- ci/feature-matrix：CI 增加 `make check-all-features`，防止 feature-gated 代码漂移导致未来 build break
+  - 关键：`make check` 仅覆盖 `integration-tests`；补充 `make check-all-features` 覆盖 `tracing`/`test-util` 等 feature 组合
+  - 文件：`.github/workflows/ci.yml`，`.codex/progress/daemon.md`
+  - 验证：`make check`；`make check-all-features`
