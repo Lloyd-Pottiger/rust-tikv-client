@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::info;
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
 
 use crate::compat::stream_fn;
 use crate::kv::codec;
@@ -220,7 +220,7 @@ pub trait PdClient: Send + Sync + 'static {
 pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl = Cluster> {
     pd: Arc<RetryClient<Cl>>,
     kv_connect: KvC,
-    kv_client_cache: Arc<RwLock<HashMap<String, KvC::KvClient>>>,
+    kv_client_cache: Arc<RwLock<HashMap<String, Arc<OnceCell<KvC::KvClient>>>>>,
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
 }
@@ -352,20 +352,28 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
     }
 
     async fn kv_client(&self, address: &str) -> Result<KvC::KvClient> {
-        if let Some(client) = self.kv_client_cache.read().await.get(address) {
-            return Ok(client.clone());
-        };
-        info!("connect to tikv endpoint: {:?}", address);
-        match self.kv_connect.connect(address).await {
-            Ok(client) => {
+        // Avoid repeated concurrent dial attempts for the same address.
+        let cached = { self.kv_client_cache.read().await.get(address).cloned() };
+        let cell = match cached {
+            Some(cell) => cell,
+            None => {
+                let new = Arc::new(OnceCell::new());
                 self.kv_client_cache
                     .write()
                     .await
-                    .insert(address.to_owned(), client.clone());
-                Ok(client)
+                    .entry(address.to_owned())
+                    .or_insert_with(|| new.clone())
+                    .clone()
             }
-            Err(e) => Err(e),
-        }
+        };
+
+        let client = cell
+            .get_or_try_init(|| async {
+                info!("connect to tikv endpoint: {:?}", address);
+                self.kv_connect.connect(address).await
+            })
+            .await?;
+        Ok(client.clone())
     }
 }
 
@@ -395,6 +403,101 @@ pub mod test {
         let kv3 = client.kv_client(addr2).await.unwrap();
         assert!(kv1.addr != kv2.addr);
         assert_eq!(kv2.addr, kv3.addr);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_kv_client_concurrent_connect_is_deduped_per_address() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use tokio::sync::{watch, Barrier};
+
+        #[derive(Clone)]
+        struct CountingConnect {
+            calls: Arc<AtomicUsize>,
+            release_rx: watch::Receiver<bool>,
+        }
+
+        #[async_trait::async_trait]
+        impl KvConnect for CountingConnect {
+            type KvClient = MockKvClient;
+
+            async fn connect(&self, address: &str) -> Result<Self::KvClient> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+
+                // Hold the dial so other tasks can race on `kv_client`.
+                let mut rx = self.release_rx.clone();
+                while !*rx.borrow() {
+                    rx.changed().await.expect("watch sender dropped");
+                }
+
+                Ok(MockKvClient::new(address.to_owned(), None))
+            }
+        }
+
+        let config = Config::default();
+
+        let (release_tx, release_rx) = watch::channel(false);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let connect = CountingConnect {
+            calls: calls.clone(),
+            release_rx,
+        };
+
+        let client = PdRpcClient::new(
+            config.clone(),
+            |_| connect.clone(),
+            |sm| {
+                futures::future::ok(crate::pd::RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    config.pd_retry,
+                    MockCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let client = Arc::new(client);
+
+        let addr = "same-addr";
+        let task_count = 16usize;
+        let start = Arc::new(Barrier::new(task_count + 1));
+
+        let mut handles = Vec::with_capacity(task_count);
+        for _ in 0..task_count {
+            let c = client.clone();
+            let start = start.clone();
+            handles.push(tokio::spawn(async move {
+                start.wait().await;
+                c.kv_client(addr).await
+            }));
+        }
+
+        start.wait().await;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connect not observed");
+
+        // Give other tasks time to contend if we accidentally attempt multiple dials.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "expected concurrent kv_client() to dial only once per address"
+        );
+
+        release_tx.send(true).unwrap();
+        for h in handles {
+            h.await.unwrap().unwrap();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

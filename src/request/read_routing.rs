@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use super::pending_backoff::{PendingBackoff, PendingBackoffKind, PendingBackoffs};
 use super::store_health::StoreHealthMap;
-use crate::proto::metapb;
 use crate::proto::errorpb;
+use crate::proto::metapb;
 use crate::region::{RegionWithLeader, StoreId};
 use crate::Error;
 use crate::ReplicaReadType;

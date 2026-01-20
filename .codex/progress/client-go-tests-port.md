@@ -39,7 +39,7 @@
   - 已补：score + `ServerIsBusy` fast-retry + pending-backoff（`src/request/read_routing.rs`/`src/request/plan.rs`/`src/request/pending_backoff.rs` 单测）
   - 仍缺：Go proxy/forwarding/flashback 等高级路径（Rust 架构不同，按 N/A 或等价语义覆盖）
 - Store/RPC client behavior: Go `client-go/internal/client/*_test.go` 有不少并发/错误路径；Rust 目前 `src/store/client.rs#L62` 仅覆盖最小 dispatch 语义
-  - 已补：store error traits 单测（Vec region_errors 聚合 + SetRegionError）；TikvConnect invalid addr fast-fail；PlanBuilder retry attempt/patch request_source/interceptor 组合
+  - 已补：store error traits 单测（Vec region_errors 聚合 + SetRegionError）；TikvConnect invalid addr fast-fail；PdRpcClient kv_client cache + 并发 dial 去重（singleflight）；PlanBuilder retry attempt/patch request_source/interceptor 组合
   - 仍缺：Go batch-client/forwarding/conn-pool 的并发/重连细节（Rust 架构不同，按 N/A 或等价语义覆盖）
 
 ## Next (Implementation Order)

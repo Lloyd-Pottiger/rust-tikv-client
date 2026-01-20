@@ -49,30 +49,26 @@ pub(crate) struct PendingBackoff {
 }
 
 impl PendingBackoffs {
-    pub(crate) fn add(&self, store_id: Option<StoreId>, kind: PendingBackoffKind, error: errorpb::Error) {
+    pub(crate) fn add(
+        &self,
+        store_id: Option<StoreId>,
+        kind: PendingBackoffKind,
+        error: errorpb::Error,
+    ) {
         let store_id = store_id.unwrap_or(0);
-        let mut guard = self
-            .inner
-            .lock()
-            .expect("pending backoffs lock poisoned");
+        let mut guard = self.inner.lock().expect("pending backoffs lock poisoned");
         guard.insert(store_id, PendingBackoff { kind, error });
     }
 
     pub(crate) fn take_for_retry(&self, store_id: Option<StoreId>) -> Option<PendingBackoff> {
         let store_id = store_id.unwrap_or(0);
-        let mut guard = self
-            .inner
-            .lock()
-            .expect("pending backoffs lock poisoned");
+        let mut guard = self.inner.lock().expect("pending backoffs lock poisoned");
         guard.remove(&store_id)
     }
 
     #[cfg(test)]
     pub(crate) fn peek_for_no_candidate(&self) -> Option<PendingBackoff> {
-        let guard = self
-            .inner
-            .lock()
-            .expect("pending backoffs lock poisoned");
+        let guard = self.inner.lock().expect("pending backoffs lock poisoned");
         guard
             .values()
             .max_by_key(|b| b.kind.base_delay_rank())
