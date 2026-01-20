@@ -15,6 +15,9 @@ pub(crate) trait Executor: Send + Sync + 'static {
     fn go(&self, f: Box<dyn FnOnce() + Send + 'static>);
 }
 
+type Injection<T, E> = Arc<dyn Fn(T, E) -> (T, E) + Send + Sync + 'static>;
+type CallbackFn<T, E> = Box<dyn FnOnce(T, E) + Send + 'static>;
+
 /// A single-shot callback with optional injectors.
 ///
 /// Mirrors `client-go/util/async/callback.go` semantics used by core_test.go:
@@ -28,8 +31,8 @@ pub(crate) struct Callback<T, E> {
 struct CallbackInner<T, E> {
     executor: Arc<dyn Executor>,
     fulfilled: AtomicBool,
-    injections: Mutex<Vec<Arc<dyn Fn(T, E) -> (T, E) + Send + Sync + 'static>>>,
-    callback: Mutex<Option<Box<dyn FnOnce(T, E) + Send + 'static>>>,
+    injections: Mutex<Vec<Injection<T, E>>>,
+    callback: Mutex<Option<CallbackFn<T, E>>>,
 }
 
 impl<T: Send + 'static, E: Send + 'static> Callback<T, E> {
@@ -77,9 +80,7 @@ impl<T: Send + 'static, E: Send + 'static> CallbackInner<T, E> {
         }
     }
 
-    fn inner_injections_snapshot(
-        &self,
-    ) -> Vec<Arc<dyn Fn(T, E) -> (T, E) + Send + Sync + 'static>> {
+    fn inner_injections_snapshot(&self) -> Vec<Injection<T, E>> {
         self.injections.lock().unwrap().clone()
     }
 }

@@ -31,3 +31,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：新增 `Transaction`/`Snapshot` *with_options API（返回 `ValueEntry`）；commit 使用 `fetch_commit_timestamp()` 轮询等待 commit_ts>=tso（timeout）；新增 `Error::CommitTsLag`
   - 验证：`cargo test` + `cargo test --features integration-tests --no-run` + `cargo clippy`
   - 文件：`src/transaction/transaction.rs`，`src/transaction/snapshot.rs`，`src/kv/kvpair.rs`，`src/common/errors.rs`，`tests/integration_tests.rs`
+
+- infra/make-all：修复 clippy::all / `-D warnings` 触发点，确保 `make all` 通过（含 `--no-default-features` unit-test）
+  - 关键：按 clippy 建议做语义等价重构（enum variant 命名、nonminimal_bool、type_complexity、unnecessary_*）；仅对 `#[cfg(test)]` 且 `not(feature=\"prometheus\")` 路径的测试 helper 加 `#[allow(dead_code)]` 避免 `-D warnings` 误伤
+  - 验证：`make all`
+  - 文件：`src/backoffer.rs`，`src/util/async_util.rs`，`src/util/gc_time.rs`，`src/transaction/transaction.rs`，`src/store/client.rs`，`src/stats.rs`，`.codex/progress/daemon.md`

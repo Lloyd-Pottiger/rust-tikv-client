@@ -361,16 +361,19 @@ mod imp {
     pub(crate) fn observe_stale_read_response(_is_cross_zone: bool, _bytes: usize) {}
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn stale_read_out_bytes(_is_cross_zone: bool) -> u64 {
         0
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn stale_read_in_bytes(_is_cross_zone: bool) -> u64 {
         0
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn stale_read_req_count(_is_cross_zone: bool) -> u64 {
         0
     }

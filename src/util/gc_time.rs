@@ -77,7 +77,9 @@ fn parse_gc_time_old(value: &str) -> Result<SystemTime, ()> {
     system_time_from_unix_timestamp(utc_secs, nanos)
 }
 
-fn parse_datetime(s: &str) -> Result<(i32, u32, u32, u32, u32, u32, u32), ()> {
+type DateTimeParts = (i32, u32, u32, u32, u32, u32, u32);
+
+fn parse_datetime(s: &str) -> Result<DateTimeParts, ()> {
     let bytes = s.as_bytes();
     if bytes.len() < 17 {
         return Err(());
@@ -231,11 +233,11 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     let mp = m + if m > 2 { -3 } else { 9 };
     let doy = (153 * mp + 2).div_euclid(5) + d - 1; // [0, 365]
     let doe = yoe * 365 + yoe.div_euclid(4) - yoe.div_euclid(100) + doy; // [0, 146096]
-    (era * 146_097 + doe - 719_468) as i64
+    era * 146_097 + doe - 719_468
 }
 
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let z = days as i64 + 719_468;
+    let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
     let doe = z - era * 146_097; // [0, 146096]
     let yoe = (doe - doe.div_euclid(1460) + doe.div_euclid(36_524) - doe.div_euclid(146_096))

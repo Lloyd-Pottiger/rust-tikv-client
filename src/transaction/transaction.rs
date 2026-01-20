@@ -3038,7 +3038,7 @@ mod tests {
             entries.get(&Key::from("b".to_owned())),
             Some(&ValueEntry::new(b"b1".to_vec(), 22))
         );
-        assert!(entries.get(&Key::from("d".to_owned())).is_none());
+        assert!(!entries.contains_key(&Key::from("d".to_owned())));
 
         Ok(())
     }

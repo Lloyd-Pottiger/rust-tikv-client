@@ -125,7 +125,6 @@ mod tests {
 
     #[tokio::test]
     async fn kv_rpc_client_dispatch_propagates_request_error() {
-        #[derive(Default)]
         struct ErrorRequest;
 
         #[async_trait]
@@ -160,8 +159,9 @@ mod tests {
         let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
         let client = KvRpcClient::new(TikvClient::new(channel), Duration::from_millis(1));
 
+        let req = ErrorRequest;
         let err = client
-            .dispatch(&ErrorRequest::default())
+            .dispatch(&req)
             .await
             .expect_err("KvRpcClient must propagate request errors");
         assert!(matches!(err, crate::Error::Unimplemented));

@@ -24,10 +24,10 @@ static TIKV_SERVER_BUSY_EXCLUDED_MAX_MS: AtomicU64 = AtomicU64::new(600_000);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Jitter {
-    NoJitter,
-    FullJitter,
-    EqualJitter,
-    DecorrJitter,
+    No,
+    Full,
+    Equal,
+    Decorr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,50 +122,50 @@ impl BackoffConfig {
 
 pub(crate) const BO_TIKV_RPC: BackoffConfig = BackoffConfig::new(
     "tikvRPC",
-    BackoffFnCfg::new(100, 2000, Jitter::EqualJitter),
+    BackoffFnCfg::new(100, 2000, Jitter::Equal),
     BackoffErrorKind::TiKVServerTimeout,
 );
 
 pub(crate) const BO_REGION_MISS: BackoffConfig = BackoffConfig::new(
     "regionMiss",
-    BackoffFnCfg::new(2, 500, Jitter::NoJitter),
+    BackoffFnCfg::new(2, 500, Jitter::No),
     BackoffErrorKind::RegionUnavailable,
 );
 
 pub(crate) const BO_TIKV_SERVER_BUSY: BackoffConfig = BackoffConfig::new(
     "tikvServerBusy",
-    BackoffFnCfg::new(2000, 10_000, Jitter::EqualJitter),
+    BackoffFnCfg::new(2000, 10_000, Jitter::Equal),
     BackoffErrorKind::TiKVServerBusy,
 );
 
 pub(crate) const BO_REGION_RECOVERY_IN_PROGRESS: BackoffConfig = BackoffConfig::new(
     "regionRecoveryInProgress",
-    BackoffFnCfg::new(100, 10_000, Jitter::EqualJitter),
+    BackoffFnCfg::new(100, 10_000, Jitter::Equal),
     BackoffErrorKind::RegionRecoveryInProgress,
 );
 
 pub(crate) const BO_TXN_NOT_FOUND: BackoffConfig = BackoffConfig::new(
     "txnNotFound",
-    BackoffFnCfg::new(2, 500, Jitter::NoJitter),
+    BackoffFnCfg::new(2, 500, Jitter::No),
     BackoffErrorKind::ResolveLockTimeout,
 );
 
 pub(crate) const BO_MAX_REGION_NOT_INITIALIZED: BackoffConfig = BackoffConfig::new(
     "regionNotInitialized",
-    BackoffFnCfg::new(2, 1000, Jitter::NoJitter),
+    BackoffFnCfg::new(2, 1000, Jitter::No),
     BackoffErrorKind::RegionNotInitialized,
 );
 
 pub(crate) const BO_IS_WITNESS: BackoffConfig = BackoffConfig::new(
     "isWitness",
-    BackoffFnCfg::new(1000, 10_000, Jitter::EqualJitter),
+    BackoffFnCfg::new(1000, 10_000, Jitter::Equal),
     BackoffErrorKind::IsWitness,
 );
 
 pub(crate) const BO_TXN_LOCK_FAST: BackoffConfig = BackoffConfig::new(
     TXN_LOCK_FAST_NAME,
     // NOTE: client-go uses `vars.BackoffLockFast` as base at runtime.
-    BackoffFnCfg::new(2, 3000, Jitter::EqualJitter),
+    BackoffFnCfg::new(2, 3000, Jitter::Equal),
     BackoffErrorKind::ResolveLockTimeout,
 );
 
@@ -223,17 +223,17 @@ impl BackoffFnState {
 
     fn backoff_ms(&mut self, max_sleep_ms: Option<u64>) -> u64 {
         let sleep_ms = match self.jitter {
-            Jitter::NoJitter => expo(self.base_ms, self.cap_ms, self.attempts),
-            Jitter::FullJitter => {
+            Jitter::No => expo(self.base_ms, self.cap_ms, self.attempts),
+            Jitter::Full => {
                 let v = expo(self.base_ms, self.cap_ms, self.attempts);
                 thread_rng().gen_range(0..v)
             }
-            Jitter::EqualJitter => {
+            Jitter::Equal => {
                 let v = expo(self.base_ms, self.cap_ms, self.attempts);
                 let half = v / 2;
                 half + thread_rng().gen_range(0..half)
             }
-            Jitter::DecorrJitter => {
+            Jitter::Decorr => {
                 // rand_between(base, last_sleep*3)
                 let upper_exclusive = self
                     .last_sleep_ms
@@ -644,7 +644,7 @@ mod test {
         assert_eq!(b.backoff_times, cloned_forked.backoff_times);
         assert_eq!(b.excluded_sleep_ms, cloned_forked.excluded_sleep_ms);
         assert_eq!(b.total_sleep_ms, cloned_forked.total_sleep_ms);
-        assert!(!b.ctx.inner.parent.is_some(), "expected root backoffer");
+        assert!(b.ctx.inner.parent.is_none(), "expected root backoffer");
     }
 
     #[test]
@@ -733,11 +733,11 @@ mod test {
 
     #[test]
     fn test_full_and_decorr_jitter_are_bounded() {
-        let mut full = BackoffFnState::new(2, 7, Jitter::FullJitter);
+        let mut full = BackoffFnState::new(2, 7, Jitter::Full);
         let d1 = full.backoff_ms(None);
         assert!(d1 <= 7);
 
-        let mut decorr = BackoffFnState::new(2, 7, Jitter::DecorrJitter);
+        let mut decorr = BackoffFnState::new(2, 7, Jitter::Decorr);
         let d2 = decorr.backoff_ms(None);
         assert!(d2 >= 2);
         assert!(d2 <= 7);
