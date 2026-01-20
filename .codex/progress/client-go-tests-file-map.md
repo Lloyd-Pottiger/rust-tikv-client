@@ -48,10 +48,10 @@
 | `client-go/internal/apicodec/codec_test.go` | covered | `src/request/keyspace.rs`（parse/decode keyspace + prefixes sorted） |
 | `client-go/internal/apicodec/codec_v1_test.go` | n/a | 空测试（Go 侧占位） |
 | `client-go/internal/apicodec/codec_v2_test.go` | covered | `src/request/keyspace.rs`（encode ranges/decode epoch/bucket）+ `src/transaction/transaction.rs`（commit primary key encode） |
-| `client-go/internal/client/client_async_test.go` | n/a | Go `SendRequestAsync`/Callback API；Rust 无同构 public API（等价 Callback/RunLoop 语义见 `src/util/async_util.rs`） |
+| `client-go/internal/client/client_async_test.go` | partial | Go `SendRequestAsync` callback API 本身 N/A（Rust 直接 `async/await`）；等价语义覆盖点：Callback/RunLoop（`src/util/async_util.rs` 单测）+ batch stream timeout/reconnect（`src/store/batch_commands.rs` 单测）+ batch unsupported 时 fallback unary（`src/store/client.rs` 单测） |
 | `client-go/internal/client/client_fail_test.go` | covered | Rust `BatchCommandsClient` 单测覆盖 batch stream close/inflight-fail/timeout + reconnect-once 语义：`src/store/batch_commands.rs` |
 | `client-go/internal/client/client_interceptor_test.go` | covered | `src/interceptor.rs`（interceptor chain 语义） |
-| `client-go/internal/client/client_test.go` | n/a | Go RPCClient/conn-pool/forwarding/metadata 细节；Rust 架构不同；等价 batch stream 行为见 `src/store/batch_commands.rs` 单测 + PD dial 去重见 `src/pd/client.rs` |
+| `client-go/internal/client/client_test.go` | partial | Go conn-pool/forwarding/metadata/trace/concurrency-limit 等实现细节 N/A；等价 batch stream 行为（prime/out-of-order/close+reconnect/timeout/health feedback）见 `src/store/batch_commands.rs` 单测；batch unsupported fallback unary + invalid addr fast-fail 见 `src/store/client.rs` 单测；PD dial 去重见 `src/pd/client.rs` 单测 |
 | `client-go/internal/client/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/internal/client/priority_queue_test.go` | n/a | Go priority queue 内存/引用清理；Rust 无对应实现 |
 | `client-go/internal/latch/latch_test.go` | covered | `src/transaction/latch.rs` |

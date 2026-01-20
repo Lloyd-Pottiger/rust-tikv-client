@@ -98,6 +98,7 @@ mod tests {
 
     use super::*;
     use crate::proto::kvrpcpb;
+    use crate::proto::tikvpb;
     use crate::store::RegionWithLeader;
 
     #[derive(Default)]
@@ -216,5 +217,67 @@ mod tests {
             Err(err) => err,
         };
         assert!(matches!(err, crate::Error::Grpc(_) | crate::Error::Url(_)));
+    }
+
+    #[derive(Default)]
+    struct UnsupportedBatchRequest {
+        unary_called: AtomicBool,
+        context: Option<kvrpcpb::Context>,
+    }
+
+    #[async_trait]
+    impl Request for UnsupportedBatchRequest {
+        async fn dispatch(
+            &self,
+            _client: &TikvClient<Channel>,
+            _timeout: Duration,
+        ) -> Result<Box<dyn Any + Send>> {
+            self.unary_called.store(true, Ordering::SeqCst);
+            Ok(Box::new(7_u64))
+        }
+
+        fn label(&self) -> &'static str {
+            "unsupported_batch_request"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn batch_request(&self) -> Option<tikvpb::batch_commands_request::Request> {
+            // The Rust client does not send Empty requests as "real" batch commands. It should
+            // treat it as unsupported and fall back to unary dispatch.
+            Some(tikvpb::batch_commands_request::Request {
+                cmd: Some(tikvpb::batch_commands_request::request::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyRequest::default(),
+                )),
+            })
+        }
+
+        fn context_mut(&mut self) -> &mut kvrpcpb::Context {
+            self.context.get_or_insert_with(kvrpcpb::Context::default)
+        }
+
+        fn set_leader(&mut self, _leader: &RegionWithLeader) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_api_version(&mut self, _api_version: kvrpcpb::ApiVersion) {}
+    }
+
+    #[tokio::test]
+    async fn kv_rpc_client_dispatch_falls_back_to_unary_when_batch_unimplemented() -> Result<()> {
+        let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let client = KvRpcClient::new(
+            TikvClient::new(channel),
+            Duration::from_millis(123),
+            crate::store::StoreHealthMap::default(),
+        );
+
+        let req = UnsupportedBatchRequest::default();
+        let resp = client.dispatch(&req).await?;
+        assert!(req.unary_called.load(Ordering::SeqCst));
+        assert_eq!(*resp.downcast::<u64>().unwrap(), 7);
+        Ok(())
     }
 }

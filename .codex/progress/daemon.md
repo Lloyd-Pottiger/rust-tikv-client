@@ -35,3 +35,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：补充 rawkv/kv flags/pd/region_cache/store 的单测/集成测引用，便于后续定位覆盖点
   - 文件：`.codex/progress/parity-checklist.md`，`.codex/progress/daemon.md`
   - 验证：`make all`
+
+- tests/port/internal-client-async：收敛 Go `internal/client/{client_test,client_async_test}.go` 可迁移语义映射（batch stream 关键路径 + KvRpcClient fallback）
+  - 关键：batch cmd unimplemented（如 Empty）必须 fallback unary；其余 conn-pool/forward/metadata/trace 等 Go-only 细节 N/A
+  - 文件：`src/store/client.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
+  - 验证：`make check` + `make unit-test` + `make all`
