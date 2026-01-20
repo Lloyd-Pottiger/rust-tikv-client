@@ -48,10 +48,10 @@
 | `client-go/internal/apicodec/codec_test.go` | covered | `src/request/keyspace.rs`（parse/decode keyspace + prefixes sorted） |
 | `client-go/internal/apicodec/codec_v1_test.go` | n/a | 空测试（Go 侧占位） |
 | `client-go/internal/apicodec/codec_v2_test.go` | covered | `src/request/keyspace.rs`（encode ranges/decode epoch/bucket）+ `src/transaction/transaction.rs`（commit primary key encode） |
-| `client-go/internal/client/client_async_test.go` | n/a | Go async/batch client 发送环；Rust 无同构 BatchCommands |
-| `client-go/internal/client/client_fail_test.go` | n/a | 同上（mockserver/batch-client 行为） |
+| `client-go/internal/client/client_async_test.go` | n/a | Go `SendRequestAsync`/Callback API；Rust 无同构 public API（等价 Callback/RunLoop 语义见 `src/util/async_util.rs`） |
+| `client-go/internal/client/client_fail_test.go` | n/a | Go RPCClient/forwarded-host 细节；Rust 用 `src/store/batch_commands.rs` 单测覆盖 batch stream close/reconnect/timeout/inflight-fail 语义 |
 | `client-go/internal/client/client_interceptor_test.go` | covered | `src/interceptor.rs`（interceptor chain 语义） |
-| `client-go/internal/client/client_test.go` | n/a | 绝大多数为 BatchCommands/forwarding/health-feedback/metadata（Rust 无同构实现）；可迁移“连接复用/并发 dial 去重”已由 `src/pd/client.rs` 单测覆盖（`test_kv_client_caching` + `test_kv_client_concurrent_connect_is_deduped_per_address`） |
+| `client-go/internal/client/client_test.go` | n/a | Go RPCClient/conn-pool/forwarding/metadata 细节；Rust 架构不同；等价 batch stream 行为见 `src/store/batch_commands.rs` 单测 + PD dial 去重见 `src/pd/client.rs` |
 | `client-go/internal/client/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/internal/client/priority_queue_test.go` | n/a | Go priority queue 内存/引用清理；Rust 无对应实现 |
 | `client-go/internal/latch/latch_test.go` | covered | `src/transaction/latch.rs` |
@@ -67,7 +67,7 @@
 | `client-go/internal/mockstore/deadlock/deadlock_test.go` | covered | Rust 侧等价 deadlock detector + 单测：`src/mock/deadlock_detector.rs` |
 | `client-go/internal/mockstore/deadlock/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/internal/mockstore/mocktikv/main_test.go` | n/a | Go mocktikv harness |
-| `client-go/internal/mockstore/mocktikv/marshal_test.go` | n/a | Go mocktikv 编码/批处理回归；Rust 无 BatchCommands 发送环 |
+| `client-go/internal/mockstore/mocktikv/marshal_test.go` | n/a | Go mocktikv MVCC 内部类型编码回归；Rust 不包含 mocktikv 实现 |
 | `client-go/internal/mockstore/mocktikv/mock_tikv_test.go` | n/a | Go mocktikv MVCC/region 模拟 |
 | `client-go/internal/mockstore/mocktikv/mvcc_test.go` | n/a | 同上 |
 | `client-go/internal/resourcecontrol/resource_control_test.go` | covered | `src/resource_control.rs` |
@@ -96,7 +96,7 @@
 | `client-go/tikvrpc/interceptor/interceptor_test.go` | covered | `src/interceptor.rs` |
 | `client-go/tikvrpc/interceptor/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/tikvrpc/main_test.go` | n/a | Go `TestMain` harness |
-| `client-go/tikvrpc/tikvrpc_test.go` | n/a | Go BatchCommands wrappers；Rust 无 BatchCommands 发送环 |
+| `client-go/tikvrpc/tikvrpc_test.go` | covered | Rust `Request::batch_request` 映射 + batch response decode 错误路径：`src/store/request.rs`/`src/store/batch_commands.rs` 单测 |
 | `client-go/trace/flags_test.go` | covered | `src/trace.rs` |
 | `client-go/trace/trace_test.go` | covered | `src/trace.rs` |
 | `client-go/txnkv/transaction/2pc_test.go` | n/a | Go 内部 `minCommitTsManager`/并发 helper；Rust async-commit/2PC 走不同实现（语义由 txn 单测/E2E 覆盖） |

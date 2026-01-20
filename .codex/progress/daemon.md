@@ -19,6 +19,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- tests/port/tikvrpc-batchcommands：迁移 Go `client-go/tikvrpc/tikvrpc_test.go`（BatchCommands request/response wrapper 语义）
+  - 完成：补 `Request::batch_request()` -> `BatchCommandKind` 映射单测（覆盖 batchable/unary-only）；补 batch response missing-cmd 错误单测；补 batch stream timeout + stream close(inflight fail) 单测
+  - 验证：`make unit-test` + `make check`
+  - 文件：`src/store/request.rs`，`src/store/batch_commands.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+
 - tests/port/mockstore-minimal：从 Go mocktikv 用例挑选可迁移子集，落到 Rust `MockKvClient` 单测（不做 1:1 mock server）
   - 完成：补齐 raw 侧可迁移纯逻辑用例：checksum 多 region merge、checksum keyspace 编码、CAS swapped=false/prev_not_exist、batch_get key 排序+按 region 分组、delete_range empty range no-op
   - 关键：新增 `MockKvClient::with_typed_dispatch_hook` 降低 downcast/boxing 噪音，便于批量写 mock 用例

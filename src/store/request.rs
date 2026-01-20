@@ -527,6 +527,8 @@ mod tests {
     use super::*;
     use crate::proto::metapb;
     use crate::region::RegionWithLeader;
+    use crate::store::batch_commands::{batch_kind_for_request, BatchCommandKind};
+    use prost::Message;
 
     #[test]
     fn request_label_and_context_fields() {
@@ -615,5 +617,156 @@ mod tests {
             Error::LeaderNotFound { .. } => {}
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    fn assert_batchable(req: &mut dyn Request, expected_kind: BatchCommandKind) {
+        // Mimic `tikvrpc.AttachContext`: ensure the request has a non-empty context.
+        req.context_mut().region_id = 1;
+
+        let batch = req.batch_request().expect("batch_request should exist");
+        assert_eq!(
+            batch_kind_for_request(&batch).expect("batch kind should be supported"),
+            expected_kind
+        );
+
+        // Ensure the batch request is serializable (no panics from prost encoding).
+        let _ = batch.encode_to_vec();
+    }
+
+    #[test]
+    fn batch_request_is_available_for_supported_types() {
+        // RawKV (batchable)
+        assert_batchable(
+            &mut kvrpcpb::RawGetRequest::default(),
+            BatchCommandKind::RawGet,
+        );
+        assert_batchable(
+            &mut kvrpcpb::RawBatchGetRequest::default(),
+            BatchCommandKind::RawBatchGet,
+        );
+        assert_batchable(
+            &mut kvrpcpb::RawPutRequest::default(),
+            BatchCommandKind::RawPut,
+        );
+        assert_batchable(
+            &mut kvrpcpb::RawBatchPutRequest::default(),
+            BatchCommandKind::RawBatchPut,
+        );
+        assert_batchable(
+            &mut kvrpcpb::RawDeleteRequest::default(),
+            BatchCommandKind::RawDelete,
+        );
+        assert_batchable(
+            &mut kvrpcpb::RawBatchDeleteRequest::default(),
+            BatchCommandKind::RawBatchDelete,
+        );
+        assert_batchable(
+            &mut kvrpcpb::RawScanRequest::default(),
+            BatchCommandKind::RawScan,
+        );
+        assert_batchable(
+            &mut kvrpcpb::RawBatchScanRequest::default(),
+            BatchCommandKind::RawBatchScan,
+        );
+        assert_batchable(
+            &mut kvrpcpb::RawDeleteRangeRequest::default(),
+            BatchCommandKind::RawDeleteRange,
+        );
+        assert_batchable(
+            &mut kvrpcpb::RawCoprocessorRequest::default(),
+            BatchCommandKind::RawCoprocessor,
+        );
+
+        // TxnKV (batchable)
+        assert_batchable(&mut kvrpcpb::GetRequest::default(), BatchCommandKind::Get);
+        assert_batchable(&mut kvrpcpb::ScanRequest::default(), BatchCommandKind::Scan);
+        assert_batchable(
+            &mut kvrpcpb::PrewriteRequest::default(),
+            BatchCommandKind::Prewrite,
+        );
+        assert_batchable(
+            &mut kvrpcpb::CommitRequest::default(),
+            BatchCommandKind::Commit,
+        );
+        assert_batchable(
+            &mut kvrpcpb::CleanupRequest::default(),
+            BatchCommandKind::Cleanup,
+        );
+        assert_batchable(
+            &mut kvrpcpb::BatchGetRequest::default(),
+            BatchCommandKind::BatchGet,
+        );
+        assert_batchable(
+            &mut kvrpcpb::BatchRollbackRequest::default(),
+            BatchCommandKind::BatchRollback,
+        );
+        assert_batchable(
+            &mut kvrpcpb::PessimisticRollbackRequest::default(),
+            BatchCommandKind::PessimisticRollback,
+        );
+        assert_batchable(
+            &mut kvrpcpb::ResolveLockRequest::default(),
+            BatchCommandKind::ResolveLock,
+        );
+        assert_batchable(
+            &mut kvrpcpb::ScanLockRequest::default(),
+            BatchCommandKind::ScanLock,
+        );
+        assert_batchable(
+            &mut kvrpcpb::FlushRequest::default(),
+            BatchCommandKind::Flush,
+        );
+        assert_batchable(
+            &mut kvrpcpb::BufferBatchGetRequest::default(),
+            BatchCommandKind::BufferBatchGet,
+        );
+        assert_batchable(
+            &mut kvrpcpb::PessimisticLockRequest::default(),
+            BatchCommandKind::PessimisticLock,
+        );
+        assert_batchable(
+            &mut kvrpcpb::TxnHeartBeatRequest::default(),
+            BatchCommandKind::TxnHeartBeat,
+        );
+        assert_batchable(
+            &mut kvrpcpb::CheckTxnStatusRequest::default(),
+            BatchCommandKind::CheckTxnStatus,
+        );
+        assert_batchable(
+            &mut kvrpcpb::CheckSecondaryLocksRequest::default(),
+            BatchCommandKind::CheckSecondaryLocks,
+        );
+        assert_batchable(&mut kvrpcpb::GcRequest::default(), BatchCommandKind::Gc);
+        assert_batchable(
+            &mut kvrpcpb::DeleteRangeRequest::default(),
+            BatchCommandKind::DeleteRange,
+        );
+        assert_batchable(
+            &mut kvrpcpb::BroadcastTxnStatusRequest::default(),
+            BatchCommandKind::BroadcastTxnStatus,
+        );
+
+        // Store health
+        assert_batchable(
+            &mut kvrpcpb::GetHealthFeedbackRequest::default(),
+            BatchCommandKind::GetHealthFeedback,
+        );
+    }
+
+    #[test]
+    fn batch_request_is_none_for_unary_only_types() {
+        // RawKV (unary-only)
+        assert!(kvrpcpb::RawGetKeyTtlRequest::default()
+            .batch_request()
+            .is_none());
+        assert!(kvrpcpb::RawCasRequest::default().batch_request().is_none());
+        assert!(kvrpcpb::RawChecksumRequest::default()
+            .batch_request()
+            .is_none());
+
+        // TxnKV (unary-only)
+        assert!(kvrpcpb::UnsafeDestroyRangeRequest::default()
+            .batch_request()
+            .is_none());
     }
 }

@@ -11,7 +11,6 @@
 逐文件（101 个 `_test.go`）的覆盖/归因清单见：`.codex/progress/client-go-tests-file-map.md`
 
 ## Out-Of-Scope (Skip; Rust Has No Equivalent Abstraction)
-- `client-go/tikvrpc/tikvrpc_test.go`: Go BatchCommands request/response wrappers + marshal/race regression（Rust 目前无 batch-client/BatchCommands 发送环）
 - `client-go/tikvrpc/*/main_test.go`: Go `goleak` harness
 - `client-go/config/config_test.go`: DSN ParsePath / failpoint 注入 TxnScope / gRPC keepalive timeout 细节（Rust 入口是 PD endpoints + `Config`）
 - `client-go/internal/unionstore/**`: Go memdb/art/rbt/staging/snapshot/memory-footprint 细节；Rust 事务 buffer 采用不同结构（只迁移“事务本地 buffer 语义”相关测试）
@@ -28,6 +27,7 @@
 - LockResolver cache: `client-go/txnkv/txnlock/lock_resolver_test.go` -> `src/transaction/lock.rs`（resolved cache 命中不触发 secondary-check RPC）
 - Region cache core invariants: `client-go/internal/locate/region_cache_test.go`(部分语义) -> `src/region_cache.rs#L423`
 - Interceptor chain basics: `client-go/tikvrpc/interceptor/*` -> `src/interceptor.rs#L309`
+- BatchCommands wrappers: `client-go/tikvrpc/tikvrpc_test.go` -> `src/store/request.rs` + `src/store/batch_commands.rs`
 - KV primitives: `client-go/kv/*` -> `src/kv/*`（Key/BoundRange/codec + Get/BatchGet options + ValueEntry 单测）
 - Trace flags/events: `client-go/trace/*` -> `src/trace.rs#L189`
 - KeyError debug-info redaction: `client-go/error/error_test.go` -> `src/common/errors.rs#L905`

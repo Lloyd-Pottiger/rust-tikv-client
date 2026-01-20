@@ -732,6 +732,69 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn batch_commands_decode_response_missing_cmd_returns_error() {
+        let err = decode_response(
+            BatchCommandKind::RawGet,
+            tikvpb::batch_commands_response::Response { cmd: None },
+        )
+        .expect_err("missing cmd should be an error");
+        assert!(matches!(err, Error::InternalError { .. }));
+    }
+
+    #[tokio::test]
+    async fn batch_commands_dispatch_times_out_when_server_never_responds() -> Result<()> {
+        struct NeverRespond;
+
+        #[tonic::async_trait]
+        impl BatchCommandsService for NeverRespond {
+            type BatchCommandsStream =
+                ReceiverStream<std::result::Result<tikvpb::BatchCommandsResponse, Status>>;
+
+            async fn batch_commands(
+                &self,
+                request: tonic::Request<tonic::Streaming<tikvpb::BatchCommandsRequest>>,
+            ) -> std::result::Result<tonic::Response<Self::BatchCommandsStream>, Status>
+            {
+                let mut inbound = request.into_inner();
+                expect_prime_empty(&mut inbound).await?;
+
+                let (tx, rx) = mpsc::channel(16);
+                tokio::spawn(async move {
+                    // Keep the response stream open, but never send a response.
+                    let _tx = tx;
+                    let _ = inbound.message().await;
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                });
+
+                Ok(tonic::Response::new(ReceiverStream::new(rx)))
+            }
+        }
+
+        let (addr, shutdown_tx) = start_batch_commands_server(NeverRespond).await;
+        let rpc = connect_test_client(addr).await;
+        let client = BatchCommandsClient::new(rpc, StoreHealthMap::default());
+
+        let err = client
+            .dispatch(
+                BatchCommandKind::RawGet,
+                make_raw_get_batch_request(vec![1_u8]),
+                Duration::from_millis(50),
+            )
+            .await
+            .expect_err("expected timeout error");
+        match err {
+            Error::GrpcAPI(status) => {
+                assert_eq!(status.code(), Code::DeadlineExceeded);
+                assert_eq!(status.message(), "batch commands request timeout");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let _ = shutdown_tx.send(());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn batch_commands_reconnects_after_stream_is_closed() -> Result<()> {
         struct CloseAfterOne {
@@ -818,6 +881,105 @@ mod tests {
         // The second request should require a new `BatchCommands` stream.
         assert!(calls.load(Ordering::SeqCst) >= 2);
 
+        let _ = shutdown_tx.send(());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_commands_fails_inflight_when_stream_closes_without_response() -> Result<()> {
+        struct CloseWithoutResponse {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[tonic::async_trait]
+        impl BatchCommandsService for CloseWithoutResponse {
+            type BatchCommandsStream =
+                ReceiverStream<std::result::Result<tikvpb::BatchCommandsResponse, Status>>;
+
+            async fn batch_commands(
+                &self,
+                request: tonic::Request<tonic::Streaming<tikvpb::BatchCommandsRequest>>,
+            ) -> std::result::Result<tonic::Response<Self::BatchCommandsStream>, Status>
+            {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let mut inbound = request.into_inner();
+                expect_prime_empty(&mut inbound).await?;
+
+                let (tx, rx) = mpsc::channel(16);
+                tokio::spawn(async move {
+                    let Ok(Some(req)) = inbound.message().await else {
+                        return;
+                    };
+
+                    if call == 0 {
+                        // Close the response stream without replying to the request.
+                        drop(tx);
+                        return;
+                    }
+
+                    if let Some((request_id, request)) = req
+                        .request_ids
+                        .into_iter()
+                        .zip(req.requests.into_iter())
+                        .next()
+                    {
+                        let key = match request.cmd {
+                            Some(tikvpb::batch_commands_request::request::Cmd::RawGet(req)) => {
+                                req.key
+                            }
+                            _ => Vec::new(),
+                        };
+                        let resp = tikvpb::BatchCommandsResponse {
+                            request_ids: vec![request_id],
+                            responses: vec![make_raw_get_batch_response(key)],
+                            ..Default::default()
+                        };
+                        let _ = tx.send(Ok(resp)).await;
+                    }
+                });
+
+                Ok(tonic::Response::new(ReceiverStream::new(rx)))
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (addr, shutdown_tx) = start_batch_commands_server(CloseWithoutResponse {
+            calls: calls.clone(),
+        })
+        .await;
+        let rpc = connect_test_client(addr).await;
+        let client = BatchCommandsClient::new(rpc, StoreHealthMap::default());
+
+        let err = client
+            .dispatch(
+                BatchCommandKind::RawGet,
+                make_raw_get_batch_request(vec![11_u8]),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect_err("expected stream closed error");
+        match err {
+            Error::GrpcAPI(status) => {
+                assert_eq!(status.code(), Code::Unavailable);
+                assert_eq!(status.message(), "batch commands stream closed");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        // After reconnecting, subsequent requests should succeed.
+        let resp = client
+            .dispatch(
+                BatchCommandKind::RawGet,
+                make_raw_get_batch_request(vec![12_u8]),
+                Duration::from_secs(5),
+            )
+            .await?;
+        let resp = resp
+            .downcast::<crate::proto::kvrpcpb::RawGetResponse>()
+            .expect("raw get response");
+        assert_eq!(resp.value, vec![12_u8]);
+
+        assert!(calls.load(Ordering::SeqCst) >= 2);
         let _ = shutdown_tx.send(());
         Ok(())
     }
