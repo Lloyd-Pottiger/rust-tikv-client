@@ -15,60 +15,19 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- infra/resolve-client-go-test-file-partials：清零 go test file map 的 `partial`（升级为 covered 或标注 N/A + 指向 Rust 覆盖点）
-  - 目标：`client-go/internal/client/client_test.go`、`client-go/internal/locate/region_request*_test.go` 等 4 个 `partial` 不再保留 partial 状态（主要为 mocktikv/BatchCommands/forwarding 架构差异）
-  - 计划：逐文件核对可迁移语义已被哪些 Rust 单测覆盖；将文件状态改为 `n/a`（或 `covered`）并补充更明确 notes；保持 source-of-truth 映射一致
-  - 验证：`cargo test`
-  - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
-
 # 已完成工作
 
-- tests/port-client-go-retry-backoffer：补齐 Go Backoffer 等价语义并迁移 `client-go/config/retry/backoff_test.go`
-  - 关键：实现 maxSleep/excludedSleep/longestSleep 预算模型；支持 clone/fork/update；实现 MayBackoffForRegionError（EpochNotMatch current_regions 为空视为 fake -> backoff）
-  - 决策：Backoffer 仅用于 parity/unit tests（`cfg(test)`/`test-util`），不影响生产请求 backoff（仍由 `src/backoff.rs` + `src/request/plan.rs` 驱动）
-  - 文件：`src/backoffer.rs`，`src/lib.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
-  - 验证：`cargo test`
-
-- tests/port-client-go-core-suite：迁移 client-go 可迁移单测语义（kv/options+ValueEntry，lock resolver cache，backoff/backoffer，keyspace codec，gc time，oracle，core request/retry/resource-control 等）
-  - 关键：resolved cache 命中不触发 secondary-check RPC；EpochNotMatch(empty CurrentRegions)->backoff；Keyspace::try_enable 限制 24-bit id；GC time 兼容解析（最多容忍 1 个尾随字段）；oracle(singleflight+lowres cache + local oracle time hook)；Key.next_prefix_key 边界 + region cache/retry fast-path + stale-read metrics + resource-control bypass
-  - 验证：`cargo test`
-  - 文件：`src/kv/*`，`src/transaction/lock.rs`，`src/request/*`，`src/request/keyspace.rs`，`src/util/gc_time.rs`，`src/pd/*`，`src/timestamp/*`，`src/store/*`，`src/region_cache.rs`，`src/resource_control.rs`
-
-- infra/test-mapping+integration-docs：维护 go tests 覆盖映射 + integration_tests 映射；校验 integration-tests feature gate 可编译
-  - 结果：go tests inventory 101 files/294 cases；`cargo test --features integration-tests --no-run` 通过
-  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/daemon.md`
-
-- feature/txn-read-return-commit-ts：txn get/batch_get 支持 ReturnCommitTS（need_commit_ts + commit_ts 透传）
-  - 关键：新增 `Transaction::get_with_options`/`Snapshot::get_with_options`（返回 `ValueEntry`）与 `Transaction::batch_get_with_options`/`Snapshot::batch_get_with_options`（返回 key->`ValueEntry`）；Get/BatchGet request 支持 `need_commit_ts`；`KvPair.commit_ts` 公开并从 proto 透传；keyspace 下 batch_get 返回 key decode 正常；单测 mock kv 校验 need_commit_ts+commit_ts（含 cached->refetch）
-  - 验证：`cargo test`
-  - 文件：`src/kv/kvpair.rs`，`src/request/keyspace.rs`，`src/transaction/transaction.rs`，`src/transaction/snapshot.rs`，`src/transaction/buffer.rs`，`src/transaction/requests.rs`，`src/transaction/lowering.rs`，`examples/raw.rs`，`.codex/progress/daemon.md`
-
-- review/overall-goals-audit：复核整体目标与测试/集成用例映射；修复因 `KvPair` API 调整导致的 integration-tests 编译回归
-  - 结果：`cargo test` + `cargo test --features integration-tests --no-run` + `cargo clippy` 通过（integration-tests 仅编译，不依赖 cluster）
-  - 文件：`tests/integration_tests.rs`，`.codex/progress/daemon.md`
-
-- tests/port-client-go-replica-selector-fast-retry：补齐 replica selector 的 `ServerIsBusy` fast-retry + pending-backoff 可迁移语义
-  - 关键：replica-read 模式下 `ServerIsBusy` 优先切换 peer（bounded by non-witness peers），不消耗 backoff；回到该 store 前先应用 pending backoff；其他 keep-peer region errors 仍 pin 同 store
-  - 验证：`cargo test`
-  - 文件：`src/request/pending_backoff.rs`，`src/request/read_routing.rs`，`src/request/plan.rs`，`src/request/mod.rs`
-
-- infra/update-test-mapping：更新 go tests 覆盖映射（fast-retry/pending-backoff 已补）
-  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
-
-- infra/full-test-file-mapping：把 client-go 101 个 `_test.go` 文件逐一映射到 Rust 覆盖点（或标注 N/A），形成可持续维护的清单
-  - 关键：新增逐文件清单 `.codex/progress/client-go-tests-file-map.md`（101 rows；covered/partial/n-a + notes），并在 `client-go-tests-port.md` 标注其为 source-of-truth
-  - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
-
-- tests/port-client-go-internal-client-suite：处理 `client-go/internal/client/*_test.go`（batch-client/conn-pool/priority-queue 等）在 Rust 侧的等价覆盖或明确 N/A
-  - 关键：补齐 Rust 侧“conn-pool 等价语义”——PdRpcClient 的 per-address kv_client cache + 并发 dial 去重（`OnceCell`）；同步更新 go test file map 将 `client_test.go` 标注为 partial（其余 BatchCommands/forwarding 维持 N/A）
-  - 验证：`cargo test`
-  - 文件：`src/pd/client.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
-
-- tests/port-client-go-integration-missing-cases：对照 `client-go/integration_tests/*.go`，补齐 Rust 侧缺失的可迁移语义（优先小而关键的）
-  - 关键：补齐 option_test 的 commit-wait TSO（`set_commit_wait_until_tso` + timeout）与单测；更新 integration mapping；`cargo test --features integration-tests --no-run` 通过
+- tests/parity-mapping+backoffer：完成 client-go tests 迁移/映射维护闭环（101 `_test.go` 逐文件清单；integration-tests 映射；parity-checklist 对齐；清零 `partial`）
+  - 关键：新增 `src/backoffer.rs`（client-go Backoffer：maxSleep/excludedSleep/longestSleep/clone+fork/update + MayBackoffForRegionError）+ 单测；对 mocktikv/BatchCommands/forwarding 等不可移植用例统一标注 N/A，但在 notes 指向 Rust 可迁移语义覆盖点
   - 验证：`cargo test` + `cargo test --features integration-tests --no-run`
-  - 文件：`src/transaction/transaction.rs`，`src/common/errors.rs`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
+  - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/parity-checklist.md`，`src/backoffer.rs`
 
-- review/post-tests-port-audit：复核整体目标/缺失 public API/测试覆盖；补齐 parity 记录
-  - 结果：`cargo test` + `cargo clippy` + `cargo test --features integration-tests --no-run` 通过；parity-checklist 补齐 commit-wait TSO 的 Rust 映射（`Transaction::{set_,get_}commit_wait_until_tso*`）
-  - 文件：`.codex/progress/daemon.md`，`.codex/progress/parity-checklist.md`
+- request+pd/core-suite：迁移 client-go 核心可迁移单测语义（region/lock/oracle/keyspace/gc-time/resource-control + pd kv_client conn 缓存/dial 去重 + replica selector fast-retry/pending-backoff）
+  - 关键：resolved lock cache 命中不触发 secondary-check；EpochNotMatch(empty CurrentRegions)->backoff；ServerIsBusy replica fast-retry + pending-backoff；PdRpcClient per-address kv_client cache + OnceCell 并发 dial 去重
+  - 验证：`cargo test`
+  - 文件：`src/request/*`，`src/region_cache.rs`，`src/transaction/lock.rs`，`src/pd/client.rs`，`src/timestamp/*`，`src/util/gc_time.rs`
+
+- txn/options：补齐 ReturnCommitTS + commit-wait TSO（含错误类型与单测），并确保 integration-tests feature 可编译
+  - 关键：新增 `Transaction`/`Snapshot` *with_options API（返回 `ValueEntry`）；commit 使用 `fetch_commit_timestamp()` 轮询等待 commit_ts>=tso（timeout）；新增 `Error::CommitTsLag`
+  - 验证：`cargo test` + `cargo test --features integration-tests --no-run` + `cargo clippy`
+  - 文件：`src/transaction/transaction.rs`，`src/transaction/snapshot.rs`，`src/kv/kvpair.rs`，`src/common/errors.rs`，`tests/integration_tests.rs`

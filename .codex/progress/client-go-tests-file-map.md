@@ -51,7 +51,7 @@
 | `client-go/internal/client/client_async_test.go` | n/a | Go async/batch client 发送环；Rust 无同构 BatchCommands |
 | `client-go/internal/client/client_fail_test.go` | n/a | 同上（mockserver/batch-client 行为） |
 | `client-go/internal/client/client_interceptor_test.go` | covered | `src/interceptor.rs`（interceptor chain 语义） |
-| `client-go/internal/client/client_test.go` | partial | Rust 侧连接复用/并发 dial 去重：`src/pd/client.rs`（`test_kv_client_caching` + `test_kv_client_concurrent_connect_is_deduped_per_address`）；其余 BatchCommands/forwarding/metadata/health-feedback 等 N/A |
+| `client-go/internal/client/client_test.go` | n/a | 绝大多数为 BatchCommands/forwarding/health-feedback/metadata（Rust 无同构实现）；可迁移“连接复用/并发 dial 去重”已由 `src/pd/client.rs` 单测覆盖（`test_kv_client_caching` + `test_kv_client_concurrent_connect_is_deduped_per_address`） |
 | `client-go/internal/client/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/internal/client/priority_queue_test.go` | n/a | Go priority queue 内存/引用清理；Rust 无对应实现 |
 | `client-go/internal/latch/latch_test.go` | covered | `src/transaction/latch.rs` |
@@ -60,9 +60,9 @@
 | `client-go/internal/locate/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/internal/locate/metrics_collector_test.go` | covered | `src/request/metrics_collector.rs` + `src/store/request.rs`（stale-read req/resp metrics） |
 | `client-go/internal/locate/region_cache_test.go` | covered | `src/region_cache.rs` |
-| `client-go/internal/locate/region_request3_test.go` | partial | 大量 mocktikv/forwarding/conn-pool；可迁移 region error/backoff/replica routing 语义见 `src/request/plan.rs` |
-| `client-go/internal/locate/region_request_state_test.go` | partial | mocktikv FSM；等价语义由 `src/request/plan.rs` + `tests/integration_tests.rs`（stale/replica read）覆盖 |
-| `client-go/internal/locate/region_request_test.go` | partial | mocktikv；关键 retry/patch request_source/backoff 见 `src/request/plan.rs`/`src/request/plan_builder.rs` |
+| `client-go/internal/locate/region_request3_test.go` | n/a | mocktikv/forwarding/conn-pool 架构特定；可迁移 region retry/backoff/replica routing 语义见 `src/request/plan.rs` 单测 |
+| `client-go/internal/locate/region_request_state_test.go` | n/a | mocktikv FSM/region request sender 特定；stale/replica read 等价语义由 `src/request/plan.rs` + `tests/integration_tests.rs` 覆盖 |
+| `client-go/internal/locate/region_request_test.go` | n/a | mocktikv/region request sender 特定；关键 retry/backoff/request_source patch 等价语义见 `src/request/plan.rs`/`src/request/plan_builder.rs` |
 | `client-go/internal/locate/replica_selector_test.go` | covered | `src/request/read_routing.rs` + `src/request/plan.rs`（stale-command/keep-peer/fast-retry） |
 | `client-go/internal/mockstore/deadlock/deadlock_test.go` | n/a | Go mockstore deadlock server；Rust 未做 1:1 mock server 迁移 |
 | `client-go/internal/mockstore/deadlock/main_test.go` | n/a | Go `TestMain` harness |
