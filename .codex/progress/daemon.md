@@ -15,6 +15,21 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
+- transport/batch-commands：引入 BatchCommands stream（multiplex/reconnect/request_id 映射/timeout），解锁 Go batch-client 相关用例迁移
+  - 计划：在 `src/store/` 增加 batch client（优先覆盖 `GetHealthFeedback` + raw/txn 高频 cmd）；保留 unary fallback；用 mock gRPC server 做单测（request_id 对齐/乱序响应/断线重连）
+  - 验证：`make check` + `make unit-test` + `make integration-test-if-ready`
+  - 文件：`src/store/*`，`src/request/*`，`tests/*`，`.codex/progress/*`
+
+- tests/port/health-feedback：迁移 Go `integration_tests/health_feedback_test.go`（store slow-score / feedback_seq_no）
+  - 计划：解析 `BatchCommandsResponse.health_feedback` 并回写 store health 状态；补 Rust E2E 用例（cluster ready 时跑）
+  - 验证：`make integration-test-if-ready` + `make all`
+  - 文件：`src/store/*`，`src/region_cache.rs`（如需），`tests/integration_tests.rs`，`.codex/progress/*`
+
+- tests/port/mockstore-minimal：从 Go mocktikv 用例挑选可迁移子集，落到 Rust `MockKvClient` 单测（不做 1:1 mock server）
+  - 计划：挑选纯算法/错误路径用例；扩展 `src/mock.rs` dispatch hook helper；补齐 unit-test 覆盖
+  - 验证：`make unit-test`
+  - 文件：`src/mock.rs`，相关模块 tests，`.codex/progress/*`
+
 # 已完成工作
 
 - tests/parity-mapping+backoffer+util：完成 client-go tests 迁移/映射维护闭环（101 `_test.go` 逐文件清单；integration-tests 映射；parity-checklist 对齐；清零 `partial`）
@@ -36,3 +51,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：按 clippy 建议做语义等价重构（enum variant 命名、nonminimal_bool、type_complexity、unnecessary_*）；仅对 `#[cfg(test)]` 且 `not(feature=\"prometheus\")` 路径的测试 helper 加 `#[allow(dead_code)]` 避免 `-D warnings` 误伤
   - 验证：`make all`
   - 文件：`src/backoffer.rs`，`src/util/async_util.rs`，`src/util/gc_time.rs`，`src/transaction/transaction.rs`，`src/store/client.rs`，`src/stats.rs`，`.codex/progress/daemon.md`
+
+- tests/coverage：确认 unit-test 侧行覆盖率满足阈值（>=80%）
+  - 关键：使用 `cargo llvm-cov`；报告输出 `target/llvm-cov/html/index.html`
+  - 验证：`make coverage`
+  - 文件：`.codex/progress/daemon.md`

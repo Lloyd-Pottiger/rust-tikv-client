@@ -11,9 +11,6 @@
 逐文件（101 个 `_test.go`）的覆盖/归因清单见：`.codex/progress/client-go-tests-file-map.md`
 
 ## Out-Of-Scope (Skip; Rust Has No Equivalent Abstraction)
-- `client-go/util/request_source*_test.go`: Go-style `context.Context` keys/RequestSource struct/BuildRequestSource (parity checklist already标注 N/A)
-- `client-go/util/async/*_test.go`: Go-specific runloop/goroutine utilities
-- `client-go/util/rate_limit_test.go`: Go channel token limiter utility
 - `client-go/tikvrpc/tikvrpc_test.go`: Go BatchCommands request/response wrappers + marshal/race regression（Rust 目前无 batch-client/BatchCommands 发送环）
 - `client-go/tikvrpc/*/main_test.go`: Go `goleak` harness
 - `client-go/config/config_test.go`: DSN ParsePath / failpoint 注入 TxnScope / gRPC keepalive timeout 细节（Rust 入口是 PD endpoints + `Config`）
@@ -23,7 +20,10 @@
 
 ## Mostly Covered (Existing Rust Tests)
 - TLS/security: `client-go/config/security_test.go` -> `src/common/security.rs#L123`
-- Retry/backoff algorithms: Go backoff jitter / attempt cap -> `src/backoff.rs#L207`（注：Go Backoffer 的 “error-type longest sleep / excluded sleep” 不做 1:1；已对齐 `MayBackoffForRegionError` fake EpochNotMatch -> backoff（`src/request/plan.rs` 单测））
+- Retry/backoff algorithms: Go jitter backoff -> `src/backoff.rs#L207`；Go Backoffer（maxSleep/excludedSleep/longestSleep/clone+fork+update + `MayBackoffForRegionError`）-> `src/backoffer.rs`
+- Util/request_source: `client-go/util/request_source*_test.go` -> `src/util/request_source.rs`
+- Util/async runloop: `client-go/util/async/*_test.go` -> `src/util/async_util.rs`
+- Util/rate limit: `client-go/util/rate_limit_test.go` -> `src/util/rate_limit.rs`
 - Latch: `client-go/internal/latch/*` -> `src/transaction/latch.rs#L483`
 - LockResolver cache: `client-go/txnkv/txnlock/lock_resolver_test.go` -> `src/transaction/lock.rs`（resolved cache 命中不触发 secondary-check RPC）
 - Region cache core invariants: `client-go/internal/locate/region_cache_test.go`(部分语义) -> `src/region_cache.rs#L423`
@@ -43,9 +43,9 @@
   - 仍缺：Go batch-client/forwarding/conn-pool 的并发/重连细节（Rust 架构不同，按 N/A 或等价语义覆盖）
 
 ## Next (Implementation Order)
-1. 扩展 `src/request/read_routing.rs` 的单元测试（ReplicaReadType::Mixed/Learner + deterministic selection）
-2. 扩展 `src/store/**` 的单元测试（dispatch/context/timeout + 与 PlanBuilder/Retry 的组合）
-3. 对照 Go `integration_tests/`，补齐 Rust `tests/integration_tests.rs` 缺失的 E2E case（仅在 cluster ready 时验证）
+1. 引入 BatchCommands send-loop + health feedback（解锁 `integration_tests/health_feedback_test.go` 等 batch-client 相关用例迁移）
+2. 评估 mocktikv 用例可迁移子集，用 `src/mock.rs`/`MockKvClient` 覆盖更多纯逻辑/错误路径单测
+3. 对照 `.codex/progress/client-go-tests-file-map.md` 定期收敛 N/A 的归因与等价语义覆盖点
 
 ## Integration Mapping
 - Go `integration_tests/` 的高层映射见：`.codex/progress/client-go-integration-tests-port.md`
