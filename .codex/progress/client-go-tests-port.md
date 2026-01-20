@@ -12,12 +12,12 @@
 
 ## Out-Of-Scope (Skip; Rust Has No Equivalent Abstraction)
 - `client-go/tikvrpc/*/main_test.go`: Go `goleak` harness
-- `client-go/config/config_test.go`: DSN ParsePath / failpoint 注入 TxnScope / gRPC keepalive timeout 细节（Rust 入口是 PD endpoints + `Config`）
 - `client-go/internal/unionstore/**`: Go memdb/art/rbt/staging/snapshot/memory-footprint 细节；Rust 事务 buffer 采用不同结构（只迁移“事务本地 buffer 语义”相关测试）
 - `client-go/internal/mockstore/**`: Go mocktikv/mockstore 生态；Rust 使用 `src/mock.rs`（不做 1:1 mock server 迁移）
 - `client-go/rawkv/rawkv_test.go` + `client-go/tikv/*_test.go` + `client-go/txnkv/**`(mocktikv parts): 强依赖 mocktikv cluster/PD HTTP mocks；Rust 以 `tests/integration_tests.rs`(real cluster) + unit-test mocks 覆盖等价语义
 
 ## Mostly Covered (Existing Rust Tests)
+- Config/DSN+txn-scope: `client-go/config/config_test.go` -> `src/config.rs`（`parse_path`/`txn_scope_from_config` 单测）+ `src/common/security.rs`（grpc keepalive timeout 单测）
 - TLS/security: `client-go/config/security_test.go` -> `src/common/security.rs#L123`
 - Retry/backoff algorithms: Go jitter backoff -> `src/backoff.rs#L207`；Go Backoffer（maxSleep/excludedSleep/longestSleep/clone+fork+update + `MayBackoffForRegionError`）-> `src/backoffer.rs`
 - Util/request_source: `client-go/util/request_source*_test.go` -> `src/util/request_source.rs`

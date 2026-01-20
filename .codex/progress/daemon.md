@@ -17,55 +17,31 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
+- tests/port/tikv-min-safe-ts：迁移 Go `client-go/tikv/kv_test.go`（MinSafeTS/StoreSafeTS + PD min-resolved-ts fallback）
+  - 步骤：补齐 safe-ts 抽象（store safe_ts cache + min 计算）；补 mock/unit-test；必要时加 integration-test；更新 `.codex/progress/client-go-tests-file-map.md`
+
+- tests/port/locate-region-request：补齐 Go `internal/locate/region_request*_test.go` 可迁移语义覆盖（retry/backoff/patch/request_source）
+  - 步骤：对齐缺失分支；为 plan_builder/plan/read_routing 增补单测；更新 `.codex/progress/client-go-tests-file-map.md` notes/status
+
+- tests/port/rawkv-rawkv_test-minimal：从 Go `client-go/rawkv/rawkv_test.go` 挑选可迁移纯逻辑子集，落到 Rust mock/unit tests
+  - 步骤：挑选不依赖 mocktikv MVCC 的语义（addr cache / store-not-match / re-resolve interval 等）；用 `MockKvClient`/hooks 覆盖；更新 mapping notes/status
+
 # 已完成工作
 
-- tests/port/internal-client-fail：对齐 Go `internal/client/client_fail_test.go` 的 batch-client 错误/重连语义到 Rust BatchCommandsClient 单测
-  - 完成：`stream close without response` 触发 inflight fail；重连后复用新 stream（只重连一次）；补 batch request timeout 单测（`DeadlineExceeded("batch commands request timeout")`）
-  - 验证：`make unit-test` + `make check`
-  - 文件：`src/store/batch_commands.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
+- transport/batch-commands+health：实现 TiKV BatchCommands stream + health feedback 落盘，并用单测/集成测对齐 Go batch-client 关键语义
+  - 关键：stream prime `Empty(request_id=0)` 防首包死锁；真实 request_id 从 1 开始；recv 按 request_id 解复用支持乱序；断线后自动重连；超时返回 `DeadlineExceeded("batch commands request timeout")`
+  - 覆盖：对齐 Go `internal/client/client_fail_test.go` / `tikvrpc/tikvrpc_test.go` / `integration_tests/health_feedback_test.go` 等价语义
+  - 文件：`src/store/batch_commands.rs`，`src/store/request.rs`，`src/store/client.rs`，`src/store/health.rs`，`src/raw/client.rs`，`tests/integration_tests.rs`，`Cargo.toml`，`Cargo.lock`
 
-- tests/port/tikvrpc-batchcommands：迁移 Go `client-go/tikvrpc/tikvrpc_test.go`（BatchCommands request/response wrapper 语义）
-  - 完成：补 `Request::batch_request()` -> `BatchCommandKind` 映射单测（覆盖 batchable/unary-only）；补 batch response missing-cmd 错误单测；补 batch stream timeout + stream close(inflight fail) 单测
-  - 验证：`make unit-test` + `make check`
-  - 文件：`src/store/request.rs`，`src/store/batch_commands.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+- tests/parity-mapping+util：完成 client-go tests 迁移/映射闭环（101 `_test.go`），补齐可迁移 util/mock 语义单测
+  - 关键：实现 Backoffer/token limiter/Callback+RunLoop/request_source/deadlock detector；从 mocktikv 挑选 raw 可迁移子集落到 `MockKvClient` 单测；其余 Go-only/mockstore 标注 N/A 并给等价覆盖点
+  - 文件：`src/backoffer.rs`，`src/util/{request_source,rate_limit,async_util}.rs`，`src/mock/deadlock_detector.rs`，`src/mock.rs`，`src/raw/client.rs`，`.codex/progress/client-go-tests-file-map.md`
 
-- tests/port/mockstore-minimal：从 Go mocktikv 用例挑选可迁移子集，落到 Rust `MockKvClient` 单测（不做 1:1 mock server）
-  - 完成：补齐 raw 侧可迁移纯逻辑用例：checksum 多 region merge、checksum keyspace 编码、CAS swapped=false/prev_not_exist、batch_get key 排序+按 region 分组、delete_range empty range no-op
-  - 关键：新增 `MockKvClient::with_typed_dispatch_hook` 降低 downcast/boxing 噪音，便于批量写 mock 用例
-  - 验证：`make unit-test`
-  - 文件：`src/mock.rs`，`src/raw/client.rs`
+- core/txn+pd+infra：补齐 request/pd/txn 核心可迁移语义与工程门槛，确保 `make all`/覆盖率阈值通过
+  - 关键：PdRpcClient kv_client cache + 并发 dial 去重；replica selector fast-retry/pending-backoff；resolved lock cache；ReturnCommitTS + commit-wait TSO；clippy/-Dwarnings 修复；`cargo llvm-cov` 行覆盖率>=80%
+  - 文件：`src/request/*`，`src/pd/client.rs`，`src/region_cache.rs`，`src/transaction/*`，`src/common/errors.rs`，`.codex/progress/daemon.md`
 
-- tests/parity-mapping+backoffer+util：完成 client-go tests 迁移/映射维护闭环（101 `_test.go` 逐文件清单；integration-tests 映射；parity-checklist 对齐；清零 `partial`）
-  - 关键：新增 `src/backoffer.rs`（client-go Backoffer：maxSleep/excludedSleep/longestSleep/clone+fork/update + MayBackoffForRegionError）+ 单测；补齐 util/mock parity：`src/util/request_source.rs`（Build/GetRequestSource）、`src/util/rate_limit.rs`（token limiter）、`src/util/async_util.rs`（Callback/RunLoop）、`src/mock/deadlock_detector.rs`（deadlock detector）；对 mocktikv/BatchCommands/forwarding 等不可移植用例统一标注 N/A，但在 notes 指向 Rust 可迁移语义覆盖点
-  - 验证：`cargo test` + `cargo test --features integration-tests --no-run`
-  - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/parity-checklist.md`，`src/backoffer.rs`，`src/util/request_source.rs`，`src/util/rate_limit.rs`，`src/util/async_util.rs`，`src/mock/deadlock_detector.rs`
-
-- request+pd/core-suite：迁移 client-go 核心可迁移单测语义（region/lock/oracle/keyspace/gc-time/resource-control + pd kv_client conn 缓存/dial 去重 + replica selector fast-retry/pending-backoff）
-  - 关键：resolved lock cache 命中不触发 secondary-check；EpochNotMatch(empty CurrentRegions)->backoff；ServerIsBusy replica fast-retry + pending-backoff；PdRpcClient per-address kv_client cache + OnceCell 并发 dial 去重
-  - 验证：`cargo test`
-  - 文件：`src/request/*`，`src/region_cache.rs`，`src/transaction/lock.rs`，`src/pd/client.rs`，`src/timestamp/*`，`src/util/gc_time.rs`
-
-- txn/options：补齐 ReturnCommitTS + commit-wait TSO（含错误类型与单测），并确保 integration-tests feature 可编译
-  - 关键：新增 `Transaction`/`Snapshot` *with_options API（返回 `ValueEntry`）；commit 使用 `fetch_commit_timestamp()` 轮询等待 commit_ts>=tso（timeout）；新增 `Error::CommitTsLag`
-  - 验证：`cargo test` + `cargo test --features integration-tests --no-run` + `cargo clippy`
-  - 文件：`src/transaction/transaction.rs`，`src/transaction/snapshot.rs`，`src/kv/kvpair.rs`，`src/common/errors.rs`，`tests/integration_tests.rs`
-
-- infra/make-all：修复 clippy::all / `-D warnings` 触发点，确保 `make all` 通过（含 `--no-default-features` unit-test）
-  - 关键：按 clippy 建议做语义等价重构（enum variant 命名、nonminimal_bool、type_complexity、unnecessary_*）；仅对 `#[cfg(test)]` 且 `not(feature=\"prometheus\")` 路径的测试 helper 加 `#[allow(dead_code)]` 避免 `-D warnings` 误伤
-  - 验证：`make all`
-  - 文件：`src/backoffer.rs`，`src/util/async_util.rs`，`src/util/gc_time.rs`，`src/transaction/transaction.rs`，`src/store/client.rs`，`src/stats.rs`，`.codex/progress/daemon.md`
-
-- tests/coverage：确认 unit-test 侧行覆盖率满足阈值（>=80%）
-  - 关键：使用 `cargo llvm-cov`；报告输出 `target/llvm-cov/html/index.html`
-  - 验证：`make coverage`
-  - 文件：`.codex/progress/daemon.md`
-
-- transport/batch-commands：引入 BatchCommands stream（multiplex/reconnect/request_id 映射/timeout），解锁 Go batch-client 相关用例迁移
-  - 关键：新增 `src/store/batch_commands.rs` + `KvRpcClient` batch/unary 分流；stream 建连前发送 `Empty(request_id=0)` 破除 TiKV/tonic 首包握手死锁；recv 侧按 request_id 解复用并支持乱序响应；stream 断线后可自动重连用于后续请求；超时返回 `DeadlineExceeded("batch commands request timeout")`
-  - 测试：新增 in-process tonic server 单测覆盖 prime/乱序/断线重连/health_feedback；`make all`
-  - 文件：`Cargo.toml`，`Cargo.lock`，`src/store/batch_commands.rs`，`src/store/client.rs`，`src/store/request.rs`，`src/store/mod.rs`，`src/request/plan.rs`，`src/transaction/transaction.rs`，`src/transaction/lock.rs`
-
-- tests/port/health-feedback：迁移 Go `integration_tests/health_feedback_test.go`（store slow-score / feedback_seq_no）
-  - 关键：新增 `src/store/health.rs`（seq_no 单调）+ 解析 `BatchCommandsResponse.health_feedback` 并落盘到 `StoreHealthMap`；补 `RawClient::__test_get_health_feedback/__test_tikv_side_slow_score`（仅 `integration-tests` feature）用于 E2E 断言
-  - 测试：`tests/integration_tests.rs` 新增 `raw_get_health_feedback`；`make integration-test-if-ready` + `make all`
-  - 文件：`src/store/health.rs`，`src/store/batch_commands.rs`，`src/pd/client.rs`，`src/request/plan_builder.rs`，`src/raw/client.rs`，`tests/integration_tests.rs`
+- tests/port/config-config_test：迁移 Go `client-go/config/config_test.go`（ParsePath / TxnScope 注入 / gRPC keepalive timeout 校验）
+  - 关键：新增 `parse_path`（`tikv://...` DSN-like）+ `txn_scope_from_config`（failpoint `tikvclient/injectTxnScope`）；在 `SecurityManager` 上补 grpc keepalive timeout 配置与最小值校验（>=50ms）
+  - 验证：`make check` + `make unit-test`
+  - 文件：`src/config.rs`，`src/common/security.rs`，`src/lib.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`

@@ -13,6 +13,7 @@ use tonic::transport::Identity;
 use tonic::transport::{Certificate, Endpoint};
 
 use crate::internal_err;
+use crate::Error;
 use crate::Result;
 
 fn strip_http_scheme(addr: &str) -> &str {
@@ -47,7 +48,6 @@ fn load_pem_file(tag: &str, path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Manages the TLS protocol
-#[derive(Default)]
 pub struct SecurityManager {
     /// The PEM encoding of the server’s CA certificates.
     ca: Vec<u8>,
@@ -55,6 +55,21 @@ pub struct SecurityManager {
     cert: Vec<u8>,
     /// The path to the file that contains the PEM encoding of the server’s private key.
     key: PathBuf,
+    keep_alive_timeout: Duration,
+}
+
+const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(3);
+const MIN_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_millis(50);
+
+impl Default for SecurityManager {
+    fn default() -> Self {
+        Self {
+            ca: Vec::new(),
+            cert: Vec::new(),
+            key: PathBuf::new(),
+            keep_alive_timeout: DEFAULT_KEEP_ALIVE_TIMEOUT,
+        }
+    }
 }
 
 impl SecurityManager {
@@ -70,7 +85,29 @@ impl SecurityManager {
             ca: load_pem_file("ca", ca_path.as_ref())?,
             cert: load_pem_file("certificate", cert_path.as_ref())?,
             key: key_path,
+            keep_alive_timeout: DEFAULT_KEEP_ALIVE_TIMEOUT,
         })
+    }
+
+    /// Validate user-configurable settings.
+    pub fn validate(&self) -> Result<()> {
+        if self.keep_alive_timeout < MIN_KEEP_ALIVE_TIMEOUT {
+            return Err(Error::StringError(format!(
+                "grpc-keepalive-timeout should be at least {MIN_KEEP_ALIVE_TIMEOUT:?}, but got {:?}",
+                self.keep_alive_timeout
+            )));
+        }
+        Ok(())
+    }
+
+    /// Get the gRPC keepalive timeout.
+    pub fn grpc_keepalive_timeout(&self) -> Duration {
+        self.keep_alive_timeout
+    }
+
+    /// Set the gRPC keepalive timeout.
+    pub fn set_grpc_keepalive_timeout(&mut self, timeout: Duration) {
+        self.keep_alive_timeout = timeout;
     }
 
     /// Connect to gRPC server using TLS connection. If TLS is not configured, use normal connection.
@@ -83,6 +120,7 @@ impl SecurityManager {
     where
         Factory: FnOnce(Channel) -> Client,
     {
+        self.validate()?;
         info!("connect to rpc server at endpoint: {:?}", addr);
         let channel = if !self.ca.is_empty() {
             self.tls_channel(addr).await?
@@ -115,7 +153,7 @@ impl SecurityManager {
     fn endpoint(&self, addr: String) -> Result<Endpoint> {
         let endpoint = Channel::from_shared(addr)?
             .tcp_keepalive(Some(Duration::from_secs(10)))
-            .keep_alive_timeout(Duration::from_secs(3));
+            .keep_alive_timeout(self.keep_alive_timeout);
         Ok(endpoint)
     }
 }
@@ -171,5 +209,24 @@ mod tests {
             super::strip_http_scheme("   127.0.0.1:2379"),
             "127.0.0.1:2379"
         );
+    }
+
+    #[test]
+    fn grpc_keepalive_timeout_matches_client_go_test() {
+        let mut mgr = SecurityManager::default();
+        assert!(mgr.validate().is_ok());
+        assert_eq!(mgr.grpc_keepalive_timeout(), Duration::from_secs(3));
+
+        mgr.set_grpc_keepalive_timeout(Duration::from_millis(50));
+        assert!(mgr.validate().is_ok());
+        assert_eq!(mgr.grpc_keepalive_timeout(), Duration::from_millis(50));
+
+        mgr.set_grpc_keepalive_timeout(Duration::from_millis(40));
+        let err = mgr
+            .validate()
+            .expect_err("keepalive timeout below 50ms should be invalid");
+        assert!(err
+            .to_string()
+            .contains("grpc-keepalive-timeout should be at least"));
     }
 }

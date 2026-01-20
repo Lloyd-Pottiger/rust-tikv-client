@@ -7,7 +7,7 @@
 
 | Go test file | Status | Rust coverage / notes |
 |---|---|---|
-| `client-go/config/config_test.go` | n/a | Go DSN/txn-scope/failpoint 注入；Rust `Config` 入口不同 |
+| `client-go/config/config_test.go` | covered | Rust 等价：`parse_path`/`txn_scope_from_config`（`src/config.rs` 单测）+ gRPC keepalive timeout 校验（`src/common/security.rs` 单测） |
 | `client-go/config/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/config/retry/backoff_test.go` | covered | Rust 侧实现 client-go Backoffer 等价语义 + 单测：`src/backoffer.rs`（maxSleep/excludedSleep/longestSleep/clone+fork+update + MayBackoffForRegionError） |
 | `client-go/config/retry/main_test.go` | n/a | Go `TestMain` harness |

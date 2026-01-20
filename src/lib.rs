@@ -151,7 +151,13 @@ pub use common::Error;
 #[doc(inline)]
 pub use common::Result;
 #[doc(inline)]
+pub use config::parse_path;
+#[doc(inline)]
+pub use config::txn_scope_from_config;
+#[doc(inline)]
 pub use config::Config;
+#[doc(inline)]
+pub use config::ParsedPath;
 #[doc(inline)]
 pub use config::PdRetryConfig;
 
