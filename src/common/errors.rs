@@ -264,6 +264,9 @@ pub enum Error {
     /// Retryable error returned by TiKV.
     #[error("Retryable error: {message}")]
     Retryable { message: String },
+    /// Client-side resource control throttled the request (e.g. resource group token exhausted).
+    #[error("resource group throttled")]
+    ResourceGroupThrottled,
     /// TiKV aborts the transaction with a reason.
     #[error("TiKV aborts txn: {message}")]
     TxnAborted { message: String },

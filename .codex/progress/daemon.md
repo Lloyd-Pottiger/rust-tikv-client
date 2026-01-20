@@ -17,10 +17,15 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port/locate-region-request-more：从 Go `client-go/internal/locate/region_request*_test.go` 继续挑可迁移纯逻辑子集落到 Rust 单测（避免 mocktikv/conn-pool/forwarding 细节）
-  - 步骤：补 `stale_command` backoff/attempt 行为、grpc send-fail 触发 store slow + invalidate_store_cache、resource-group-throttled 不触发 store invalidation（若 Rust 有等价 error）；更新 mapping notes/status
+- tests/port/partial-audit：复核仍为 partial 的 client-go `_test.go`（`region_request_state_test.go`/`rawkv_test.go`/`kv_test.go` 等），能迁移的纯逻辑继续补 Rust 单测；不能迁移的细化 N/A 理由与等价覆盖点
+  - 步骤：逐文件挑 1-3 个纯逻辑 case；补单测/必要实现；更新 `.codex/progress/client-go-tests-file-map.md` 注释；`make check`+`make unit-test`
 
 # 已完成工作
+
+- tests/port/locate-region-request-more：补齐 Go `client-go/internal/locate/region_request*_test.go` 可迁移 send-fail/stale-command 语义到 Rust 单测
+  - 关键：引入 `Error::ResourceGroupThrottled` 并确保不触发 cache invalidation/mark slow；gRPC send-fail 触发 mark store slow + invalidate_store_cache；replica-read stale-command 无 backoff、按非 witness peer 数量有界重试，耗尽后 invalidate region 并返回 RegionError
+  - 文件：`src/common/errors.rs`，`src/request/plan.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
+  - 验证：`make all`
 
 - transport/batch-commands+health：实现 TiKV BatchCommands stream + health feedback 落盘，并用单测/集成测对齐 Go batch-client 关键语义
   - 关键：stream prime `Empty(request_id=0)` 防首包死锁；真实 request_id 从 1 开始；recv 按 request_id 解复用支持乱序；断线后自动重连；超时返回 `DeadlineExceeded("batch commands request timeout")`

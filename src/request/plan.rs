@@ -1321,6 +1321,7 @@ mod test {
     use crate::proto::kvrpcpb::BatchGetResponse;
     use crate::region::RegionId;
     use crate::store::Store;
+    use crate::store::StoreHealthMap;
     use crate::Key;
     use crate::Timestamp;
 
@@ -2286,6 +2287,8 @@ mod test {
 
         let mut request = kvrpcpb::RawGetRequest::default();
         request.key = vec![5];
+        let store_health = StoreHealthMap::default();
+        let slow_check_epoch_ms = StoreHealthMap::now_epoch_ms();
         let plan = RetryableMultiRegion {
             inner: Dispatch {
                 request,
@@ -2296,7 +2299,7 @@ mod test {
             concurrency: 1,
             preserve_region_results: false,
             request_context: RequestContext::default(),
-            read_routing: ReadRouting::default(),
+            read_routing: ReadRouting::default().with_store_health(store_health.clone()),
         };
 
         let results = plan.execute().await?;
@@ -2307,6 +2310,59 @@ mod test {
 
         assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
         assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 1);
+        assert!(
+            store_health.is_slow(1, slow_check_epoch_ms),
+            "grpc send-failure should mark the target store as slow"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_multi_region_resource_group_throttled_does_not_invalidate_caches(
+    ) -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let store_health = StoreHealthMap::default();
+        let slow_check_epoch_ms = StoreHealthMap::now_epoch_ms();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                Err(Error::ResourceGroupThrottled)
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            backoff: Backoff::no_jitter_backoff(0, 0, 1),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default().with_store_health(store_health.clone()),
+        };
+
+        let err = plan
+            .execute()
+            .await
+            .expect_err("resource group throttled should be returned to caller");
+        assert!(matches!(err, Error::ResourceGroupThrottled));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        assert!(
+            !store_health.is_slow(1, slow_check_epoch_ms),
+            "resource group throttling should not mark stores as slow"
+        );
         Ok(())
     }
 
@@ -2377,6 +2433,73 @@ mod test {
 
         assert_eq!(&*store_ids.lock().unwrap(), &[1, 2]);
         assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_multi_region_replica_read_stale_command_exhausts_peers_and_fails(
+    ) -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+        let store_ids = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let store_ids_for_hook = store_ids.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let store_id = req
+                    .context
+                    .as_ref()
+                    .and_then(|ctx| ctx.peer.as_ref())
+                    .map(|peer| peer.store_id)
+                    .expect("store_id should be set");
+                store_ids_for_hook.lock().unwrap().push(store_id);
+
+                calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(kvrpcpb::RawGetResponse {
+                    region_error: Some(errorpb::Error {
+                        stale_command: Some(errorpb::StaleCommand::default()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }) as Box<dyn Any + Send>)
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+
+        let mut read_routing = ReadRouting::default();
+        read_routing.set_replica_read(crate::ReplicaReadType::PreferLeader);
+        read_routing.set_seed(0);
+
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // No backoff budget: replica reads should switch peers immediately on stale-command,
+            // but should still have a bounded number of attempts.
+            backoff: Backoff::no_jitter_backoff(50, 50, 0),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing,
+        };
+
+        let err = plan
+            .execute()
+            .await
+            .expect_err("stale-command should fail after exhausting replicas");
+        assert!(matches!(err, Error::RegionError(_)));
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(&*store_ids.lock().unwrap(), &[1, 2, 3]);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
         assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
         Ok(())
     }
