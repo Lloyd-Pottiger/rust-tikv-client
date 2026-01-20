@@ -23,6 +23,9 @@ use crate::region::RegionVerId;
 use crate::region::RegionWithLeader;
 use crate::region::StoreId;
 use crate::region_cache::RegionCache;
+use crate::store::safe_ts::SafeTsManager;
+use crate::store::safe_ts::StoreSafeTsProvider;
+use crate::store::safe_ts::StoreSafeTsRequest;
 use crate::store::KvConnect;
 use crate::store::RegionStore;
 use crate::store::StoreHealthMap;
@@ -229,6 +232,7 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     kv_connect: KvC,
     kv_client_cache: KvClientCache<KvC>,
     store_health: StoreHealthMap,
+    safe_ts: SafeTsManager,
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
 }
@@ -358,6 +362,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             kv_client_cache,
             kv_connect: kv_connect(security_mgr, store_health.clone()),
             store_health,
+            safe_ts: SafeTsManager::default(),
             enable_codec,
             region_cache: RegionCache::new_with_ttl(
                 pd,
@@ -390,6 +395,39 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             })
             .await?;
         Ok(client.clone())
+    }
+}
+
+impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC, Cluster> {
+    pub(crate) fn min_safe_ts(&self, txn_scope: &str) -> u64 {
+        self.safe_ts.get_min_safe_ts(txn_scope)
+    }
+
+    pub(crate) async fn refresh_safe_ts_cache_once(&self) -> Result<()> {
+        struct Provider<'a, KvC: KvConnect + Send + Sync + 'static> {
+            pd: &'a PdRpcClient<KvC, Cluster>,
+        }
+
+        #[async_trait]
+        impl<KvC: KvConnect + Send + Sync + 'static> StoreSafeTsProvider for Provider<'_, KvC> {
+            async fn get_store_safe_ts(&self, store: &metapb::Store) -> Result<u64> {
+                let addr = SafeTsManager::store_safe_ts_address(store);
+                let client = self.pd.kv_client(addr).await?;
+
+                let req = StoreSafeTsRequest::new_all_ranges();
+                let resp = client.dispatch(&req).await?;
+                let resp = resp
+                    .downcast::<kvrpcpb::StoreSafeTsResponse>()
+                    .map_err(|_| crate::internal_err!("unexpected StoreSafeTS response type"))?;
+                Ok(resp.safe_ts)
+            }
+        }
+
+        let stores = self.region_cache.read_through_all_stores().await?;
+        let provider = Provider { pd: self };
+        self.safe_ts
+            .update_safe_ts_once(&stores, None, &provider)
+            .await
     }
 }
 

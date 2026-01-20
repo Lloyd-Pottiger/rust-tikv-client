@@ -5,6 +5,7 @@ mod client;
 mod errors;
 mod health;
 mod request;
+pub(crate) mod safe_ts;
 
 use std::cmp::max;
 use std::cmp::min;

@@ -17,9 +17,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port/tikv-min-safe-ts：迁移 Go `client-go/tikv/kv_test.go`（MinSafeTS/StoreSafeTS + PD min-resolved-ts fallback）
-  - 步骤：补齐 safe-ts 抽象（store safe_ts cache + min 计算）；补 mock/unit-test；必要时加 integration-test；更新 `.codex/progress/client-go-tests-file-map.md`
-
 - tests/port/locate-region-request：补齐 Go `internal/locate/region_request*_test.go` 可迁移语义覆盖（retry/backoff/patch/request_source）
   - 步骤：对齐缺失分支；为 plan_builder/plan/read_routing 增补单测；更新 `.codex/progress/client-go-tests-file-map.md` notes/status
 
@@ -45,3 +42,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：新增 `parse_path`（`tikv://...` DSN-like）+ `txn_scope_from_config`（failpoint `tikvclient/injectTxnScope`）；在 `SecurityManager` 上补 grpc keepalive timeout 配置与最小值校验（>=50ms）
   - 验证：`make check` + `make unit-test`
   - 文件：`src/config.rs`，`src/common/security.rs`，`src/lib.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+
+- tests/port/tikv-min-safe-ts：迁移 Go `client-go/tikv/kv_test.go` 的 MinSafeTS/StoreSafeTS/PD fallback 语义到 Rust 单测，并提供 TransactionClient 入口
+  - 关键：新增 `SafeTsManager`（store safe_ts + per-scope min_safe_ts；0/max 处理；PD per-store map 优先，invalid->StoreSafeTS fallback；混合路径对齐 Go）；新增 `TransactionClient::{refresh_safe_ts_cache,min_safe_ts}`（store-side StoreSafeTS 刷新）
+  - 验证：`make check` + `make unit-test`
+  - 文件：`src/store/safe_ts.rs`，`src/pd/client.rs`，`src/transaction/client.rs`，`src/store/mod.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`

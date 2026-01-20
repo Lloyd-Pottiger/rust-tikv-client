@@ -130,6 +130,20 @@ impl Client {
             txn_latches: None,
         })
     }
+
+    /// Refresh the internal safe-ts cache once.
+    ///
+    /// This queries TiKV stores using `StoreSafeTS` and updates `min_safe_ts(txn_scope)` results.
+    pub async fn refresh_safe_ts_cache(&self) -> Result<()> {
+        self.pd.refresh_safe_ts_cache_once().await
+    }
+
+    /// Get the cached minimal safe timestamp for the given txn scope.
+    ///
+    /// Returns `0` if the cache is not refreshed yet (or stores are missing).
+    pub fn min_safe_ts(&self, txn_scope: &str) -> u64 {
+        self.pd.min_safe_ts(txn_scope)
+    }
 }
 
 impl<PdC: PdClient> Client<PdC> {
