@@ -20,7 +20,7 @@ Rust 侧集成测试集中在：
 | `integration_tests/interceptor_test.go` | `tests/integration_tests.rs` `txn_snapshot_api_and_request_context` | request context setters + rpc interceptors |
 | `integration_tests/isolation_test.go` | `tests/integration_tests.rs` `txn_read`/`txn_snapshot*` | 读一致性/快照相关 |
 | `integration_tests/lock_test.go` | `tests/integration_tests.rs` `txn_lock_keys*`/`txn_get_for_update` + `tests/failpoint_tests.rs` | pessimistic lock / resolve locks |
-| `integration_tests/option_test.go` | `src/transaction/transaction.rs`/`src/config.rs` 单测 | option builder/validation 语义（Rust 以 builder + 单测覆盖） |
+| `integration_tests/option_test.go` | `src/transaction/transaction.rs`/`src/config.rs` 单测 | option builder/validation + commit-wait TSO（`set_commit_wait_until_tso` + timeout） |
 | `integration_tests/pd_api_test.go` | `tests/integration_tests.rs` `txn_get_timestamp`/`txn_update_safepoint` + `tests/common/ctl.rs` | PD TSO/HTTP API 辅助 |
 | `integration_tests/pipelined_memdb_test.go` | `tests/integration_tests.rs` `txn_pipelined_flush` + `src/transaction/transaction.rs` 单测 | pipelined txn flush/resolve locks |
 | `integration_tests/prewrite_test.go` | `src/transaction/transaction.rs` 单测 + 多个 txn E2E 用例 | prewrite/commit 请求构造与重试 |
@@ -39,4 +39,3 @@ Rust 侧集成测试集中在：
 | `integration_tests/store_test.go` | `tests/integration_tests.rs` `raw_client_new_and_with_cf_smoke` | client 创建 + CF |
 | `integration_tests/ticlient_test.go` | `tests/integration_tests.rs` `txn_get_timestamp` | basic client usage |
 | `integration_tests/util_test.go` | `tests/common/mod.rs` | Rust 侧用 `init()/clear_tikv()` 做等价准备工作 |
-

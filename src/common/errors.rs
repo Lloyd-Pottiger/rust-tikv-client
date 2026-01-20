@@ -270,6 +270,9 @@ pub enum Error {
     /// Commit TS is too large for TiKV.
     #[error("Commit TS {commit_ts} is too large")]
     CommitTsTooLarge { commit_ts: u64 },
+    /// Commit TS is behind a user-specified commit-wait TSO.
+    #[error("Commit TS {commit_ts} is behind commit-wait TSO {wait_until_tso}")]
+    CommitTsLag { commit_ts: u64, wait_until_tso: u64 },
     /// The transaction is not found on TiKV.
     #[error("Txn {start_ts} not found")]
     TxnNotFound { start_ts: u64 },

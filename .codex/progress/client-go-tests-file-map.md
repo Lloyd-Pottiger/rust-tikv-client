@@ -26,7 +26,7 @@
 | `client-go/integration_tests/isolation_test.go` | covered | `tests/integration_tests.rs` `txn_read`/`txn_snapshot*` |
 | `client-go/integration_tests/lock_test.go` | covered | `tests/integration_tests.rs` `txn_lock_keys*`/`txn_get_for_update` + `tests/failpoint_tests.rs` |
 | `client-go/integration_tests/main_test.go` | n/a | Go `TestMain` harness |
-| `client-go/integration_tests/option_test.go` | covered | `src/transaction/transaction.rs`/`src/config.rs` 单测 |
+| `client-go/integration_tests/option_test.go` | covered | `src/transaction/transaction.rs` 单测：commit-wait TSO（`set_commit_wait_until_tso` + timeout）+ 事务 options 覆盖 |
 | `client-go/integration_tests/pd_api_test.go` | covered | `tests/integration_tests.rs` `txn_get_timestamp`/`txn_update_safepoint` + `tests/common/ctl.rs` |
 | `client-go/integration_tests/pipelined_memdb_test.go` | covered | `tests/integration_tests.rs` `txn_pipelined_flush` + `src/transaction/transaction.rs` 单测 |
 | `client-go/integration_tests/prewrite_test.go` | covered | `src/transaction/transaction.rs` 单测 + txn E2E 用例 |

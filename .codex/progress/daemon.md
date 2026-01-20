@@ -13,10 +13,10 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- tests/port-client-go-integration-missing-cases：对照 `client-go/integration_tests/*.go`，补齐 Rust `tests/integration_tests.rs` 缺失的 E2E 语义（优先小而关键的）
-  - 实施：逐文件 diff；能用现有 public API 覆盖的补集成用例；无法覆盖的明确原因（例如缺少对应 public API）
-  - 验证：`cargo test --features integration-tests --no-run`；cluster ready 时跑 `make integration-test-if-ready`
-  - 文件：`tests/integration_tests.rs`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`
+- review/post-tests-port-audit：复核整体目标/缺失 public API/测试覆盖；必要时拆解新任务补齐
+  - 实施：复查 `.codex/progress/parity-checklist.md`/api inventory；跑 `cargo test`/`cargo clippy`/`cargo test --features integration-tests --no-run`；把未达成目标拆成具体任务加入「待做工作」
+  - 验证：`cargo clippy` + `cargo test`
+  - 文件：`.codex/progress/daemon.md`，`.codex/progress/parity-checklist.md`，`.codex/progress/parity-map.md`
 
 # 待做工作
 
@@ -56,3 +56,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：补齐 Rust 侧“conn-pool 等价语义”——PdRpcClient 的 per-address kv_client cache + 并发 dial 去重（`OnceCell`）；同步更新 go test file map 将 `client_test.go` 标注为 partial（其余 BatchCommands/forwarding 维持 N/A）
   - 验证：`cargo test`
   - 文件：`src/pd/client.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+
+- tests/port-client-go-integration-missing-cases：对照 `client-go/integration_tests/*.go`，补齐 Rust 侧缺失的可迁移语义（优先小而关键的）
+  - 关键：补齐 option_test 的 commit-wait TSO（`set_commit_wait_until_tso` + timeout）与单测；更新 integration mapping；`cargo test --features integration-tests --no-run` 通过
+  - 验证：`cargo test` + `cargo test --features integration-tests --no-run`
+  - 文件：`src/transaction/transaction.rs`，`src/common/errors.rs`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`

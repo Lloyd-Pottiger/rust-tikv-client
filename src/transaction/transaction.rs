@@ -358,6 +358,33 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.assertion_level = assertion_level;
     }
 
+    /// Set the minimum commit timestamp (PD TSO) required for `commit()`.
+    ///
+    /// When set, `commit()` will keep fetching new timestamps from PD until the chosen commit
+    /// timestamp is >= `tso` or `commit_wait_until_tso_timeout()` elapses.
+    ///
+    /// This is aligned with client-go's `Txn.SetCommitWaitUntilTSO`.
+    pub fn set_commit_wait_until_tso(&mut self, tso: u64) {
+        self.options.commit_wait_until_tso = (tso != 0).then_some(tso);
+    }
+
+    /// Get the minimum commit timestamp (PD TSO) required for `commit()`.
+    ///
+    /// Returns `0` when unset.
+    pub fn commit_wait_until_tso(&self) -> u64 {
+        self.options.commit_wait_until_tso.unwrap_or(0)
+    }
+
+    /// Set the timeout for `commit()` to wait for `commit_wait_until_tso()`.
+    pub fn set_commit_wait_until_tso_timeout(&mut self, timeout: Duration) {
+        self.options.commit_wait_until_tso_timeout = timeout;
+    }
+
+    /// Get the timeout for `commit()` to wait for `commit_wait_until_tso()`.
+    pub fn commit_wait_until_tso_timeout(&self) -> Duration {
+        self.options.commit_wait_until_tso_timeout
+    }
+
     /// Set `kvrpcpb::Mutation.assertion` for a key.
     ///
     /// The assertion is sent on `PrewriteRequest` and `FlushRequest` mutations (depending on the
@@ -1736,7 +1763,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             .await?;
         let range = pipelined.flushed_range();
 
-        let commit_version = self.rpc.clone().get_timestamp().await?;
+        let commit_version = fetch_commit_timestamp(self.rpc.clone(), &self.options).await?;
         let req = new_commit_request_with_primary_key(
             iter::once(primary_key.clone()),
             Some(primary_key),
@@ -1996,6 +2023,10 @@ const PD_TS_LOGICAL_BITS: u64 = 18;
 ///
 /// This is aligned with `client-go`'s default `tikv-client.async-commit.safe-window` (2s).
 const DEFAULT_MAX_COMMIT_TS_SAFE_WINDOW: Duration = Duration::from_secs(2);
+/// Default timeout for commit-wait TSO (`Transaction::set_commit_wait_until_tso_timeout`).
+const DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT: Duration = Duration::from_secs(1);
+/// Poll interval while waiting for commit timestamp to reach `commit_wait_until_tso`.
+const COMMIT_WAIT_UNTIL_TSO_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Optimistic or pessimistic transaction.
 #[derive(Clone, PartialEq, Debug)]
@@ -2036,6 +2067,12 @@ pub struct TransactionOptions {
     /// This is a control-plane knob for the async-commit / 1PC protocol. If set too small, TiKV may
     /// reject prewrite due to `max_commit_ts` constraints.
     max_commit_ts_safe_window: Duration,
+    /// Ensure the final commit timestamp (PD TSO) is >= this value.
+    ///
+    /// This is aligned with client-go's `Txn.SetCommitWaitUntilTSO`. `None` means disabled.
+    commit_wait_until_tso: Option<u64>,
+    /// Timeout for waiting `commit_wait_until_tso` to be reached.
+    commit_wait_until_tso_timeout: Duration,
     #[doc(hidden)]
     heartbeat_option: HeartbeatOption,
     pipelined: Option<PipelinedTxnOptions>,
@@ -2111,6 +2148,8 @@ impl TransactionOptions {
             check_level: CheckLevel::Panic,
             assertion_level: kvrpcpb::AssertionLevel::Off,
             max_commit_ts_safe_window: DEFAULT_MAX_COMMIT_TS_SAFE_WINDOW,
+            commit_wait_until_tso: None,
+            commit_wait_until_tso_timeout: DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
             pipelined: None,
         }
@@ -2129,6 +2168,8 @@ impl TransactionOptions {
             check_level: CheckLevel::Panic,
             assertion_level: kvrpcpb::AssertionLevel::Off,
             max_commit_ts_safe_window: DEFAULT_MAX_COMMIT_TS_SAFE_WINDOW,
+            commit_wait_until_tso: None,
+            commit_wait_until_tso_timeout: DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
             pipelined: None,
         }
@@ -2332,6 +2373,31 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     undetermined: bool,
     write_size: u64,
     start_instant: Instant,
+}
+
+async fn fetch_commit_timestamp<PdC: PdClient>(
+    rpc: Arc<PdC>,
+    options: &TransactionOptions,
+) -> Result<Timestamp> {
+    let Some(wait_until_tso) = options.commit_wait_until_tso else {
+        return rpc.clone().get_timestamp().await;
+    };
+
+    let timeout = options.commit_wait_until_tso_timeout;
+    let start = tokio::time::Instant::now();
+    loop {
+        let ts = rpc.clone().get_timestamp().await?;
+        if ts.version() >= wait_until_tso {
+            return Ok(ts);
+        }
+        if start.elapsed() >= timeout {
+            return Err(Error::CommitTsLag {
+                commit_ts: ts.version(),
+                wait_until_tso,
+            });
+        }
+        tokio::time::sleep(COMMIT_WAIT_UNTIL_TSO_POLL_INTERVAL).await;
+    }
 }
 
 impl<PdC: PdClient> Committer<PdC> {
@@ -2544,7 +2610,7 @@ impl<PdC: PdClient> Committer<PdC> {
         debug!("committing primary");
         let primary_key = self.primary_key.clone();
         let keys = primary_key.clone().into_iter();
-        let commit_version = self.rpc.clone().get_timestamp().await?;
+        let commit_version = fetch_commit_timestamp(self.rpc.clone(), &self.options).await?;
         let req = new_commit_request_with_primary_key(
             keys,
             primary_key,
@@ -4616,6 +4682,200 @@ mod tests {
 
         let err = txn.commit().await.expect_err("commit must fail");
         assert!(matches!(err, crate::Error::KeyExists(_)), "{err:?}");
+    }
+
+    struct CommitWaitPdClient {
+        client: MockKvClient,
+        region: RegionWithLeader,
+        ts_versions: Vec<u64>,
+        ts_calls: AtomicUsize,
+    }
+
+    impl CommitWaitPdClient {
+        fn new(client: MockKvClient, ts_versions: Vec<u64>) -> Self {
+            assert!(!ts_versions.is_empty());
+
+            let leader = metapb::Peer {
+                id: 100,
+                store_id: 1,
+                ..Default::default()
+            };
+            let mut region = metapb::Region::default();
+            region.id = 1;
+            region.region_epoch = Some(metapb::RegionEpoch {
+                conf_ver: 0,
+                version: 0,
+            });
+            region.peers = vec![leader.clone()];
+
+            Self {
+                client,
+                region: RegionWithLeader {
+                    region,
+                    leader: Some(leader),
+                },
+                ts_versions,
+                ts_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn ts_calls(&self) -> usize {
+            self.ts_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl PdClient for CommitWaitPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            region: RegionWithLeader,
+        ) -> crate::Result<RegionStore> {
+            Ok(RegionStore::new(region, Arc::new(self.client.clone())))
+        }
+
+        async fn region_for_key(&self, _key: &crate::Key) -> crate::Result<RegionWithLeader> {
+            Ok(self.region.clone())
+        }
+
+        async fn region_for_id(&self, _id: RegionId) -> crate::Result<RegionWithLeader> {
+            Ok(self.region.clone())
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> crate::Result<Timestamp> {
+            let idx = self.ts_calls.fetch_add(1, Ordering::SeqCst);
+            let version = self
+                .ts_versions
+                .get(idx)
+                .copied()
+                .unwrap_or_else(|| *self.ts_versions.last().expect("non-empty"));
+            Ok(Timestamp::from_version(version))
+        }
+
+        async fn get_min_ts(self: Arc<Self>) -> crate::Result<Timestamp> {
+            Ok(Timestamp::default())
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> crate::Result<bool> {
+            Ok(true)
+        }
+
+        async fn load_keyspace(&self, keyspace: &str) -> crate::Result<keyspacepb::KeyspaceMeta> {
+            Ok(keyspacepb::KeyspaceMeta {
+                id: 0,
+                name: keyspace.to_owned(),
+                state: keyspacepb::KeyspaceState::Enabled as i32,
+                ..Default::default()
+            })
+        }
+
+        async fn all_stores(&self) -> crate::Result<Vec<Store>> {
+            Ok(vec![Store::new(Arc::new(self.client.clone()))])
+        }
+
+        async fn update_leader(
+            &self,
+            _ver_id: RegionVerId,
+            _leader: metapb::Peer,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {}
+
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+    }
+
+    #[tokio::test]
+    async fn test_commit_wait_until_tso_retries_until_target_is_reached() -> crate::Result<()> {
+        let start_ts = 10_u64;
+        let wait_until_tso = start_ts + 200;
+
+        let commit_reqs: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let commit_reqs_cloned = commit_reqs.clone();
+        let kv_client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+            } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_reqs_cloned.lock().unwrap().push(req.commit_version);
+                Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+            } else {
+                unreachable!("unexpected request type in commit-wait test");
+            }
+        });
+
+        let pd_client = Arc::new(CommitWaitPdClient::new(
+            kv_client,
+            vec![start_ts + 100, start_ts + 201],
+        ));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_ts),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+
+        assert_eq!(txn.commit_wait_until_tso(), 0);
+        assert_eq!(txn.commit_wait_until_tso_timeout(), Duration::from_secs(1));
+        txn.set_commit_wait_until_tso(wait_until_tso);
+        assert_eq!(txn.commit_wait_until_tso(), wait_until_tso);
+
+        txn.put("k1".to_owned(), "v1".to_owned()).await?;
+        let commit_ts = txn
+            .commit()
+            .await?
+            .expect("non-empty txn should return commit ts");
+        assert_eq!(commit_ts.version(), start_ts + 201);
+        assert_eq!(pd_client.ts_calls(), 2);
+        assert_eq!(*commit_reqs.lock().unwrap(), vec![start_ts + 201]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_commit_wait_until_tso_times_out() -> crate::Result<()> {
+        let start_ts = 10_u64;
+        let wait_until_tso = start_ts + 100;
+
+        let commit_reqs: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let commit_reqs_cloned = commit_reqs.clone();
+        let kv_client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+            } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_reqs_cloned.lock().unwrap().push(req.commit_version);
+                Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+            } else {
+                unreachable!("unexpected request type in commit-wait timeout test");
+            }
+        });
+
+        let pd_client = Arc::new(CommitWaitPdClient::new(kv_client, vec![start_ts + 10]));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_ts),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+            RequestContext::default(),
+            None,
+        );
+        txn.set_commit_wait_until_tso(wait_until_tso);
+        txn.set_commit_wait_until_tso_timeout(Duration::from_millis(20));
+        txn.put("k1".to_owned(), "v1".to_owned()).await?;
+
+        let err = txn.commit().await.expect_err("commit must time out");
+        assert!(
+            matches!(err, Error::CommitTsLag { .. }),
+            "unexpected error: {err:?}"
+        );
+        assert!(commit_reqs.lock().unwrap().is_empty());
+        Ok(())
     }
 
     #[test]
