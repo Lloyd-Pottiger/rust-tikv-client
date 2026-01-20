@@ -97,6 +97,7 @@
 
 pub mod backoff;
 #[cfg(any(test, feature = "test-util"))]
+#[cfg_attr(feature = "test-util", allow(dead_code))]
 mod backoffer;
 pub mod interceptor;
 pub mod metrics;
@@ -135,6 +136,7 @@ pub mod resource_manager {
 }
 
 #[cfg(any(test, feature = "test-util"))]
+#[cfg_attr(feature = "test-util", allow(dead_code))]
 mod mock;
 
 /// Test and benchmark utilities (feature-gated).

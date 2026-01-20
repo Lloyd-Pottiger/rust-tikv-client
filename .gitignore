@@ -16,3 +16,8 @@ client-rust/
 .codex/progress/*
 !.codex/progress/daemon.md
 AGENTS.override.md
+
+# Local planning artifacts (created by some Codex skills; not part of the repo).
+task_plan.md
+progress.md
+findings.md

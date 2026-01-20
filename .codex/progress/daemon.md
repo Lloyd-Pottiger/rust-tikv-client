@@ -50,3 +50,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：当前覆盖率阈值通过（`COVERAGE_FAIL_UNDER=80`）；报告输出到 `target/llvm-cov/html/index.html`
   - 文件：`.codex/progress/daemon.md`
   - 验证：`make coverage`
+
+- meta/goal-audit + quality/all-features + chores/repo-hygiene：收尾复核整体目标（tests port + build matrix）
+  - 关键：client-go `101` 个 `_test.go` 在 `.codex/progress/client-go-tests-file-map.md` 均有归因（covered/partial/n/a）；`make check-all-features` 暴露的 test-util dead-code 与 bench 返回类型不匹配问题已修复
+  - 文件：`src/lib.rs`，`src/util/mod.rs`，`benches/plan.rs`，`.gitignore`，`.codex/progress/daemon.md`
+  - 验证：`make all`；`make coverage`；`make check-all-features`

@@ -32,7 +32,7 @@ fn bench_plan_raw_batch_get_3regions(c: &mut Criterion) {
             Ok(Box::new(kvrpcpb::RawBatchGetResponse {
                 pairs,
                 ..Default::default()
-            }) as Box<dyn Any>)
+            }) as Box<dyn Any + Send>)
         },
     )));
 
