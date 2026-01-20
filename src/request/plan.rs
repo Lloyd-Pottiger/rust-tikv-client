@@ -2504,6 +2504,108 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_retryable_multi_region_stale_read_data_is_not_ready_waits_and_retries(
+    ) -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+        let store_ids = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let store_ids_for_hook = store_ids.clone();
+        let stale_read_flags = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let stale_read_flags_for_hook = stale_read_flags.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let ctx = req
+                    .context
+                    .as_ref()
+                    .expect("missing context on RawGetRequest");
+                let store_id = ctx
+                    .peer
+                    .as_ref()
+                    .map(|peer| peer.store_id)
+                    .expect("store_id should be set");
+                store_ids_for_hook.lock().unwrap().push(store_id);
+                stale_read_flags_for_hook
+                    .lock()
+                    .unwrap()
+                    .push(ctx.stale_read);
+
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            data_is_not_ready: Some(errorpb::DataIsNotReady {
+                                region_id: 1,
+                                peer_id: 0,
+                                safe_ts: 0,
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any + Send>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any + Send>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+
+        let mut read_routing = ReadRouting::default();
+        read_routing.set_stale_read(true);
+        // Deterministically select a follower on the first attempt.
+        read_routing.set_seed(1);
+
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // No region backoff: data_is_not_ready on stale-read uses a dedicated retry loop.
+            backoff: Backoff::no_jitter_backoff(50, 50, 0),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing,
+        };
+
+        let handle = tokio::spawn(async move { plan.execute().await });
+
+        while calls.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(199)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+
+        let results = handle.await.expect("task panicked")?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        // Stale-read retries fall back to leader, while keeping `Context.stale_read=true`.
+        assert_eq!(&*store_ids.lock().unwrap(), &[2, 1]);
+        assert_eq!(&*stale_read_flags.lock().unwrap(), &[true, true]);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
     async fn run_replica_read_keep_peer_region_error_test(
         region_error: errorpb::Error,
     ) -> Result<()> {

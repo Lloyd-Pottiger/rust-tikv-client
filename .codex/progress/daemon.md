@@ -17,10 +17,15 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port/partial-audit：复核仍为 partial 的 client-go `_test.go`（`region_request_state_test.go`/`rawkv_test.go`/`kv_test.go` 等），能迁移的纯逻辑继续补 Rust 单测；不能迁移的细化 N/A 理由与等价覆盖点
-  - 步骤：逐文件挑 1-3 个纯逻辑 case；补单测/必要实现；更新 `.codex/progress/client-go-tests-file-map.md` 注释；`make check`+`make unit-test`
+- parity/review-backlog：对照 `.codex/progress/parity-checklist.md` 复核未完成项，拆解成可实现的小任务并补回本文件的「待做工作」
+  - 步骤：按模块（raw/txn/pd/region_cache/store）扫一遍；标注缺口/API；每项给最小实现步骤与验证命令
 
 # 已完成工作
+
+- tests/port/partial-audit：补齐 `region_request_state_test.go` 可迁移纯逻辑语义（stale-read `DataIsNotReady` wait+retry + retry fallback-to-leader）
+  - 关键：stale-read 遇到 `data_is_not_ready` 不 invalidate region/store cache；固定 sleep 后重试；重试选路回退 leader 但保持 `Context.stale_read=true`
+  - 文件：`src/request/plan.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
+  - 验证：`make check` + `make unit-test`
 
 - tests/port/locate-region-request-more：补齐 Go `client-go/internal/locate/region_request*_test.go` 可迁移 send-fail/stale-command 语义到 Rust 单测
   - 关键：引入 `Error::ResourceGroupThrottled` 并确保不触发 cache invalidation/mark slow；gRPC send-fail 触发 mark store slow + invalidate_store_cache；replica-read stale-command 无 backoff、按非 witness peer 数量有界重试，耗尽后 invalidate region 并返回 RegionError
