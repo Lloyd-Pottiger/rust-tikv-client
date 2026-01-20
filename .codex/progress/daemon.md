@@ -13,11 +13,6 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
-- review/post-tests-port-audit：复核整体目标/缺失 public API/测试覆盖；必要时拆解新任务补齐
-  - 实施：复查 `.codex/progress/parity-checklist.md`/api inventory；跑 `cargo test`/`cargo clippy`/`cargo test --features integration-tests --no-run`；把未达成目标拆成具体任务加入「待做工作」
-  - 验证：`cargo clippy` + `cargo test`
-  - 文件：`.codex/progress/daemon.md`，`.codex/progress/parity-checklist.md`，`.codex/progress/parity-map.md`
-
 # 待做工作
 
 # 已完成工作
@@ -61,3 +56,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：补齐 option_test 的 commit-wait TSO（`set_commit_wait_until_tso` + timeout）与单测；更新 integration mapping；`cargo test --features integration-tests --no-run` 通过
   - 验证：`cargo test` + `cargo test --features integration-tests --no-run`
   - 文件：`src/transaction/transaction.rs`，`src/common/errors.rs`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
+
+- review/post-tests-port-audit：复核整体目标/缺失 public API/测试覆盖；补齐 parity 记录
+  - 结果：`cargo test` + `cargo clippy` + `cargo test --features integration-tests --no-run` 通过；parity-checklist 补齐 commit-wait TSO 的 Rust 映射（`Transaction::{set_,get_}commit_wait_until_tso*`）
+  - 文件：`.codex/progress/daemon.md`，`.codex/progress/parity-checklist.md`
