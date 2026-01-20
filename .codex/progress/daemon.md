@@ -17,8 +17,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-- tests/port/rawkv-rawkv_test-minimal：从 Go `client-go/rawkv/rawkv_test.go` 挑选可迁移纯逻辑子集，落到 Rust mock/unit tests
-  - 步骤：挑选不依赖 mocktikv MVCC 的语义（addr cache / store-not-match / re-resolve interval 等）；用 `MockKvClient`/hooks 覆盖；更新 mapping notes/status
+（空）
 
 # 已完成工作
 
@@ -49,3 +48,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 完成：将 `region_request{,3,_state}_test.go` 从 N/A 收敛为 partial（明确对应 Rust 覆盖点：`src/request/plan.rs`/`src/request/plan_builder.rs`/`src/request/read_routing.rs`/integration stale-read）；补 `StoreNotMatch` 但 leader 缺失时不触发 store invalidation 的分支单测
   - 验证：`make check` + `make unit-test`
   - 文件：`src/request/plan.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
+
+- tests/port/rawkv-rawkv_test-minimal：从 Go `client-go/rawkv/rawkv_test.go` 挑选可迁移纯逻辑子集，落到 Rust mock/unit tests
+  - 完成：补 raw CF 透传/隔离单测；将 raw `Client::{with_cf,with_backoff,with_atomic_for_cas}` 下放到泛型 impl，便于 `Client<MockPdClient>` 使用；更新 Go tests mapping（rawkv 从 N/A -> partial）
+  - 验证：`make all`
+  - 文件：`src/raw/client.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`

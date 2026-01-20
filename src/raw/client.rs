@@ -138,6 +138,14 @@ impl Client<PdRpcClient> {
             request_context: crate::RequestContext::default(),
         })
     }
+}
+
+impl<PdC: PdClient> Client<PdC> {
+    /// Returns the PD cluster ID this client is connected to.
+    #[must_use]
+    pub fn cluster_id(&self) -> u64 {
+        self.cluster_id
+    }
 
     /// Create a new client which is a clone of `self`, but which uses an explicit column family for
     /// all requests.
@@ -161,15 +169,9 @@ impl Client<PdRpcClient> {
     /// ```
     #[must_use]
     pub fn with_cf(&self, cf: ColumnFamily) -> Self {
-        Client {
-            cluster_id: self.cluster_id,
-            rpc: self.rpc.clone(),
-            cf: Some(cf),
-            backoff: self.backoff.clone(),
-            atomic: self.atomic,
-            keyspace: self.keyspace,
-            request_context: self.request_context.clone(),
-        }
+        let mut cloned = self.clone();
+        cloned.cf = Some(cf);
+        cloned
     }
 
     /// Set the [`Backoff`] strategy for retrying requests.
@@ -189,15 +191,9 @@ impl Client<PdRpcClient> {
     /// ```
     #[must_use]
     pub fn with_backoff(&self, backoff: Backoff) -> Self {
-        Client {
-            cluster_id: self.cluster_id,
-            rpc: self.rpc.clone(),
-            cf: self.cf.clone(),
-            backoff,
-            atomic: self.atomic,
-            keyspace: self.keyspace,
-            request_context: self.request_context.clone(),
-        }
+        let mut cloned = self.clone();
+        cloned.backoff = backoff;
+        cloned
     }
 
     /// Set to use the atomic mode.
@@ -209,23 +205,9 @@ impl Client<PdRpcClient> {
     /// operations are not supported in the mode.
     #[must_use]
     pub fn with_atomic_for_cas(&self) -> Self {
-        Client {
-            cluster_id: self.cluster_id,
-            rpc: self.rpc.clone(),
-            cf: self.cf.clone(),
-            backoff: self.backoff.clone(),
-            atomic: true,
-            keyspace: self.keyspace,
-            request_context: self.request_context.clone(),
-        }
-    }
-}
-
-impl<PdC: PdClient> Client<PdC> {
-    /// Returns the PD cluster ID this client is connected to.
-    #[must_use]
-    pub fn cluster_id(&self) -> u64 {
-        self.cluster_id
+        let mut cloned = self.clone();
+        cloned.atomic = true;
+        cloned
     }
 
     /// Set `kvrpcpb::Context.request_source` for all requests created by this client.
@@ -1831,6 +1813,89 @@ mod tests {
             .delete_range(vec![2_u8]..vec![2_u8])
             .await
             .expect("empty delete_range should be ok");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_with_cf_isolates_operations_across_column_families() -> Result<()> {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        let storage = Arc::new(Mutex::new(HashMap::<(String, Vec<u8>), Vec<u8>>::new()));
+        let storage_for_hook = storage.clone();
+
+        let kv = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            let cf_key = |cf: &str| {
+                if cf.is_empty() {
+                    ColumnFamily::Default.to_string()
+                } else {
+                    cf.to_owned()
+                }
+            };
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::RawPutRequest>() {
+                let cf = cf_key(&req.cf);
+                let mut guard = storage_for_hook.lock().unwrap();
+                guard.insert((cf, req.key.clone()), req.value.clone());
+                return Ok(Box::new(kvrpcpb::RawPutResponse::default()));
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() {
+                let cf = cf_key(&req.cf);
+                let guard = storage_for_hook.lock().unwrap();
+                if let Some(value) = guard.get(&(cf, req.key.clone())).cloned() {
+                    return Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: false,
+                        value,
+                        ..Default::default()
+                    }));
+                }
+                return Ok(Box::new(kvrpcpb::RawGetResponse {
+                    not_found: true,
+                    ..Default::default()
+                }));
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::RawDeleteRequest>() {
+                let cf = cf_key(&req.cf);
+                let mut guard = storage_for_hook.lock().unwrap();
+                guard.remove(&(cf, req.key.clone()));
+                return Ok(Box::new(kvrpcpb::RawDeleteResponse::default()));
+            }
+
+            Err(crate::internal_err!("unexpected request type"))
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(kv));
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: true,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let write = client.with_cf(ColumnFamily::Write);
+        write.put(vec![1_u8], vec![11_u8]).await?;
+        assert_eq!(write.get(vec![1_u8]).await?, Some(vec![11_u8]));
+        assert_eq!(client.get(vec![1_u8]).await?, None);
+
+        // `cf=None` (empty string) should behave like `default`.
+        client.put(vec![2_u8], vec![22_u8]).await?;
+        assert_eq!(client.get(vec![2_u8]).await?, Some(vec![22_u8]));
+        assert_eq!(
+            client
+                .with_cf(ColumnFamily::Default)
+                .get(vec![2_u8])
+                .await?,
+            Some(vec![22_u8])
+        );
+
+        write.delete(vec![1_u8]).await?;
+        assert_eq!(write.get(vec![1_u8]).await?, None);
+
         Ok(())
     }
 
