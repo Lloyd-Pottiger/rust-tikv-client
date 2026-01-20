@@ -27,9 +27,9 @@ Conventions:
 - [x] `func DefaultTiKVClient() TiKVClient` | Rust: N/A (out-of-scope: TiKV gRPC client config is internal; use `Config`/defaults) | Tests: N/A
 - [x] `func DefaultTxnLocalLatches() TxnLocalLatches` | Rust: N/A (out-of-scope: configure via `TransactionClient::with_txn_local_latches`) | Tests: N/A
 - [x] `func GetGlobalConfig() *Config` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
-- [x] `func GetTxnScopeFromConfig() string` | Rust: N/A (out-of-scope: no global config; use `GLOBAL_TXN_SCOPE` and explicit options) | Tests: N/A
+- [x] `func GetTxnScopeFromConfig() string` | Rust: `tikv_client::txn_scope_from_config` (src/config.rs) | Tests: `src/config.rs (txn_scope_from_config_matches_client_go_test)`
 - [x] `func NewSecurity(sslCA, sslCert, sslKey string, verityCN []string) Security` | Rust: `Config::with_security` + `SecurityManager::load` (src/{config.rs,common/security.rs}) | Tests: `src/common/security.rs (test_security)`
-- [x] `func ParsePath(path string) (etcdAddrs []string, disableGC bool, keyspaceName string, err error)` | Rust: N/A (out-of-scope: no DSN parser; pass PD endpoints + `Config`) | Tests: N/A
+- [x] `func ParsePath(path string) (etcdAddrs []string, disableGC bool, keyspaceName string, err error)` | Rust: `tikv_client::parse_path` (src/config.rs) | Tests: `src/config.rs (parse_path_matches_client_go_test)`
 - [x] `func StoreGlobalConfig(config *Config)` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
 - [x] `func UpdateGlobal(f func(conf *Config)) func()` | Rust: N/A (out-of-scope: explicit `Config` passed to `*_with_config`) | Tests: N/A
 
@@ -214,12 +214,12 @@ Conventions:
 - [x] `type BatchGetOption interface` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
 - [x] `type BatchGetOptions struct` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
 - [x] `type BatchGetter interface` | Rust: N/A (out-of-scope: no Go-style getter interfaces) | Tests: N/A
-- [x] `type FlagsOp uint32` | Rust: `tikv_client::transaction::FlagsOp` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `type FlagsOp uint32` | Rust: `tikv_client::transaction::FlagsOp` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
 - [x] `type GetOption interface` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
 - [x] `type GetOptions struct` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
 - [x] `type GetOrBatchGetOption interface` | Rust: N/A (out-of-scope: no option-interfaces; use typed params/structs) | Tests: N/A
 - [x] `type Getter interface` | Rust: N/A (out-of-scope: no Go-style getter interfaces) | Tests: N/A
-- [x] `type KeyFlags uint16` | Rust: `tikv_client::transaction::KeyFlags` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `type KeyFlags uint16` | Rust: `tikv_client::transaction::KeyFlags` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
 - [x] `type KeyRange struct` | Rust: `tikv_client::BoundRange` (src/kv/bound_range.rs) | Tests: `src/kv/bound_range.rs (doctests)`
 - [x] `type LockCtx struct` | Rust: N/A (out-of-scope: use `tikv_client::transaction::LockOptions`) | Tests: N/A
 - [x] `type ReplicaReadType byte` | Rust: `src/replica_read.rs (ReplicaReadType)` | Tests: `src/transaction/transaction.rs (test_replica_read_peer_selection_and_context_fields)`
@@ -228,7 +228,7 @@ Conventions:
 - [x] `type Variables struct` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Functions
-- [x] `func ApplyFlagsOps(origin KeyFlags, ops ...FlagsOp) KeyFlags` | Rust: N/A (capability: `KeyFlags::apply` in `transaction::key_flags`) | Tests: N/A
+- [x] `func ApplyFlagsOps(origin KeyFlags, ops ...FlagsOp) KeyFlags` | Rust: N/A (capability: `KeyFlags::apply` in `transaction::key_flags`) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
 - [x] `func BatchGetToGetOptions(options []BatchGetOption) []GetOption` | Rust: N/A (out-of-scope: no option-interfaces) | Tests: N/A
 - [x] `func CmpKey(k, another []byte) int` | Rust: N/A (out-of-scope: use `Key`/byte slice ordering) | Tests: N/A
 - [x] `func NewLockCtx(forUpdateTS uint64, lockWaitTime int64, waitStartTime time.Time) *LockCtx` | Rust: N/A (out-of-scope: use `transaction::LockOptions`) | Tests: N/A
@@ -249,7 +249,7 @@ Conventions:
 - [x] `DelNeedCheckExists` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `DelNeedConstraintCheckInPrewrite` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `DelNeedLocked` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `DelPresumeKeyNotExists` | Rust: `FlagsOp::DelPresumeKeyNotExists` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `DelPresumeKeyNotExists` | Rust: `FlagsOp::DelPresumeKeyNotExists` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
 - [x] `FlagBytes` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `LockAlwaysWait` | Rust: N/A (capability: `transaction::LockOptions::wait_timeout_ms`) | Tests: N/A
 - [x] `LockNoWait` | Rust: N/A (capability: `transaction::LockOptions::wait_timeout_ms`) | Tests: N/A
@@ -258,10 +258,10 @@ Conventions:
 - [x] `ReplicaReadLearner` | Rust: `ReplicaReadType::Learner` (src/replica_read.rs) | Tests: N/A
 - [x] `ReplicaReadMixed` | Rust: `ReplicaReadType::Mixed` (src/replica_read.rs) | Tests: N/A
 - [x] `ReplicaReadPreferLeader` | Rust: `ReplicaReadType::PreferLeader` (src/replica_read.rs) | Tests: N/A
-- [x] `SetAssertExist` | Rust: `FlagsOp::SetAssertExist` (src/transaction/key_flags.rs) | Tests: N/A
-- [x] `SetAssertNone` | Rust: `FlagsOp::SetAssertNone` (src/transaction/key_flags.rs) | Tests: N/A
-- [x] `SetAssertNotExist` | Rust: `FlagsOp::SetAssertNotExist` (src/transaction/key_flags.rs) | Tests: N/A
-- [x] `SetAssertUnknown` | Rust: `FlagsOp::SetAssertUnknown` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetAssertExist` | Rust: `FlagsOp::SetAssertExist` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
+- [x] `SetAssertNone` | Rust: `FlagsOp::SetAssertNone` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
+- [x] `SetAssertNotExist` | Rust: `FlagsOp::SetAssertNotExist` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
+- [x] `SetAssertUnknown` | Rust: `FlagsOp::SetAssertUnknown` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
 - [x] `SetIgnoredIn2PC` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `SetKeyLocked` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `SetKeyLockedValueExists` | Rust: N/A (out-of-scope) | Tests: N/A
@@ -269,9 +269,9 @@ Conventions:
 - [x] `SetNeedConstraintCheckInPrewrite` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `SetNeedLocked` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `SetNewlyInserted` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `SetPresumeKeyNotExists` | Rust: `FlagsOp::SetPresumeKeyNotExists` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetPresumeKeyNotExists` | Rust: `FlagsOp::SetPresumeKeyNotExists` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
 - [x] `SetPreviousPresumeKNE` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `SetPrewriteOnly` | Rust: `FlagsOp::SetPrewriteOnly` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `SetPrewriteOnly` | Rust: `FlagsOp::SetPrewriteOnly` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
 - [x] `SetReadable` | Rust: N/A (out-of-scope) | Tests: N/A
 
 ### Vars
@@ -288,10 +288,10 @@ Conventions:
 - [x] `func (e ValueEntry) IsValueEmpty() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (e ValueEntry) Size() int` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (f KeyFlags) AndPersistent() KeyFlags` | Rust: N/A (out-of-scope: persistent flags are internal in Rust) | Tests: N/A
-- [x] `func (f KeyFlags) HasAssertExist() bool` | Rust: `KeyFlags::has_assert_exist` (src/transaction/key_flags.rs) | Tests: N/A
-- [x] `func (f KeyFlags) HasAssertNotExist() bool` | Rust: `KeyFlags::has_assert_not_exist` (src/transaction/key_flags.rs) | Tests: N/A
-- [x] `func (f KeyFlags) HasAssertUnknown() bool` | Rust: `KeyFlags::has_assert_unknown` (src/transaction/key_flags.rs) | Tests: N/A
-- [x] `func (f KeyFlags) HasAssertionFlags() bool` | Rust: `KeyFlags::has_assertion_flags` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasAssertExist() bool` | Rust: `KeyFlags::has_assert_exist` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
+- [x] `func (f KeyFlags) HasAssertNotExist() bool` | Rust: `KeyFlags::has_assert_not_exist` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
+- [x] `func (f KeyFlags) HasAssertUnknown() bool` | Rust: `KeyFlags::has_assert_unknown` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
+- [x] `func (f KeyFlags) HasAssertionFlags() bool` | Rust: `KeyFlags::has_assertion_flags` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
 - [x] `func (f KeyFlags) HasIgnoredIn2PC() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (f KeyFlags) HasLocked() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (f KeyFlags) HasLockedValueExists() bool` | Rust: N/A (out-of-scope) | Tests: N/A
@@ -299,8 +299,8 @@ Conventions:
 - [x] `func (f KeyFlags) HasNeedConstraintCheckInPrewrite() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (f KeyFlags) HasNeedLocked() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (f KeyFlags) HasNewlyInserted() bool` | Rust: N/A (out-of-scope) | Tests: N/A
-- [x] `func (f KeyFlags) HasPresumeKeyNotExists() bool` | Rust: `KeyFlags::has_presume_key_not_exists` (src/transaction/key_flags.rs) | Tests: N/A
-- [x] `func (f KeyFlags) HasPrewriteOnly() bool` | Rust: `KeyFlags::has_prewrite_only` (src/transaction/key_flags.rs) | Tests: N/A
+- [x] `func (f KeyFlags) HasPresumeKeyNotExists() bool` | Rust: `KeyFlags::has_presume_key_not_exists` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
+- [x] `func (f KeyFlags) HasPrewriteOnly() bool` | Rust: `KeyFlags::has_prewrite_only` (src/transaction/key_flags.rs) | Tests: `src/transaction/key_flags.rs (apply_and_queries)`
 - [x] `func (f KeyFlags) HasReadable() bool` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (o *BatchGetOptions) Apply(opts []BatchGetOption)` | Rust: N/A (out-of-scope) | Tests: N/A
 - [x] `func (o *GetOptions) Apply(opts []GetOption)` | Rust: N/A (out-of-scope) | Tests: N/A
@@ -651,8 +651,8 @@ Conventions:
 ### Functions
 - [x] `func NewClient(ctx context.Context, pdAddrs []string, security config.Security, opts ...opt.ClientOption) (*Client, error)` | Rust: `RawClient::new_with_config` + `Config::with_security` (src/{raw/client.rs,config.rs}) | Tests: `src/common/security.rs (test_security)`
 - [x] `func NewClientWithOpts(ctx context.Context, pdAddrs []string, opts ...ClientOpt) (*Client, error)` | Rust: `RawClient::new` / `RawClient::new_with_config` (src/raw/client.rs) | Tests: `src/raw/client.rs (tests)`
-- [x] `func ScanKeyOnly() RawOption` | Rust: `RawClient::{scan_keys,scan_keys_reverse}` (src/raw/client.rs) | Tests: N/A
-- [x] `func SetColumnFamily(cf string) RawOption` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (src/raw/{client.rs,mod.rs}) | Tests: N/A
+- [x] `func ScanKeyOnly() RawOption` | Rust: `RawClient::{scan_keys,scan_keys_reverse}` (src/raw/client.rs) | Tests: `src/raw/requests.rs (test_raw_scan)`
+- [x] `func SetColumnFamily(cf string) RawOption` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (src/raw/{client.rs,mod.rs}) | Tests: `src/raw/client.rs (test_with_cf_isolates_operations_across_column_families)`
 - [x] `func WithAPIVersion(apiVersion kvrpcpb.APIVersion) ClientOpt` | Rust: N/A (out-of-scope: target TiKV uses API v2; use `Config::with_keyspace`) | Tests: N/A
 - [x] `func WithGRPCDialOptions(opts ...grpc.DialOption) ClientOpt` | Rust: N/A (out-of-scope: no gRPC dial option passthrough; use `Config`/defaults) | Tests: N/A
 - [x] `func WithKeyspace(name string) ClientOpt` | Rust: `Config::with_keyspace` / `Config::with_default_keyspace` (src/config.rs) | Tests: N/A
@@ -663,29 +663,29 @@ Conventions:
 - (none)
 
 ### Vars
-- [x] `ErrMaxScanLimitExceeded` | Rust: `Error::MaxScanLimitExceeded` (src/common/errors.rs) | Tests: N/A
+- [x] `ErrMaxScanLimitExceeded` | Rust: `Error::MaxScanLimitExceeded` (src/common/errors.rs) | Tests: `src/raw/client.rs (test_scan_limit_exceeded_errors)`
 - [x] `MaxRawKVScanLimit` | Rust: `MAX_RAW_KV_SCAN_LIMIT` (src/raw/client.rs) | Tests: N/A
 
 ### Methods
-- [x] `func (c *Client) BatchDelete(ctx context.Context, keys [][]byte, options ...RawOption) error` | Rust: `RawClient::batch_delete` (src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOption) ([][]byte, error)` | Rust: `RawClient::batch_get` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) BatchDelete(ctx context.Context, keys [][]byte, options ...RawOption) error` | Rust: `RawClient::batch_delete` (src/raw/client.rs) | Tests: `tests/integration_tests.rs (raw_req)`
+- [x] `func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOption) ([][]byte, error)` | Rust: `RawClient::batch_get` (src/raw/client.rs) | Tests: `src/raw/client.rs (test_batch_get_sorts_and_splits_keys_by_region)` + `tests/integration_tests.rs (raw_req)`
 - [x] `func (c *Client) BatchPut(ctx context.Context, keys, values [][]byte, options ...RawOption) error` | Rust: `RawClient::batch_put` (src/raw/client.rs) | Tests: `src/raw/client.rs (test_batch_put_with_ttl)`
 - [x] `func (c *Client) BatchPutWithTTL(ctx context.Context, keys, values [][]byte, ttls []uint64, options ...RawOption) error` | Rust: `RawClient::batch_put_with_ttl` (src/raw/client.rs) | Tests: `src/raw/client.rs (test_batch_put_with_ttl)`
 - [x] `func (c *Client) Checksum(ctx context.Context, startKey, endKey []byte, options ...RawOption, ) (check RawChecksum, err error)` | Rust: `RawClient::checksum` (src/raw/client.rs) | Tests: `src/raw/requests.rs (test_raw_checksum_merge)`
 - [x] `func (c *Client) Close() error` | Rust: N/A (out-of-scope: drop closes client) | Tests: N/A
 - [x] `func (c *Client) ClusterID() uint64` | Rust: `RawClient::cluster_id` (src/raw/client.rs) | Tests: `src/raw/client.rs (tests)`
-- [x] `func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValue []byte, options ...RawOption) ([]byte, bool, error)` | Rust: `RawClient::compare_and_swap` (src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) error` | Rust: `RawClient::delete` (src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte, options ...RawOption) error` | Rust: `RawClient::delete_range` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValue []byte, options ...RawOption) ([]byte, bool, error)` | Rust: `RawClient::compare_and_swap` (src/raw/client.rs) | Tests: `src/raw/client.rs (test_compare_and_swap_requires_atomic_mode, test_compare_and_swap_atomic_success, test_compare_and_swap_atomic_not_swapped_returns_previous_value, test_compare_and_swap_previous_none_sets_previous_not_exist)` + `tests/integration_tests.rs (raw_cas)`
+- [x] `func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) error` | Rust: `RawClient::delete` (src/raw/client.rs) | Tests: `tests/integration_tests.rs (raw_req)`
+- [x] `func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte, options ...RawOption) error` | Rust: `RawClient::delete_range` (src/raw/client.rs) | Tests: `src/raw/client.rs (test_delete_range_empty_range_returns_ok_without_rpc)` + `tests/integration_tests.rs (raw_delete_range)`
 - [x] `func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]byte, error)` | Rust: `RawClient::get` (src/raw/client.rs) | Tests: `src/raw/client.rs (test_request_source_and_resource_group_tag)`
-- [x] `func (c *Client) GetKeyTTL(ctx context.Context, key []byte, options ...RawOption) (*uint64, error)` | Rust: `RawClient::get_key_ttl_secs` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) GetKeyTTL(ctx context.Context, key []byte, options ...RawOption) (*uint64, error)` | Rust: `RawClient::get_key_ttl_secs` (src/raw/client.rs) | Tests: `tests/integration_tests.rs (raw_ttl)`
 - [x] `func (c *Client) GetPDClient() pd.Client` | Rust: N/A (out-of-scope: PD client is internal; use `request::PlanBuilder`/clients) | Tests: N/A
-- [x] `func (c *Client) Put(ctx context.Context, key, value []byte, options ...RawOption) error` | Rust: `RawClient::put` (src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, options ...RawOption) error` | Rust: `RawClient::put_with_ttl` (src/raw/client.rs) | Tests: N/A
+- [x] `func (c *Client) Put(ctx context.Context, key, value []byte, options ...RawOption) error` | Rust: `RawClient::put` (src/raw/client.rs) | Tests: `tests/integration_tests.rs (raw_req)`
+- [x] `func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, options ...RawOption) error` | Rust: `RawClient::put_with_ttl` (src/raw/client.rs) | Tests: `tests/integration_tests.rs (raw_ttl)`
 - [x] `func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption) (keys [][]byte, values [][]byte, err error)` | Rust: `RawClient::scan_reverse` (src/raw/client.rs) | Tests: `src/raw/requests.rs (test_raw_scan)`
 - [x] `func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, options ...RawOption, ) (keys [][]byte, values [][]byte, err error)` | Rust: `RawClient::scan` (src/raw/client.rs) | Tests: `src/raw/requests.rs (test_raw_scan)`
-- [x] `func (c *Client) SetAtomicForCAS(b bool) *Client` | Rust: `RawClient::with_atomic_for_cas` (src/raw/client.rs) | Tests: N/A
-- [x] `func (c *Client) SetColumnFamily(columnFamily string) *Client` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (src/raw/{client.rs,mod.rs}) | Tests: N/A
+- [x] `func (c *Client) SetAtomicForCAS(b bool) *Client` | Rust: `RawClient::with_atomic_for_cas` (src/raw/client.rs) | Tests: `src/raw/client.rs (test_compare_and_swap_requires_atomic_mode, test_compare_and_swap_atomic_success)`
+- [x] `func (c *Client) SetColumnFamily(columnFamily string) *Client` | Rust: `RawClient::with_cf` + `ColumnFamily::try_from` (src/raw/{client.rs,mod.rs}) | Tests: `src/raw/client.rs (test_with_cf_isolates_operations_across_column_families)`
 - [x] `func (c ClientProbe) GetRegionCache() *locate.RegionCache` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
 - [x] `func (c ClientProbe) SetPDClient(client pd.Client)` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
 - [x] `func (c ClientProbe) SetRPCClient(client client.Client)` | Rust: N/A (out-of-scope: Go probe/test hooks not exposed) | Tests: N/A
@@ -733,7 +733,7 @@ Conventions:
 - [x] `type RPCContext = locate.RPCContext` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `type RPCRuntimeStats = locate.RPCRuntimeStats` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `type Region = locate.Region` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
-- [x] `type RegionCache = locate.RegionCache` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `type RegionCache = locate.RegionCache` | Rust: N/A (capability: internal `RegionCache` used by clients) (src/region_cache.rs) | Tests: `src/region_cache.rs (tests)`
 - [x] `type RegionLockResolver interface` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `type RegionRequestRuntimeStats = locate.RegionRequestRuntimeStats` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `type RegionRequestSender = locate.RegionRequestSender` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
@@ -771,13 +771,13 @@ Conventions:
 - [x] `func NewLockResolver(etcdAddrs []string, security config.Security, opts ...opt.ClientOption) ( *txnlock.LockResolver, error, )` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func NewLockResolverProb(r *txnlock.LockResolver) *LockResolverProbe` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func NewMockSafePointKV(opts ...SafePointKVOpt) *MockSafePointKV` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
-- [x] `func NewPDClient(pdAddrs []string) (pd.Client, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
-- [x] `func NewRPCClient(opts ...ClientOpt) *client.RPCClient` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewPDClient(pdAddrs []string) (pd.Client, error)` | Rust: N/A (capability: internal `PdRpcClient` dial/retry used by clients) (src/pd/client.rs) | Tests: `src/pd/client.rs (test_kv_client_caching, test_kv_client_concurrent_connect_is_deduped_per_address)`
+- [x] `func NewRPCClient(opts ...ClientOpt) *client.RPCClient` | Rust: N/A (capability: internal kv RPC client/connector used by clients) (src/store/client.rs) | Tests: `src/store/client.rs (kv_rpc_client_dispatch_calls_request_dispatch, kv_rpc_client_dispatch_propagates_request_error, tikv_connect_connect_rejects_invalid_address)`
 - [x] `func NewRPCanceller() *RPCCanceller` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
-- [x] `func NewRegionCache(pdClient pd.Client) *locate.RegionCache` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewRegionCache(pdClient pd.Client) *locate.RegionCache` | Rust: N/A (capability: internal `RegionCache` used by clients) (src/region_cache.rs) | Tests: `src/region_cache.rs (tests)`
 - [x] `func NewRegionLockResolver(identifier string, store Storage) *BaseRegionLockResolver` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func NewRegionRequestRuntimeStats() *RegionRequestRuntimeStats` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
-- [x] `func NewRegionRequestSender(regionCache *RegionCache, client client.Client, readTSValidator oracle.ReadTSValidator) *RegionRequestSender` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
+- [x] `func NewRegionRequestSender(regionCache *RegionCache, client client.Client, readTSValidator oracle.ReadTSValidator) *RegionRequestSender` | Rust: N/A (capability: request routing+retry in `request::PlanBuilder`) (src/request/plan.rs) | Tests: `src/request/plan.rs (tests)`
 - [x] `func NewRegionVerID(id, confVer, ver uint64) RegionVerID` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func NewSpool(n int, dur time.Duration) *Spool` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 
 - [x] `func NewTestKeyspaceTiKVStore(client Client, pdClient pd.Client, clientHijack func(Client) Client, pdClientHijack func(pd.Client) pd.Client, txnLocalLatches uint, keyspaceMeta keyspacepb.KeyspaceMeta, opt ...Option) (*KVStore, error)` | Rust: N/A (out-of-scope: Rust exposes `RawClient`/`TransactionClient`; internal store/locate/unionstore wiring is not public) | Tests: N/A 

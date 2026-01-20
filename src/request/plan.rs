@@ -1341,6 +1341,13 @@ mod test {
         update_leader_calls: AtomicUsize,
     }
 
+    struct StoreNotMatchLeaderSwitchPdClient {
+        client: MockKvClient,
+        region: Mutex<RegionWithLeader>,
+        invalidated_regions: AtomicUsize,
+        invalidated_stores: AtomicUsize,
+    }
+
     impl LeaderSwitchPdClient {
         fn new(client: MockKvClient) -> Self {
             let leader = metapb::Peer {
@@ -1381,6 +1388,50 @@ mod test {
                 invalidated_regions: AtomicUsize::new(0),
                 invalidated_stores: AtomicUsize::new(0),
                 update_leader_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl StoreNotMatchLeaderSwitchPdClient {
+        fn new(client: MockKvClient) -> Self {
+            // Reuse the same region layout as `LeaderSwitchPdClient`: 3 peers, leader on store 1.
+            let leader = metapb::Peer {
+                id: 101,
+                store_id: 1,
+                role: metapb::PeerRole::Voter as i32,
+                is_witness: false,
+            };
+            let follower_1 = metapb::Peer {
+                id: 102,
+                store_id: 2,
+                role: metapb::PeerRole::Voter as i32,
+                is_witness: false,
+            };
+            let follower_2 = metapb::Peer {
+                id: 103,
+                store_id: 3,
+                role: metapb::PeerRole::Voter as i32,
+                is_witness: false,
+            };
+
+            let mut region = metapb::Region::default();
+            region.id = 1;
+            region.start_key = vec![];
+            region.end_key = vec![];
+            region.region_epoch = Some(metapb::RegionEpoch {
+                conf_ver: 0,
+                version: 0,
+            });
+            region.peers = vec![leader.clone(), follower_1, follower_2];
+
+            Self {
+                client,
+                region: Mutex::new(RegionWithLeader {
+                    region,
+                    leader: Some(leader),
+                }),
+                invalidated_regions: AtomicUsize::new(0),
+                invalidated_stores: AtomicUsize::new(0),
             }
         }
     }
@@ -1494,6 +1545,74 @@ mod test {
 
         async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {
             self.invalidated_regions.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {
+            self.invalidated_stores.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl PdClient for StoreNotMatchLeaderSwitchPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            region: RegionWithLeader,
+        ) -> Result<RegionStore> {
+            Ok(RegionStore::new(region, Arc::new(self.client.clone())))
+        }
+
+        async fn region_for_key(&self, _key: &Key) -> Result<RegionWithLeader> {
+            Ok(self.region.lock().unwrap().clone())
+        }
+
+        async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+            Ok(self.region.lock().unwrap().clone())
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Ok(Timestamp::default())
+        }
+
+        async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+            Ok(Timestamp::default())
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Ok(keyspacepb::KeyspaceMeta {
+                id: 0,
+                name: keyspace.to_owned(),
+                state: keyspacepb::KeyspaceState::Enabled as i32,
+                ..Default::default()
+            })
+        }
+
+        async fn all_stores(&self) -> Result<Vec<Store>> {
+            Ok(vec![Store::new(Arc::new(self.client.clone()))])
+        }
+
+        async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {
+            self.invalidated_regions.fetch_add(1, Ordering::SeqCst);
+            // Simulate PD refreshing the region and electing store 3 as leader (e.g. after store
+            // replacement / address reuse leading to StoreNotMatch).
+            let mut region = self.region.lock().unwrap();
+            let new_leader = region
+                .region
+                .peers
+                .iter()
+                .find(|peer| peer.store_id == 3)
+                .cloned()
+                .expect("peer on store 3 must exist");
+            region.leader = Some(new_leader);
         }
 
         async fn invalidate_store_cache(&self, _store_id: StoreId) {
@@ -2040,6 +2159,84 @@ mod test {
         let resp = results.into_iter().next().unwrap()?;
         assert!(resp.not_found);
 
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retryable_multi_region_store_not_match_switches_leader_after_invalidate(
+    ) -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+
+        let store_ids = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let store_ids_for_hook = store_ids.clone();
+
+        let pd_client = Arc::new(StoreNotMatchLeaderSwitchPdClient::new(
+            MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let store_id = req
+                    .context
+                    .as_ref()
+                    .and_then(|ctx| ctx.peer.as_ref())
+                    .map(|peer| peer.store_id)
+                    .expect("store_id should be set");
+                store_ids_for_hook.lock().unwrap().push(store_id);
+
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => {
+                        assert_eq!(store_id, 1);
+                        Ok(Box::new(kvrpcpb::RawGetResponse {
+                            region_error: Some(errorpb::Error {
+                                store_not_match: Some(errorpb::StoreNotMatch {
+                                    request_store_id: store_id,
+                                    actual_store_id: 3,
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }) as Box<dyn Any + Send>)
+                    }
+                    1 => {
+                        assert_eq!(store_id, 3);
+                        Ok(Box::new(kvrpcpb::RawGetResponse {
+                            not_found: true,
+                            ..Default::default()
+                        }) as Box<dyn Any + Send>)
+                    }
+                    _ => unreachable!("unexpected extra dispatch attempts"),
+                }
+            }),
+        ));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            // No backoff budget: store_not_match must trigger an immediate retry with refreshed
+            // region/store caches (e.g. after store replacement).
+            backoff: Backoff::no_jitter_backoff(50, 50, 0),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing: ReadRouting::default(),
+        };
+
+        let results = plan.execute().await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(&*store_ids.lock().unwrap(), &[1, 3]);
         assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 1);
         assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 1);
         Ok(())
