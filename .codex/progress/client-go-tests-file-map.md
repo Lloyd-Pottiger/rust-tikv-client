@@ -64,7 +64,7 @@
 | `client-go/internal/locate/region_request_state_test.go` | n/a | mocktikv FSM/region request sender 特定；stale/replica read 等价语义由 `src/request/plan.rs` + `tests/integration_tests.rs` 覆盖 |
 | `client-go/internal/locate/region_request_test.go` | n/a | mocktikv/region request sender 特定；关键 retry/backoff/request_source patch 等价语义见 `src/request/plan.rs`/`src/request/plan_builder.rs` |
 | `client-go/internal/locate/replica_selector_test.go` | covered | `src/request/read_routing.rs` + `src/request/plan.rs`（stale-command/keep-peer/fast-retry） |
-| `client-go/internal/mockstore/deadlock/deadlock_test.go` | n/a | Go mockstore deadlock server；Rust 未做 1:1 mock server 迁移 |
+| `client-go/internal/mockstore/deadlock/deadlock_test.go` | covered | Rust 侧等价 deadlock detector + 单测：`src/mock/deadlock_detector.rs` |
 | `client-go/internal/mockstore/deadlock/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/internal/mockstore/mocktikv/main_test.go` | n/a | Go mocktikv harness |
 | `client-go/internal/mockstore/mocktikv/marshal_test.go` | n/a | Go mocktikv 编码/批处理回归；Rust 无 BatchCommands 发送环 |

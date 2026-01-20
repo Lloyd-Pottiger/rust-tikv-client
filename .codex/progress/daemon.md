@@ -18,9 +18,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 # 已完成工作
 
 - tests/parity-mapping+backoffer+util：完成 client-go tests 迁移/映射维护闭环（101 `_test.go` 逐文件清单；integration-tests 映射；parity-checklist 对齐；清零 `partial`）
-  - 关键：新增 `src/backoffer.rs`（client-go Backoffer：maxSleep/excludedSleep/longestSleep/clone+fork/update + MayBackoffForRegionError）+ 单测；补齐 util parity：`src/util/request_source.rs`（Build/GetRequestSource）、`src/util/rate_limit.rs`（token limiter）、`src/util/async_util.rs`（Callback/RunLoop）；对 mocktikv/BatchCommands/forwarding 等不可移植用例统一标注 N/A，但在 notes 指向 Rust 可迁移语义覆盖点
+  - 关键：新增 `src/backoffer.rs`（client-go Backoffer：maxSleep/excludedSleep/longestSleep/clone+fork/update + MayBackoffForRegionError）+ 单测；补齐 util/mock parity：`src/util/request_source.rs`（Build/GetRequestSource）、`src/util/rate_limit.rs`（token limiter）、`src/util/async_util.rs`（Callback/RunLoop）、`src/mock/deadlock_detector.rs`（deadlock detector）；对 mocktikv/BatchCommands/forwarding 等不可移植用例统一标注 N/A，但在 notes 指向 Rust 可迁移语义覆盖点
   - 验证：`cargo test` + `cargo test --features integration-tests --no-run`
-  - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/parity-checklist.md`，`src/backoffer.rs`，`src/util/request_source.rs`，`src/util/rate_limit.rs`，`src/util/async_util.rs`
+  - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/parity-checklist.md`，`src/backoffer.rs`，`src/util/request_source.rs`，`src/util/rate_limit.rs`，`src/util/async_util.rs`，`src/mock/deadlock_detector.rs`
 
 - request+pd/core-suite：迁移 client-go 核心可迁移单测语义（region/lock/oracle/keyspace/gc-time/resource-control + pd kv_client conn 缓存/dial 去重 + replica selector fast-retry/pending-backoff）
   - 关键：resolved lock cache 命中不触发 secondary-check；EpochNotMatch(empty CurrentRegions)->backoff；ServerIsBusy replica fast-retry + pending-backoff；PdRpcClient per-address kv_client cache + OnceCell 并发 dial 去重

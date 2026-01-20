@@ -5,6 +5,8 @@
 //! The goal is to be able to test functionality independently of the rest of
 //! the system, in particular without requiring a TiKV or PD server, or RPC layer.
 
+mod deadlock_detector;
+
 use std::any::Any;
 use std::sync::Arc;
 
