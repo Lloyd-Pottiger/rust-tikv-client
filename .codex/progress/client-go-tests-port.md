@@ -19,7 +19,7 @@
 ## Mostly Covered (Existing Rust Tests)
 - Config/DSN+txn-scope: `client-go/config/config_test.go` -> `src/config.rs`（`parse_path`/`txn_scope_from_config` 单测）+ `src/common/security.rs`（grpc keepalive timeout 单测）
 - TLS/security: `client-go/config/security_test.go` -> `src/common/security.rs#L123`
-- RawKV core: `client-go/rawkv/rawkv_test.go` -> `src/raw/client.rs` 单测 + `tests/integration_tests.rs` raw E2E（CF/scan/batch/delete_range/cas/checksum 等价语义；store addr swap/mocktikv MVCC N/A）
+- RawKV core: `client-go/rawkv/rawkv_test.go` -> `src/raw/client.rs` 单测 + `tests/integration_tests.rs` raw E2E（CF/scan/batch/delete_range/cas/checksum + StoreNotMatch store-addr refresh 等价语义；mocktikv liveness/replace-store/MVCC N/A）
 - SafeTS/MinSafeTS: `client-go/tikv/kv_test.go` -> `src/store/safe_ts.rs`（StoreSafeTS/PD fallback/混合路径）+ `src/transaction/client.rs`（`refresh_safe_ts_cache`/`min_safe_ts`）
 - Retry/backoff algorithms: Go jitter backoff -> `src/backoff.rs#L207`；Go Backoffer（maxSleep/excludedSleep/longestSleep/clone+fork+update + `MayBackoffForRegionError`）-> `src/backoffer.rs`
 - Util/request_source: `client-go/util/request_source*_test.go` -> `src/util/request_source.rs`

@@ -90,7 +90,7 @@
 | `client-go/oracle/oracles/local_test.go` | covered | `src/timestamp/local_oracle.rs` |
 | `client-go/oracle/oracles/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/oracle/oracles/pd_test.go` | covered | `src/pd/low_resolution_ts.rs` + `src/pd/stale_timestamp.rs` + `src/pd/read_ts_validation.rs` |
-| `client-go/rawkv/rawkv_test.go` | partial | 可迁移 raw 语义（CF 透传、batch/scan/delete_range/cas/checksum/sharding）由 Rust unit/E2E 覆盖：`src/raw/client.rs` + `tests/integration_tests.rs`；store addr swap/liveness/mocktikv MVCC 相关用例 N/A |
+| `client-go/rawkv/rawkv_test.go` | partial | 可迁移 raw 语义（CF 透传、batch/scan/delete_range/cas/checksum/sharding、StoreNotMatch->refresh store addr 重试）由 Rust unit/E2E 覆盖：`src/raw/client.rs` + `tests/integration_tests.rs`；mocktikv cluster liveness/replace-store/MVCC 相关用例 N/A |
 | `client-go/tikv/kv_test.go` | partial | Rust 侧补 SafeTS 抽象+单测覆盖 MinSafeTS/StoreSafeTS/PD fallback 语义：`src/store/safe_ts.rs`；并在 `TransactionClient` 暴露 `refresh_safe_ts_cache`/`min_safe_ts`（`src/transaction/client.rs`）。Go 的 `NewKVStore` 泄漏测试/完整 mocktikv KVStore 结构 N/A |
 | `client-go/tikv/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/tikvrpc/interceptor/interceptor_test.go` | covered | `src/interceptor.rs` |

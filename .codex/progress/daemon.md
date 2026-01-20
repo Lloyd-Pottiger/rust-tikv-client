@@ -17,7 +17,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
-（空）
+- tests/port/locate-region-request-more：从 Go `client-go/internal/locate/region_request*_test.go` 继续挑可迁移纯逻辑子集落到 Rust 单测（避免 mocktikv/conn-pool/forwarding 细节）
+  - 步骤：补 `stale_command` backoff/attempt 行为、grpc send-fail 触发 store slow + invalidate_store_cache、resource-group-throttled 不触发 store invalidation（若 Rust 有等价 error）；更新 mapping notes/status
 
 # 已完成工作
 
@@ -52,4 +53,9 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - tests/port/rawkv-rawkv_test-minimal：从 Go `client-go/rawkv/rawkv_test.go` 挑选可迁移纯逻辑子集，落到 Rust mock/unit tests
   - 完成：补 raw CF 透传/隔离单测；将 raw `Client::{with_cf,with_backoff,with_atomic_for_cas}` 下放到泛型 impl，便于 `Client<MockPdClient>` 使用；更新 Go tests mapping（rawkv 从 N/A -> partial）
   - 验证：`make all`
+  - 文件：`src/raw/client.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+
+- tests/port/rawkv-store-addr-update：补齐 Go `client-go/rawkv/rawkv_test.go` 的 store addr swap / StoreNotMatch->reload->retry 可迁移语义
+  - 完成：新增 RawClient 单测 `test_store_not_match_reloads_store_addr_and_retries`（模拟 PD store addr 更新 + client-side store cache 失效；先 StoreNotMatch，再 invalidate_store_cache 后用新 addr 重试成功）；更新 mapping notes
+  - 验证：`make check` + `make unit-test`
   - 文件：`src/raw/client.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`

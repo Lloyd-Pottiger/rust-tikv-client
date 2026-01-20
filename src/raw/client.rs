@@ -1102,6 +1102,7 @@ struct ScanInnerArgs {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -1109,10 +1110,121 @@ mod tests {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::errorpb;
+    use crate::proto::keyspacepb;
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
     use crate::Result;
+    use async_trait::async_trait;
+    use tokio::sync::Mutex;
     use tonic::Status;
+
+    #[derive(Clone)]
+    struct StoreAddrPdClient {
+        region: crate::region::RegionWithLeader,
+        store_cache: Arc<Mutex<HashMap<crate::region::StoreId, String>>>,
+        pd_stores: Arc<Mutex<HashMap<crate::region::StoreId, String>>>,
+        addr_clients: Arc<Mutex<HashMap<String, MockKvClient>>>,
+        invalidated_stores: Arc<AtomicUsize>,
+    }
+
+    impl StoreAddrPdClient {
+        async fn store_address(&self, store_id: crate::region::StoreId) -> Result<String> {
+            if let Some(addr) = self.store_cache.lock().await.get(&store_id).cloned() {
+                return Ok(addr);
+            }
+
+            let addr = self
+                .pd_stores
+                .lock()
+                .await
+                .get(&store_id)
+                .cloned()
+                .ok_or_else(|| crate::internal_err!("missing store in PD store map"))?;
+            self.store_cache.lock().await.insert(store_id, addr.clone());
+            Ok(addr)
+        }
+    }
+
+    #[async_trait]
+    impl PdClient for StoreAddrPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            region: crate::region::RegionWithLeader,
+        ) -> Result<RegionStore> {
+            let store_id = region.get_store_id()?;
+            let addr = self.store_address(store_id).await?;
+            let kv = self
+                .addr_clients
+                .lock()
+                .await
+                .get(&addr)
+                .cloned()
+                .ok_or_else(|| crate::internal_err!("missing kv client for addr={}", addr))?;
+            Ok(RegionStore::new(region, Arc::new(kv)))
+        }
+
+        async fn region_for_key(&self, _key: &Key) -> Result<crate::region::RegionWithLeader> {
+            Ok(self.region.clone())
+        }
+
+        async fn region_for_id(
+            &self,
+            id: crate::region::RegionId,
+        ) -> Result<crate::region::RegionWithLeader> {
+            if id == self.region.id() {
+                Ok(self.region.clone())
+            } else {
+                Err(crate::Error::RegionNotFoundInResponse { region_id: id })
+            }
+        }
+
+        async fn all_stores(&self) -> Result<Vec<crate::store::Store>> {
+            let clients = self.addr_clients.lock().await;
+            Ok(clients
+                .values()
+                .cloned()
+                .map(|kv| crate::store::Store::new(Arc::new(kv)))
+                .collect())
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<crate::Timestamp> {
+            Ok(crate::Timestamp::default())
+        }
+
+        async fn get_min_ts(self: Arc<Self>) -> Result<crate::Timestamp> {
+            Ok(crate::Timestamp::default())
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Ok(keyspacepb::KeyspaceMeta {
+                id: 0,
+                name: keyspace.to_owned(),
+                state: keyspacepb::KeyspaceState::Enabled as i32,
+                ..Default::default()
+            })
+        }
+
+        async fn update_leader(
+            &self,
+            _ver_id: crate::region::RegionVerId,
+            _leader: metapb::Peer,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: crate::region::RegionVerId) {}
+
+        async fn invalidate_store_cache(&self, store_id: crate::region::StoreId) {
+            self.invalidated_stores.fetch_add(1, Ordering::SeqCst);
+            self.store_cache.lock().await.remove(&store_id);
+        }
+    }
 
     #[test]
     fn test_cluster_id_accessor() {
@@ -1813,6 +1925,222 @@ mod tests {
             .delete_range(vec![2_u8]..vec![2_u8])
             .await
             .expect("empty delete_range should be ok");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_store_not_match_reloads_store_addr_and_retries() -> Result<()> {
+        use std::sync::Mutex as StdMutex;
+
+        fn peer_store_id(req: &kvrpcpb::Context) -> u64 {
+            req.peer.as_ref().expect("peer should be set").store_id
+        }
+
+        let store1_calls = Arc::new(AtomicUsize::new(0));
+        let store2_calls = Arc::new(AtomicUsize::new(0));
+
+        let store1_data = Arc::new(StdMutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+        let store1_data_for_hook = store1_data.clone();
+        let store1 = MockKvClient::with_dispatch_hook({
+            let store1_calls = store1_calls.clone();
+            move |req: &dyn Any| {
+                store1_calls.fetch_add(1, Ordering::SeqCst);
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawPutRequest>() {
+                    let ctx = req.context.as_ref().expect("context should be set");
+                    let request_store_id = peer_store_id(ctx);
+                    if request_store_id != 1 {
+                        return Ok(Box::new(kvrpcpb::RawPutResponse {
+                            region_error: Some(errorpb::Error {
+                                store_not_match: Some(errorpb::StoreNotMatch {
+                                    request_store_id,
+                                    actual_store_id: 1,
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+
+                    store1_data_for_hook
+                        .lock()
+                        .unwrap()
+                        .insert(req.key.clone(), req.value.clone());
+                    return Ok(Box::new(kvrpcpb::RawPutResponse::default()));
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() {
+                    let ctx = req.context.as_ref().expect("context should be set");
+                    let request_store_id = peer_store_id(ctx);
+                    if request_store_id != 1 {
+                        return Ok(Box::new(kvrpcpb::RawGetResponse {
+                            region_error: Some(errorpb::Error {
+                                store_not_match: Some(errorpb::StoreNotMatch {
+                                    request_store_id,
+                                    actual_store_id: 1,
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+
+                    let value = store1_data_for_hook.lock().unwrap().get(&req.key).cloned();
+                    return Ok(Box::new(match value {
+                        Some(value) => kvrpcpb::RawGetResponse {
+                            not_found: false,
+                            value,
+                            ..Default::default()
+                        },
+                        None => kvrpcpb::RawGetResponse {
+                            not_found: true,
+                            ..Default::default()
+                        },
+                    }));
+                }
+
+                Err(crate::internal_err!("unexpected request type"))
+            }
+        });
+
+        let store2 = MockKvClient::with_dispatch_hook({
+            let store2_calls = store2_calls.clone();
+            move |req: &dyn Any| {
+                store2_calls.fetch_add(1, Ordering::SeqCst);
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawPutRequest>() {
+                    let ctx = req.context.as_ref().expect("context should be set");
+                    let request_store_id = peer_store_id(ctx);
+                    if request_store_id != 2 {
+                        return Ok(Box::new(kvrpcpb::RawPutResponse {
+                            region_error: Some(errorpb::Error {
+                                store_not_match: Some(errorpb::StoreNotMatch {
+                                    request_store_id,
+                                    actual_store_id: 2,
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+
+                    return Ok(Box::new(kvrpcpb::RawPutResponse::default()));
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() {
+                    let ctx = req.context.as_ref().expect("context should be set");
+                    let request_store_id = peer_store_id(ctx);
+                    if request_store_id != 2 {
+                        return Ok(Box::new(kvrpcpb::RawGetResponse {
+                            region_error: Some(errorpb::Error {
+                                store_not_match: Some(errorpb::StoreNotMatch {
+                                    request_store_id,
+                                    actual_store_id: 2,
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+
+                    return Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }));
+                }
+
+                Err(crate::internal_err!("unexpected request type"))
+            }
+        });
+
+        let region = crate::region::RegionWithLeader {
+            region: metapb::Region {
+                id: 1,
+                start_key: vec![],
+                end_key: vec![],
+                region_epoch: Some(metapb::RegionEpoch {
+                    conf_ver: 0,
+                    version: 0,
+                }),
+                peers: vec![
+                    metapb::Peer {
+                        id: 11,
+                        store_id: 1,
+                        ..Default::default()
+                    },
+                    metapb::Peer {
+                        id: 12,
+                        store_id: 2,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            leader: Some(metapb::Peer {
+                id: 11,
+                store_id: 1,
+                ..Default::default()
+            }),
+        };
+
+        let store_cache = Arc::new(Mutex::new(HashMap::from([
+            (1, "store1".to_owned()),
+            (2, "store2".to_owned()),
+        ])));
+        let pd_stores = Arc::new(Mutex::new(HashMap::from([
+            (1, "store1".to_owned()),
+            (2, "store2".to_owned()),
+        ])));
+        let addr_clients = Arc::new(Mutex::new(HashMap::from([
+            ("store1".to_owned(), store1.clone()),
+            ("store2".to_owned(), store2.clone()),
+        ])));
+        let invalidated_stores = Arc::new(AtomicUsize::new(0));
+
+        let pd_client = Arc::new(StoreAddrPdClient {
+            region,
+            store_cache: store_cache.clone(),
+            pd_stores: pd_stores.clone(),
+            addr_clients: addr_clients.clone(),
+            invalidated_stores: invalidated_stores.clone(),
+        });
+
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: Backoff::no_backoff(),
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let key = vec![b'k'];
+        let value = vec![b'v'];
+        client.put(key.clone(), value.clone()).await?;
+
+        // Simulate store1/store2 address swap in PD (but keep a stale client-side store cache).
+        pd_stores.lock().await.insert(1, "store2".to_owned());
+        pd_stores.lock().await.insert(2, "store1".to_owned());
+        addr_clients
+            .lock()
+            .await
+            .insert("store1".to_owned(), store2.clone());
+        addr_clients
+            .lock()
+            .await
+            .insert("store2".to_owned(), store1.clone());
+
+        assert_eq!(client.get(key).await?, Some(value));
+        assert_eq!(store1_calls.load(Ordering::SeqCst), 2); // put + retry get
+        assert_eq!(store2_calls.load(Ordering::SeqCst), 1); // store-not-match get attempt
+        assert_eq!(invalidated_stores.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store_cache.lock().await.get(&1).map(String::as_str),
+            Some("store2"),
+            "client should refresh store addr after store-not-match"
+        );
+
         Ok(())
     }
 
