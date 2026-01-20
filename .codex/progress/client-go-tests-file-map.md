@@ -106,5 +106,5 @@
 | `client-go/util/async/runloop_test.go` | n/a | 同上 |
 | `client-go/util/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/util/misc_test.go` | covered | `src/util/gc_time.rs` + `src/util/time_detail.rs` |
-| `client-go/util/rate_limit_test.go` | n/a | Go channel limiter；Rust 无对应 util |
-| `client-go/util/request_source_test.go` | n/a | Go `context.Context` key/request_source builder；Rust 无对应抽象 |
+| `client-go/util/rate_limit_test.go` | covered | Rust 侧等价 token limiter + 单测：`src/util/rate_limit.rs` |
+| `client-go/util/request_source_test.go` | covered | Rust 侧等价 RequestSource builder + 单测：`src/util/request_source.rs` |

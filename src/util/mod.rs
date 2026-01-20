@@ -3,4 +3,8 @@
 #[cfg(test)]
 mod gc_time;
 pub mod iter;
+#[cfg(any(test, feature = "test-util"))]
+mod rate_limit;
+#[cfg(any(test, feature = "test-util"))]
+mod request_source;
 mod time_detail;
