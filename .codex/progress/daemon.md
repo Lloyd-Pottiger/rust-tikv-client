@@ -15,6 +15,16 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 待做工作
 
+- tests/port-client-go-internal-client-suite：处理 `client-go/internal/client/*_test.go`（batch-client/conn-pool/priority-queue 等）在 Rust 侧的等价覆盖或明确 N/A
+  - 实施：逐文件对照测试目的；能用 Rust 现有架构覆盖的补单测；纯 Go/batch-client 架构差异的标注 N/A（并在 mapping 里说明原因）
+  - 验证：`cargo test`
+  - 文件：`src/request/*`，`src/store/*`（如需），`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`
+
+- tests/port-client-go-integration-missing-cases：对照 `client-go/integration_tests/*.go`，补齐 Rust `tests/integration_tests.rs` 缺失的 E2E 语义（优先小而关键的）
+  - 实施：逐文件 diff；能用现有 public API 覆盖的补集成用例；无法覆盖的明确原因（例如缺少对应 public API）
+  - 验证：`cargo test --features integration-tests --no-run`；cluster ready 时跑 `make integration-test-if-ready`
+  - 文件：`tests/integration_tests.rs`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`
+
 # 已完成工作
 
 - tests/port-client-go-core-suite：迁移 client-go 可迁移单测语义（kv/options+ValueEntry，lock resolver cache，backoff/backoffer，keyspace codec，gc time，oracle，core request/retry/resource-control 等）
@@ -42,3 +52,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 - infra/update-test-mapping：更新 go tests 覆盖映射（fast-retry/pending-backoff 已补）
   - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`
+
+- infra/full-test-file-mapping：把 client-go 101 个 `_test.go` 文件逐一映射到 Rust 覆盖点（或标注 N/A），形成可持续维护的清单
+  - 关键：新增逐文件清单 `.codex/progress/client-go-tests-file-map.md`（101 rows；covered/partial/n-a + notes），并在 `client-go-tests-port.md` 标注其为 source-of-truth
+  - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`

@@ -7,6 +7,9 @@
 - `func Test*` cases: ~294
 - Top dirs by test-file count: `internal/` (38), `integration_tests/` (32), `util/` (6), `config/` (5), `tikvrpc/` (4), `oracle/` (4)
 
+## File-Level Map (Source Of Truth)
+逐文件（101 个 `_test.go`）的覆盖/归因清单见：`.codex/progress/client-go-tests-file-map.md`
+
 ## Out-Of-Scope (Skip; Rust Has No Equivalent Abstraction)
 - `client-go/util/request_source*_test.go`: Go-style `context.Context` keys/RequestSource struct/BuildRequestSource (parity checklist already标注 N/A)
 - `client-go/util/async/*_test.go`: Go-specific runloop/goroutine utilities
