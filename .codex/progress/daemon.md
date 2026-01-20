@@ -45,3 +45,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：mockstore harness N/A，但 raw CRUD/batch/scan + txn scan/reverse 多 region 语义由 Rust E2E + unit tests 覆盖
   - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/daemon.md`
   - 验证：`make all`
+
+- quality/coverage-80：验证 `make coverage` lines>=80%（生成 html 报告）
+  - 关键：当前覆盖率阈值通过（`COVERAGE_FAIL_UNDER=80`）；报告输出到 `target/llvm-cov/html/index.html`
+  - 文件：`.codex/progress/daemon.md`
+  - 验证：`make coverage`
