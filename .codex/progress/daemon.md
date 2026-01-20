@@ -40,3 +40,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：batch cmd unimplemented（如 Empty）必须 fallback unary；其余 conn-pool/forward/metadata/trace 等 Go-only 细节 N/A
   - 文件：`src/store/client.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
   - 验证：`make check` + `make unit-test` + `make all`
+
+- tests/port/integration-mock-scan-raw：收敛 Go mockstore 集成用例（raw/txn scan）到 Rust real-cluster E2E 覆盖
+  - 关键：mockstore harness N/A，但 raw CRUD/batch/scan + txn scan/reverse 多 region 语义由 Rust E2E + unit tests 覆盖
+  - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/daemon.md`
+  - 验证：`make all`

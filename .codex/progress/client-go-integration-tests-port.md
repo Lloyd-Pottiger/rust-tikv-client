@@ -26,12 +26,12 @@ Rust 侧集成测试集中在：
 | `integration_tests/prewrite_test.go` | `src/transaction/transaction.rs` 单测 + 多个 txn E2E 用例 | prewrite/commit 请求构造与重试 |
 | `integration_tests/range_task_test.go` | `src/request/*`（plan/shard 单测） | Go RangeTask 抽象 Rust 侧对应 plan/shard；以单测验证拆分/合并/重试 |
 | `integration_tests/raw/api_test.go` | `tests/integration_tests.rs` `raw_req`/`raw_write_million`/`raw_large_batch_put`/`raw_ttl`/`raw_checksum`/`raw_cas` | raw CRUD/scan/ttl/checksum/cas |
-| `integration_tests/raw/api_mock_test.go` | N/A | Go 使用 mockstore；Rust 选择 real-cluster E2E + unit-test mocks |
+| `integration_tests/raw/api_mock_test.go` | `tests/integration_tests.rs` `raw_req` + `src/raw/client.rs`（unit tests） | Go mockstore harness N/A；raw CRUD/batch/scan/multi-region 语义由 Rust E2E+单测覆盖 |
 | `integration_tests/raw/util_test.go` | `src/kv/bound_range.rs` 单测 | range/`\\0` 语义 |
 | `integration_tests/resource_group_test.go` | `tests/integration_tests.rs` `txn_snapshot_api_and_request_context` | resource group name/tag/penalty/override priority |
 | `integration_tests/resource_tag_test.go` | 同上 | tagger/interceptor 组合 |
 | `integration_tests/safepoint_test.go` | `tests/integration_tests.rs` `txn_update_safepoint` | safepoint 更新 |
-| `integration_tests/scan_mock_test.go` | N/A | Go mock 扫描；Rust 用 real-cluster scan + 单测覆盖 range 语义 |
+| `integration_tests/scan_mock_test.go` | `tests/integration_tests.rs` `txn_scan`/`txn_scan_reverse`/`txn_scan_reverse_multi_regions` | Go mock 扫描 harness N/A；以 real-cluster E2E 覆盖多 region 扫描语义 |
 | `integration_tests/scan_test.go` | `tests/integration_tests.rs` `txn_scan*` + raw scan 覆盖 | scan/scan_reverse 多 region |
 | `integration_tests/snapshot_fail_test.go` | `tests/failpoint_tests.rs` | snapshot/commit 失败路径 |
 | `integration_tests/snapshot_test.go` | `tests/integration_tests.rs` `txn_snapshot_api_and_request_context`/`txn_pessimistic_snapshot_checks_locks` | snapshot 语义 |

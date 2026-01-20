@@ -31,13 +31,13 @@
 | `client-go/integration_tests/pipelined_memdb_test.go` | covered | `tests/integration_tests.rs` `txn_pipelined_flush` + `src/transaction/transaction.rs` 单测 |
 | `client-go/integration_tests/prewrite_test.go` | covered | `src/transaction/transaction.rs` 单测 + txn E2E 用例 |
 | `client-go/integration_tests/range_task_test.go` | covered | `src/request/*`（plan/shard 单测） |
-| `client-go/integration_tests/raw/api_mock_test.go` | n/a | Go mockstore；Rust 选择 real-cluster E2E + unit-test mocks |
+| `client-go/integration_tests/raw/api_mock_test.go` | covered | Go mockstore harness N/A；等价 raw CRUD/batch/scan/region-split 语义由 Rust E2E+单测覆盖：`tests/integration_tests.rs`（`raw_req`/`raw_*`）+ `src/raw/client.rs`（key->region split/重试单测）+ `src/raw/requests.rs`（scan/checksum 单测） |
 | `client-go/integration_tests/raw/api_test.go` | covered | `tests/integration_tests.rs` `raw_req`/`raw_write_million`/`raw_large_batch_put`/`raw_ttl`/`raw_checksum`/`raw_cas` |
 | `client-go/integration_tests/raw/util_test.go` | covered | `src/kv/bound_range.rs` 单测 |
 | `client-go/integration_tests/resource_group_test.go` | covered | `tests/integration_tests.rs` `txn_snapshot_api_and_request_context` |
 | `client-go/integration_tests/resource_tag_test.go` | covered | 同上 |
 | `client-go/integration_tests/safepoint_test.go` | covered | `tests/integration_tests.rs` `txn_update_safepoint` |
-| `client-go/integration_tests/scan_mock_test.go` | n/a | Go mock 扫描；Rust 用 real-cluster scan + 单测覆盖 range 语义 |
+| `client-go/integration_tests/scan_mock_test.go` | covered | Go mock 扫描 harness N/A；等价 txn scan/reverse 多 region 语义由 Rust E2E 覆盖：`tests/integration_tests.rs`（`txn_scan`/`txn_scan_reverse`/`txn_scan_reverse_multi_regions`） |
 | `client-go/integration_tests/scan_test.go` | covered | `tests/integration_tests.rs` `txn_scan*` + raw scan 覆盖 |
 | `client-go/integration_tests/snapshot_fail_test.go` | covered | `tests/failpoint_tests.rs` |
 | `client-go/integration_tests/snapshot_test.go` | covered | `tests/integration_tests.rs` `txn_snapshot_api_and_request_context`/`txn_pessimistic_snapshot_checks_locks` |
