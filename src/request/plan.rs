@@ -1737,7 +1737,7 @@ mod test {
                 Ok(Box::new(kvrpcpb::RawGetResponse {
                     not_found: true,
                     ..Default::default()
-                }) as Box<dyn Any>)
+                }) as Box<dyn Any + Send>)
             },
         )));
 
@@ -1802,7 +1802,7 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     1 => Ok(Box::new(kvrpcpb::RawGetResponse {
                         region_error: Some(errorpb::Error {
                             not_leader: Some(errorpb::NotLeader {
@@ -1817,11 +1817,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -1883,11 +1883,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -1954,11 +1954,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2008,11 +2008,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2067,11 +2067,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2122,11 +2122,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2179,11 +2179,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2231,7 +2231,7 @@ mod test {
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2279,7 +2279,7 @@ mod test {
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2339,11 +2339,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2408,11 +2408,11 @@ mod test {
                     0 => Ok(Box::new(kvrpcpb::RawGetResponse {
                         region_error: Some(region_error_for_hook.clone()),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2500,11 +2500,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2579,11 +2579,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2657,11 +2657,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2725,11 +2725,11 @@ mod test {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                     _ => Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>),
+                    }) as Box<dyn Any + Send>),
                 }
             },
         )));
@@ -2911,7 +2911,7 @@ mod test {
                 Ok(Box::new(kvrpcpb::RawGetResponse {
                     not_found: true,
                     ..Default::default()
-                }) as Box<dyn Any>)
+                }) as Box<dyn Any + Send>)
             },
         )));
 

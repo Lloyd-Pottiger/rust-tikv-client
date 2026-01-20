@@ -21,7 +21,7 @@
 | `client-go/integration_tests/client_fp_test.go` | covered | `tests/failpoint_tests.rs` |
 | `client-go/integration_tests/delete_range_test.go` | covered | `tests/integration_tests.rs` `raw_delete_range` |
 | `client-go/integration_tests/gc_test.go` | covered | `tests/integration_tests.rs` `txn_update_safepoint` |
-| `client-go/integration_tests/health_feedback_test.go` | n/a | Go batch-client health feedback；Rust 无 BatchCommands stream（仅保留等价语义测试） |
+| `client-go/integration_tests/health_feedback_test.go` | covered | Rust `BatchCommands` stream + `StoreHealthMap`；E2E：`tests/integration_tests.rs` `raw_get_health_feedback` |
 | `client-go/integration_tests/interceptor_test.go` | covered | `tests/integration_tests.rs` `txn_snapshot_api_and_request_context` |
 | `client-go/integration_tests/isolation_test.go` | covered | `tests/integration_tests.rs` `txn_read`/`txn_snapshot*` |
 | `client-go/integration_tests/lock_test.go` | covered | `tests/integration_tests.rs` `txn_lock_keys*`/`txn_get_for_update` + `tests/failpoint_tests.rs` |
@@ -90,7 +90,7 @@
 | `client-go/oracle/oracles/local_test.go` | covered | `src/timestamp/local_oracle.rs` |
 | `client-go/oracle/oracles/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/oracle/oracles/pd_test.go` | covered | `src/pd/low_resolution_ts.rs` + `src/pd/stale_timestamp.rs` + `src/pd/read_ts_validation.rs` |
-| `client-go/rawkv/rawkv_test.go` | n/a | 强依赖 mocktikv cluster；Rust 用 `tests/integration_tests.rs` 覆盖 raw E2E |
+| `client-go/rawkv/rawkv_test.go` | n/a | 强依赖 mocktikv cluster；Rust 用 real-cluster E2E + unit-test mocks 覆盖可迁移语义（raw cas/checksum/batch_get sharding）：`tests/integration_tests.rs` + `src/raw/client.rs` |
 | `client-go/tikv/kv_test.go` | n/a | Go mocktikv parts（Rust 无 1:1） |
 | `client-go/tikv/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/tikvrpc/interceptor/interceptor_test.go` | covered | `src/interceptor.rs` |

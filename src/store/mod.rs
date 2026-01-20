@@ -1,7 +1,9 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod batch_commands;
 mod client;
 mod errors;
+mod health;
 mod request;
 
 use std::cmp::max;
@@ -19,6 +21,7 @@ pub use self::errors::HasKeyErrors;
 pub use self::errors::HasRegionError;
 pub use self::errors::HasRegionErrors;
 pub use self::errors::SetRegionError;
+pub(crate) use self::health::StoreHealthMap;
 pub use self::request::Request;
 use crate::interceptor::ReplicaKind;
 use crate::interceptor::RpcContextInfo;
@@ -172,7 +175,7 @@ mod tests {
             &self,
             _client: &TikvClient<Channel>,
             _timeout: Duration,
-        ) -> Result<Box<dyn Any>> {
+        ) -> Result<Box<dyn Any + Send>> {
             unreachable!("dispatch not used in RegionStore::apply_to_request tests");
         }
 

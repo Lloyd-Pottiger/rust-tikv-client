@@ -495,6 +495,30 @@ async fn raw_client_new_and_with_cf_smoke() -> Result<()> {
 
 #[tokio::test]
 #[serial]
+async fn raw_get_health_feedback() -> Result<()> {
+    init().await?;
+    let client = RawClient::new(pd_addrs()).await?;
+
+    for _ in 0..3 {
+        let resp = client.__test_get_health_feedback().await?;
+        let feedback = resp
+            .health_feedback
+            .expect("GetHealthFeedbackResponse must include health_feedback");
+        assert_ne!(feedback.feedback_seq_no, 0);
+        assert_ne!(feedback.store_id, 0);
+        assert_eq!(feedback.slow_score, 1);
+
+        assert_eq!(
+            client.__test_tikv_side_slow_score(feedback.store_id),
+            Some(1)
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn txn_read() -> Result<()> {
     const NUM_BITS_TXN: u32 = 4;
     const NUM_BITS_KEY_PER_TXN: u32 = 4;

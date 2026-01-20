@@ -583,7 +583,7 @@ impl Request for RawCoprocessorRequest {
         &self,
         client: &TikvClient<Channel>,
         timeout: Duration,
-    ) -> Result<Box<dyn Any>> {
+    ) -> Result<Box<dyn Any + Send>> {
         self.inner.dispatch(client, timeout).await
     }
 
@@ -801,7 +801,7 @@ mod test {
                     resp.kvs.push(kv);
                 }
 
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp))
             },
         )));
 
@@ -865,7 +865,7 @@ mod test {
                 let ttls = req.ttls.clone();
                 fut_actual_map.lock().unwrap().insert(kv_pair, ttls);
                 let resp = kvrpcpb::RawBatchPutResponse::default();
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp))
             },
         )));
 

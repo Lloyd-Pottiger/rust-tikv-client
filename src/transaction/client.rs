@@ -585,16 +585,14 @@ mod tests {
             move |req: &dyn Any| {
                 if req.downcast_ref::<kvrpcpb::ScanLockRequest>().is_some() {
                     scan_lock_calls_for_hook.fetch_add(1, Ordering::SeqCst);
-                    return Ok(Box::new(kvrpcpb::ScanLockResponse::default()) as Box<dyn Any>);
+                    return Ok(Box::new(kvrpcpb::ScanLockResponse::default()));
                 }
                 if req
                     .downcast_ref::<kvrpcpb::UnsafeDestroyRangeRequest>()
                     .is_some()
                 {
                     destroy_calls_for_hook.fetch_add(1, Ordering::SeqCst);
-                    return Ok(
-                        Box::new(kvrpcpb::UnsafeDestroyRangeResponse::default()) as Box<dyn Any>
-                    );
+                    return Ok(Box::new(kvrpcpb::UnsafeDestroyRangeResponse::default()));
                 }
                 unreachable!("unexpected request type");
             },

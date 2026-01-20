@@ -37,7 +37,7 @@ pub async fn pd_rpc_client() -> crate::pd::PdRpcClient<MockKvConnect, MockCluste
     let config = crate::Config::default();
     crate::pd::PdRpcClient::new(
         config.clone(),
-        |_| MockKvConnect,
+        |_, _| MockKvConnect,
         |sm| {
             futures::future::ok(crate::pd::RetryClient::new_with_cluster(
                 sm,
@@ -56,18 +56,38 @@ pub async fn pd_rpc_client() -> crate::pd::PdRpcClient<MockKvConnect, MockCluste
 #[derive(new, Default, Clone)]
 pub struct MockKvClient {
     pub addr: String,
-    dispatch: Option<Arc<dyn Fn(&dyn Any) -> Result<Box<dyn Any>> + Send + Sync + 'static>>,
+    dispatch: Option<Arc<dyn Fn(&dyn Any) -> Result<Box<dyn Any + Send>> + Send + Sync + 'static>>,
 }
 
 impl MockKvClient {
     pub fn with_dispatch_hook<F>(dispatch: F) -> MockKvClient
     where
-        F: Fn(&dyn Any) -> Result<Box<dyn Any>> + Send + Sync + 'static,
+        F: Fn(&dyn Any) -> Result<Box<dyn Any + Send>> + Send + Sync + 'static,
     {
         MockKvClient {
             addr: String::new(),
             dispatch: Some(Arc::new(dispatch)),
         }
+    }
+
+    /// Create a `MockKvClient` with a typed dispatch hook.
+    ///
+    /// This is a convenience wrapper for tests that only need to handle a single request type.
+    /// The hook receives a `&Req` and returns a typed `Resp`, which will be boxed and returned from
+    /// [`KvClient::dispatch`].
+    pub fn with_typed_dispatch_hook<Req, Resp, F>(dispatch: F) -> MockKvClient
+    where
+        Req: Any + 'static,
+        Resp: Any + Send + 'static,
+        F: Fn(&Req) -> Result<Resp> + Send + Sync + 'static,
+    {
+        Self::with_dispatch_hook(move |req: &dyn Any| {
+            let req = req
+                .downcast_ref::<Req>()
+                .ok_or_else(|| crate::internal_err!("unexpected request type"))?;
+            let resp = dispatch(req)?;
+            Ok(Box::new(resp))
+        })
     }
 }
 
@@ -84,7 +104,7 @@ pub struct MockPdClient {
 
 #[async_trait]
 impl KvClient for MockKvClient {
-    async fn dispatch(&self, req: &dyn Request) -> Result<Box<dyn Any>> {
+    async fn dispatch(&self, req: &dyn Request) -> Result<Box<dyn Any + Send>> {
         match &self.dispatch {
             Some(f) => f(req.as_any()),
             None => panic!("no dispatch hook set"),

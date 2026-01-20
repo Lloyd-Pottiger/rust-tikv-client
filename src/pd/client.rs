@@ -25,6 +25,7 @@ use crate::region::StoreId;
 use crate::region_cache::RegionCache;
 use crate::store::KvConnect;
 use crate::store::RegionStore;
+use crate::store::StoreHealthMap;
 use crate::store::TikvConnect;
 use crate::store::{KvClient, Store};
 use crate::BoundRange;
@@ -56,6 +57,10 @@ type KvClientCache<KvC> = Arc<RwLock<HashMap<String, Arc<OnceCell<<KvC as KvConn
 #[async_trait]
 pub trait PdClient: Send + Sync + 'static {
     type KvClient: KvClient + Send + Sync + 'static;
+
+    fn store_health(&self) -> crate::store::StoreHealthMap {
+        crate::store::StoreHealthMap::default()
+    }
 
     /// In transactional API, `region` is decoded (keys in raw format).
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore>;
@@ -223,6 +228,7 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     pd: Arc<RetryClient<Cl>>,
     kv_connect: KvC,
     kv_client_cache: KvClientCache<KvC>,
+    store_health: StoreHealthMap,
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
 }
@@ -230,6 +236,10 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
 #[async_trait]
 impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     type KvClient = KvC::KvClient;
+
+    fn store_health(&self) -> StoreHealthMap {
+        self.store_health.clone()
+    }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
         let store_id = region.get_store_id()?;
@@ -302,7 +312,9 @@ impl PdRpcClient<TikvConnect, Cluster> {
     ) -> Result<PdRpcClient> {
         PdRpcClient::new(
             config.clone(),
-            |security_mgr| TikvConnect::new(security_mgr, config.timeout),
+            |security_mgr, store_health| {
+                TikvConnect::new(security_mgr, config.timeout, store_health)
+            },
             |security_mgr| {
                 RetryClient::connect(pd_endpoints, security_mgr, config.timeout, config.pd_retry)
             },
@@ -325,7 +337,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
     ) -> Result<PdRpcClient<KvC, Cl>>
     where
         PdFut: Future<Output = Result<RetryClient<Cl>>>,
-        MakeKvC: FnOnce(Arc<SecurityManager>) -> KvC,
+        MakeKvC: FnOnce(Arc<SecurityManager>, StoreHealthMap) -> KvC,
         MakePd: FnOnce(Arc<SecurityManager>) -> PdFut,
     {
         let security_mgr = Arc::new(
@@ -339,11 +351,13 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         );
 
         let pd = Arc::new(pd(security_mgr.clone()).await?);
+        let store_health = StoreHealthMap::default();
         let kv_client_cache = Default::default();
         Ok(PdRpcClient {
             pd: pd.clone(),
             kv_client_cache,
-            kv_connect: kv_connect(security_mgr),
+            kv_connect: kv_connect(security_mgr, store_health.clone()),
+            store_health,
             enable_codec,
             region_cache: RegionCache::new_with_ttl(
                 pd,
@@ -448,7 +462,7 @@ pub mod test {
 
         let client = PdRpcClient::new(
             config.clone(),
-            |_| connect.clone(),
+            |_, _| connect.clone(),
             |sm| {
                 futures::future::ok(crate::pd::RetryClient::new_with_cluster(
                     sm,

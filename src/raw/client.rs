@@ -1079,6 +1079,34 @@ impl<PdC: PdClient> Client<PdC> {
     }
 }
 
+#[cfg(feature = "integration-tests")]
+impl<PdC: PdClient> Client<PdC> {
+    /// Issue a `GetHealthFeedback` request through the batch RPC stream (test-only).
+    #[doc(hidden)]
+    pub async fn __test_get_health_feedback(
+        &self,
+    ) -> Result<crate::proto::kvrpcpb::GetHealthFeedbackResponse> {
+        let key: Key = Vec::new().into();
+        let store = self.rpc.clone().store_for_key(&key).await?;
+
+        let mut request = crate::proto::kvrpcpb::GetHealthFeedbackRequest::default();
+        crate::store::Request::set_api_version(&mut request, self.keyspace.api_version());
+        let request = self.request_context.apply_to(request);
+
+        let resp = store.client.dispatch(&request).await?;
+        let resp = resp
+            .downcast::<crate::proto::kvrpcpb::GetHealthFeedbackResponse>()
+            .map_err(|_| crate::internal_err!("unexpected GetHealthFeedbackResponse type"))?;
+        Ok(*resp)
+    }
+
+    /// Read the latest TiKV-side slow score recorded from `BatchCommandsResponse.health_feedback`.
+    #[doc(hidden)]
+    pub fn __test_tikv_side_slow_score(&self, store_id: crate::region::StoreId) -> Option<i32> {
+        self.rpc.store_health().tikv_side_slow_score(store_id)
+    }
+}
+
 #[derive(Clone)]
 struct ScanInnerArgs {
     start_key: Key,
@@ -1133,7 +1161,7 @@ mod tests {
                     Ok(Box::new(kvrpcpb::RawGetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>)
+                    }))
                 } else {
                     unreachable!("unexpected request type: {:?}", req.type_id());
                 }
@@ -1162,7 +1190,7 @@ mod tests {
                     let resp = kvrpcpb::RawBatchPutResponse {
                         ..Default::default()
                     };
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp))
                 } else {
                     unreachable!()
                 }
@@ -1197,7 +1225,7 @@ mod tests {
                         data: req.data.clone(),
                         ..Default::default()
                     };
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp))
                 } else {
                     unreachable!()
                 }
@@ -1266,7 +1294,7 @@ mod tests {
                         not_found: true,
                         ..Default::default()
                     };
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp))
                 } else {
                     unreachable!()
                 }
@@ -1351,7 +1379,7 @@ mod tests {
                 Ok(Box::new(kvrpcpb::RawScanResponse {
                     kvs,
                     ..Default::default()
-                }) as Box<dyn Any>)
+                }))
             },
         )));
         let client = Client {
@@ -1446,7 +1474,7 @@ mod tests {
                 Ok(Box::new(kvrpcpb::RawGetResponse {
                     not_found: true,
                     ..Default::default()
-                }) as Box<dyn Any>)
+                }))
             },
         )));
 
@@ -1546,6 +1574,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_checksum_merges_per_region_checksums_and_totals() -> Result<()> {
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls_for_hook = dispatch_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_typed_dispatch_hook(
+            move |req: &kvrpcpb::RawChecksumRequest| {
+                dispatch_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+
+                assert_eq!(req.algorithm, kvrpcpb::ChecksumAlgorithm::Crc64Xor as i32);
+                assert_eq!(req.ranges.len(), 1);
+                let range = req.ranges.first().expect("range should be set");
+
+                let ctx = req.context.as_ref().expect("context should be set");
+                match ctx.region_id {
+                    1 => {
+                        assert_eq!(range.start_key, Vec::<u8>::new());
+                        assert_eq!(range.end_key, vec![10_u8]);
+                        Ok(kvrpcpb::RawChecksumResponse {
+                            checksum: 0x11,
+                            total_kvs: 1,
+                            total_bytes: 10,
+                            ..Default::default()
+                        })
+                    }
+                    2 => {
+                        assert_eq!(range.start_key, vec![10_u8]);
+                        assert_eq!(range.end_key, vec![250_u8, 250]);
+                        Ok(kvrpcpb::RawChecksumResponse {
+                            checksum: 0x22,
+                            total_kvs: 2,
+                            total_bytes: 20,
+                            ..Default::default()
+                        })
+                    }
+                    3 => {
+                        assert_eq!(range.start_key, vec![250_u8, 250]);
+                        assert_eq!(range.end_key, vec![251_u8, 251]);
+                        Ok(kvrpcpb::RawChecksumResponse {
+                            checksum: 0x44,
+                            total_kvs: 3,
+                            total_bytes: 30,
+                            ..Default::default()
+                        })
+                    }
+                    other => unreachable!("unexpected region_id: {}", other),
+                }
+            },
+        )));
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let checksum = client.checksum(Vec::<u8>::new()..vec![251_u8, 251]).await?;
+        assert_eq!(
+            checksum,
+            RawChecksum {
+                crc64_xor: 0x11 ^ 0x22 ^ 0x44,
+                total_kvs: 6,
+                total_bytes: 60,
+            }
+        );
+        assert_eq!(dispatch_calls.load(Ordering::SeqCst), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_checksum_encodes_range_keys_in_keyspace_mode() -> Result<()> {
+        let keyspace_id = 4242;
+
+        let expected_start: Vec<u8> = Key::from(vec![b'a'])
+            .encode_keyspace(Keyspace::Enable { keyspace_id }, KeyMode::Raw)
+            .into();
+        let expected_end: Vec<u8> = Key::from(vec![b'z'])
+            .encode_keyspace(Keyspace::Enable { keyspace_id }, KeyMode::Raw)
+            .into();
+
+        let expected_start_for_hook = expected_start.clone();
+        let expected_end_for_hook = expected_end.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_typed_dispatch_hook(
+            move |req: &kvrpcpb::RawChecksumRequest| {
+                assert_eq!(req.algorithm, kvrpcpb::ChecksumAlgorithm::Crc64Xor as i32);
+                assert_eq!(req.ranges.len(), 1);
+                let range = req.ranges.first().expect("range should be set");
+                assert_eq!(range.start_key, expected_start_for_hook);
+                assert_eq!(range.end_key, expected_end_for_hook);
+
+                Ok(kvrpcpb::RawChecksumResponse {
+                    checksum: 1,
+                    total_kvs: 2,
+                    total_bytes: 3,
+                    ..Default::default()
+                })
+            },
+        )));
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Enable { keyspace_id },
+            request_context: crate::RequestContext::default(),
+        };
+
+        let checksum = client.checksum(vec![b'a']..vec![b'z']).await?;
+        assert_eq!(
+            checksum,
+            RawChecksum {
+                crc64_xor: 1,
+                total_kvs: 2,
+                total_bytes: 3,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_compare_and_swap_requires_atomic_mode() {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
@@ -1579,7 +1729,7 @@ mod tests {
                     previous_not_exist: false,
                     previous_value: vec![7],
                     ..Default::default()
-                }) as Box<dyn Any>)
+                }))
             },
         )));
 
@@ -1598,6 +1748,173 @@ mod tests {
             .await?;
         assert_eq!(prev, Some(vec![7_u8]));
         assert!(swapped);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_swap_atomic_not_swapped_returns_previous_value() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_typed_dispatch_hook(
+            move |req: &kvrpcpb::RawCasRequest| {
+                assert!(!req.previous_not_exist);
+                assert_eq!(req.previous_value, vec![6_u8]);
+                Ok(kvrpcpb::RawCasResponse {
+                    succeed: false,
+                    previous_not_exist: false,
+                    previous_value: vec![7_u8],
+                    ..Default::default()
+                })
+            },
+        )));
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: true,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let (prev, swapped) = client
+            .compare_and_swap(vec![1_u8], Some(vec![6_u8]), vec![7_u8])
+            .await?;
+        assert_eq!(prev, Some(vec![7_u8]));
+        assert!(!swapped);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_swap_previous_none_sets_previous_not_exist() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_typed_dispatch_hook(
+            move |req: &kvrpcpb::RawCasRequest| {
+                assert!(req.previous_not_exist);
+                Ok(kvrpcpb::RawCasResponse {
+                    succeed: true,
+                    previous_not_exist: true,
+                    ..Default::default()
+                })
+            },
+        )));
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: true,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        let (prev, swapped) = client
+            .compare_and_swap(vec![1_u8], Option::<Vec<u8>>::None, vec![7_u8])
+            .await?;
+        assert_eq!(prev, None);
+        assert!(swapped);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_empty_range_returns_ok_without_rpc() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        // Empty range is a client-side no-op (TiKV would reject it).
+        client
+            .delete_range(vec![2_u8]..vec![2_u8])
+            .await
+            .expect("empty delete_range should be ok");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_sorts_and_splits_keys_by_region() -> Result<()> {
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls_for_hook = dispatch_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_typed_dispatch_hook(
+            move |req: &kvrpcpb::RawBatchGetRequest| {
+                dispatch_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.cf, ColumnFamily::Write.to_string());
+
+                let ctx = req.context.as_ref().expect("context should be set");
+                match ctx.region_id {
+                    1 => {
+                        assert_eq!(req.keys, vec![vec![1_u8], vec![2_u8]]);
+                        Ok(kvrpcpb::RawBatchGetResponse {
+                            pairs: vec![
+                                kvrpcpb::KvPair {
+                                    key: vec![1_u8],
+                                    value: vec![11_u8],
+                                    ..Default::default()
+                                },
+                                kvrpcpb::KvPair {
+                                    key: vec![2_u8],
+                                    value: vec![12_u8],
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        })
+                    }
+                    2 => {
+                        assert_eq!(req.keys, vec![vec![10_u8], vec![11_u8]]);
+                        Ok(kvrpcpb::RawBatchGetResponse {
+                            pairs: vec![
+                                kvrpcpb::KvPair {
+                                    key: vec![10_u8],
+                                    value: vec![20_u8],
+                                    ..Default::default()
+                                },
+                                kvrpcpb::KvPair {
+                                    key: vec![11_u8],
+                                    value: vec![21_u8],
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        })
+                    }
+                    other => unreachable!("unexpected region_id: {}", other),
+                }
+            },
+        )));
+        let client = Client {
+            cluster_id: 0,
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Write),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+            request_context: crate::RequestContext::default(),
+        };
+
+        // Provide keys in an unsorted order. The sharding layer sorts them before grouping.
+        let pairs = client
+            .batch_get(vec![vec![11_u8], vec![1_u8], vec![10_u8], vec![2_u8]])
+            .await?;
+        assert_eq!(dispatch_calls.load(Ordering::SeqCst), 2);
+
+        let mut got = pairs
+            .into_iter()
+            .map(|p| (Vec::<u8>::from(p.key), p.value))
+            .collect::<Vec<_>>();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (vec![1_u8], vec![11_u8]),
+                (vec![2_u8], vec![12_u8]),
+                (vec![10_u8], vec![20_u8]),
+                (vec![11_u8], vec![21_u8]),
+            ]
+        );
         Ok(())
     }
 
@@ -1624,9 +1941,9 @@ mod tests {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>);
+                    }));
                 }
-                Ok(Box::new(kvrpcpb::RawScanResponse::default()) as Box<dyn Any>)
+                Ok(Box::new(kvrpcpb::RawScanResponse::default()))
             },
         )));
 
@@ -1662,9 +1979,9 @@ mod tests {
                             ..Default::default()
                         }),
                         ..Default::default()
-                    }) as Box<dyn Any>);
+                    }));
                 }
-                Ok(Box::new(kvrpcpb::RawScanResponse::default()) as Box<dyn Any>)
+                Ok(Box::new(kvrpcpb::RawScanResponse::default()))
             },
         )));
 
@@ -1699,7 +2016,7 @@ mod tests {
                         ..Default::default()
                     }),
                     ..Default::default()
-                }) as Box<dyn Any>)
+                }))
             },
         )));
 

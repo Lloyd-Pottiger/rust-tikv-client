@@ -46,7 +46,6 @@ pub mod plan;
 mod plan_builder;
 mod read_routing;
 mod shard;
-mod store_health;
 
 /// Abstracts any request sent to a TiKV server.
 #[async_trait]
@@ -147,7 +146,11 @@ mod test {
 
         #[async_trait]
         impl Request for MockKvRequest {
-            async fn dispatch(&self, _: &TikvClient<Channel>, _: Duration) -> Result<Box<dyn Any>> {
+            async fn dispatch(
+                &self,
+                _: &TikvClient<Channel>,
+                _: Duration,
+            ) -> Result<Box<dyn Any + Send>> {
                 Ok(Box::new(MockRpcResponse {}))
             }
 
@@ -209,7 +212,7 @@ mod test {
         };
 
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
-            |_: &dyn Any| Ok(Box::new(MockRpcResponse) as Box<dyn Any>),
+            |_: &dyn Any| Ok(Box::new(MockRpcResponse)),
         )));
 
         let plan = crate::request::PlanBuilder::new(pd_client.clone(), Keyspace::Disable, request)
@@ -230,7 +233,7 @@ mod test {
                 Ok(Box::new(kvrpcpb::CommitResponse {
                     error: Some(kvrpcpb::KeyError::default()),
                     ..Default::default()
-                }) as Box<dyn Any>)
+                }))
             },
         )));
 

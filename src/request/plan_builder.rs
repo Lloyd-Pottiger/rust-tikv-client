@@ -66,6 +66,7 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
             }
         }
         let request_context = RequestContext::default();
+        let store_health = pd_client.store_health();
         PlanBuilder {
             pd_client,
             plan: Dispatch {
@@ -73,7 +74,7 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
                 kv_client: None,
             },
             request_context,
-            read_routing: ReadRouting::default(),
+            read_routing: ReadRouting::default().with_store_health(store_health),
             phantom: PhantomData,
         }
     }
@@ -581,7 +582,7 @@ mod tests {
                     not_found: true,
                     ..Default::default()
                 };
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp))
             },
         )));
 
@@ -679,7 +680,7 @@ mod tests {
                     not_found: true,
                     ..Default::default()
                 };
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp))
             },
         )));
 
@@ -722,7 +723,7 @@ mod tests {
                 Ok(Box::new(kvrpcpb::RawGetResponse {
                     not_found: true,
                     ..Default::default()
-                }) as Box<dyn Any>)
+                }))
             },
         )));
         let mut req = kvrpcpb::RawGetRequest::default();
@@ -764,7 +765,7 @@ mod tests {
                         );
                         let mut resp = kvrpcpb::RawGetResponse::default();
                         resp.region_error = Some(errorpb::Error::default());
-                        Ok(Box::new(resp) as Box<dyn Any>)
+                        Ok(Box::new(resp))
                     }
                     1 => {
                         assert!(ctx.is_retry_request);
@@ -775,7 +776,7 @@ mod tests {
                         Ok(Box::new(kvrpcpb::RawGetResponse {
                             not_found: true,
                             ..Default::default()
-                        }) as Box<dyn Any>)
+                        }))
                     }
                     other => unreachable!("unexpected dispatch attempt {other}"),
                 }

@@ -8,8 +8,11 @@ use async_trait::async_trait;
 use derive_new::new;
 use tonic::transport::Channel;
 
+use super::batch_commands::batch_kind_for_request;
+use super::batch_commands::BatchCommandsClient;
 use super::Request;
 use crate::proto::tikvpb::tikv_client::TikvClient;
+use crate::store::StoreHealthMap;
 use crate::Result;
 use crate::SecurityManager;
 
@@ -25,6 +28,7 @@ pub trait KvConnect: Sized + Send + Sync + 'static {
 pub struct TikvConnect {
     security_mgr: Arc<SecurityManager>,
     timeout: Duration,
+    store_health: StoreHealthMap,
 }
 
 #[async_trait]
@@ -35,26 +39,51 @@ impl KvConnect for TikvConnect {
         self.security_mgr
             .connect(address, TikvClient::new)
             .await
-            .map(|c| KvRpcClient::new(c, self.timeout))
+            .map(|c| KvRpcClient::new(c, self.timeout, self.store_health.clone()))
     }
 }
 
 #[async_trait]
 pub trait KvClient {
-    async fn dispatch(&self, req: &dyn Request) -> Result<Box<dyn Any>>;
+    async fn dispatch(&self, req: &dyn Request) -> Result<Box<dyn Any + Send>>;
 }
 
 /// This client handles requests for a single TiKV node. It converts the data
 /// types and abstractions of the client program into the grpc data types.
-#[derive(new, Clone)]
+#[derive(Clone)]
 pub struct KvRpcClient {
     rpc_client: TikvClient<Channel>,
     timeout: Duration,
+    batch_client: BatchCommandsClient,
+}
+
+impl KvRpcClient {
+    pub(crate) fn new(
+        rpc_client: TikvClient<Channel>,
+        timeout: Duration,
+        store_health: StoreHealthMap,
+    ) -> Self {
+        let batch_client = BatchCommandsClient::new(rpc_client.clone(), store_health);
+        Self {
+            rpc_client,
+            timeout,
+            batch_client,
+        }
+    }
 }
 
 #[async_trait]
 impl KvClient for KvRpcClient {
-    async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any>> {
+    async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any + Send>> {
+        if let Some(batch_req) = request.batch_request() {
+            if let Ok(kind) = batch_kind_for_request(&batch_req) {
+                return self
+                    .batch_client
+                    .dispatch(kind, batch_req, self.timeout)
+                    .await;
+            }
+        }
+
         request.dispatch(&self.rpc_client, self.timeout).await
     }
 }
@@ -84,7 +113,7 @@ mod tests {
             &self,
             _client: &TikvClient<Channel>,
             timeout: Duration,
-        ) -> Result<Box<dyn Any>> {
+        ) -> Result<Box<dyn Any + Send>> {
             self.called.store(true, Ordering::SeqCst);
             self.timeout_ms
                 .store(timeout.as_millis() as u64, Ordering::SeqCst);
@@ -113,7 +142,11 @@ mod tests {
     #[tokio::test]
     async fn kv_rpc_client_dispatch_calls_request_dispatch() -> Result<()> {
         let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
-        let client = KvRpcClient::new(TikvClient::new(channel), Duration::from_millis(123));
+        let client = KvRpcClient::new(
+            TikvClient::new(channel),
+            Duration::from_millis(123),
+            crate::store::StoreHealthMap::default(),
+        );
 
         let req = TestRequest::default();
         let resp = client.dispatch(&req).await?;
@@ -133,7 +166,7 @@ mod tests {
                 &self,
                 _client: &TikvClient<Channel>,
                 _timeout: Duration,
-            ) -> Result<Box<dyn Any>> {
+            ) -> Result<Box<dyn Any + Send>> {
                 Err(crate::Error::Unimplemented)
             }
 
@@ -157,7 +190,11 @@ mod tests {
         }
 
         let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
-        let client = KvRpcClient::new(TikvClient::new(channel), Duration::from_millis(1));
+        let client = KvRpcClient::new(
+            TikvClient::new(channel),
+            Duration::from_millis(1),
+            crate::store::StoreHealthMap::default(),
+        );
 
         let req = ErrorRequest;
         let err = client
@@ -169,8 +206,11 @@ mod tests {
 
     #[tokio::test]
     async fn tikv_connect_connect_rejects_invalid_address() {
-        let connect =
-            TikvConnect::new(Arc::new(SecurityManager::default()), Duration::from_secs(1));
+        let connect = TikvConnect::new(
+            Arc::new(SecurityManager::default()),
+            Duration::from_secs(1),
+            crate::store::StoreHealthMap::default(),
+        );
         let err = match connect.connect("not a valid address").await {
             Ok(_) => panic!("expected invalid address to fail fast"),
             Err(err) => err,

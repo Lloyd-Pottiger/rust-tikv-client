@@ -5,10 +5,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::pending_backoff::{PendingBackoff, PendingBackoffKind, PendingBackoffs};
-use super::store_health::StoreHealthMap;
 use crate::proto::errorpb;
 use crate::proto::metapb;
 use crate::region::{RegionWithLeader, StoreId};
+use crate::store::StoreHealthMap;
 use crate::Error;
 use crate::ReplicaReadType;
 use crate::Result;
@@ -123,7 +123,6 @@ impl ReadRouting {
         self.replica_read.is_follower_read() || self.stale_read
     }
 
-    #[cfg(test)]
     pub(crate) fn with_store_health(mut self, store_health: StoreHealthMap) -> Self {
         self.store_health = store_health;
         self

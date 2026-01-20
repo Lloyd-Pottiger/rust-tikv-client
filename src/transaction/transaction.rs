@@ -2853,7 +2853,7 @@ mod tests {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
                     assert_eq!(req.keys, vec![expected_key_cloned.clone()]);
                     assert_eq!(req.primary_key, expected_key_cloned);
-                    Ok(Box::new(kvrpcpb::CommitResponse::default()) as Box<dyn Any>)
+                    Ok(Box::new(kvrpcpb::CommitResponse::default()) as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type: {:?}", req.type_id());
                 }
@@ -2894,12 +2894,12 @@ mod tests {
                         stale_command: Some(errorpb::StaleCommand::default()),
                         ..Default::default()
                     });
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp) as Box<dyn Any + Send>)
                 } else {
                     Ok(Box::new(kvrpcpb::GetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>)
+                    }) as Box<dyn Any + Send>)
                 }
             },
         )));
@@ -2938,13 +2938,13 @@ mod tests {
                     assert!(!req.need_commit_ts);
                     let mut resp = kvrpcpb::GetResponse::default();
                     resp.value = b"v".to_vec();
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp) as Box<dyn Any + Send>)
                 } else {
                     assert!(req.need_commit_ts);
                     let mut resp = kvrpcpb::GetResponse::default();
                     resp.value = b"v".to_vec();
                     resp.commit_ts = 77;
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp) as Box<dyn Any + Send>)
                 }
             },
         )));
@@ -3009,7 +3009,7 @@ mod tests {
                     ],
                     ..Default::default()
                 };
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp) as Box<dyn Any + Send>)
             },
         )));
 
@@ -3057,11 +3057,11 @@ mod tests {
             move |req: &dyn Any| {
                 if req.downcast_ref::<kvrpcpb::TxnHeartBeatRequest>().is_some() {
                     heartbeats_cloned.fetch_add(1, Ordering::SeqCst);
-                    Ok(Box::<kvrpcpb::TxnHeartBeatResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::TxnHeartBeatResponse>::default() as Box<dyn Any + Send>)
                 } else if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
-                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any + Send>)
                 } else {
-                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
                 }
             },
         )));
@@ -3100,16 +3100,16 @@ mod tests {
             move |req: &dyn Any| {
                 if req.downcast_ref::<kvrpcpb::TxnHeartBeatRequest>().is_some() {
                     heartbeats_cloned.fetch_add(1, Ordering::SeqCst);
-                    Ok(Box::<kvrpcpb::TxnHeartBeatResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::TxnHeartBeatResponse>::default() as Box<dyn Any + Send>)
                 } else if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
-                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any + Send>)
                 } else if req
                     .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
                     .is_some()
                 {
-                    Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any + Send>)
                 } else {
-                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
                 }
             },
         )));
@@ -3159,7 +3159,7 @@ mod tests {
                 } else {
                     assert!(!req.is_first_lock);
                 }
-                Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>)
+                Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any + Send>)
             },
         )));
 
@@ -3201,7 +3201,7 @@ mod tests {
                     req.mutations[0].assertion,
                     kvrpcpb::Assertion::NotExist as i32
                 );
-                Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>)
+                Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any + Send>)
             },
         )));
 
@@ -3237,7 +3237,8 @@ mod tests {
                         .map(|ctx| ctx.region_id)
                         .unwrap_or_default();
                     match region_id {
-                        1 => Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>),
+                        1 => Ok(Box::<kvrpcpb::PessimisticLockResponse>::default()
+                            as Box<dyn Any + Send>),
                         2 => {
                             let mut key_error = kvrpcpb::KeyError::default();
                             key_error.conflict = Some(kvrpcpb::WriteConflict {
@@ -3251,14 +3252,15 @@ mod tests {
 
                             let mut resp = kvrpcpb::PessimisticLockResponse::default();
                             resp.errors.push(key_error);
-                            Ok(Box::new(resp) as Box<dyn Any>)
+                            Ok(Box::new(resp) as Box<dyn Any + Send>)
                         }
                         _ => unreachable!("unexpected region id in partial rollback test"),
                     }
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>()
                 {
                     rollback_reqs_cloned.lock().unwrap().push(req.clone());
-                    Ok(Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::PessimisticRollbackResponse>::default()
+                        as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in partial rollback test");
                 }
@@ -3310,7 +3312,7 @@ mod tests {
                     locked_with_conflict_ts: 0,
                     skip_resolving_lock: false,
                 });
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp) as Box<dyn Any + Send>)
             },
         )));
 
@@ -3384,10 +3386,10 @@ mod tests {
                         Some((req.min_commit_ts, req.max_commit_ts));
                     let mut resp = kvrpcpb::PrewriteResponse::default();
                     resp.min_commit_ts = 0;
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp) as Box<dyn Any + Send>)
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
                     commit_reqs_cloned.lock().unwrap().push(req.keys.clone());
-                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in async commit fallback test");
                 }
@@ -3445,10 +3447,10 @@ mod tests {
                 if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
                     let mut resp = kvrpcpb::PrewriteResponse::default();
                     resp.min_commit_ts = expected_min_commit_ts;
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp) as Box<dyn Any + Send>)
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
                     commit_reqs_cloned.lock().unwrap().push(req.keys.clone());
-                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in async commit success test");
                 }
@@ -3531,7 +3533,7 @@ mod tests {
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     let mut resp = kvrpcpb::GetResponse::default();
                     resp.not_found = true;
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp) as Box<dyn Any + Send>)
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
                     let ctx = req
                         .context
@@ -3540,7 +3542,7 @@ mod tests {
                     assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
                     assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
-                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any + Send>)
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
                     let ctx = req
                         .context
@@ -3549,7 +3551,7 @@ mod tests {
                     assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
                     assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
-                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in request context test");
                 }
@@ -3613,11 +3615,11 @@ mod tests {
                             ..Default::default()
                         });
                         resp.error = Some(key_error);
-                        Ok(Box::new(resp) as Box<dyn Any>)
+                        Ok(Box::new(resp) as Box<dyn Any + Send>)
                     } else {
                         let mut resp = kvrpcpb::GetResponse::default();
                         resp.not_found = true;
-                        Ok(Box::new(resp) as Box<dyn Any>)
+                        Ok(Box::new(resp) as Box<dyn Any + Send>)
                     }
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::CleanupRequest>() {
                     let ctx = req
@@ -3625,14 +3627,14 @@ mod tests {
                         .as_ref()
                         .expect("missing context on CleanupRequest");
                     assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
-                    Ok(Box::<kvrpcpb::CleanupResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CleanupResponse>::default() as Box<dyn Any + Send>)
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
                     let ctx = req
                         .context
                         .as_ref()
                         .expect("missing context on ResolveLockRequest");
                     assert_request_context(ctx, &hook_source, &hook_tag, &hook_group_name);
-                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in lock resolution context test");
                 }
@@ -3691,11 +3693,11 @@ mod tests {
                 if call == 0 {
                     let mut resp = kvrpcpb::GetResponse::default();
                     resp.region_error = Some(crate::proto::errorpb::Error::default());
-                    return Ok(Box::new(resp) as Box<dyn Any>);
+                    return Ok(Box::new(resp) as Box<dyn Any + Send>);
                 }
                 let mut resp = kvrpcpb::GetResponse::default();
                 resp.not_found = true;
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp) as Box<dyn Any + Send>)
             },
         )));
 
@@ -3767,7 +3769,7 @@ mod tests {
 
                 let mut resp = kvrpcpb::GetResponse::default();
                 resp.not_found = true;
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp) as Box<dyn Any + Send>)
             },
         )));
 
@@ -3830,7 +3832,7 @@ mod tests {
                 assert_eq!(ctx.resource_group_tag, expected_tag_for_hook);
                 let mut resp = kvrpcpb::GetResponse::default();
                 resp.not_found = true;
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp) as Box<dyn Any + Send>)
             },
         )));
 
@@ -3891,7 +3893,7 @@ mod tests {
 
                 let mut resp = kvrpcpb::GetResponse::default();
                 resp.not_found = true;
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp) as Box<dyn Any + Send>)
             },
         )));
 
@@ -4105,7 +4107,7 @@ mod tests {
 
                     let mut resp = kvrpcpb::GetResponse::default();
                     resp.not_found = true;
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp) as Box<dyn Any + Send>)
                 },
             )));
 
@@ -4171,16 +4173,16 @@ mod tests {
                             ..Default::default()
                         });
                         resp.error = Some(key_error);
-                        Ok(Box::new(resp) as Box<dyn Any>)
+                        Ok(Box::new(resp) as Box<dyn Any + Send>)
                     } else {
                         let mut resp = kvrpcpb::GetResponse::default();
                         resp.not_found = true;
-                        Ok(Box::new(resp) as Box<dyn Any>)
+                        Ok(Box::new(resp) as Box<dyn Any + Send>)
                     }
                 } else if req.downcast_ref::<kvrpcpb::CleanupRequest>().is_some() {
-                    Ok(Box::<kvrpcpb::CleanupResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CleanupResponse>::default() as Box<dyn Any + Send>)
                 } else if req.downcast_ref::<kvrpcpb::ResolveLockRequest>().is_some() {
-                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in stale-read lock fallback test");
                 }
@@ -4246,9 +4248,9 @@ mod tests {
                         .lock()
                         .unwrap()
                         .push(req.generation);
-                    Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any + Send>)
                 } else if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
-                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
                     assert_eq!(req.start_version, 10);
                     let ctx = req
@@ -4259,7 +4261,7 @@ mod tests {
                     assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     resolve_calls_cloned.fetch_add(1, Ordering::SeqCst);
-                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in pipelined txn test");
                 }
@@ -4325,7 +4327,7 @@ mod tests {
                     assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
-                    Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any + Send>)
                 } else if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
                     unreachable!("commit must not be sent in rollback test");
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
@@ -4339,7 +4341,7 @@ mod tests {
                     assert_eq!(ctx.disk_full_opt, i32::from(hook_disk_full_opt));
                     assert_eq!(ctx.txn_source, hook_txn_source);
                     resolve_calls_cloned.fetch_add(1, Ordering::SeqCst);
-                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in pipelined rollback test");
                 }
@@ -4403,9 +4405,9 @@ mod tests {
                         req.mutations[0].assertion,
                         kvrpcpb::Assertion::NotExist as i32
                     );
-                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any + Send>)
                 } else if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
-                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in assertion propagation test");
                 }
@@ -4441,9 +4443,9 @@ mod tests {
                     prewrite_calls_cloned.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(req.mutations.len(), 1);
                     assert_eq!(req.mutations[0].op, kvrpcpb::Op::Insert as i32);
-                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any + Send>)
                 } else if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
-                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in presumeKNE test");
                 }
@@ -4478,7 +4480,7 @@ mod tests {
                     prewrite_calls_cloned.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(req.mutations.len(), 1);
                     assert_eq!(req.mutations[0].op, kvrpcpb::Op::CheckNotExists as i32);
-                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any + Send>)
                 } else if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
                     panic!("unexpected CommitRequest for prewrite-only transaction");
                 } else {
@@ -4524,10 +4526,10 @@ mod tests {
                         .mutations
                         .iter()
                         .any(|m| m.key == b"k2".to_vec() && m.op == kvrpcpb::Op::Put as i32));
-                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any + Send>)
                 } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
                     assert_eq!(req.keys, vec![b"k2".to_vec()]);
-                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in primary reselect test");
                 }
@@ -4565,9 +4567,9 @@ mod tests {
                     assert_eq!(req.assertion_level, kvrpcpb::AssertionLevel::Strict as i32);
                     assert_eq!(req.mutations.len(), 1);
                     assert_eq!(req.mutations[0].assertion, kvrpcpb::Assertion::Exist as i32);
-                    Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any + Send>)
                 } else if req.downcast_ref::<kvrpcpb::ResolveLockRequest>().is_some() {
-                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
+                    Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any + Send>)
                 } else {
                     unreachable!("unexpected request type in pipelined assertion test");
                 }
@@ -4625,7 +4627,7 @@ mod tests {
 
                 let mut resp = kvrpcpb::PrewriteResponse::default();
                 resp.errors.push(key_error);
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp) as Box<dyn Any + Send>)
             },
         )));
 
@@ -4664,7 +4666,7 @@ mod tests {
 
                 let mut resp = kvrpcpb::PrewriteResponse::default();
                 resp.errors.push(key_error);
-                Ok(Box::new(resp) as Box<dyn Any>)
+                Ok(Box::new(resp) as Box<dyn Any + Send>)
             },
         )));
 
@@ -4796,10 +4798,10 @@ mod tests {
         let commit_reqs_cloned = commit_reqs.clone();
         let kv_client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
             if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
-                Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any + Send>)
             } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
                 commit_reqs_cloned.lock().unwrap().push(req.commit_version);
-                Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
             } else {
                 unreachable!("unexpected request type in commit-wait test");
             }
@@ -4845,10 +4847,10 @@ mod tests {
         let commit_reqs_cloned = commit_reqs.clone();
         let kv_client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
             if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
-                Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
+                Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any + Send>)
             } else if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
                 commit_reqs_cloned.lock().unwrap().push(req.commit_version);
-                Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
+                Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any + Send>)
             } else {
                 unreachable!("unexpected request type in commit-wait timeout test");
             }

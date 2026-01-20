@@ -13,24 +13,17 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 正在进行的工作
 
+（空）
+
 # 待做工作
 
-- transport/batch-commands：引入 BatchCommands stream（multiplex/reconnect/request_id 映射/timeout），解锁 Go batch-client 相关用例迁移
-  - 计划：在 `src/store/` 增加 batch client（优先覆盖 `GetHealthFeedback` + raw/txn 高频 cmd）；保留 unary fallback；用 mock gRPC server 做单测（request_id 对齐/乱序响应/断线重连）
-  - 验证：`make check` + `make unit-test` + `make integration-test-if-ready`
-  - 文件：`src/store/*`，`src/request/*`，`tests/*`，`.codex/progress/*`
-
-- tests/port/health-feedback：迁移 Go `integration_tests/health_feedback_test.go`（store slow-score / feedback_seq_no）
-  - 计划：解析 `BatchCommandsResponse.health_feedback` 并回写 store health 状态；补 Rust E2E 用例（cluster ready 时跑）
-  - 验证：`make integration-test-if-ready` + `make all`
-  - 文件：`src/store/*`，`src/region_cache.rs`（如需），`tests/integration_tests.rs`，`.codex/progress/*`
+# 已完成工作
 
 - tests/port/mockstore-minimal：从 Go mocktikv 用例挑选可迁移子集，落到 Rust `MockKvClient` 单测（不做 1:1 mock server）
-  - 计划：挑选纯算法/错误路径用例；扩展 `src/mock.rs` dispatch hook helper；补齐 unit-test 覆盖
+  - 完成：补齐 raw 侧可迁移纯逻辑用例：checksum 多 region merge、checksum keyspace 编码、CAS swapped=false/prev_not_exist、batch_get key 排序+按 region 分组、delete_range empty range no-op
+  - 关键：新增 `MockKvClient::with_typed_dispatch_hook` 降低 downcast/boxing 噪音，便于批量写 mock 用例
   - 验证：`make unit-test`
-  - 文件：`src/mock.rs`，相关模块 tests，`.codex/progress/*`
-
-# 已完成工作
+  - 文件：`src/mock.rs`，`src/raw/client.rs`
 
 - tests/parity-mapping+backoffer+util：完成 client-go tests 迁移/映射维护闭环（101 `_test.go` 逐文件清单；integration-tests 映射；parity-checklist 对齐；清零 `partial`）
   - 关键：新增 `src/backoffer.rs`（client-go Backoffer：maxSleep/excludedSleep/longestSleep/clone+fork/update + MayBackoffForRegionError）+ 单测；补齐 util/mock parity：`src/util/request_source.rs`（Build/GetRequestSource）、`src/util/rate_limit.rs`（token limiter）、`src/util/async_util.rs`（Callback/RunLoop）、`src/mock/deadlock_detector.rs`（deadlock detector）；对 mocktikv/BatchCommands/forwarding 等不可移植用例统一标注 N/A，但在 notes 指向 Rust 可迁移语义覆盖点
@@ -56,3 +49,13 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：使用 `cargo llvm-cov`；报告输出 `target/llvm-cov/html/index.html`
   - 验证：`make coverage`
   - 文件：`.codex/progress/daemon.md`
+
+- transport/batch-commands：引入 BatchCommands stream（multiplex/reconnect/request_id 映射/timeout），解锁 Go batch-client 相关用例迁移
+  - 关键：新增 `src/store/batch_commands.rs` + `KvRpcClient` batch/unary 分流；stream 建连前发送 `Empty(request_id=0)` 破除 TiKV/tonic 首包握手死锁；recv 侧按 request_id 解复用并支持乱序响应；stream 断线后可自动重连用于后续请求；超时返回 `DeadlineExceeded("batch commands request timeout")`
+  - 测试：新增 in-process tonic server 单测覆盖 prime/乱序/断线重连/health_feedback；`make all`
+  - 文件：`Cargo.toml`，`Cargo.lock`，`src/store/batch_commands.rs`，`src/store/client.rs`，`src/store/request.rs`，`src/store/mod.rs`，`src/request/plan.rs`，`src/transaction/transaction.rs`，`src/transaction/lock.rs`
+
+- tests/port/health-feedback：迁移 Go `integration_tests/health_feedback_test.go`（store slow-score / feedback_seq_no）
+  - 关键：新增 `src/store/health.rs`（seq_no 单调）+ 解析 `BatchCommandsResponse.health_feedback` 并落盘到 `StoreHealthMap`；补 `RawClient::__test_get_health_feedback/__test_tikv_side_slow_score`（仅 `integration-tests` feature）用于 E2E 断言
+  - 测试：`tests/integration_tests.rs` 新增 `raw_get_health_feedback`；`make integration-test-if-ready` + `make all`
+  - 文件：`src/store/health.rs`，`src/store/batch_commands.rs`，`src/pd/client.rs`，`src/request/plan_builder.rs`，`src/raw/client.rs`，`tests/integration_tests.rs`

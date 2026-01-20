@@ -16,7 +16,7 @@ Rust 侧集成测试集中在：
 | `integration_tests/client_fp_test.go` | `tests/failpoint_tests.rs` | failpoint 驱动的事务异常路径 |
 | `integration_tests/delete_range_test.go` | `tests/integration_tests.rs` `raw_delete_range` | 新增：覆盖 raw delete-range 的 range 语义（含 `\\0` 边界技巧） |
 | `integration_tests/gc_test.go` | `tests/integration_tests.rs` `txn_update_safepoint` | GC/safepoint 相关主路径 |
-| `integration_tests/health_feedback_test.go` | N/A | Go batch client health feedback；Rust 未实现 BatchCommands 同构机制 |
+| `integration_tests/health_feedback_test.go` | `tests/integration_tests.rs` `raw_get_health_feedback` | BatchCommands stream health feedback + `StoreHealthMap` seq_no 单调 |
 | `integration_tests/interceptor_test.go` | `tests/integration_tests.rs` `txn_snapshot_api_and_request_context` | request context setters + rpc interceptors |
 | `integration_tests/isolation_test.go` | `tests/integration_tests.rs` `txn_read`/`txn_snapshot*` | 读一致性/快照相关 |
 | `integration_tests/lock_test.go` | `tests/integration_tests.rs` `txn_lock_keys*`/`txn_get_for_update` + `tests/failpoint_tests.rs` | pessimistic lock / resolve locks |

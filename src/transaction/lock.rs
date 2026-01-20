@@ -510,9 +510,9 @@ mod tests {
                         region_error: Some(errorpb::Error::default()),
                         ..Default::default()
                     };
-                    Ok(Box::new(resp) as Box<dyn Any>)
+                    Ok(Box::new(resp) as Box<dyn Any + Send>)
                 });
-                Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
+                Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any + Send>)
             },
         )));
 
@@ -580,7 +580,7 @@ mod tests {
                         action: kvrpcpb::Action::NoAction as i32,
                         ..Default::default()
                     };
-                    return Ok(Box::new(resp) as Box<dyn Any>);
+                    return Ok(Box::new(resp));
                 }
                 if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
                     batch_count_hook.fetch_add(1, Ordering::SeqCst);
@@ -588,7 +588,7 @@ mod tests {
                     assert_eq!(req.txn_infos[0].txn, txn_id);
                     assert_eq!(req.txn_infos[0].status, commit_ts);
                     let resp = kvrpcpb::ResolveLockResponse::default();
-                    return Ok(Box::new(resp) as Box<dyn Any>);
+                    return Ok(Box::new(resp));
                 }
                 panic!("unexpected request type in LockResolver test");
             },
@@ -639,7 +639,7 @@ mod tests {
                     assert_eq!(req.txn_infos.len(), 1);
                     assert_eq!(req.txn_infos[0].txn, txn_id);
                     assert_eq!(req.txn_infos[0].status, commit_ts);
-                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()) as Box<dyn Any>);
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()));
                 }
                 panic!("unexpected request type in lock resolver cache test");
             },

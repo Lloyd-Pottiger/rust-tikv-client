@@ -225,7 +225,7 @@ mod tests {
                     return Ok(Box::new(kvrpcpb::GetResponse {
                         not_found: true,
                         ..Default::default()
-                    }) as Box<dyn Any>);
+                    }));
                 }
 
                 if let Some(req) = req.downcast_ref::<kvrpcpb::BatchGetRequest>() {
@@ -236,7 +236,7 @@ mod tests {
                         ctx.request_source
                     );
                     assert_eq!(ctx.resource_group_tag, expected_tag);
-                    return Ok(Box::new(kvrpcpb::BatchGetResponse::default()) as Box<dyn Any>);
+                    return Ok(Box::new(kvrpcpb::BatchGetResponse::default()));
                 }
 
                 if let Some(req) = req.downcast_ref::<kvrpcpb::ScanRequest>() {
@@ -247,7 +247,7 @@ mod tests {
                         ctx.request_source
                     );
                     assert_eq!(ctx.resource_group_tag, expected_tag);
-                    return Ok(Box::new(kvrpcpb::ScanResponse::default()) as Box<dyn Any>);
+                    return Ok(Box::new(kvrpcpb::ScanResponse::default()));
                 }
 
                 unreachable!("unexpected request type");
