@@ -41,6 +41,7 @@ use crate::transaction::HasLocks;
 mod keyspace;
 #[cfg(test)]
 mod metrics_collector;
+mod pending_backoff;
 pub mod plan;
 mod plan_builder;
 mod read_routing;

@@ -34,3 +34,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 - review/overall-goals-audit：复核整体目标与测试/集成用例映射；修复因 `KvPair` API 调整导致的 integration-tests 编译回归
   - 结果：`cargo test` + `cargo test --features integration-tests --no-run` + `cargo clippy` 通过（integration-tests 仅编译，不依赖 cluster）
   - 文件：`tests/integration_tests.rs`，`.codex/progress/daemon.md`
+
+- tests/port-client-go-replica-selector-fast-retry：补齐 replica selector 的 `ServerIsBusy` fast-retry + pending-backoff 可迁移语义
+  - 关键：replica-read 模式下 `ServerIsBusy` 优先切换 peer（bounded by non-witness peers），不消耗 backoff；回到该 store 前先应用 pending backoff；其他 keep-peer region errors 仍 pin 同 store
+  - 验证：`cargo test`
+  - 文件：`src/request/pending_backoff.rs`，`src/request/read_routing.rs`，`src/request/plan.rs`，`src/request/mod.rs`
+
+- infra/update-test-mapping：更新 go tests 覆盖映射（fast-retry/pending-backoff 已补）
+  - 文件：`.codex/progress/client-go-tests-port.md`，`.codex/progress/daemon.md`

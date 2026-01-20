@@ -41,6 +41,7 @@ use crate::RequestContext;
 use crate::Result;
 
 use super::keyspace::Keyspace;
+use super::pending_backoff::PendingBackoffKind;
 
 fn replica_kind_for_peer(
     leader: &metapb::Peer,
@@ -312,6 +313,30 @@ where
             }
         };
 
+        // If we previously fast-retried away from this store, apply a pending backoff before
+        // dispatching another request to it.
+        if let Ok(store_id) = region_store.region_with_leader.get_store_id() {
+            if let Some(pending) = read_routing.take_pending_backoff_for_retry(Some(store_id)) {
+                debug!(
+                    "applying pending backoff: store_id={store_id} kind={:?} err={:?}",
+                    pending.kind, pending.error
+                );
+                match backoff.next_delay_duration() {
+                    Some(duration) => {
+                        crate::stats::observe_backoff_sleep("pending_backoff", duration);
+                        sleep(duration).await;
+                    }
+                    None => {
+                        return Err(Error::RegionError(Box::new(errorpb::Error {
+                            message: "backoff attempts exhausted while applying pending backoff"
+                                .to_owned(),
+                            ..Default::default()
+                        })));
+                    }
+                }
+            }
+        }
+
         // limit concurrent requests
         let permit = permits.acquire().await.map_err(|e| {
             crate::internal_err!("semaphore closed while acquiring permit: {:?}", e)
@@ -384,8 +409,7 @@ where
             }
 
             let region_id = region_store.region_with_leader.id();
-            let keep_peer = e.server_is_busy.is_some()
-                || e.max_timestamp_not_synced.is_some()
+            let keep_peer = e.max_timestamp_not_synced.is_some()
                 || e.read_index_not_ready.is_some()
                 || e.proposal_in_merging_mode.is_some();
             if keep_peer {
@@ -428,6 +452,15 @@ where
                 .await;
             }
 
+            let non_witness_peers = region_store
+                .region_with_leader
+                .region
+                .peers
+                .iter()
+                .filter(|peer| !peer.is_witness)
+                .count();
+            let store_id = region_store.region_with_leader.get_store_id().ok();
+
             let region_error = e.clone();
             let region_error_resolved =
                 handle_region_error(pd_client.clone(), e, region_store).await?;
@@ -446,6 +479,32 @@ where
                     attempt + 1,
                 )
                 .await;
+            }
+
+            if read_routing.is_replica_read_mode() && region_error.server_is_busy.is_some() {
+                // Port client-go's replica selector fast retry behavior for server-is-busy: try a
+                // different peer first (bounded by the number of peers), and only then back off.
+                if non_witness_peers > 1 && attempt + 1 < non_witness_peers {
+                    if let Some(store_id) = store_id {
+                        read_routing.add_pending_backoff(
+                            Some(store_id),
+                            PendingBackoffKind::TikvServerBusy,
+                            region_error.clone(),
+                        );
+                        read_routing.mark_store_slow_for(store_id, Duration::from_millis(500));
+                    }
+                    return Self::single_plan_handler(
+                        pd_client,
+                        plan,
+                        backoff,
+                        permits,
+                        preserve_region_results,
+                        request_context.clone(),
+                        read_routing,
+                        attempt + 1,
+                    )
+                    .await;
+                }
             }
 
             match backoff.next_delay_duration() {
@@ -1854,7 +1913,10 @@ mod test {
             tokio::task::yield_now().await;
         }
         tokio::task::yield_now().await;
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "expected at least one dispatch attempt"
+        );
 
         tokio::time::advance(Duration::from_millis(49)).await;
         tokio::task::yield_now().await;
@@ -2393,10 +2455,6 @@ mod test {
     ) -> Result<()> {
         for region_error in [
             errorpb::Error {
-                server_is_busy: Some(errorpb::ServerIsBusy::default()),
-                ..Default::default()
-            },
-            errorpb::Error {
                 max_timestamp_not_synced: Some(errorpb::MaxTimestampNotSynced::default()),
                 ..Default::default()
             },
@@ -2411,6 +2469,95 @@ mod test {
         ] {
             run_replica_read_keep_peer_region_error_test(region_error).await?;
         }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_retryable_multi_region_replica_read_server_is_busy_fast_retries() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+        let store_ids = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let store_ids_for_hook = store_ids.clone();
+
+        let pd_client = Arc::new(LeaderSwitchPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() else {
+                    unreachable!("unexpected request type");
+                };
+                let store_id = req
+                    .context
+                    .as_ref()
+                    .and_then(|ctx| ctx.peer.as_ref())
+                    .map(|peer| peer.store_id)
+                    .expect("store_id should be set");
+                store_ids_for_hook.lock().unwrap().push(store_id);
+
+                let call = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        region_error: Some(errorpb::Error {
+                            server_is_busy: Some(errorpb::ServerIsBusy::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                    _ => Ok(Box::new(kvrpcpb::RawGetResponse {
+                        not_found: true,
+                        ..Default::default()
+                    }) as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut request = kvrpcpb::RawGetRequest::default();
+        request.key = vec![5];
+
+        let mut read_routing = ReadRouting::default();
+        read_routing.set_replica_read(crate::ReplicaReadType::PreferLeader);
+        read_routing.set_seed(0);
+
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request,
+                kv_client: None,
+            },
+            pd_client: pd_client.clone(),
+            backoff: Backoff::no_jitter_backoff(50, 50, 1),
+            concurrency: 1,
+            preserve_region_results: false,
+            request_context: RequestContext::default(),
+            read_routing,
+        };
+
+        let handle = tokio::spawn(async move { plan.execute().await });
+
+        while calls.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "expected at least one dispatch attempt"
+        );
+
+        // ServerIsBusy in replica-read mode should fast-retry another peer, without waiting for
+        // the backoff duration.
+        for _ in 0..10 {
+            if calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let results = handle.await.expect("task panicked")?;
+        assert_eq!(results.len(), 1);
+        let resp = results.into_iter().next().unwrap()?;
+        assert!(resp.not_found);
+
+        assert_eq!(&*store_ids.lock().unwrap(), &[1, 2]);
+        assert_eq!(pd_client.invalidated_regions.load(Ordering::SeqCst), 0);
+        assert_eq!(pd_client.invalidated_stores.load(Ordering::SeqCst), 0);
         Ok(())
     }
 

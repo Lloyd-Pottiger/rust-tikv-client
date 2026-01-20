@@ -4,8 +4,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use super::pending_backoff::{PendingBackoff, PendingBackoffKind, PendingBackoffs};
 use super::store_health::StoreHealthMap;
 use crate::proto::metapb;
+use crate::proto::errorpb;
 use crate::region::{RegionWithLeader, StoreId};
 use crate::Error;
 use crate::ReplicaReadType;
@@ -25,6 +27,7 @@ pub(crate) struct ReadRouting {
     store_match: Arc<[StoreId]>,
     store_health: StoreHealthMap,
     pinned_stores: Arc<Mutex<HashMap<u64, StoreId>>>,
+    pending_backoffs: PendingBackoffs,
 }
 
 impl Default for ReadRouting {
@@ -38,6 +41,7 @@ impl Default for ReadRouting {
             store_match: Arc::from([]),
             store_health: StoreHealthMap::default(),
             pinned_stores: Arc::new(Mutex::new(HashMap::new())),
+            pending_backoffs: PendingBackoffs::default(),
         }
     }
 }
@@ -81,6 +85,22 @@ impl ReadRouting {
 
     pub(crate) fn mark_store_slow_for(&self, store_id: crate::region::StoreId, duration: Duration) {
         self.store_health.mark_slow_for(store_id, duration);
+    }
+
+    pub(crate) fn add_pending_backoff(
+        &self,
+        store_id: Option<StoreId>,
+        kind: PendingBackoffKind,
+        error: errorpb::Error,
+    ) {
+        self.pending_backoffs.add(store_id, kind, error);
+    }
+
+    pub(crate) fn take_pending_backoff_for_retry(
+        &self,
+        store_id: Option<StoreId>,
+    ) -> Option<PendingBackoff> {
+        self.pending_backoffs.take_for_retry(store_id)
     }
 
     pub(crate) fn pin_store_for_region(&self, region_id: u64, store_id: StoreId) {

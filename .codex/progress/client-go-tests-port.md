@@ -33,7 +33,8 @@
 ## Gaps / Needs Expansion
 - Replica read selection: `client-go/internal/locate/replica_selector_test.go` 覆盖面远大于 Rust 的 `src/request/read_routing.rs#L229`
   - 已补：Mixed/Learner 选择、stale-read retry fallback、witness 排除、seed deterministic selection、force-leader override vs request-source 选择
-  - 仍缺：Go 的 score/fast-retry/pending-backoff/avoid-slow-store/proxy/flashback 等高级路径（Rust 目前未实现同构逻辑）
+  - 已补：score + `ServerIsBusy` fast-retry + pending-backoff（`src/request/read_routing.rs`/`src/request/plan.rs`/`src/request/pending_backoff.rs` 单测）
+  - 仍缺：Go proxy/forwarding/flashback 等高级路径（Rust 架构不同，按 N/A 或等价语义覆盖）
 - Store/RPC client behavior: Go `client-go/internal/client/*_test.go` 有不少并发/错误路径；Rust 目前 `src/store/client.rs#L62` 仅覆盖最小 dispatch 语义
   - 已补：store error traits 单测（Vec region_errors 聚合 + SetRegionError）；TikvConnect invalid addr fast-fail；PlanBuilder retry attempt/patch request_source/interceptor 组合
   - 仍缺：Go batch-client/forwarding/conn-pool 的并发/重连细节（Rust 架构不同，按 N/A 或等价语义覆盖）
