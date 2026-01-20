@@ -102,8 +102,8 @@
 | `client-go/txnkv/transaction/2pc_test.go` | n/a | Go 内部 `minCommitTsManager`/并发 helper；Rust async-commit/2PC 走不同实现（语义由 txn 单测/E2E 覆盖） |
 | `client-go/txnkv/transaction/batch_getter_test.go` | covered | `src/transaction/transaction.rs`（ReturnCommitTS + buffer cache/overlay） |
 | `client-go/txnkv/txnlock/lock_resolver_test.go` | covered | `src/transaction/lock.rs`（resolved cache 等） |
-| `client-go/util/async/core_test.go` | n/a | Go async/runloop 工具；Rust async 模型不同 |
-| `client-go/util/async/runloop_test.go` | n/a | 同上 |
+| `client-go/util/async/core_test.go` | covered | Rust 侧等价 Callback(inject LIFO + fulfill-once) + 单测：`src/util/async_util.rs` |
+| `client-go/util/async/runloop_test.go` | covered | Rust 侧等价 RunLoop(append/exec/wait/cancel/concurrent) + 单测：`src/util/async_util.rs` |
 | `client-go/util/main_test.go` | n/a | Go `TestMain` harness |
 | `client-go/util/misc_test.go` | covered | `src/util/gc_time.rs` + `src/util/time_detail.rs` |
 | `client-go/util/rate_limit_test.go` | covered | Rust 侧等价 token limiter + 单测：`src/util/rate_limit.rs` |
