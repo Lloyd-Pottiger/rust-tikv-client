@@ -34,6 +34,8 @@ use crate::Result;
 use crate::SecurityManager;
 use crate::Timestamp;
 
+type KvClientCache<KvC> = Arc<RwLock<HashMap<String, Arc<OnceCell<<KvC as KvConnect>::KvClient>>>>>;
+
 /// The PdClient handles all the encoding stuff.
 ///
 /// Raw APIs does not require encoding/decoding at all.
@@ -220,7 +222,7 @@ pub trait PdClient: Send + Sync + 'static {
 pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl = Cluster> {
     pd: Arc<RetryClient<Cl>>,
     kv_connect: KvC,
-    kv_client_cache: Arc<RwLock<HashMap<String, Arc<OnceCell<KvC::KvClient>>>>>,
+    kv_client_cache: KvClientCache<KvC>,
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
 }
