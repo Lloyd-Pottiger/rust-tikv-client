@@ -49,7 +49,7 @@
 | `client-go/internal/apicodec/codec_v1_test.go` | n/a | 空测试（Go 侧占位） |
 | `client-go/internal/apicodec/codec_v2_test.go` | covered | `src/request/keyspace.rs`（encode ranges/decode epoch/bucket）+ `src/transaction/transaction.rs`（commit primary key encode） |
 | `client-go/internal/client/client_async_test.go` | n/a | Go `SendRequestAsync`/Callback API；Rust 无同构 public API（等价 Callback/RunLoop 语义见 `src/util/async_util.rs`） |
-| `client-go/internal/client/client_fail_test.go` | n/a | Go RPCClient/forwarded-host 细节；Rust 用 `src/store/batch_commands.rs` 单测覆盖 batch stream close/reconnect/timeout/inflight-fail 语义 |
+| `client-go/internal/client/client_fail_test.go` | covered | Rust `BatchCommandsClient` 单测覆盖 batch stream close/inflight-fail/timeout + reconnect-once 语义：`src/store/batch_commands.rs` |
 | `client-go/internal/client/client_interceptor_test.go` | covered | `src/interceptor.rs`（interceptor chain 语义） |
 | `client-go/internal/client/client_test.go` | n/a | Go RPCClient/conn-pool/forwarding/metadata 细节；Rust 架构不同；等价 batch stream 行为见 `src/store/batch_commands.rs` 单测 + PD dial 去重见 `src/pd/client.rs` |
 | `client-go/internal/client/main_test.go` | n/a | Go `TestMain` harness |

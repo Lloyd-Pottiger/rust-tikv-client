@@ -19,6 +19,11 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
+- tests/port/internal-client-fail：对齐 Go `internal/client/client_fail_test.go` 的 batch-client 错误/重连语义到 Rust BatchCommandsClient 单测
+  - 完成：`stream close without response` 触发 inflight fail；重连后复用新 stream（只重连一次）；补 batch request timeout 单测（`DeadlineExceeded("batch commands request timeout")`）
+  - 验证：`make unit-test` + `make check`
+  - 文件：`src/store/batch_commands.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
+
 - tests/port/tikvrpc-batchcommands：迁移 Go `client-go/tikvrpc/tikvrpc_test.go`（BatchCommands request/response wrapper 语义）
   - 完成：补 `Request::batch_request()` -> `BatchCommandKind` 映射单测（覆盖 batchable/unary-only）；补 batch response missing-cmd 错误单测；补 batch stream timeout + stream close(inflight fail) 单测
   - 验证：`make unit-test` + `make check`

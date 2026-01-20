@@ -907,34 +907,32 @@ mod tests {
 
                 let (tx, rx) = mpsc::channel(16);
                 tokio::spawn(async move {
-                    let Ok(Some(req)) = inbound.message().await else {
-                        return;
-                    };
-
                     if call == 0 {
-                        // Close the response stream without replying to the request.
-                        drop(tx);
+                        // Close the response stream without replying to the first request.
+                        let _ = inbound.message().await;
                         return;
                     }
 
-                    if let Some((request_id, request)) = req
-                        .request_ids
-                        .into_iter()
-                        .zip(req.requests.into_iter())
-                        .next()
-                    {
-                        let key = match request.cmd {
-                            Some(tikvpb::batch_commands_request::request::Cmd::RawGet(req)) => {
-                                req.key
+                    let tx = tx;
+                    while let Ok(Some(req)) = inbound.message().await {
+                        for (request_id, request) in
+                            req.request_ids.into_iter().zip(req.requests.into_iter())
+                        {
+                            let key = match request.cmd {
+                                Some(tikvpb::batch_commands_request::request::Cmd::RawGet(req)) => {
+                                    req.key
+                                }
+                                _ => Vec::new(),
+                            };
+                            let resp = tikvpb::BatchCommandsResponse {
+                                request_ids: vec![request_id],
+                                responses: vec![make_raw_get_batch_response(key)],
+                                ..Default::default()
+                            };
+                            if tx.send(Ok(resp)).await.is_err() {
+                                return;
                             }
-                            _ => Vec::new(),
-                        };
-                        let resp = tikvpb::BatchCommandsResponse {
-                            request_ids: vec![request_id],
-                            responses: vec![make_raw_get_batch_response(key)],
-                            ..Default::default()
-                        };
-                        let _ = tx.send(Ok(resp)).await;
+                        }
                     }
                 });
 
@@ -966,20 +964,22 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
 
-        // After reconnecting, subsequent requests should succeed.
-        let resp = client
-            .dispatch(
-                BatchCommandKind::RawGet,
-                make_raw_get_batch_request(vec![12_u8]),
-                Duration::from_secs(5),
-            )
-            .await?;
-        let resp = resp
-            .downcast::<crate::proto::kvrpcpb::RawGetResponse>()
-            .expect("raw get response");
-        assert_eq!(resp.value, vec![12_u8]);
+        // After reconnecting, subsequent requests should reuse the new stream.
+        for v in 12_u8..=15_u8 {
+            let resp = client
+                .dispatch(
+                    BatchCommandKind::RawGet,
+                    make_raw_get_batch_request(vec![v]),
+                    Duration::from_secs(5),
+                )
+                .await?;
+            let resp = resp
+                .downcast::<crate::proto::kvrpcpb::RawGetResponse>()
+                .expect("raw get response");
+            assert_eq!(resp.value, vec![v]);
+        }
 
-        assert!(calls.load(Ordering::SeqCst) >= 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         let _ = shutdown_tx.send(());
         Ok(())
     }
