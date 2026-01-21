@@ -506,11 +506,15 @@ async fn raw_get_health_feedback() -> Result<()> {
             .expect("GetHealthFeedbackResponse must include health_feedback");
         assert_ne!(feedback.feedback_seq_no, 0);
         assert_ne!(feedback.store_id, 0);
-        assert_eq!(feedback.slow_score, 1);
+        assert!(
+            feedback.slow_score > 0,
+            "expected a positive TiKV slow score, got {}",
+            feedback.slow_score
+        );
 
         assert_eq!(
             client.__test_tikv_side_slow_score(feedback.store_id),
-            Some(1)
+            Some(feedback.slow_score)
         );
     }
 

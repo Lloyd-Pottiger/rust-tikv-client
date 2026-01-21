@@ -8,6 +8,7 @@ export MULTI_REGION ?= 1
 export TIKV_VERSION ?= v8.5.1
 export TIUP_KV      ?= 3
 COVERAGE_FAIL_UNDER ?= 80
+COVERAGE_INTEGRATION_RUST_MIN_STACK ?= 33554432
 
 ALL_FEATURES := integration-tests
 
@@ -143,7 +144,7 @@ coverage-integration:
 	@if cargo llvm-cov --version >/dev/null 2>&1; then \
 		rustup component add llvm-tools-preview >/dev/null 2>&1 || true; \
 		cargo llvm-cov clean --workspace --profraw-only >/dev/null 2>&1 || true; \
-		PD_ADDRS="$(PD_ADDRS)" cargo llvm-cov --package tikv-client --no-default-features --features "integration-tests" --lib --tests \
+		RUST_MIN_STACK="$(COVERAGE_INTEGRATION_RUST_MIN_STACK)" PD_ADDRS="$(PD_ADDRS)" cargo llvm-cov --package tikv-client --no-default-features --features "integration-tests" --lib --tests \
 			--ignore-filename-regex 'src/generated/' \
 			--fail-under-lines $(COVERAGE_FAIL_UNDER) \
 			--html -- --test-threads 1 && echo "Coverage report: target/llvm-cov/html/index.html"; \

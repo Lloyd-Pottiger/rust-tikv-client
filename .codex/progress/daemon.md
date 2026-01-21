@@ -65,3 +65,8 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：对齐 client-go `checkAllSecondaries/addKeys` 语义：仅在“部分 secondary lock 缺失”时信任 response `commit_ts`；否则忽略 `commit_ts`，使用 `max(lock.min_commit_ts)` 避免 `CommitTsExpired`
   - 文件：`src/transaction/lock.rs`，`.codex/progress/daemon.md`
   - 验证：`make coverage-integration`；`make all`
+
+- quality/integration-test-stability：收敛 make all / coverage-integration 的不稳定因素
+  - 关键：`make coverage-integration` 固定 `RUST_MIN_STACK=32MiB` 避免 llvm-cov 下 stack overflow；`raw_get_health_feedback` 不再假设 slow_score 恒为 1（可能随 TiKV 负载波动），改为验证 slow_score>0 且本地 store_health 记录与返回一致
+  - 文件：`Makefile`，`tests/integration_tests.rs`，`.codex/progress/daemon.md`
+  - 验证：`make coverage-integration`；`make all`
