@@ -97,7 +97,7 @@ pub struct MockKvConnect;
 #[cfg(test)]
 pub struct MockCluster;
 
-#[derive(new)]
+#[derive(new, Default)]
 pub struct MockPdClient {
     client: MockKvClient,
 }
@@ -126,12 +126,6 @@ impl KvConnect for MockKvConnect {
 }
 
 impl MockPdClient {
-    pub fn default() -> MockPdClient {
-        MockPdClient {
-            client: MockKvClient::default(),
-        }
-    }
-
     pub(crate) fn region1() -> RegionWithLeader {
         let mut region = RegionWithLeader::default();
         region.region.id = 1;
