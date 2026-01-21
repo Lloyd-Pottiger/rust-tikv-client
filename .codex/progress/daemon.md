@@ -21,52 +21,17 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
 
 # 已完成工作
 
-- tests/parity/client-go：client-go tests 迁移闭环（raw/txn/request/config/safe-ts），补齐 rawkv store replace StoreNotMatch->invalidate->leader switch 单测
-  - 关键：store_not_match 无 backoff 也必须 invalidate region+store cache 并刷新 leader 后重试；stale-read DataIsNotReady wait+retry 等
-  - 文件：`src/request/plan.rs`，`src/raw/client.rs`，`src/config.rs`，`src/store/safe_ts.rs`，`tests/{integration_tests.rs,failpoint_tests.rs}`，`.codex/progress/{client-go-tests-file-map.md,client-go-tests-port.md,daemon.md}`
-  - 验证：`cargo test test_retryable_multi_region_store_not_match_switches_leader_after_invalidate --features test-util`；`make all`
+- tests/parity/client-go：client-go 可迁移测试语义迁移闭环（101 `_test.go` 归因 + 关键路径补齐）
+  - 关键：StoreNotMatch->invalidate cache+刷新 leader 重试；stale-read DataIsNotReady wait+retry；async-commit 二级锁恢复对齐 client-go（仅缺锁时采信 `commit_ts`，否则用 `max(min_commit_ts)`）
+  - 文件：`src/{request,raw,transaction,store}/*`，`tests/{integration_tests.rs,failpoint_tests.rs}`，`.codex/progress/{client-go-tests-file-map.md,client-go-tests-port.md,client-go-integration-tests-port.md,parity-checklist.md,daemon.md}`
+  - 验证：`make all`；`make coverage`；`make coverage-integration`
 
 - transport/store：实现 BatchCommands stream + health feedback 等价语义
-  - 关键：stream prime `Empty(request_id=0)`；request_id 从 1 起；recv 按 request_id 解复用/乱序；断线重连；timeout -> DeadlineExceeded
-  - 文件：`src/store/{batch_commands.rs,request.rs,client.rs,health.rs}`，`tests/integration_tests.rs`，`Cargo.toml`，`Cargo.lock`
+  - 关键：stream prime `Empty(request_id=0)`；request_id 从 1 起；recv 按 request_id 解复用/乱序；断线重连；timeout -> DeadlineExceeded；batch unimplemented fallback unary
+  - 文件：`src/store/{batch_commands.rs,request.rs,client.rs,health.rs}`，`tests/integration_tests.rs`
   - 验证：`make all`
 
-- parity/review-backlog：复核 `.codex/progress/parity-checklist.md` 并修正 raw/txn/pd/region_cache/store 的 Rust/Tests 映射
-  - 关键：补充 rawkv/kv flags/pd/region_cache/store 的单测/集成测引用，便于后续定位覆盖点
-  - 文件：`.codex/progress/parity-checklist.md`，`.codex/progress/daemon.md`
-  - 验证：`make all`
-
-- tests/port/internal-client-async：收敛 Go `internal/client/{client_test,client_async_test}.go` 可迁移语义映射（batch stream 关键路径 + KvRpcClient fallback）
-  - 关键：batch cmd unimplemented（如 Empty）必须 fallback unary；其余 conn-pool/forward/metadata/trace 等 Go-only 细节 N/A
-  - 文件：`src/store/client.rs`，`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/daemon.md`
-  - 验证：`make check` + `make unit-test` + `make all`
-
-- tests/port/integration-mock-scan-raw：收敛 Go mockstore 集成用例（raw/txn scan）到 Rust real-cluster E2E 覆盖
-  - 关键：mockstore harness N/A，但 raw CRUD/batch/scan + txn scan/reverse 多 region 语义由 Rust E2E + unit tests 覆盖
-  - 文件：`.codex/progress/client-go-tests-file-map.md`，`.codex/progress/client-go-integration-tests-port.md`，`.codex/progress/daemon.md`
-  - 验证：`make all`
-
-- quality/coverage-80：验证 `make coverage` lines>=80%（生成 html 报告）
-  - 关键：当前覆盖率阈值通过（`COVERAGE_FAIL_UNDER=80`）；报告输出到 `target/llvm-cov/html/index.html`
-  - 文件：`.codex/progress/daemon.md`
-  - 验证：`make coverage`
-
-- meta/goal-audit + quality/all-features + chores/repo-hygiene：收尾复核整体目标（tests port + build matrix）
-  - 关键：client-go `101` 个 `_test.go` 在 `.codex/progress/client-go-tests-file-map.md` 均有归因（covered/partial/n/a）；`make check-all-features` 暴露的 test-util dead-code 与 bench 返回类型不匹配问题已修复
-  - 文件：`src/lib.rs`，`src/util/mod.rs`，`benches/plan.rs`，`.gitignore`，`.codex/progress/daemon.md`
-  - 验证：`make all`；`make coverage`；`make check-all-features`
-
-- ci/feature-matrix：CI 增加 `make check-all-features`，防止 feature-gated 代码漂移导致未来 build break
-  - 关键：`make check` 仅覆盖 `integration-tests`；补充 `make check-all-features` 覆盖 `tracing`/`test-util` 等 feature 组合
-  - 文件：`.github/workflows/ci.yml`，`.codex/progress/daemon.md`
-  - 验证：`make check`；`make check-all-features`
-
-- quality/coverage-integration：验证 `make coverage-integration` 也能通过（`--no-default-features --features integration-tests`）
-  - 关键：对齐 client-go `checkAllSecondaries/addKeys` 语义：仅在“部分 secondary lock 缺失”时信任 response `commit_ts`；否则忽略 `commit_ts`，使用 `max(lock.min_commit_ts)` 避免 `CommitTsExpired`
-  - 文件：`src/transaction/lock.rs`，`.codex/progress/daemon.md`
-  - 验证：`make coverage-integration`；`make all`
-
-- quality/integration-test-stability：收敛 make all / coverage-integration 的不稳定因素
-  - 关键：`make coverage-integration` 固定 `RUST_MIN_STACK=32MiB` 避免 llvm-cov 下 stack overflow；`raw_get_health_feedback` 不再假设 slow_score 恒为 1（可能随 TiKV 负载波动），改为验证 slow_score>0 且本地 store_health 记录与返回一致
-  - 文件：`Makefile`，`tests/integration_tests.rs`，`.codex/progress/daemon.md`
-  - 验证：`make coverage-integration`；`make all`
+- quality/ci：覆盖率/feature matrix 收尾 + 稳定性收敛
+  - 关键：CI 增加 `make check-all-features`；`make coverage-integration` 固定 `RUST_MIN_STACK=32MiB`；`raw_get_health_feedback` 不再假设 slow_score 恒为 1；复核 `make check-all-features`/`make coverage`/`make all` 均通过
+  - 文件：`Makefile`，`.github/workflows/ci.yml`，`tests/integration_tests.rs`，`.codex/progress/daemon.md`
+  - 验证：`make check-all-features`；`make coverage`；`make coverage-integration`；`make all`
