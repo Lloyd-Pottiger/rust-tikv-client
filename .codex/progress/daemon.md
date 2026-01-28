@@ -35,3 +35,7 @@ client-go 和 client-rust 我都已经 clone 到当前目录下，新的 rust cl
   - 关键：CI 增加 `make check-all-features`；`make coverage-integration` 固定 `RUST_MIN_STACK=32MiB`；`raw_get_health_feedback` 不再假设 slow_score 恒为 1；补齐 `cargo clippy --all-features`（修复 `MockPdClient::default` clippy）；复核 `make check-all-features`/`make coverage`/`make all` 均通过
   - 文件：`Makefile`，`src/mock.rs`，`.github/workflows/ci.yml`，`tests/integration_tests.rs`，`.codex/progress/daemon.md`
   - 验证：`cargo clippy --all --all-targets --all-features -- -D clippy::all`；`make check-all-features`；`make coverage`；`make coverage-integration`；`make all`
+
+- review：给 repo 级 code review 准备文件阅读顺序清单（todo checklist）
+  - 关键：按 docs/tooling -> proto/codegen -> public API -> core modules -> tests/examples -> reference clients 顺序组织
+  - 文件：`.codex/review/overview.md`，`.codex/progress/daemon.md`
