@@ -44,7 +44,8 @@ use crate::Result;
 ///
 /// Note: dropping an active transaction does **not** automatically roll it back; on an early error
 /// return, prefer calling [`Transaction::rollback`]. See [`TransactionOptions::drop_check`] /
-/// [`CheckLevel`](crate::CheckLevel) for drop-time behavior configuration.
+/// [`CheckLevel`](crate::CheckLevel) for drop-time behavior configuration. For the common
+/// "begin + do work + commit/rollback" pattern, consider using [`run_in_transaction`](Self::run_in_transaction).
 ///
 /// Besides transactions, the client provides some further functionality:
 /// - `gc`: trigger a GC process which clears stale data in the cluster.

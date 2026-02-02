@@ -279,6 +279,9 @@ impl LockOptions {
 ///
 /// Dropping an active transaction does **not** automatically roll it back. By default it logs a
 /// warning (see [`CheckLevel`] and [`TransactionOptions::drop_check`]).
+///
+/// If you want to avoid manual commit/rollback plumbing, consider using
+/// [`TransactionClient::run_in_transaction`](crate::TransactionClient::run_in_transaction).
 #[must_use = "Transaction must be committed or rolled back"]
 pub struct Transaction<PdC: PdClient = PdRpcClient> {
     status: Arc<AtomicU8>,
