@@ -16,6 +16,11 @@ export TIUP_KV_PORT ?=
 COVERAGE_FAIL_UNDER ?= 80
 COVERAGE_INTEGRATION_RUST_MIN_STACK ?= 33554432
 
+# Best-effort health checks (used for integration test gating and TiUP readiness polling).
+# Keep them fast so `make all` doesn't hang on a half-alive PD.
+CURL ?= curl
+CURL_ARGS ?= -fsS --connect-timeout 2 --max-time 2
+
 ALL_FEATURES := integration-tests
 
 NEXTEST_ARGS := --config-file $(shell pwd)/config/nextest.toml
@@ -69,19 +74,19 @@ integration-test-if-ready: generate
 		echo "curl not found; skipping integration tests (install curl or run manually)."; \
 		exit 0; \
 	fi; \
-	if ! curl -fsS "$$pd_url/pd/api/v1/version" >/dev/null 2>&1; then \
+	if ! $(CURL) $(CURL_ARGS) "$$pd_url/pd/api/v1/version" >/dev/null 2>&1; then \
 		echo "PD not reachable at $$pd_url; skipping integration tests (run \`make tiup-up\` then \`make integration-test\`)."; \
 		exit 0; \
 	fi; \
 	py=""; \
 	if command -v python3 >/dev/null 2>&1; then py=python3; elif command -v python >/dev/null 2>&1; then py=python; fi; \
 	if [ -n "$$py" ]; then \
-		if ! curl -fsS "$$pd_url/pd/api/v1/stores" 2>/dev/null | $$py -c "import json,sys; data=json.load(sys.stdin); count=int(data.get('count',0) or 0); stores=data.get('stores',[]); all_up=all(((s.get('store') or {}).get('state_name')=='Up') for s in stores); sys.exit(0 if (count > 0 and all_up) else 1)"; then \
+		if ! $(CURL) $(CURL_ARGS) "$$pd_url/pd/api/v1/stores" 2>/dev/null | $$py -c "import json,sys; data=json.load(sys.stdin); count=int(data.get('count',0) or 0); stores=data.get('stores',[]); all_up=all(((s.get('store') or {}).get('state_name')=='Up') for s in stores); sys.exit(0 if (count > 0 and all_up) else 1)"; then \
 			echo "PD is reachable at $$pd_url but TiKV stores are not ready; skipping integration tests (run \`make tiup-up\` then \`make integration-test\`)."; \
 			exit 0; \
 		fi; \
 	else \
-		if ! curl -fsS "$$pd_url/pd/api/v1/stores" 2>/dev/null | grep -q '\"state_name\":\"Up\"'; then \
+		if ! $(CURL) $(CURL_ARGS) "$$pd_url/pd/api/v1/stores" 2>/dev/null | grep -q '\"state_name\":\"Up\"'; then \
 			echo "PD is reachable at $$pd_url but TiKV stores are not ready; skipping integration tests (run \`make tiup-up\` then \`make integration-test\`)."; \
 			exit 0; \
 		fi; \
@@ -277,11 +282,11 @@ tiup-up:
 		fi; \
 		echo "Waiting for PD ($$pd_addr) to be ready..."; \
 		tries=0; \
-		while [ $$tries -lt 60 ]; do \
-			if curl -fsS "$$pd_url/pd/api/v1/version" >/dev/null 2>&1; then \
-				echo "PD is ready."; \
-				break; \
-			fi; \
+			while [ $$tries -lt 60 ]; do \
+				if $(CURL) $(CURL_ARGS) "$$pd_url/pd/api/v1/version" >/dev/null 2>&1; then \
+					echo "PD is ready."; \
+					break; \
+				fi; \
 			sleep 1; \
 			tries=$$((tries + 1)); \
 		done; \
@@ -298,11 +303,11 @@ tiup-up:
 		echo "Waiting for TiKV stores to be ready (expected=$(TIUP_KV))..."; \
 		expected_kv="$(TIUP_KV)"; \
 		tries=0; \
-		while [ $$tries -lt 60 ]; do \
-			if curl -fsS "$$pd_url/pd/api/v1/stores" 2>/dev/null | $$py -c "import json,sys; expected=int('$$expected_kv'); data=json.load(sys.stdin); count=int(data.get('count',0) or 0); stores=data.get('stores',[]); all_up=all((s.get('store') or {}).get('state_name')=='Up' for s in stores); sys.exit(0 if (count >= expected and all_up) else 1)"; then \
-				echo "TiKV stores are ready."; \
-				exit 0; \
-			fi; \
+			while [ $$tries -lt 60 ]; do \
+				if $(CURL) $(CURL_ARGS) "$$pd_url/pd/api/v1/stores" 2>/dev/null | $$py -c "import json,sys; expected=int('$$expected_kv'); data=json.load(sys.stdin); count=int(data.get('count',0) or 0); stores=data.get('stores',[]); all_up=all((s.get('store') or {}).get('state_name')=='Up' for s in stores); sys.exit(0 if (count >= expected and all_up) else 1)"; then \
+					echo "TiKV stores are ready."; \
+					exit 0; \
+				fi; \
 			sleep 1; \
 			tries=$$((tries + 1)); \
 		done; \
