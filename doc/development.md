@@ -83,6 +83,16 @@ Key environment variables:
 - `MULTI_REGION` (default `1`): pre-splits regions in `tests/common/init()` for multi-region tests
 - `TIKV_VERSION` (default `v8.5.1`): TiUp playground TiKV/PD version used by `make tiup-up`
 - `TIUP_KV` (default `3`): TiUp playground TiKV instance count used by `make tiup-up` (and the readiness check)
+- `TIUP_PD_HOST` / `TIUP_PD_PORT`: override TiUp playground PD listen address used by `make tiup-up`
+  (defaults to the first `PD_ADDRS` host/port)
+- `TIUP_KV_HOST` / `TIUP_KV_PORT`: override TiUp playground TiKV listen address base used by `make tiup-up`
+  (useful when running multiple playgrounds or avoiding port conflicts)
+
+Example (avoid local port conflicts by running the playground on non-default ports):
+
+```bash
+PD_ADDRS=127.0.0.1:32379 TIUP_KV_PORT=30160 make tiup-up
+```
 
 Stop and clean up:
 
