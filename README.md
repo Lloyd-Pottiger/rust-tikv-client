@@ -51,14 +51,24 @@ let _value = client.get("key".to_owned()).await?;
 
 Transactional mode:
 
+Tip: prefer `TransactionClient::run_in_transaction` so the client commits on success and rolls back on error.
+The `.boxed()` helper comes from `futures::FutureExt` (add `futures = "0.3"` to your `Cargo.toml` if needed).
+
 ```rust,no_run
-# use tikv_client::{Result, TransactionClient};
+# use futures::FutureExt;
+# use tikv_client::{Result, TransactionClient, TransactionOptions};
 # async fn example() -> Result<()> {
 let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
-let mut txn = txn_client.begin_optimistic().await?;
-txn.put("key".to_owned(), "value".to_owned()).await?;
-let _value = txn.get("key".to_owned()).await?;
-txn.commit().await?;
+txn_client
+    .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+        async move {
+            txn.put("key".to_owned(), "value".to_owned()).await?;
+            let _value = txn.get("key".to_owned()).await?;
+            Ok(())
+        }
+        .boxed()
+    })
+    .await?;
 # Ok(())
 # }
 ```

@@ -6,6 +6,7 @@ The TiKV client is a Rust library (crate). To use this crate in your project, ad
 [dependencies]
 tikv-client = "0.3"
 tokio = { version = "1", features = ["full"] }
+futures = "0.3"
 ```
 
 Note that you need to use Tokio. The TiKV client has an async API and therefore you need an async runtime in your program to use it. At the moment, Tokio is used internally in the client and so you must use Tokio in your code too. We plan to become more flexible in future versions.
@@ -32,16 +33,25 @@ async fn main() -> Result<()> {
 
 Transactional mode:
 
+Tip: prefer `TransactionClient::run_in_transaction` so the client commits on success and rolls back on error.
+
 ```rust
-use tikv_client::{Result, TransactionClient};
+use futures::FutureExt;
+use tikv_client::{Result, TransactionClient, TransactionOptions};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
-    let mut txn = txn_client.begin_optimistic().await?;
-    txn.put("key".to_owned(), "value".to_owned()).await?;
-    let _value = txn.get("key".to_owned()).await?;
-    txn.commit().await?;
+    txn_client
+        .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+            async move {
+                txn.put("key".to_owned(), "value".to_owned()).await?;
+                let _value = txn.get("key".to_owned()).await?;
+                Ok(())
+            }
+            .boxed()
+        })
+        .await?;
     Ok(())
 }
 ```
@@ -49,14 +59,21 @@ async fn main() -> Result<()> {
 To make an example which builds and runs,
 
 ```rust
-use tikv_client::{Result, TransactionClient};
+use futures::FutureExt;
+use tikv_client::{Result, TransactionClient, TransactionOptions};
 
 async fn run() -> Result<()> {
     let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
-    let mut txn = txn_client.begin_optimistic().await?;
-    txn.put("key".to_owned(), "value".to_owned()).await?;
-    let _value = txn.get("key".to_owned()).await?;
-    txn.commit().await?;
+    txn_client
+        .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+            async move {
+                txn.put("key".to_owned(), "value".to_owned()).await?;
+                let _value = txn.get("key".to_owned()).await?;
+                Ok(())
+            }
+            .boxed()
+        })
+        .await?;
     Ok(())
 }
 
