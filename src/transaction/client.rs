@@ -355,6 +355,9 @@ impl<PdC: PdClient> Client<PdC> {
     /// If `f` returns an error, this method will try to roll back the transaction and then return
     /// the original error. Rollback errors are logged and suppressed.
     ///
+    /// If you need the commit timestamp (e.g. to perform a *stale read* after writing), use
+    /// [`run_in_transaction_with_commit_ts`](Self::run_in_transaction_with_commit_ts).
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -379,11 +382,55 @@ impl<PdC: PdClient> Client<PdC> {
     where
         F: for<'a> FnOnce(&'a mut Transaction<PdC>) -> BoxFuture<'a, Result<T>>,
     {
+        let (v, _commit_ts) = self.run_in_transaction_with_commit_ts(options, f).await?;
+        Ok(v)
+    }
+
+    /// Run a function in a transaction, returning the closure result *and* the commit timestamp.
+    ///
+    /// This is the same as [`run_in_transaction`](Self::run_in_transaction), except it returns the
+    /// commit timestamp returned by [`Transaction::commit`] (or `None` if there was nothing to
+    /// commit).
+    ///
+    /// This is useful for *stale reads*: you can take the returned `commit_ts`, wait until
+    /// `current_min_timestamp >= commit_ts`, and then perform a stale snapshot read at
+    /// `current_min_timestamp`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use futures::FutureExt;
+    /// # use tikv_client::{Result, TransactionClient, TransactionOptions};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
+    ///
+    /// let ((), commit_ts) = client
+    ///     .run_in_transaction_with_commit_ts(TransactionOptions::new_optimistic(), |txn| {
+    ///         async move {
+    ///             txn.put("k".to_owned(), b"v".to_vec()).await?;
+    ///             Ok(())
+    ///         }
+    ///         .boxed()
+    ///     })
+    ///     .await?;
+    ///
+    /// assert!(commit_ts.is_some());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn run_in_transaction_with_commit_ts<T, F>(
+        &self,
+        options: TransactionOptions,
+        f: F,
+    ) -> Result<(T, Option<Timestamp>)>
+    where
+        F: for<'a> FnOnce(&'a mut Transaction<PdC>) -> BoxFuture<'a, Result<T>>,
+    {
         let mut txn = self.begin_with_options(options).await?;
         match f(&mut txn).await {
             Ok(v) => {
-                let _ = txn.commit().await?;
-                Ok(v)
+                let commit_ts = txn.commit().await?;
+                Ok((v, commit_ts))
             }
             Err(err) => {
                 if let Err(rollback_err) = txn.rollback().await {
@@ -730,6 +777,111 @@ mod tests {
             .await?;
 
         assert_eq!(commit_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(rollback_calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_in_transaction_with_commit_ts_returns_commit_ts_on_success() -> Result<()> {
+        let commit_calls = Arc::new(AtomicUsize::new(0));
+        let rollback_calls = Arc::new(AtomicUsize::new(0));
+        let commit_calls_for_hook = commit_calls.clone();
+        let rollback_calls_for_hook = rollback_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                    return Ok(Box::new(kvrpcpb::PrewriteResponse::default()));
+                }
+                if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    commit_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::CommitResponse::default()));
+                }
+                if req
+                    .downcast_ref::<kvrpcpb::BatchRollbackRequest>()
+                    .is_some()
+                {
+                    rollback_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::BatchRollbackResponse::default()));
+                }
+                unreachable!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let client = Client {
+            pd: pd_client,
+            keyspace: Keyspace::Disable,
+            request_context: RequestContext::default(),
+            txn_latches: None,
+        };
+
+        let options = TransactionOptions::new_optimistic()
+            .heartbeat_option(crate::transaction::HeartbeatOption::NoHeartbeat);
+
+        let (v, commit_ts) = client
+            .run_in_transaction_with_commit_ts(options, |txn| {
+                Box::pin(async move {
+                    txn.put(vec![1_u8], b"v1".to_vec()).await?;
+                    Ok(42_u8)
+                })
+            })
+            .await?;
+
+        assert_eq!(v, 42);
+        assert!(commit_ts.is_some());
+        assert_eq!(commit_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(rollback_calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_in_transaction_with_commit_ts_returns_none_when_no_mutations() -> Result<()> {
+        let prewrite_calls = Arc::new(AtomicUsize::new(0));
+        let commit_calls = Arc::new(AtomicUsize::new(0));
+        let rollback_calls = Arc::new(AtomicUsize::new(0));
+        let prewrite_calls_for_hook = prewrite_calls.clone();
+        let commit_calls_for_hook = commit_calls.clone();
+        let rollback_calls_for_hook = rollback_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                    prewrite_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::PrewriteResponse::default()));
+                }
+                if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    commit_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::CommitResponse::default()));
+                }
+                if req
+                    .downcast_ref::<kvrpcpb::BatchRollbackRequest>()
+                    .is_some()
+                {
+                    rollback_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::BatchRollbackResponse::default()));
+                }
+                unreachable!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let client = Client {
+            pd: pd_client,
+            keyspace: Keyspace::Disable,
+            request_context: RequestContext::default(),
+            txn_latches: None,
+        };
+
+        let options = TransactionOptions::new_optimistic()
+            .heartbeat_option(crate::transaction::HeartbeatOption::NoHeartbeat);
+
+        let (v, commit_ts) = client
+            .run_in_transaction_with_commit_ts(options, |_| Box::pin(async { Ok(123_u8) }))
+            .await?;
+
+        assert_eq!(v, 123);
+        assert!(commit_ts.is_none());
+        assert_eq!(prewrite_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(commit_calls.load(Ordering::SeqCst), 0);
         assert_eq!(rollback_calls.load(Ordering::SeqCst), 0);
         Ok(())
     }
