@@ -2277,18 +2277,26 @@ async fn txn_replica_read_snapshot_get() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-async fn txn_stale_read_snapshot_get() -> Result<()> {
+async fn txn_run_in_transaction_with_commit_ts_stale_read() -> Result<()> {
     init().await?;
     let client =
         TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
             .await?;
 
-    let key = "stale_read_k".to_owned();
+    let key = "run_in_txn_stale_read_k".to_owned();
     let value = "v".to_owned();
 
-    let mut txn = client.begin_optimistic().await?;
-    txn.put(key.clone(), value.clone()).await?;
-    let commit_ts = txn.commit().await?.expect("commit timestamp");
+    let ((), commit_ts) = client
+        .run_in_transaction_with_commit_ts(TransactionOptions::new_optimistic(), |txn| {
+            let key = key.clone();
+            let value = value.clone();
+            Box::pin(async move {
+                txn.put(key, value).await?;
+                Ok(())
+            })
+        })
+        .await?;
+    let commit_ts = commit_ts.expect("commit timestamp");
 
     // Stale reads require a read-ts that is <= the cluster's safe-ts. PD's `GetMinTs` provides a
     // conservative timestamp across all TSO groups; wait until it is >= `commit_ts`.
@@ -2309,6 +2317,17 @@ async fn txn_stale_read_snapshot_get() -> Result<()> {
         stale_ts,
         TransactionOptions::new_optimistic().stale_read(true),
     );
-    assert_eq!(snapshot.get(key).await?, Some(value.into_bytes()));
+    assert_eq!(snapshot.get(key.clone()).await?, Some(value.into_bytes()));
+
+    // Cleanup so tests that don't call init() aren't affected.
+    client
+        .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+            let key = key.clone();
+            Box::pin(async move {
+                txn.delete(key).await?;
+                Ok(())
+            })
+        })
+        .await?;
     Ok(())
 }
