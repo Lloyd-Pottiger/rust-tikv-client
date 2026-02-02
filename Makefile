@@ -119,6 +119,7 @@ integration-test-raw: generate
 
 integration-test-smoke: generate
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests txn_run_in_transaction_commits_on_ok -- --test-threads 1
+	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests txn_run_in_transaction_with_commit_ts_some -- --test-threads 1
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests txn_crud -- --test-threads 1
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests txn_try_one_pc -- --test-threads 1
 	PD_ADDRS="$(PD_ADDRS)" cargo test --package tikv-client --test integration_tests --features integration-tests txn_pipelined_flush -- --test-threads 1
