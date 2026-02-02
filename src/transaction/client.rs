@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use log::debug;
-use log::info;
+use futures::future::BoxFuture;
+use log::{debug, info, warn};
 
 use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF};
 use crate::config::Config;
@@ -346,6 +346,36 @@ impl<PdC: PdClient> Client<PdC> {
         Ok(self.new_transaction(timestamp, options))
     }
 
+    /// Run a function in a transaction, committing on success and rolling back on error.
+    ///
+    /// The closure should *not* call [`Transaction::commit`] or [`Transaction::rollback`]; this
+    /// helper manages the transaction lifecycle.
+    ///
+    /// If `f` returns an error, this method will try to roll back the transaction and then return
+    /// the original error. Rollback errors are logged and suppressed.
+    pub async fn run_in_transaction<T, F>(&self, options: TransactionOptions, f: F) -> Result<T>
+    where
+        F: for<'a> FnOnce(&'a mut Transaction<PdC>) -> BoxFuture<'a, Result<T>>,
+    {
+        let mut txn = self.begin_with_options(options).await?;
+        match f(&mut txn).await {
+            Ok(v) => {
+                let _ = txn.commit().await?;
+                Ok(v)
+            }
+            Err(err) => {
+                if let Err(rollback_err) = txn.rollback().await {
+                    warn!(
+                        "Rollback after transaction error failed (start_ts={}): {}",
+                        txn.start_timestamp().version(),
+                        rollback_err
+                    );
+                }
+                Err(err)
+            }
+        }
+    }
+
     /// Create a new [`Snapshot`] at the given [`Timestamp`].
     pub fn snapshot(&self, timestamp: Timestamp, options: TransactionOptions) -> Snapshot<PdC> {
         debug!("creating new snapshot");
@@ -628,6 +658,110 @@ mod tests {
 
         client.unsafe_destroy_range(..).await?;
         assert!(destroy_calls.load(Ordering::SeqCst) > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_in_transaction_commits_on_success() -> Result<()> {
+        let commit_calls = Arc::new(AtomicUsize::new(0));
+        let rollback_calls = Arc::new(AtomicUsize::new(0));
+        let commit_calls_for_hook = commit_calls.clone();
+        let rollback_calls_for_hook = rollback_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                    return Ok(Box::new(kvrpcpb::PrewriteResponse::default()));
+                }
+                if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    commit_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::CommitResponse::default()));
+                }
+                if req
+                    .downcast_ref::<kvrpcpb::BatchRollbackRequest>()
+                    .is_some()
+                {
+                    rollback_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::BatchRollbackResponse::default()));
+                }
+                unreachable!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let client = Client {
+            pd: pd_client,
+            keyspace: Keyspace::Disable,
+            request_context: RequestContext::default(),
+            txn_latches: None,
+        };
+
+        let options = TransactionOptions::new_optimistic()
+            .heartbeat_option(crate::transaction::HeartbeatOption::NoHeartbeat);
+
+        client
+            .run_in_transaction(options, |txn| {
+                Box::pin(async move {
+                    txn.put(vec![1_u8], b"v1".to_vec()).await?;
+                    Ok(())
+                })
+            })
+            .await?;
+
+        assert_eq!(commit_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(rollback_calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_in_transaction_rolls_back_on_error() -> Result<()> {
+        let commit_calls = Arc::new(AtomicUsize::new(0));
+        let rollback_calls = Arc::new(AtomicUsize::new(0));
+        let commit_calls_for_hook = commit_calls.clone();
+        let rollback_calls_for_hook = rollback_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                    return Ok(Box::new(kvrpcpb::PrewriteResponse::default()));
+                }
+                if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    commit_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::CommitResponse::default()));
+                }
+                if req
+                    .downcast_ref::<kvrpcpb::BatchRollbackRequest>()
+                    .is_some()
+                {
+                    rollback_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::BatchRollbackResponse::default()));
+                }
+                unreachable!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let client = Client {
+            pd: pd_client,
+            keyspace: Keyspace::Disable,
+            request_context: RequestContext::default(),
+            txn_latches: None,
+        };
+
+        let options = TransactionOptions::new_optimistic()
+            .heartbeat_option(crate::transaction::HeartbeatOption::NoHeartbeat);
+
+        let err = client
+            .run_in_transaction(options, |txn| {
+                Box::pin(async move {
+                    txn.put(vec![1_u8], b"v1".to_vec()).await?;
+                    Err::<(), _>(crate::Error::Unimplemented)
+                })
+            })
+            .await
+            .expect_err("expected transaction closure to return an error");
+        assert!(matches!(err, crate::Error::Unimplemented));
+
+        assert_eq!(commit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(rollback_calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 }
