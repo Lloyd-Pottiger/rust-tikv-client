@@ -271,6 +271,14 @@ impl LockOptions {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # Error handling and drop behavior
+///
+/// A transaction should be explicitly committed or rolled back. If your code returns early with an
+/// error, call [`rollback`](Transaction::rollback) to avoid leaving locks behind.
+///
+/// Dropping an active transaction does **not** automatically roll it back. By default it logs a
+/// warning (see [`CheckLevel`] and [`TransactionOptions::drop_check`]).
 #[must_use = "Transaction must be committed or rolled back"]
 pub struct Transaction<PdC: PdClient = PdRpcClient> {
     status: Arc<AtomicU8>,

@@ -42,6 +42,10 @@ use crate::Result;
 /// Begin a [`Transaction`] by calling [`begin_optimistic`](Client::begin_optimistic) or
 /// [`begin_pessimistic`](Client::begin_pessimistic). A transaction must be rolled back or committed.
 ///
+/// Note: dropping an active transaction does **not** automatically roll it back; on an early error
+/// return, prefer calling [`Transaction::rollback`]. See [`TransactionOptions::drop_check`] /
+/// [`CheckLevel`](crate::CheckLevel) for drop-time behavior configuration.
+///
 /// Besides transactions, the client provides some further functionality:
 /// - `gc`: trigger a GC process which clears stale data in the cluster.
 /// - `current_timestamp`: get the current `Timestamp` from PD.
