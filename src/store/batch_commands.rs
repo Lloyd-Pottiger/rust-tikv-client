@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -111,17 +111,20 @@ pub(crate) struct BatchCommandsClient {
     outbound_tx: mpsc::Sender<Outbound>,
     inflight: Arc<Mutex<HashMap<u64, Inflight>>>,
     next_request_id: Arc<AtomicU64>,
+    batch_supported: Arc<AtomicBool>,
 }
 
 impl BatchCommandsClient {
     pub(crate) fn new(rpc_client: TikvClient<Channel>, store_health: StoreHealthMap) -> Self {
         let (outbound_tx, outbound_rx) = mpsc::channel(1024);
         let inflight = Arc::new(Mutex::new(HashMap::new()));
+        let batch_supported = Arc::new(AtomicBool::new(true));
 
         let state = Arc::new(BatchCommandsState {
             rpc_client,
             store_health,
             inflight: inflight.clone(),
+            batch_supported: batch_supported.clone(),
         });
         tokio::spawn(run_batch_send_loop(state, outbound_rx));
 
@@ -129,7 +132,16 @@ impl BatchCommandsClient {
             outbound_tx,
             inflight,
             next_request_id: Arc::new(AtomicU64::new(1)),
+            batch_supported,
         }
+    }
+
+    pub(crate) fn supports_batch_commands(&self) -> bool {
+        self.batch_supported.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn disable_batch_commands(&self) {
+        self.batch_supported.store(false, Ordering::Relaxed);
     }
 
     pub(crate) async fn dispatch(
@@ -138,6 +150,13 @@ impl BatchCommandsClient {
         request: tikvpb::batch_commands_request::Request,
         timeout: Duration,
     ) -> Result<Box<dyn Any + Send>> {
+        if !self.supports_batch_commands() {
+            return Err(Error::GrpcAPI(Status::new(
+                Code::Unimplemented,
+                "batch commands RPC is not supported",
+            )));
+        }
+
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let (resp_tx, resp_rx) = oneshot::channel();
 
@@ -180,6 +199,7 @@ struct BatchCommandsState {
     rpc_client: TikvClient<Channel>,
     store_health: StoreHealthMap,
     inflight: Arc<Mutex<HashMap<u64, Inflight>>>,
+    batch_supported: Arc<AtomicBool>,
 }
 
 struct BatchConnection {
@@ -248,7 +268,15 @@ async fn connect_batch_stream(
     let request_stream = ReceiverStream::new(request_rx);
 
     let mut client = state.rpc_client.clone();
-    let response_stream = client.batch_commands(request_stream).await?.into_inner();
+    let response_stream = match client.batch_commands(request_stream).await {
+        Ok(resp) => resp.into_inner(),
+        Err(status) => {
+            if status.code() == Code::Unimplemented {
+                state.batch_supported.store(false, Ordering::Relaxed);
+            }
+            return Err(status);
+        }
+    };
 
     tokio::spawn(run_batch_recv_loop(state, response_stream));
 

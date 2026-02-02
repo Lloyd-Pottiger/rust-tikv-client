@@ -75,12 +75,26 @@ impl KvRpcClient {
 #[async_trait]
 impl KvClient for KvRpcClient {
     async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any + Send>> {
-        if let Some(batch_req) = request.batch_request() {
-            if let Ok(kind) = batch_kind_for_request(&batch_req) {
-                return self
-                    .batch_client
-                    .dispatch(kind, batch_req, self.timeout)
-                    .await;
+        if self.batch_client.supports_batch_commands() {
+            if let Some(batch_req) = request.batch_request() {
+                if let Ok(kind) = batch_kind_for_request(&batch_req) {
+                    match self
+                        .batch_client
+                        .dispatch(kind, batch_req, self.timeout)
+                        .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(crate::Error::GrpcAPI(status))
+                            if status.code() == tonic::Code::Unimplemented =>
+                        {
+                            // Old TiKV / proxies may not support the BatchCommands RPC. Fall back
+                            // to unary requests and disable batch for this client to avoid
+                            // repeating the same error.
+                            self.batch_client.disable_batch_commands();
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
             }
         }
 
@@ -90,16 +104,81 @@ impl KvClient for KvRpcClient {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Endpoint;
+    use tonic::transport::Server;
 
     use super::*;
     use crate::proto::kvrpcpb;
     use crate::proto::tikvpb;
     use crate::store::RegionWithLeader;
+
+    #[derive(Clone, Debug)]
+    struct UnimplementedTikvServer;
+
+    impl<B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for UnimplementedTikvServer
+    where
+        B: tonic::codegen::Body + Send + 'static,
+        B::Error: Into<tonic::codegen::StdError> + Send + 'static,
+    {
+        type Response = tonic::codegen::http::Response<tonic::body::BoxBody>;
+        type Error = Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut tonic::codegen::Context<'_>,
+        ) -> tonic::codegen::Poll<std::result::Result<(), Self::Error>> {
+            tonic::codegen::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: tonic::codegen::http::Request<B>) -> Self::Future {
+            Box::pin(async move {
+                Ok(tonic::codegen::http::Response::builder()
+                    .status(200)
+                    .header("grpc-status", "12")
+                    .header("content-type", "application/grpc")
+                    .body(tonic::codegen::empty_body())
+                    .unwrap())
+            })
+        }
+    }
+
+    impl tonic::server::NamedService for UnimplementedTikvServer {
+        const NAME: &'static str = "tikvpb.Tikv";
+    }
+
+    async fn start_unimplemented_tikv_server() -> (SocketAddr, oneshot::Sender<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind unimplemented tikv server");
+        let addr = listener
+            .local_addr()
+            .expect("unimplemented tikv local_addr");
+        let incoming = TcpListenerStream::new(listener);
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(UnimplementedTikvServer)
+                .serve_with_incoming_shutdown(incoming, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve unimplemented tikv server");
+        });
+
+        (addr, shutdown_tx)
+    }
 
     #[derive(Default)]
     struct TestRequest {
@@ -278,6 +357,76 @@ mod tests {
         let resp = client.dispatch(&req).await?;
         assert!(req.unary_called.load(Ordering::SeqCst));
         assert_eq!(*resp.downcast::<u64>().unwrap(), 7);
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct BatchCommandsUnimplementedRequest {
+        unary_called: AtomicBool,
+        context: Option<kvrpcpb::Context>,
+    }
+
+    #[async_trait]
+    impl Request for BatchCommandsUnimplementedRequest {
+        async fn dispatch(
+            &self,
+            _client: &TikvClient<Channel>,
+            _timeout: Duration,
+        ) -> Result<Box<dyn Any + Send>> {
+            self.unary_called.store(true, Ordering::SeqCst);
+            Ok(Box::new(7_u64))
+        }
+
+        fn label(&self) -> &'static str {
+            "batch_commands_unimplemented_request"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn batch_request(&self) -> Option<tikvpb::batch_commands_request::Request> {
+            Some(tikvpb::batch_commands_request::Request {
+                cmd: Some(tikvpb::batch_commands_request::request::Cmd::RawGet(
+                    kvrpcpb::RawGetRequest::default(),
+                )),
+            })
+        }
+
+        fn context_mut(&mut self) -> &mut kvrpcpb::Context {
+            self.context.get_or_insert_with(kvrpcpb::Context::default)
+        }
+
+        fn set_leader(&mut self, _leader: &RegionWithLeader) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_api_version(&mut self, _api_version: kvrpcpb::ApiVersion) {}
+    }
+
+    #[tokio::test]
+    async fn kv_rpc_client_dispatch_falls_back_to_unary_when_batch_commands_rpc_unimplemented(
+    ) -> Result<()> {
+        let (addr, shutdown_tx) = start_unimplemented_tikv_server().await;
+        let channel = Endpoint::from_shared(format!("http://{addr}"))?.connect_lazy();
+
+        let client = KvRpcClient::new(
+            TikvClient::new(channel),
+            Duration::from_millis(123),
+            crate::store::StoreHealthMap::default(),
+        );
+
+        let req = BatchCommandsUnimplementedRequest::default();
+        let resp = client.dispatch(&req).await?;
+        assert!(req.unary_called.load(Ordering::SeqCst));
+        assert_eq!(*resp.downcast::<u64>().unwrap(), 7);
+
+        assert!(
+            !client.batch_client.supports_batch_commands(),
+            "batch should be disabled after the BatchCommands RPC returns Unimplemented",
+        );
+
+        let _ = shutdown_tx.send(());
         Ok(())
     }
 }
