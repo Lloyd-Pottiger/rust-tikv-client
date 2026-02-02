@@ -106,6 +106,11 @@ struct Outbound {
     request: tikvpb::batch_commands_request::Request,
 }
 
+// Align with client-go's default `MaxBatchSize` (128). We don't currently expose this as a public
+// config knob, but micro-batching reduces per-message overhead without adding noticeable latency
+// (the send loop yields at most once to coalesce pending requests).
+const MAX_BATCH_COMMANDS_REQUESTS: usize = 128;
+
 #[derive(Clone)]
 pub(crate) struct BatchCommandsClient {
     outbound_tx: mpsc::Sender<Outbound>,
@@ -213,12 +218,48 @@ async fn run_batch_send_loop(
     let mut connection: Option<BatchConnection> = None;
 
     while let Some(outbound) = outbound_rx.recv().await {
+        // Collect a small batch to amortize the per-message overhead.
+        let mut req = tikvpb::BatchCommandsRequest {
+            requests: vec![outbound.request],
+            request_ids: vec![outbound.request_id],
+        };
+
+        let mut yielded = false;
+        while req.request_ids.len() < MAX_BATCH_COMMANDS_REQUESTS {
+            match outbound_rx.try_recv() {
+                Ok(outbound) => {
+                    req.request_ids.push(outbound.request_id);
+                    req.requests.push(outbound.request);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    if yielded {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                    yielded = true;
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+
+        // If the stream has been marked unsupported (for example, because the server returned
+        // `UNIMPLEMENTED`), fail queued requests quickly and avoid reconnect loops.
+        if !state.batch_supported.load(Ordering::Relaxed) {
+            let status = Status::new(Code::Unimplemented, "batch commands RPC is not supported");
+            for request_id in req.request_ids {
+                fail_inflight(&state.inflight, request_id, status.clone()).await;
+            }
+            continue;
+        }
+
         loop {
             if connection.is_none() {
                 connection = match connect_batch_stream(state.clone()).await {
                     Ok(conn) => Some(conn),
                     Err(status) => {
-                        fail_inflight(&state.inflight, outbound.request_id, status).await;
+                        for request_id in req.request_ids.iter().copied() {
+                            fail_inflight(&state.inflight, request_id, status.clone()).await;
+                        }
                         break;
                     }
                 };
@@ -228,14 +269,11 @@ async fn run_batch_send_loop(
                 break;
             };
 
-            let req = tikvpb::BatchCommandsRequest {
-                requests: vec![outbound.request.clone()],
-                request_ids: vec![outbound.request_id],
-            };
-
             match conn.request_tx.send(req).await {
                 Ok(()) => break,
-                Err(_) => {
+                Err(err) => {
+                    // Recover the message for retry after reconnecting.
+                    req = err.0;
                     connection = None;
                     continue;
                 }
@@ -755,6 +793,108 @@ mod tests {
             .unwrap();
         assert_eq!(r1.value, vec![1]);
         assert_eq!(r2.value, vec![2]);
+
+        let _ = shutdown_tx.send(());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_commands_send_loop_micro_batches_pending_outbounds() -> Result<()> {
+        struct RecordBatchSize {
+            batch_size: Arc<AtomicUsize>,
+        }
+
+        #[tonic::async_trait]
+        impl BatchCommandsService for RecordBatchSize {
+            type BatchCommandsStream =
+                ReceiverStream<std::result::Result<tikvpb::BatchCommandsResponse, Status>>;
+
+            async fn batch_commands(
+                &self,
+                request: tonic::Request<tonic::Streaming<tikvpb::BatchCommandsRequest>>,
+            ) -> std::result::Result<tonic::Response<Self::BatchCommandsStream>, Status>
+            {
+                let mut inbound = request.into_inner();
+                expect_prime_empty(&mut inbound).await?;
+
+                let batch_size = self.batch_size.clone();
+                let (tx, rx) = mpsc::channel(16);
+                tokio::spawn(async move {
+                    if let Ok(Some(req)) = inbound.message().await {
+                        batch_size.store(req.request_ids.len(), Ordering::SeqCst);
+                        let responses = req
+                            .requests
+                            .into_iter()
+                            .map(|request| {
+                                let value = match request.cmd {
+                                    Some(tikvpb::batch_commands_request::request::Cmd::RawGet(
+                                        req,
+                                    )) => req.key,
+                                    _ => Vec::new(),
+                                };
+                                make_raw_get_batch_response(value)
+                            })
+                            .collect();
+
+                        let _ = tx
+                            .send(Ok(tikvpb::BatchCommandsResponse {
+                                request_ids: req.request_ids,
+                                responses,
+                                ..Default::default()
+                            }))
+                            .await;
+                    }
+                });
+
+                Ok(tonic::Response::new(ReceiverStream::new(rx)))
+            }
+        }
+
+        let batch_size = Arc::new(AtomicUsize::new(0));
+        let (addr, shutdown_tx) = start_batch_commands_server(RecordBatchSize {
+            batch_size: batch_size.clone(),
+        })
+        .await;
+        let rpc = connect_test_client(addr).await;
+        let client = BatchCommandsClient::new(rpc, StoreHealthMap::default());
+
+        // Queue multiple requests before yielding to the background send loop, ensuring they can
+        // be coalesced into a single BatchCommandsRequest message.
+        let keys = [vec![1_u8], vec![2_u8], vec![3_u8]];
+        let mut queued = Vec::new();
+        for key in keys.iter().cloned() {
+            let request_id = client.next_request_id.fetch_add(1, Ordering::Relaxed);
+            let (resp_tx, resp_rx) = oneshot::channel();
+            client.inflight.try_lock().expect("inflight lock").insert(
+                request_id,
+                Inflight {
+                    kind: BatchCommandKind::RawGet,
+                    resp_tx,
+                },
+            );
+            client
+                .outbound_tx
+                .try_send(Outbound {
+                    request_id,
+                    request: make_raw_get_batch_request(key.clone()),
+                })
+                .expect("enqueue outbound");
+            queued.push((key, resp_rx));
+        }
+
+        tokio::task::yield_now().await;
+
+        for (key, rx) in queued {
+            let resp = tokio::time::timeout(Duration::from_secs(5), rx)
+                .await
+                .expect("response timeout")
+                .expect("response channel closed")?;
+            let resp = resp
+                .downcast::<crate::proto::kvrpcpb::RawGetResponse>()
+                .expect("raw get response");
+            assert_eq!(resp.value, key);
+        }
+        assert_eq!(batch_size.load(Ordering::SeqCst), 3);
 
         let _ = shutdown_tx.send(());
         Ok(())
