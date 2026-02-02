@@ -294,24 +294,35 @@ tiup-up:
 			echo "PD did not become ready in time. See $(TIUP_LOG_FILE)."; \
 			exit 1; \
 		fi; \
-		py=""; \
-		if command -v python3 >/dev/null 2>&1; then py=python3; elif command -v python >/dev/null 2>&1; then py=python; fi; \
-		if [ -z "$$py" ]; then \
-			echo "python not found; skipping TiKV stores readiness check."; \
-			exit 0; \
-		fi; \
-		echo "Waiting for TiKV stores to be ready (expected=$(TIUP_KV))..."; \
-		expected_kv="$(TIUP_KV)"; \
-		tries=0; \
-			while [ $$tries -lt 60 ]; do \
-				if $(CURL) $(CURL_ARGS) "$$pd_url/pd/api/v1/stores" 2>/dev/null | $$py -c "import json,sys; expected=int('$$expected_kv'); data=json.load(sys.stdin); count=int(data.get('count',0) or 0); stores=data.get('stores',[]); all_up=all((s.get('store') or {}).get('state_name')=='Up' for s in stores); sys.exit(0 if (count >= expected and all_up) else 1)"; then \
-					echo "TiKV stores are ready."; \
-					exit 0; \
-				fi; \
-			sleep 1; \
-			tries=$$((tries + 1)); \
-		done; \
-		echo "TiKV stores did not become ready in time. See $(TIUP_LOG_FILE)."; \
+			py=""; \
+			if command -v python3 >/dev/null 2>&1; then py=python3; elif command -v python >/dev/null 2>&1; then py=python; fi; \
+			if [ -z "$$py" ]; then \
+				echo "python not found; falling back to a grep-based TiKV stores readiness check."; \
+			fi; \
+			echo "Waiting for TiKV stores to be ready (expected=$(TIUP_KV))..."; \
+			expected_kv="$(TIUP_KV)"; \
+			tries=0; \
+				while [ $$tries -lt 60 ]; do \
+					if [ -n "$$py" ]; then \
+						if $(CURL) $(CURL_ARGS) "$$pd_url/pd/api/v1/stores" 2>/dev/null | $$py -c "import json,sys; expected=int('$$expected_kv'); data=json.load(sys.stdin); count=int(data.get('count',0) or 0); stores=data.get('stores',[]); all_up=all((s.get('store') or {}).get('state_name')=='Up' for s in stores); sys.exit(0 if (count >= expected and all_up) else 1)"; then \
+							echo "TiKV stores are ready."; \
+							exit 0; \
+						fi; \
+					else \
+						json="$$( $(CURL) $(CURL_ARGS) \"$$pd_url/pd/api/v1/stores\" 2>/dev/null || true )"; \
+						count="$$(printf '%s' \"$$json\" | tr -d '\\n' | sed -n 's/.*\"count\":[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)"; \
+						if [ -z \"$$count\" ]; then count=0; fi; \
+						up_count="$$(printf '%s' \"$$json\" | grep -o '\"state_name\"[[:space:]]*:[[:space:]]*\"Up\"' | wc -l | tr -d ' ')"; \
+						if [ -z \"$$up_count\" ]; then up_count=0; fi; \
+						if [ $$count -ge $$expected_kv ] && [ $$up_count -eq $$count ]; then \
+							echo \"TiKV stores are ready.\"; \
+							exit 0; \
+						fi; \
+					fi; \
+				sleep 1; \
+				tries=$$((tries + 1)); \
+			done; \
+			echo "TiKV stores did not become ready in time. See $(TIUP_LOG_FILE)."; \
 		exit 1
 
 tiup-down:
