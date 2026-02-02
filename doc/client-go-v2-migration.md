@@ -65,12 +65,17 @@ Retry and routing are configured via `TransactionOptions` (builder-style). Examp
 # async fn example() -> Result<()> {
 let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
 
-let mut txn = txn_client
-    .begin_with_options(TransactionOptions::new_optimistic().use_async_commit())
+// Tip: prefer `run_in_transaction` so the client commits on success and rolls back on error.
+// If you need the commit timestamp (e.g. to use as a stale-read timestamp), use
+// `run_in_transaction_with_commit_ts` instead.
+txn_client
+    .run_in_transaction(TransactionOptions::new_optimistic().use_async_commit(), |txn| {
+        Box::pin(async move {
+            txn.put("k".to_owned(), "v".to_owned()).await?;
+            Ok(())
+        })
+    })
     .await?;
-
-txn.put("k".to_owned(), "v".to_owned()).await?;
-txn.commit().await?;
 # Ok(())
 # }
 ```
