@@ -2271,7 +2271,18 @@ async fn txn_replica_read_snapshot_get() -> Result<()> {
         commit_ts,
         TransactionOptions::new_optimistic().replica_read(ReplicaReadType::Follower),
     );
-    assert_eq!(snapshot.get(key).await?, Some(value.into_bytes()));
+    assert_eq!(snapshot.get(key.clone()).await?, Some(value.into_bytes()));
+
+    // Cleanup so tests that don't call init() aren't affected.
+    client
+        .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+            let key = key.clone();
+            Box::pin(async move {
+                txn.delete(key).await?;
+                Ok(())
+            })
+        })
+        .await?;
     Ok(())
 }
 
