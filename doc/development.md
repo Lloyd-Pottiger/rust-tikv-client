@@ -13,6 +13,9 @@ make check
 # Compile all feature combinations (no fmt/clippy; smoke compile only).
 make check-all-features
 
+# Clippy across all feature combinations (slow; useful before PRs / for CI parity).
+make clippy-all-features
+
 # Compile rustdoc examples (doc tests).
 make doc-test
 

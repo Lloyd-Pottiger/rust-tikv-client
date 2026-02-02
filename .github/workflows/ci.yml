@@ -29,6 +29,8 @@ jobs:
         run: make check
       - name: make check-all-features
         run: make check-all-features
+      - name: make clippy-all-features
+        run: make clippy-all-features
       - name: make doc-test
         run: make doc-test
       - name: make doc

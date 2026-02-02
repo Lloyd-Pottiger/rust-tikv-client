@@ -1,7 +1,7 @@
 export RUSTFLAGS=-Dwarnings
 export RUSTDOCFLAGS=-Dwarnings
 
-.PHONY: default check check-all-features unit-test generate integration-test integration-test-if-ready integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc doc-test coverage coverage-integration coverage-integration-if-ready tiup-coverage-integration tiup tiup-up tiup-down tiup-clean all clean
+.PHONY: default check check-all-features clippy-all-features unit-test generate integration-test integration-test-if-ready integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc doc-test coverage coverage-integration coverage-integration-if-ready tiup-coverage-integration tiup tiup-up tiup-down tiup-clean all clean
 
 export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
@@ -50,6 +50,9 @@ check: generate
 
 check-all-features: generate
 	cargo check --all --all-targets --all-features
+
+clippy-all-features: generate
+	cargo clippy --all --all-targets --all-features -- -D clippy::all
 
 unit-test: generate
 	@if cargo nextest --version >/dev/null 2>&1; then \
