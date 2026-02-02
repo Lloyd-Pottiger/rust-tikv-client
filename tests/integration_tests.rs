@@ -178,6 +178,136 @@ async fn txn_crud() -> Result<()> {
 
 #[tokio::test]
 #[serial]
+async fn txn_run_in_transaction_commits_on_ok() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    client
+        .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+            Box::pin(async move {
+                txn.put("run_in_txn_ok".to_owned(), "v".to_owned()).await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+    let mut txn = client.begin_optimistic().await?;
+    assert_eq!(
+        txn.get("run_in_txn_ok".to_owned()).await?,
+        Some("v".to_owned().into())
+    );
+    txn.rollback().await?;
+
+    // Cleanup so tests that don't call init() aren't affected.
+    client
+        .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+            Box::pin(async move {
+                txn.delete("run_in_txn_ok".to_owned()).await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_run_in_transaction_rolls_back_on_err() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let err = client
+        .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+            Box::pin(async move {
+                txn.put("run_in_txn_err".to_owned(), "v".to_owned()).await?;
+                Err::<(), Error>(Error::StringError("boom".to_owned()))
+            })
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::StringError(_)));
+
+    let mut txn = client.begin_optimistic().await?;
+    assert!(txn.get("run_in_txn_err".to_owned()).await?.is_none());
+    txn.rollback().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_run_in_transaction_with_commit_ts_some() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let ((), commit_ts) = client
+        .run_in_transaction_with_commit_ts(TransactionOptions::new_optimistic(), |txn| {
+            Box::pin(async move {
+                txn.put("run_in_txn_commit_ts".to_owned(), "v".to_owned())
+                    .await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+    let commit_ts = commit_ts.expect("expected commit_ts for a write transaction");
+    assert!(commit_ts.version() > 0);
+
+    let mut snapshot = client.snapshot(commit_ts, TransactionOptions::new_optimistic());
+    assert_eq!(
+        snapshot.get("run_in_txn_commit_ts".to_owned()).await?,
+        Some("v".to_owned().into())
+    );
+
+    // Cleanup so tests that don't call init() aren't affected.
+    client
+        .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+            Box::pin(async move {
+                txn.delete("run_in_txn_commit_ts".to_owned()).await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_run_in_transaction_with_commit_ts_none_when_no_mutations() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let (v, commit_ts) = client
+        .run_in_transaction_with_commit_ts(TransactionOptions::new_optimistic(), |txn| {
+            Box::pin(async move {
+                let _ = txn.get("k".to_owned()).await?;
+                Ok(123_u8)
+            })
+        })
+        .await?;
+
+    assert_eq!(v, 123);
+    assert!(commit_ts.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn txn_pessimistic_snapshot_checks_locks() -> Result<()> {
     init().await?;
     let scenario = FailScenario::setup();
