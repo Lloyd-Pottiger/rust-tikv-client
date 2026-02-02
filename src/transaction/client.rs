@@ -471,7 +471,8 @@ impl<PdC: PdClient> Client<PdC> {
     ///
     /// This timestamp is a control-plane value intended for *stale reads* (replica reads that may
     /// be slightly behind the leader). A common pattern is:
-    /// 1) write data and get a commit timestamp
+    /// 1) write data and get a commit timestamp (from [`Transaction::commit`] or
+    ///    [`run_in_transaction_with_commit_ts`](Self::run_in_transaction_with_commit_ts))
     /// 2) wait until `current_min_timestamp >= commit_ts`
     /// 3) perform a stale snapshot read at `current_min_timestamp`
     ///
