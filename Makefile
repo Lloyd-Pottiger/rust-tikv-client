@@ -59,17 +59,34 @@ integration-test-if-ready: generate
 	case "$$pd_addr" in \
 		http://*|https://*) pd_url="$$pd_addr" ;; \
 	esac; \
-	if command -v curl >/dev/null 2>&1 && curl -fsS "$$pd_url/pd/api/v1/version" >/dev/null 2>&1; then \
-		echo "PD is ready at $$pd_url; running integration tests..."; \
-		if cargo nextest --version >/dev/null 2>&1; then \
-			$(RUN_INTEGRATION_TEST) txn_; \
-			$(RUN_INTEGRATION_TEST) raw_; \
-		else \
-			$(CARGO_TEST_INTEGRATION) txn_ $(CARGO_TEST_INTEGRATION_RUNNER_ARGS); \
-			$(CARGO_TEST_INTEGRATION) raw_ $(CARGO_TEST_INTEGRATION_RUNNER_ARGS); \
+	if ! command -v curl >/dev/null 2>&1; then \
+		echo "curl not found; skipping integration tests (install curl or run manually)."; \
+		exit 0; \
+	fi; \
+	if ! curl -fsS "$$pd_url/pd/api/v1/version" >/dev/null 2>&1; then \
+		echo "PD not reachable at $$pd_url; skipping integration tests (run \`make tiup-up\` then \`make integration-test\`)."; \
+		exit 0; \
+	fi; \
+	py=""; \
+	if command -v python3 >/dev/null 2>&1; then py=python3; elif command -v python >/dev/null 2>&1; then py=python; fi; \
+	if [ -n "$$py" ]; then \
+		if ! curl -fsS "$$pd_url/pd/api/v1/stores" 2>/dev/null | $$py -c "import json,sys; data=json.load(sys.stdin); count=int(data.get('count',0) or 0); stores=data.get('stores',[]); all_up=all(((s.get('store') or {}).get('state_name')=='Up') for s in stores); sys.exit(0 if (count > 0 and all_up) else 1)"; then \
+			echo "PD is reachable at $$pd_url but TiKV stores are not ready; skipping integration tests (run \`make tiup-up\` then \`make integration-test\`)."; \
+			exit 0; \
 		fi; \
 	else \
-		echo "PD not reachable at $$pd_url; skipping integration tests (run \`make tiup-up\` then \`make integration-test\`)."; \
+		if ! curl -fsS "$$pd_url/pd/api/v1/stores" 2>/dev/null | grep -q '\"state_name\":\"Up\"'; then \
+			echo "PD is reachable at $$pd_url but TiKV stores are not ready; skipping integration tests (run \`make tiup-up\` then \`make integration-test\`)."; \
+			exit 0; \
+		fi; \
+	fi; \
+	echo "PD is ready at $$pd_url and TiKV stores are ready; running integration tests..."; \
+	if cargo nextest --version >/dev/null 2>&1; then \
+		$(RUN_INTEGRATION_TEST) txn_; \
+		$(RUN_INTEGRATION_TEST) raw_; \
+	else \
+		$(CARGO_TEST_INTEGRATION) txn_ $(CARGO_TEST_INTEGRATION_RUNNER_ARGS); \
+		$(CARGO_TEST_INTEGRATION) raw_ $(CARGO_TEST_INTEGRATION_RUNNER_ARGS); \
 	fi
 
 integration-test-txn: generate
