@@ -354,6 +354,27 @@ impl<PdC: PdClient> Client<PdC> {
     ///
     /// If `f` returns an error, this method will try to roll back the transaction and then return
     /// the original error. Rollback errors are logged and suppressed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use futures::FutureExt;
+    /// # use tikv_client::{Result, TransactionClient, TransactionOptions};
+    /// # async fn example() -> Result<()> {
+    /// let client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
+    ///
+    /// client
+    ///     .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+    ///         async move {
+    ///             txn.put("k".to_owned(), b"v".to_vec()).await?;
+    ///             Ok(())
+    ///         }
+    ///         .boxed()
+    ///     })
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn run_in_transaction<T, F>(&self, options: TransactionOptions, f: F) -> Result<T>
     where
         F: for<'a> FnOnce(&'a mut Transaction<PdC>) -> BoxFuture<'a, Result<T>>,
