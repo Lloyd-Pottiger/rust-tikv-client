@@ -74,6 +74,14 @@ pub struct Key(
     pub(crate) Vec<u8>,
 );
 
+const _: () = {
+    use std::mem::{align_of, size_of};
+
+    // `Vec<u8>` <-> `Key` reference casts rely on `Key` staying layout-compatible with `Vec<u8>`.
+    assert!(size_of::<Key>() == size_of::<Vec<u8>>());
+    assert!(align_of::<Key>() == align_of::<Vec<u8>>());
+};
+
 impl AsRef<Key> for kvrpcpb::Mutation {
     fn as_ref(&self) -> &Key {
         self.key.as_ref()
@@ -236,6 +244,13 @@ impl fmt::Debug for Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::{align_of, size_of};
+
+    #[test]
+    fn key_layout_matches_vec_u8_for_ref_cast() {
+        assert_eq!(size_of::<Key>(), size_of::<Vec<u8>>());
+        assert_eq!(align_of::<Key>(), align_of::<Vec<u8>>());
+    }
 
     #[test]
     fn vec_key_ref_cast_round_trips_bytes() {
