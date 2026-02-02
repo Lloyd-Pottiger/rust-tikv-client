@@ -34,6 +34,7 @@ async fn main() -> Result<()> {
 Transactional mode:
 
 Tip: prefer `TransactionClient::run_in_transaction` so the client commits on success and rolls back on error.
+If you need the commit timestamp (e.g. for stale reads), use `TransactionClient::run_in_transaction_with_commit_ts`.
 
 ```rust
 use futures::FutureExt;

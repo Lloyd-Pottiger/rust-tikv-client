@@ -52,6 +52,7 @@ let _value = client.get("key".to_owned()).await?;
 Transactional mode:
 
 Tip: prefer `TransactionClient::run_in_transaction` so the client commits on success and rolls back on error.
+If you need the commit timestamp (e.g. for stale reads), use `TransactionClient::run_in_transaction_with_commit_ts`.
 The `.boxed()` helper comes from `futures::FutureExt` (add `futures = "0.3"` to your `Cargo.toml` if needed).
 
 ```rust,no_run
