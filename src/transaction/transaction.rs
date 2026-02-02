@@ -271,6 +271,7 @@ impl LockOptions {
 /// # Ok(())
 /// # }
 /// ```
+#[must_use = "Transaction must be committed or rolled back"]
 pub struct Transaction<PdC: PdClient = PdRpcClient> {
     status: Arc<AtomicU8>,
     timestamp: Timestamp,
@@ -2145,7 +2146,7 @@ impl TransactionOptions {
             replica_read: ReplicaReadType::Leader,
             stale_read: false,
             retry_options: RetryOptions::default_optimistic(),
-            check_level: CheckLevel::Panic,
+            check_level: CheckLevel::Warn,
             assertion_level: kvrpcpb::AssertionLevel::Off,
             max_commit_ts_safe_window: DEFAULT_MAX_COMMIT_TS_SAFE_WINDOW,
             commit_wait_until_tso: None,
@@ -2165,7 +2166,7 @@ impl TransactionOptions {
             replica_read: ReplicaReadType::Leader,
             stale_read: false,
             retry_options: RetryOptions::default_pessimistic(),
-            check_level: CheckLevel::Panic,
+            check_level: CheckLevel::Warn,
             assertion_level: kvrpcpb::AssertionLevel::Off,
             max_commit_ts_safe_window: DEFAULT_MAX_COMMIT_TS_SAFE_WINDOW,
             commit_wait_until_tso: None,
@@ -2315,7 +2316,7 @@ impl TransactionOptions {
 
 /// Determines what happens when a transaction is dropped without being rolled back or committed.
 ///
-/// The default is to panic.
+/// The default is to warn.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum CheckLevel {
     /// The program will panic.
@@ -2819,6 +2820,47 @@ mod tests {
     use crate::Transaction;
     use crate::TransactionOptions;
     use crate::ValueEntry;
+
+    #[test]
+    fn drop_check_warn_is_default() {
+        let res = std::panic::catch_unwind(|| {
+            let txn = Transaction::new(
+                Timestamp::from_version(42),
+                Arc::new(MockPdClient::default()),
+                TransactionOptions::new_optimistic(),
+                Keyspace::Disable,
+                RequestContext::default(),
+                None,
+            );
+            drop(txn);
+        });
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn drop_check_panic_still_panics() {
+        let res = std::panic::catch_unwind(|| {
+            let txn = Transaction::new(
+                Timestamp::from_version(42),
+                Arc::new(MockPdClient::default()),
+                TransactionOptions::new_optimistic().drop_check(CheckLevel::Panic),
+                Keyspace::Disable,
+                RequestContext::default(),
+                None,
+            );
+            drop(txn);
+        });
+        let err = res.expect_err("expected drop_check=panic to panic");
+        let msg = err
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| err.downcast_ref::<String>().map(|s| s.as_str()))
+            .expect("panic payload must be a string");
+        assert_eq!(
+            msg,
+            "Dropping an active transaction. Consider commit or rollback it."
+        );
+    }
 
     #[test]
     fn heartbeat_txn_not_found_error_is_detected() {
