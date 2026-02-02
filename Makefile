@@ -7,6 +7,12 @@ export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
 export TIKV_VERSION ?= v8.5.1
 export TIUP_KV      ?= 3
+# Optional: override TiUP playground listen addresses (useful when local ports are occupied).
+# If TIUP_PD_* isn't set, `tiup-up` derives PD host/port from the first entry in `PD_ADDRS`.
+export TIUP_PD_HOST ?=
+export TIUP_PD_PORT ?=
+export TIUP_KV_HOST ?=
+export TIUP_KV_PORT ?=
 COVERAGE_FAIL_UNDER ?= 80
 COVERAGE_INTEGRATION_RUST_MIN_STACK ?= 33554432
 
@@ -208,9 +214,32 @@ tiup-up:
 	fi; \
 	if [ -z "$$name" ]; then \
 		rm -f "$(TIUP_NAME_FILE)" "$(TIUP_PID_FILE)"; \
+		# Allow running TiUP playground on non-default ports (e.g. when 2379/20160 are occupied). \
+		# For PD, default to the first entry in `PD_ADDRS` unless TIUP_PD_HOST/TIUP_PD_PORT are set. \
+		pd_first="$${PD_ADDRS%%,*}"; \
+		pd_first="$${pd_first#http://}"; \
+		pd_first="$${pd_first#https://}"; \
+		pd_host=""; \
+		pd_port=""; \
+		if [ -n "$$TIUP_PD_HOST" ] && [ -n "$$TIUP_PD_PORT" ]; then \
+			pd_host="$$TIUP_PD_HOST"; \
+			pd_port="$$TIUP_PD_PORT"; \
+		else \
+			case "$$pd_first" in \
+				*:*) pd_host="$${pd_first%:*}"; pd_port="$${pd_first##*:}" ;; \
+			esac; \
+		fi; \
+		tiup_pd_args=""; \
+		if [ -n "$$pd_host" ] && [ -n "$$pd_port" ]; then \
+			tiup_pd_args="--pd.host $$pd_host --pd.port $$pd_port"; \
+		fi; \
+		tiup_kv_args=""; \
+		if [ -n "$$TIUP_KV_HOST" ]; then tiup_kv_args="$$tiup_kv_args --kv.host $$TIUP_KV_HOST"; fi; \
+		if [ -n "$$TIUP_KV_PORT" ]; then tiup_kv_args="$$tiup_kv_args --kv.port $$TIUP_KV_PORT"; fi; \
 		echo "Starting tiup playground (tikv-slim, $(TIKV_VERSION))..." ; \
 		tiup install tikv:$(TIKV_VERSION) pd:$(TIKV_VERSION) ; \
 		tiup playground $(TIKV_VERSION) --mode tikv-slim --kv $(TIUP_KV) --without-monitor \
+			$$tiup_pd_args $$tiup_kv_args \
 			--kv.config "$$kv_cfg" \
 			--pd.config "$$pd_cfg" \
 			> "$(TIUP_LOG_FILE)" 2>&1 & \
