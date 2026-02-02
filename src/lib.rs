@@ -80,13 +80,18 @@
 //! Transactional mode:
 //!
 //! ```rust,no_run
-//! # use tikv_client::{TransactionClient, Result};
+//! # use tikv_client::{Result, TransactionClient, TransactionOptions};
 //! # async fn example() -> Result<()> {
 //! let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
-//! let mut txn = txn_client.begin_optimistic().await?;
-//! txn.put("key".to_owned(), "value".to_owned()).await?;
-//! let _value = txn.get("key".to_owned()).await?;
-//! txn.commit().await?;
+//! txn_client
+//!     .run_in_transaction(TransactionOptions::new_optimistic(), |txn| {
+//!         Box::pin(async move {
+//!             txn.put("key".to_owned(), "value".to_owned()).await?;
+//!             let _value = txn.get("key".to_owned()).await?;
+//!             Ok(())
+//!         })
+//!     })
+//!     .await?;
 //! # Ok(())
 //! # }
 //! ```
