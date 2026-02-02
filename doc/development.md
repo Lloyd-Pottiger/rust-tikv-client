@@ -136,6 +136,12 @@ integration tests, start a cluster first (e.g. `make tiup-up`) and run:
 make coverage-integration
 ```
 
+If you want the same "skip when no cluster is reachable" behavior as `make all`, run:
+
+```bash
+make coverage-integration-if-ready
+```
+
 Notes:
 - Coverage ignores generated protobuf sources under `src/generated/**`.
 - `coverage-integration` runs tests with `--test-threads 1` to match the integration test

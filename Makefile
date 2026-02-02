@@ -1,7 +1,7 @@
 export RUSTFLAGS=-Dwarnings
 export RUSTDOCFLAGS=-Dwarnings
 
-.PHONY: default check check-all-features unit-test generate integration-test integration-test-if-ready integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc doc-test coverage coverage-integration tiup-coverage-integration tiup tiup-up tiup-down tiup-clean all clean
+.PHONY: default check check-all-features unit-test generate integration-test integration-test-if-ready integration-test-txn integration-test-raw integration-test-smoke tiup-integration-test tiup-integration-test-txn tiup-integration-test-raw tiup-integration-test-smoke test doc doc-test coverage coverage-integration coverage-integration-if-ready tiup-coverage-integration tiup tiup-up tiup-down tiup-clean all clean
 
 export PD_ADDRS     ?= 127.0.0.1:2379
 export MULTI_REGION ?= 1
@@ -181,6 +181,40 @@ coverage-integration:
 		echo "cargo llvm-cov not installed. Install with: cargo install cargo-llvm-cov --version 0.6.21 --locked"; \
 		exit 1; \
 	fi
+
+# Run integration coverage only when PD is reachable. This keeps the target usable on machines
+# without a running cluster while still running coverage automatically when available.
+coverage-integration-if-ready:
+	@set -e; \
+	pd_addrs="$(PD_ADDRS)"; \
+	pd_addr="$${pd_addrs%%,*}"; \
+	pd_url="http://$$pd_addr"; \
+	case "$$pd_addr" in \
+		http://*|https://*) pd_url="$$pd_addr" ;; \
+	esac; \
+	if ! command -v curl >/dev/null 2>&1; then \
+		echo "curl not found; skipping integration coverage (install curl or run manually)."; \
+		exit 0; \
+	fi; \
+	if ! $(CURL) $(CURL_ARGS) "$$pd_url/pd/api/v1/version" >/dev/null 2>&1; then \
+		echo "PD not reachable at $$pd_url; skipping integration coverage (run \`make tiup-up\` then \`make coverage-integration\`)."; \
+		exit 0; \
+	fi; \
+	py=""; \
+	if command -v python3 >/dev/null 2>&1; then py=python3; elif command -v python >/dev/null 2>&1; then py=python; fi; \
+	if [ -n "$$py" ]; then \
+		if ! $(CURL) $(CURL_ARGS) "$$pd_url/pd/api/v1/stores" 2>/dev/null | $$py -c "import json,sys; data=json.load(sys.stdin); count=int(data.get('count',0) or 0); stores=data.get('stores',[]); all_up=all(((s.get('store') or {}).get('state_name')=='Up') for s in stores); sys.exit(0 if (count > 0 and all_up) else 1)"; then \
+			echo "PD is reachable at $$pd_url but TiKV stores are not ready; skipping integration coverage (run \`make tiup-up\` then \`make coverage-integration\`)."; \
+			exit 0; \
+		fi; \
+	else \
+		if ! $(CURL) $(CURL_ARGS) "$$pd_url/pd/api/v1/stores" 2>/dev/null | grep -q '\"state_name\":\"Up\"'; then \
+			echo "PD is reachable at $$pd_url but TiKV stores are not ready; skipping integration coverage (run \`make tiup-up\` then \`make coverage-integration\`)."; \
+			exit 0; \
+		fi; \
+	fi; \
+	echo "PD is ready at $$pd_url and TiKV stores are ready; running integration coverage..."; \
+	$(MAKE) coverage-integration
 
 tiup-coverage-integration:
 	@set -e; \

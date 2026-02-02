@@ -194,6 +194,32 @@ make tiup-integration-test-txn
 make tiup-integration-test-raw
 ```
 
+## Coverage (optional)
+
+If you have `cargo llvm-cov` installed:
+
+```
+make coverage
+```
+
+To include integration tests in the coverage run, start a cluster first (e.g. `make tiup-up`) and run:
+
+```
+make coverage-integration
+```
+
+If you'd like to skip the run when no cluster is reachable (same gating as `make all`), use:
+
+```
+make coverage-integration-if-ready
+```
+
+Or use a one-shot TiUp playground lifecycle:
+
+```
+make tiup-coverage-integration
+```
+
 ## Benchmarks
 
 See `doc/bench.md` for microbenchmarks (`cargo bench`) and optional flamegraph workflow.
