@@ -40,14 +40,14 @@
   - 已补：Mixed/Learner 选择、stale-read retry fallback、witness 排除、seed deterministic selection、force-leader override vs request-source 选择
   - 已补：score + `ServerIsBusy` fast-retry + pending-backoff（`src/request/read_routing.rs`/`src/request/plan.rs`/`src/request/pending_backoff.rs` 单测）
   - 仍缺：Go proxy/forwarding/flashback 等高级路径（Rust 架构不同，按 N/A 或等价语义覆盖）
-- Store/RPC client behavior: Go `client-go/internal/client/*_test.go` 有不少并发/错误路径；Rust 目前 `src/store/client.rs#L62` 仅覆盖最小 dispatch 语义
+- Store/RPC client behavior: Go `client-go/internal/client/*_test.go` 有不少并发/错误路径；Rust 通过 `src/store/client.rs`（unary + batch fallback）+ `src/store/batch_commands.rs`（stream prime/demux/reconnect/timeout）覆盖主要语义
   - 已补：store error traits 单测（Vec region_errors 聚合 + SetRegionError）；TikvConnect invalid addr fast-fail；PdRpcClient kv_client cache + 并发 dial 去重（singleflight）；PlanBuilder retry attempt/patch request_source/interceptor 组合
-  - 仍缺：Go batch-client/forwarding/conn-pool 的并发/重连细节（Rust 架构不同，按 N/A 或等价语义覆盖）
+  - 已补：BatchCommands stream + health feedback（`src/store/batch_commands.rs` 单测覆盖连接/重连/timeout；`tests/integration_tests.rs::raw_get_health_feedback` 覆盖 slow_score 应用）
+  - 仍缺：Go forwarding/proxy/conn-pool 的细节（Rust 架构不同，按 N/A 或等价语义覆盖）
 
 ## Next (Implementation Order)
-1. 引入 BatchCommands send-loop + health feedback（解锁 `integration_tests/health_feedback_test.go` 等 batch-client 相关用例迁移）
-2. 评估 mocktikv 用例可迁移子集，用 `src/mock.rs`/`MockKvClient` 覆盖更多纯逻辑/错误路径单测
-3. 对照 `.codex/progress/client-go-tests-file-map.md` 定期收敛 N/A 的归因与等价语义覆盖点
+1. 评估 mocktikv 用例可迁移子集，用 `src/mock.rs`/`MockKvClient` 覆盖更多纯逻辑/错误路径单测
+2. 对照 `.codex/progress/client-go-tests-file-map.md` 定期收敛 N/A 的归因与等价语义覆盖点
 
 ## Integration Mapping
 - Go `integration_tests/` 的高层映射见：`.codex/progress/client-go-integration-tests-port.md`
