@@ -149,6 +149,8 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         } else {
             SnapshotReadContext {
+                resource_group_tag: self.options.resource_group_tag.clone(),
+                resource_group_name: self.options.resource_group_name.clone(),
                 request_source: self.options.request_source.clone(),
                 ..SnapshotReadContext::default()
             }
@@ -1424,20 +1426,18 @@ impl TransactionOptions {
         self
     }
 
-    /// Set resource group tag for read requests.
+    /// Set resource group tag for requests.
     ///
-    /// This option is only effective for read-only snapshots created via
-    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    /// This option writes to `kvrpcpb::Context.resource_group_tag`.
     #[must_use]
     pub fn resource_group_tag(mut self, tag: Vec<u8>) -> TransactionOptions {
         self.resource_group_tag = Some(tag);
         self
     }
 
-    /// Set resource group name for read requests.
+    /// Set resource group name for requests.
     ///
-    /// This option is only effective for read-only snapshots created via
-    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    /// This option writes to `kvrpcpb::Context.resource_control_context.resource_group_name`.
     #[must_use]
     pub fn resource_group_name(mut self, name: impl Into<String>) -> TransactionOptions {
         self.resource_group_name = Some(name.into());
@@ -1476,6 +1476,16 @@ impl TransactionOptions {
         let ctx = ctx.get_or_insert_with(kvrpcpb::Context::default);
         ctx.disk_full_opt = self.disk_full_opt as i32;
         ctx.txn_source = self.txn_source;
+        if let Some(tag) = &self.resource_group_tag {
+            ctx.resource_group_tag = tag.clone();
+        }
+        ctx.resource_control_context =
+            self.resource_group_name
+                .as_ref()
+                .map(|resource_group_name| kvrpcpb::ResourceControlContext {
+                    resource_group_name: resource_group_name.clone(),
+                    ..Default::default()
+                });
         if let Some(request_source) = &self.request_source {
             ctx.request_source = request_source.clone();
         }
@@ -2568,7 +2578,13 @@ mod tests {
         let commit_disk_full_opt = Arc::new(std::sync::atomic::AtomicI32::new(-1));
         let prewrite_request_source = Arc::new(std::sync::Mutex::new(String::new()));
         let commit_request_source = Arc::new(std::sync::Mutex::new(String::new()));
+        let prewrite_resource_group_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let commit_resource_group_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let prewrite_resource_group_name = Arc::new(std::sync::Mutex::new(String::new()));
+        let commit_resource_group_name = Arc::new(std::sync::Mutex::new(String::new()));
         let request_source = "txn-source".to_string();
+        let resource_group_tag = b"rg-tag".to_vec();
+        let resource_group_name = "rg-name".to_string();
 
         let prewrite_txn_source_cloned = prewrite_txn_source.clone();
         let commit_txn_source_cloned = commit_txn_source.clone();
@@ -2576,6 +2592,10 @@ mod tests {
         let commit_disk_full_opt_cloned = commit_disk_full_opt.clone();
         let prewrite_request_source_cloned = prewrite_request_source.clone();
         let commit_request_source_cloned = commit_request_source.clone();
+        let prewrite_resource_group_tag_cloned = prewrite_resource_group_tag.clone();
+        let commit_resource_group_tag_cloned = commit_resource_group_tag.clone();
+        let prewrite_resource_group_name_cloned = prewrite_resource_group_name.clone();
+        let commit_resource_group_name_cloned = commit_resource_group_name.clone();
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
@@ -2583,6 +2603,14 @@ mod tests {
                     prewrite_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
                     prewrite_disk_full_opt_cloned.store(ctx.disk_full_opt, Ordering::SeqCst);
                     *prewrite_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
+                    *prewrite_resource_group_tag_cloned.lock().unwrap() =
+                        ctx.resource_group_tag.clone();
+                    *prewrite_resource_group_name_cloned.lock().unwrap() = ctx
+                        .resource_control_context
+                        .as_ref()
+                        .expect("resource_control_context")
+                        .resource_group_name
+                        .clone();
                     return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
                 }
                 if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
@@ -2590,6 +2618,14 @@ mod tests {
                     commit_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
                     commit_disk_full_opt_cloned.store(ctx.disk_full_opt, Ordering::SeqCst);
                     *commit_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
+                    *commit_resource_group_tag_cloned.lock().unwrap() =
+                        ctx.resource_group_tag.clone();
+                    *commit_resource_group_name_cloned.lock().unwrap() = ctx
+                        .resource_control_context
+                        .as_ref()
+                        .expect("resource_control_context")
+                        .resource_group_name
+                        .clone();
                     return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
                 }
 
@@ -2604,6 +2640,8 @@ mod tests {
                 .disk_full_opt(DiskFullOpt::AllowedOnAlmostFull)
                 .txn_source(42)
                 .request_source(request_source.clone())
+                .resource_group_tag(resource_group_tag.clone())
+                .resource_group_name(resource_group_name.clone())
                 .heartbeat_option(HeartbeatOption::NoHeartbeat)
                 .drop_check(CheckLevel::None),
             Keyspace::Disable,
@@ -2623,6 +2661,22 @@ mod tests {
         );
         assert_eq!(*prewrite_request_source.lock().unwrap(), request_source);
         assert_eq!(*commit_request_source.lock().unwrap(), request_source);
+        assert_eq!(
+            *prewrite_resource_group_tag.lock().unwrap(),
+            resource_group_tag
+        );
+        assert_eq!(
+            *commit_resource_group_tag.lock().unwrap(),
+            resource_group_tag
+        );
+        assert_eq!(
+            *prewrite_resource_group_name.lock().unwrap(),
+            resource_group_name
+        );
+        assert_eq!(
+            *commit_resource_group_name.lock().unwrap(),
+            resource_group_name
+        );
     }
 
     #[rstest::rstest]
