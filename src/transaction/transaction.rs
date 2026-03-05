@@ -37,6 +37,7 @@ use crate::BoundRange;
 use crate::Error;
 use crate::Key;
 use crate::KvPair;
+use crate::ReplicaReadType;
 use crate::Result;
 use crate::Value;
 
@@ -113,6 +114,21 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
     }
 
+    fn apply_replica_read_context(
+        ctx: &mut Option<kvrpcpb::Context>,
+        replica_read: ReplicaReadType,
+        stale_read: bool,
+    ) {
+        let ctx = ctx.get_or_insert_with(kvrpcpb::Context::default);
+        if stale_read {
+            ctx.stale_read = true;
+            ctx.replica_read = false;
+        } else {
+            ctx.stale_read = false;
+            ctx.replica_read = replica_read.is_follower_read();
+        }
+    }
+
     /// Create a new 'get' request
     ///
     /// Once resolved this request will result in the fetching of the value associated with the
@@ -139,13 +155,29 @@ impl<PdC: PdClient> Transaction<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let retry_options = self.options.retry_options.clone();
         let keyspace = self.keyspace;
+        let (replica_read, stale_read) = if self.options.read_only {
+            (self.options.replica_read, self.options.stale_read)
+        } else {
+            (ReplicaReadType::Leader, false)
+        };
 
         self.buffer
             .get_or_else(key, |key| async move {
-                let request = new_get_request(key, timestamp.clone());
-                let plan = PlanBuilder::new(rpc, keyspace, request)
-                    .resolve_lock(timestamp, retry_options.lock_backoff, keyspace)
-                    .retry_multi_region(DEFAULT_REGION_BACKOFF)
+                let mut request = new_get_request(key, timestamp.clone());
+                Self::apply_replica_read_context(&mut request.context, replica_read, stale_read);
+
+                let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
+                    timestamp,
+                    retry_options.lock_backoff,
+                    keyspace,
+                );
+                let plan_builder = if replica_read.is_follower_read() {
+                    plan_builder
+                        .retry_multi_region_with_replica_read(DEFAULT_REGION_BACKOFF, replica_read)
+                } else {
+                    plan_builder.retry_multi_region(DEFAULT_REGION_BACKOFF)
+                };
+                let plan = plan_builder
                     .merge(CollectSingle)
                     .post_process_default()
                     .plan();
@@ -274,15 +306,31 @@ impl<PdC: PdClient> Transaction<PdC> {
             .into_iter()
             .map(move |k| k.into().encode_keyspace(keyspace, KeyMode::Txn));
         let retry_options = self.options.retry_options.clone();
+        let (replica_read, stale_read) = if self.options.read_only {
+            (self.options.replica_read, self.options.stale_read)
+        } else {
+            (ReplicaReadType::Leader, false)
+        };
 
         self.buffer
             .batch_get_or_else(keys, move |keys| async move {
-                let request = new_batch_get_request(keys, timestamp.clone());
-                let plan = PlanBuilder::new(rpc, keyspace, request)
-                    .resolve_lock(timestamp, retry_options.lock_backoff, keyspace)
-                    .retry_multi_region(retry_options.region_backoff)
-                    .merge(Collect)
-                    .plan();
+                let mut request = new_batch_get_request(keys, timestamp.clone());
+                Self::apply_replica_read_context(&mut request.context, replica_read, stale_read);
+
+                let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
+                    timestamp,
+                    retry_options.lock_backoff,
+                    keyspace,
+                );
+                let plan_builder = if replica_read.is_follower_read() {
+                    plan_builder.retry_multi_region_with_replica_read(
+                        retry_options.region_backoff,
+                        replica_read,
+                    )
+                } else {
+                    plan_builder.retry_multi_region(retry_options.region_backoff)
+                };
+                let plan = plan_builder.merge(Collect).plan();
                 plan.execute()
                     .await
                     .map(|r| r.into_iter().map(Into::into).collect())
@@ -786,6 +834,11 @@ impl<PdC: PdClient> Transaction<PdC> {
         let retry_options = self.options.retry_options.clone();
         let keyspace = self.keyspace;
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
+        let (replica_read, stale_read) = if self.options.read_only {
+            (self.options.replica_read, self.options.stale_read)
+        } else {
+            (ReplicaReadType::Leader, false)
+        };
 
         self.buffer
             .scan_and_fetch(
@@ -794,18 +847,33 @@ impl<PdC: PdClient> Transaction<PdC> {
                 !key_only,
                 reverse,
                 move |new_range, new_limit| async move {
-                    let request = new_scan_request(
+                    let mut request = new_scan_request(
                         new_range,
                         timestamp.clone(),
                         new_limit,
                         key_only,
                         reverse,
                     );
-                    let plan = PlanBuilder::new(rpc, keyspace, request)
-                        .resolve_lock(timestamp, retry_options.lock_backoff, keyspace)
-                        .retry_multi_region(retry_options.region_backoff)
-                        .merge(Collect)
-                        .plan();
+                    Self::apply_replica_read_context(
+                        &mut request.context,
+                        replica_read,
+                        stale_read,
+                    );
+
+                    let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
+                        timestamp,
+                        retry_options.lock_backoff,
+                        keyspace,
+                    );
+                    let plan_builder = if replica_read.is_follower_read() {
+                        plan_builder.retry_multi_region_with_replica_read(
+                            retry_options.region_backoff,
+                            replica_read,
+                        )
+                    } else {
+                        plan_builder.retry_multi_region(retry_options.region_backoff)
+                    };
+                    let plan = plan_builder.merge(Collect).plan();
                     plan.execute()
                         .await
                         .map(|r| r.into_iter().map(Into::into).collect())
@@ -1084,6 +1152,10 @@ pub enum TransactionKind {
 pub struct TransactionOptions {
     /// Optimistic or pessimistic (default) transaction.
     kind: TransactionKind,
+    /// Read from replicas other than the leader (read-only snapshots only).
+    replica_read: ReplicaReadType,
+    /// Mark reads as stale read (read-only snapshots only).
+    stale_read: bool,
     /// Try using 1pc rather than 2pc (default is to always use 2pc).
     try_one_pc: bool,
     /// Try to use async commit (default is not to).
@@ -1115,6 +1187,8 @@ impl TransactionOptions {
     pub fn new_optimistic() -> TransactionOptions {
         TransactionOptions {
             kind: TransactionKind::Optimistic,
+            replica_read: ReplicaReadType::Leader,
+            stale_read: false,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1128,6 +1202,8 @@ impl TransactionOptions {
     pub fn new_pessimistic() -> TransactionOptions {
         TransactionOptions {
             kind: TransactionKind::Pessimistic(Timestamp::from_version(0)),
+            replica_read: ReplicaReadType::Leader,
+            stale_read: false,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1155,6 +1231,28 @@ impl TransactionOptions {
     #[must_use]
     pub fn read_only(mut self) -> TransactionOptions {
         self.read_only = true;
+        self
+    }
+
+    /// Configure replica read behavior.
+    ///
+    /// This option is only effective for read-only snapshots created via
+    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    #[must_use]
+    pub fn replica_read(mut self, read_type: ReplicaReadType) -> TransactionOptions {
+        self.replica_read = read_type;
+        self
+    }
+
+    /// Enable stale reads for read-only snapshots.
+    ///
+    /// When enabled, read requests will set `kvrpcpb::Context.stale_read = true`.
+    ///
+    /// This option is only effective for read-only snapshots created via
+    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    #[must_use]
+    pub fn stale_read(mut self) -> TransactionOptions {
+        self.stale_read = true;
         self
     }
 
@@ -1607,6 +1705,8 @@ impl From<u8> for TransactionStatus {
 mod tests {
     use std::any::Any;
     use std::io;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicU64;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -1620,8 +1720,118 @@ mod tests {
     use crate::proto::pdpb::Timestamp;
     use crate::request::Keyspace;
     use crate::transaction::HeartbeatOption;
+    use crate::Key;
+    use crate::ReplicaReadType;
     use crate::Transaction;
     use crate::TransactionOptions;
+
+    #[tokio::test]
+    async fn test_snapshot_replica_read_follower() {
+        let store_id = Arc::new(AtomicU64::new(0));
+        let replica_read = Arc::new(AtomicBool::new(false));
+        let stale_read = Arc::new(AtomicBool::new(false));
+
+        let store_id_cloned = store_id.clone();
+        let replica_read_cloned = replica_read.clone();
+        let stale_read_cloned = stale_read.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+                store_id_cloned.store(peer.store_id, Ordering::SeqCst);
+                replica_read_cloned.store(ctx.replica_read, Ordering::SeqCst);
+                stale_read_cloned.store(ctx.stale_read, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Follower),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(store_id.load(Ordering::SeqCst), 51);
+        assert!(replica_read.load(Ordering::SeqCst));
+        assert!(!stale_read.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_replica_read_learner() {
+        let store_id = Arc::new(AtomicU64::new(0));
+
+        let store_id_cloned = store_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+                store_id_cloned.store(peer.store_id, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Learner),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(store_id.load(Ordering::SeqCst), 61);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_stale_read_disables_replica_read_flag() {
+        let replica_read = Arc::new(AtomicBool::new(true));
+        let stale_read = Arc::new(AtomicBool::new(false));
+
+        let replica_read_cloned = replica_read.clone();
+        let stale_read_cloned = stale_read.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                replica_read_cloned.store(ctx.replica_read, Ordering::SeqCst);
+                stale_read_cloned.store(ctx.stale_read, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Follower)
+                .stale_read(),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert!(!replica_read.load(Ordering::SeqCst));
+        assert!(stale_read.load(Ordering::SeqCst));
+    }
 
     #[rstest::rstest]
     #[case(Keyspace::Disable)]

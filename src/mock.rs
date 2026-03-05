@@ -116,6 +116,27 @@ impl MockPdClient {
             version: 0,
         });
 
+        region.region.peers = vec![
+            metapb::Peer {
+                id: 1,
+                store_id: 41,
+                role: metapb::PeerRole::Voter as i32,
+                ..Default::default()
+            },
+            metapb::Peer {
+                id: 2,
+                store_id: 51,
+                role: metapb::PeerRole::Voter as i32,
+                ..Default::default()
+            },
+            metapb::Peer {
+                id: 3,
+                store_id: 61,
+                role: metapb::PeerRole::Learner as i32,
+                ..Default::default()
+            },
+        ];
+
         let leader = metapb::Peer {
             store_id: 41,
             ..Default::default()
@@ -135,6 +156,27 @@ impl MockPdClient {
             version: 0,
         });
 
+        region.region.peers = vec![
+            metapb::Peer {
+                id: 4,
+                store_id: 42,
+                role: metapb::PeerRole::Voter as i32,
+                ..Default::default()
+            },
+            metapb::Peer {
+                id: 5,
+                store_id: 52,
+                role: metapb::PeerRole::Voter as i32,
+                ..Default::default()
+            },
+            metapb::Peer {
+                id: 6,
+                store_id: 62,
+                role: metapb::PeerRole::Learner as i32,
+                ..Default::default()
+            },
+        ];
+
         let leader = metapb::Peer {
             store_id: 42,
             ..Default::default()
@@ -153,6 +195,27 @@ impl MockPdClient {
             conf_ver: 0,
             version: 0,
         });
+
+        region.region.peers = vec![
+            metapb::Peer {
+                id: 7,
+                store_id: 43,
+                role: metapb::PeerRole::Voter as i32,
+                ..Default::default()
+            },
+            metapb::Peer {
+                id: 8,
+                store_id: 53,
+                role: metapb::PeerRole::Voter as i32,
+                ..Default::default()
+            },
+            metapb::Peer {
+                id: 9,
+                store_id: 63,
+                role: metapb::PeerRole::Learner as i32,
+                ..Default::default()
+            },
+        ];
 
         let leader = metapb::Peer {
             store_id: 43,

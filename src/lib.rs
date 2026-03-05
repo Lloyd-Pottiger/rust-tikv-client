@@ -107,6 +107,7 @@ mod pd;
 mod proto;
 mod region;
 mod region_cache;
+mod replica_read;
 mod stats;
 mod store;
 mod timestamp;
@@ -148,6 +149,8 @@ pub use crate::raw::lowering as raw_lowering;
 pub use crate::raw::Client as RawClient;
 #[doc(inline)]
 pub use crate::raw::ColumnFamily;
+#[doc(inline)]
+pub use crate::replica_read::ReplicaReadType;
 #[doc(inline)]
 pub use crate::request::RetryOptions;
 #[doc(inline)]

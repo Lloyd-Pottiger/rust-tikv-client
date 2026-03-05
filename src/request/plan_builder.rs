@@ -29,6 +29,7 @@ use crate::store::RegionStore;
 use crate::transaction::HasLocks;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
+use crate::ReplicaReadType;
 use crate::Result;
 use crate::Timestamp;
 
@@ -165,7 +166,7 @@ where
         self,
         backoff: Backoff,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
-        self.make_retry_multi_region(backoff, false)
+        self.make_retry_multi_region(backoff, false, None)
     }
 
     /// Preserve all results, even some of them are Err.
@@ -174,13 +175,25 @@ where
         self,
         backoff: Backoff,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
-        self.make_retry_multi_region(backoff, true)
+        self.make_retry_multi_region(backoff, true, None)
+    }
+
+    /// Split the request into shards, routing to non-leader replicas when requested.
+    ///
+    /// This is primarily useful for read-only snapshots.
+    pub fn retry_multi_region_with_replica_read(
+        self,
+        backoff: Backoff,
+        replica_read: ReplicaReadType,
+    ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
+        self.make_retry_multi_region(backoff, false, Some(replica_read))
     }
 
     fn make_retry_multi_region(
         self,
         backoff: Backoff,
         preserve_region_results: bool,
+        replica_read: Option<ReplicaReadType>,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
         PlanBuilder {
             pd_client: self.pd_client.clone(),
@@ -189,6 +202,7 @@ where
                 pd_client: self.pd_client,
                 backoff,
                 preserve_region_results,
+                replica_read,
             },
             phantom: PhantomData,
         }

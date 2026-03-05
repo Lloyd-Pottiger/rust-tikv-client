@@ -17,6 +17,7 @@ use crate::pd::PdClient;
 use crate::proto::errorpb;
 use crate::proto::errorpb::EpochNotMatch;
 use crate::proto::kvrpcpb;
+use crate::proto::metapb;
 use crate::proto::pdpb::Timestamp;
 use crate::region::StoreId;
 use crate::region::{RegionVerId, RegionWithLeader};
@@ -36,6 +37,7 @@ use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
 use crate::util::iter::FlatMapOkIterExt;
 use crate::Error;
+use crate::ReplicaReadType;
 use crate::Result;
 
 use super::keyspace::Keyspace;
@@ -92,6 +94,43 @@ pub(crate) fn is_grpc_error(e: &Error) -> bool {
     matches!(e, Error::GrpcAPI(_) | Error::Grpc(_))
 }
 
+fn select_replica_read_peer(
+    region: &RegionWithLeader,
+    replica_read: ReplicaReadType,
+) -> Option<metapb::Peer> {
+    let leader_store_id = region.leader.as_ref().map(|p| p.store_id);
+    let peers = &region.region.peers;
+
+    let peer = match replica_read {
+        ReplicaReadType::Follower => peers
+            .iter()
+            .find(|p| {
+                Some(p.store_id) != leader_store_id && p.role != metapb::PeerRole::Learner as i32
+            })
+            .cloned(),
+        ReplicaReadType::Learner => peers
+            .iter()
+            .find(|p| p.role == metapb::PeerRole::Learner as i32)
+            .cloned(),
+        ReplicaReadType::Mixed => peers
+            .iter()
+            .find(|p| {
+                Some(p.store_id) != leader_store_id && p.role != metapb::PeerRole::Learner as i32
+            })
+            .cloned()
+            .or_else(|| {
+                peers
+                    .iter()
+                    .find(|p| Some(p.store_id) != leader_store_id)
+                    .cloned()
+            }),
+        ReplicaReadType::Leader | ReplicaReadType::PreferLeader => None,
+    };
+
+    peer.or_else(|| region.leader.clone())
+        .or_else(|| region.region.peers.first().cloned())
+}
+
 pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     pub(super) inner: P,
     pub pd_client: Arc<PdC>,
@@ -101,6 +140,8 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     /// If true, return Ok and preserve all regions' results, even if some of them are Err.
     /// Otherwise, return the first Err if there is any.
     pub preserve_region_results: bool,
+
+    pub(super) replica_read: Option<ReplicaReadType>,
 }
 
 impl<P: Plan + Shardable, PdC: PdClient> RetryableMultiRegion<P, PdC>
@@ -115,6 +156,7 @@ where
         backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        replica_read: Option<ReplicaReadType>,
     ) -> Result<<Self as Plan>::Result> {
         let shards = current_plan.shards(&pd_client).collect::<Vec<_>>().await;
         debug!("single_plan_handler, shards: {}", shards.len());
@@ -129,6 +171,7 @@ where
                 backoff.clone(),
                 permits.clone(),
                 preserve_region_results,
+                replica_read,
             ));
             handles.push(handle);
         }
@@ -157,12 +200,20 @@ where
     async fn single_shard_handler(
         pd_client: Arc<PdC>,
         mut plan: P,
-        region: RegionWithLeader,
+        mut region: RegionWithLeader,
         mut backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        replica_read: Option<ReplicaReadType>,
     ) -> Result<<Self as Plan>::Result> {
         debug!("single_shard_handler");
+        if let Some(read_type) = replica_read {
+            if read_type.is_follower_read() {
+                if let Some(peer) = select_replica_read_peer(&region, read_type) {
+                    region.leader = Some(peer);
+                }
+            }
+        }
         let region_store = match pd_client
             .clone()
             .map_region_to_store(region)
@@ -185,6 +236,7 @@ where
                     backoff,
                     permits,
                     preserve_region_results,
+                    replica_read,
                     Error::LeaderNotFound { region },
                 )
                 .await;
@@ -212,6 +264,7 @@ where
                     backoff,
                     permits,
                     preserve_region_results,
+                    replica_read,
                     e,
                 )
                 .await;
@@ -241,6 +294,7 @@ where
                         backoff,
                         permits,
                         preserve_region_results,
+                        replica_read,
                     )
                     .await
                 }
@@ -260,6 +314,7 @@ where
         mut backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        replica_read: Option<ReplicaReadType>,
         e: Error,
     ) -> Result<<Self as Plan>::Result> {
         debug!("handle_other_error: {:?}", e);
@@ -278,6 +333,7 @@ where
                     backoff,
                     permits,
                     preserve_region_results,
+                    replica_read,
                 )
                 .await
             }
@@ -392,6 +448,7 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
             preserve_region_results: self.preserve_region_results,
+            replica_read: self.replica_read,
         }
     }
 }
@@ -414,6 +471,7 @@ where
             self.backoff.clone(),
             concurrency_permits.clone(),
             self.preserve_region_results,
+            self.replica_read,
         )
         .await
     }
@@ -970,6 +1028,7 @@ mod test {
             pd_client: Arc::new(MockPdClient::default()),
             backoff: Backoff::no_backoff(),
             preserve_region_results: false,
+            replica_read: None,
         };
         assert!(plan.execute().await.is_err())
     }
