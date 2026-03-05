@@ -544,6 +544,10 @@ impl Request for RawCoprocessorRequest {
     fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion) {
         self.inner.set_api_version(api_version);
     }
+
+    fn set_is_retry_request(&mut self, is_retry_request: bool) {
+        self.inner.set_is_retry_request(is_retry_request);
+    }
 }
 
 impl KvRequest for RawCoprocessorRequest {

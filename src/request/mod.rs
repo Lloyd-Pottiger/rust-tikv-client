@@ -106,6 +106,7 @@ mod test {
     use crate::store::region_stream_for_keys;
     use crate::store::HasRegionError;
     use crate::transaction::lowering::new_commit_request;
+    use crate::transaction::lowering::new_get_request;
     use crate::Error;
     use crate::Key;
     use crate::Result;
@@ -153,6 +154,8 @@ mod test {
             }
 
             fn set_api_version(&mut self, _: kvrpcpb::ApiVersion) {}
+
+            fn set_is_retry_request(&mut self, _: bool) {}
         }
 
         #[async_trait]
@@ -204,6 +207,48 @@ mod test {
 
         // Original call plus the 3 retries
         assert_eq!(invoking_count.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn test_is_retry_request_flag_set_on_retry() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let seen_is_retry_request = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let call_count_cloned = call_count.clone();
+        let seen_is_retry_request_cloned = seen_is_retry_request.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                seen_is_retry_request_cloned
+                    .lock()
+                    .unwrap()
+                    .push(ctx.is_retry_request);
+
+                let call = call_count_cloned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let response = if call == 0 {
+                    kvrpcpb::GetResponse {
+                        region_error: Some(crate::proto::errorpb::Error::default()),
+                        ..Default::default()
+                    }
+                } else {
+                    kvrpcpb::GetResponse::default()
+                };
+
+                Ok(Box::new(response) as Box<dyn Any>)
+            },
+        )));
+
+        let key: Key = "key".to_owned().into();
+        let req = new_get_request(key, Timestamp::default());
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, req)
+            .retry_multi_region(Backoff::no_jitter_backoff(0, 0, 1))
+            .plan();
+        let _ = plan.execute().await.unwrap();
+
+        assert_eq!(*seen_is_retry_request.lock().unwrap(), vec![false, true]);
     }
 
     #[tokio::test]

@@ -124,8 +124,13 @@ impl<Req: KvRequest + Shardable> Shardable for Dispatch<Req> {
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        let is_retry_request = self.kv_client.is_some();
         self.kv_client = Some(store.client.clone());
-        self.request.apply_store(store)
+        self.request.apply_store(store)?;
+        if is_retry_request {
+            self.request.set_is_retry_request(true);
+        }
+        Ok(())
     }
 }
 

@@ -24,6 +24,7 @@ pub trait Request: Any + Sync + Send + 'static {
     fn as_any(&self) -> &dyn Any;
     fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()>;
     fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion);
+    fn set_is_retry_request(&mut self, is_retry_request: bool);
 }
 
 macro_rules! impl_request {
@@ -67,6 +68,11 @@ macro_rules! impl_request {
             fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion) {
                 let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
                 ctx.api_version = api_version.into();
+            }
+
+            fn set_is_retry_request(&mut self, is_retry_request: bool) {
+                let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+                ctx.is_retry_request = is_retry_request;
             }
         }
     };
