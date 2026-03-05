@@ -40,6 +40,7 @@ use crate::Error;
 use crate::IsolationLevel;
 use crate::Key;
 use crate::KvPair;
+use crate::ReplicaReadAdjuster;
 use crate::ReplicaReadType;
 use crate::Result;
 use crate::Value;
@@ -88,6 +89,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     buffer: Buffer,
     rpc: Arc<PdC>,
     options: TransactionOptions,
+    replica_read_adjuster: Option<ReplicaReadAdjuster>,
     keyspace: Keyspace,
     is_heartbeat_started: bool,
     start_instant: Instant,
@@ -96,6 +98,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
 #[derive(Clone, Default)]
 struct SnapshotReadContext {
     replica_read: ReplicaReadType,
+    replica_read_adjuster: Option<ReplicaReadAdjuster>,
     stale_read: bool,
     not_fill_cache: bool,
     task_id: u64,
@@ -106,6 +109,15 @@ struct SnapshotReadContext {
     resource_group_tag: Option<Vec<u8>>,
     resource_group_name: Option<String>,
     request_source: Option<String>,
+}
+
+fn normalize_busy_threshold_ms(threshold: Duration) -> u32 {
+    let millis = threshold.as_millis();
+    if millis == 0 || millis > u128::from(u32::MAX) {
+        0
+    } else {
+        millis as u32
+    }
 }
 
 impl<PdC: PdClient> Transaction<PdC> {
@@ -126,6 +138,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             buffer: Buffer::new(options.is_pessimistic()),
             rpc,
             options,
+            replica_read_adjuster: None,
             keyspace,
             is_heartbeat_started: false,
             start_instant: std::time::Instant::now(),
@@ -136,6 +149,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         if self.options.read_only {
             SnapshotReadContext {
                 replica_read: self.options.replica_read,
+                replica_read_adjuster: self.replica_read_adjuster.clone(),
                 stale_read: self.options.stale_read,
                 not_fill_cache: self.options.not_fill_cache,
                 task_id: self.options.task_id,
@@ -185,6 +199,33 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
     }
 
+    /// Set a replica read adjuster for point/batch gets.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_replica_read_adjuster<F>(&mut self, adjuster: F)
+    where
+        F: Fn(usize) -> ReplicaReadType + Send + Sync + 'static,
+    {
+        self.replica_read_adjuster = Some(Arc::new(adjuster));
+    }
+
+    /// Clear the replica read adjuster.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn clear_replica_read_adjuster(&mut self) {
+        self.replica_read_adjuster = None;
+    }
+
+    /// Set the busy threshold for read requests.
+    ///
+    /// This maps to client-go `KVSnapshot.SetLoadBasedReplicaReadThreshold` and writes to
+    /// `kvrpcpb::Context.busy_threshold_ms`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_load_based_replica_read_threshold(&mut self, threshold: Duration) {
+        self.options.busy_threshold_ms = normalize_busy_threshold_ms(threshold);
+    }
+
     /// Create a new 'get' request
     ///
     /// Once resolved this request will result in the fetching of the value associated with the
@@ -211,7 +252,12 @@ impl<PdC: PdClient> Transaction<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let retry_options = self.options.retry_options.clone();
         let keyspace = self.keyspace;
-        let snapshot_ctx = self.snapshot_read_context();
+        let mut snapshot_ctx = self.snapshot_read_context();
+        if snapshot_ctx.replica_read.is_follower_read() {
+            if let Some(adjuster) = snapshot_ctx.replica_read_adjuster.as_ref() {
+                snapshot_ctx.replica_read = (adjuster)(1);
+            }
+        }
         let replica_read = snapshot_ctx.replica_read;
 
         self.buffer
@@ -360,30 +406,44 @@ impl<PdC: PdClient> Transaction<PdC> {
             .map(move |k| k.into().encode_keyspace(keyspace, KeyMode::Txn));
         let retry_options = self.options.retry_options.clone();
         let snapshot_ctx = self.snapshot_read_context();
-        let replica_read = snapshot_ctx.replica_read;
 
         self.buffer
-            .batch_get_or_else(keys, move |keys| async move {
-                let mut request = new_batch_get_request(keys, timestamp.clone());
-                Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
+            .batch_get_or_else(keys, move |keys| {
+                let keys: Vec<Key> = keys.collect();
+                let key_count = keys.len();
+                let mut snapshot_ctx = snapshot_ctx.clone();
+                if snapshot_ctx.replica_read.is_follower_read() {
+                    if let Some(adjuster) = snapshot_ctx.replica_read_adjuster.as_ref() {
+                        snapshot_ctx.replica_read = (adjuster)(key_count);
+                    }
+                }
+                let replica_read = snapshot_ctx.replica_read;
 
-                let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
-                    timestamp,
-                    retry_options.lock_backoff,
-                    keyspace,
-                );
-                let plan_builder = if replica_read.is_follower_read() {
-                    plan_builder.retry_multi_region_with_replica_read(
-                        retry_options.region_backoff,
-                        replica_read,
-                    )
-                } else {
-                    plan_builder.retry_multi_region(retry_options.region_backoff)
-                };
-                let plan = plan_builder.merge(Collect).plan();
-                plan.execute()
-                    .await
-                    .map(|r| r.into_iter().map(Into::into).collect())
+                async move {
+                    let mut request = crate::transaction::requests::new_batch_get_request(
+                        keys.into_iter().map(Into::into).collect(),
+                        timestamp.version(),
+                    );
+                    Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
+
+                    let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
+                        timestamp,
+                        retry_options.lock_backoff,
+                        keyspace,
+                    );
+                    let plan_builder = if replica_read.is_follower_read() {
+                        plan_builder.retry_multi_region_with_replica_read(
+                            retry_options.region_backoff,
+                            replica_read,
+                        )
+                    } else {
+                        plan_builder.retry_multi_region(retry_options.region_backoff)
+                    };
+                    let plan = plan_builder.merge(Collect).plan();
+                    plan.execute()
+                        .await
+                        .map(|r| r.into_iter().map(Into::into).collect())
+                }
             })
             .await
             .map(move |pairs| pairs.map(move |pair| pair.truncate_keyspace(keyspace)))
@@ -1431,7 +1491,7 @@ impl TransactionOptions {
     /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
     #[must_use]
     pub fn busy_threshold(mut self, threshold: Duration) -> TransactionOptions {
-        self.busy_threshold_ms = threshold.as_millis().min(u128::from(u32::MAX)) as u32;
+        self.busy_threshold_ms = normalize_busy_threshold_ms(threshold);
         self
     }
 
@@ -2120,6 +2180,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_replica_read_adjuster_can_disable_replica_read_for_point_get() {
+        let store_id = Arc::new(AtomicU64::new(0));
+        let replica_read = Arc::new(AtomicBool::new(true));
+
+        let store_id_cloned = store_id.clone();
+        let replica_read_cloned = replica_read.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+                store_id_cloned.store(peer.store_id, Ordering::SeqCst);
+                replica_read_cloned.store(ctx.replica_read, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Follower),
+            Keyspace::Disable,
+        );
+        snapshot.set_replica_read_adjuster(|_| ReplicaReadType::Leader);
+
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(store_id.load(Ordering::SeqCst), 41);
+        assert!(!replica_read.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_replica_read_adjuster_can_disable_replica_read_for_batch_get() {
+        let store_id = Arc::new(AtomicU64::new(0));
+        let replica_read = Arc::new(AtomicBool::new(true));
+
+        let store_id_cloned = store_id.clone();
+        let replica_read_cloned = replica_read.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::BatchGetRequest>()
+                    .expect("expected batch get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+                store_id_cloned.store(peer.store_id, Ordering::SeqCst);
+                replica_read_cloned.store(ctx.replica_read, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::BatchGetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Follower),
+            Keyspace::Disable,
+        );
+        snapshot.set_replica_read_adjuster(|key_count| {
+            if key_count >= 2 {
+                ReplicaReadType::Leader
+            } else {
+                ReplicaReadType::Follower
+            }
+        });
+
+        let keys = vec![Key::from(vec![0]), Key::from(vec![1])];
+        let _ = snapshot.batch_get(keys).await.unwrap().collect::<Vec<_>>();
+
+        assert_eq!(store_id.load(Ordering::SeqCst), 41);
+        assert!(!replica_read.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn test_snapshot_replica_read_prefer_leader_grpc_error_falls_back_to_replica() {
         let get_count = Arc::new(AtomicUsize::new(0));
         let first_store_id = Arc::new(AtomicU64::new(0));
@@ -2567,6 +2709,71 @@ mod tests {
         let _ = snapshot.get(key).await.unwrap();
 
         assert_eq!(seen_busy_threshold_ms.load(Ordering::SeqCst), 321);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_busy_threshold_too_large_disables() {
+        let seen_busy_threshold_ms = Arc::new(AtomicU64::new(0));
+
+        let seen_busy_threshold_ms_cloned = seen_busy_threshold_ms.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                seen_busy_threshold_ms_cloned
+                    .store(u64::from(ctx.busy_threshold_ms), Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let too_large = u64::from(u32::MAX) + 1;
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .busy_threshold(Duration::from_millis(too_large)),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(seen_busy_threshold_ms.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_set_load_based_replica_read_threshold_propagates_to_context() {
+        let seen_busy_threshold_ms = Arc::new(AtomicU64::new(0));
+
+        let seen_busy_threshold_ms_cloned = seen_busy_threshold_ms.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                seen_busy_threshold_ms_cloned
+                    .store(u64::from(ctx.busy_threshold_ms), Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+        );
+        snapshot.set_load_based_replica_read_threshold(Duration::from_millis(222));
+
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(seen_busy_threshold_ms.load(Ordering::SeqCst), 222);
     }
 
     #[tokio::test]

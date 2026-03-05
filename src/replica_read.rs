@@ -5,6 +5,8 @@
 //! This module is intentionally small: it provides only the public types used to
 //! configure where reads are served from.
 
+use std::sync::Arc;
+
 /// The type of TiKV replica to read from.
 ///
 /// This mirrors the `client-go` v2 `kv.ReplicaReadType` concept.
@@ -32,3 +34,9 @@ impl ReplicaReadType {
         self != ReplicaReadType::Leader
     }
 }
+
+/// Adjust replica read selection for point/batch gets based on key count.
+///
+/// This maps to the client-go `ReplicaReadAdjuster` hook used by `KVSnapshot` for
+/// `Get`/`BatchGet`.
+pub type ReplicaReadAdjuster = Arc<dyn Fn(usize) -> ReplicaReadType + Send + Sync + 'static>;

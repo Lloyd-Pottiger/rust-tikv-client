@@ -6,9 +6,12 @@ use log::{debug, trace};
 use crate::BoundRange;
 use crate::Key;
 use crate::KvPair;
+use crate::ReplicaReadType;
 use crate::Result;
 use crate::Transaction;
 use crate::Value;
+
+use std::time::Duration;
 
 /// A read-only transaction which reads at the given timestamp.
 ///
@@ -23,6 +26,26 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Set a replica read adjuster for point/batch gets.
+    ///
+    /// This option is only effective when `TransactionOptions::replica_read` is
+    /// configured to a follower-read type.
+    pub fn set_replica_read_adjuster<F>(&mut self, adjuster: F)
+    where
+        F: Fn(usize) -> ReplicaReadType + Send + Sync + 'static,
+    {
+        self.transaction.set_replica_read_adjuster(adjuster);
+    }
+
+    /// Set the busy threshold for read requests.
+    ///
+    /// This maps to client-go `KVSnapshot.SetLoadBasedReplicaReadThreshold` and writes to
+    /// `kvrpcpb::Context.busy_threshold_ms`.
+    pub fn set_load_based_replica_read_threshold(&mut self, threshold: Duration) {
+        self.transaction
+            .set_load_based_replica_read_threshold(threshold);
+    }
+
     /// Get the value associated with the given key.
     pub async fn get(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         trace!("invoking get request on snapshot");

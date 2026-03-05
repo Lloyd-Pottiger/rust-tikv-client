@@ -1,6 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
-use crate::{BoundRange, Key, KvPair, Result, Snapshot, Value};
+use crate::{BoundRange, Key, KvPair, ReplicaReadType, Result, Snapshot, Value};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A synchronous read-only snapshot.
 ///
@@ -68,5 +69,18 @@ impl SyncSnapshot {
         limit: u32,
     ) -> Result<impl Iterator<Item = Key>> {
         safe_block_on(&self.runtime, self.inner.scan_keys_reverse(range, limit))
+    }
+
+    /// Set a replica read adjuster for point/batch gets.
+    pub fn set_replica_read_adjuster<F>(&mut self, adjuster: F)
+    where
+        F: Fn(usize) -> ReplicaReadType + Send + Sync + 'static,
+    {
+        self.inner.set_replica_read_adjuster(adjuster);
+    }
+
+    /// Set the busy threshold for read requests.
+    pub fn set_load_based_replica_read_threshold(&mut self, threshold: Duration) {
+        self.inner.set_load_based_replica_read_threshold(threshold);
     }
 }
