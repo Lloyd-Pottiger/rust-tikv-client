@@ -46,6 +46,7 @@ use crate::timestamp::TimestampExt;
 use crate::transaction::requests::kvrpcpb::prewrite_request::PessimisticAction;
 use crate::transaction::HasLocks;
 use crate::util::iter::FlatMapOkIterExt;
+use crate::Key;
 use crate::KvPair;
 use crate::Result;
 use crate::Value;
@@ -221,12 +222,11 @@ pub fn new_prewrite_request(
     lock_ttl: u64,
 ) -> kvrpcpb::PrewriteRequest {
     let mut req = kvrpcpb::PrewriteRequest::default();
+    req.txn_size = mutations.len() as u64;
     req.mutations = mutations;
     req.primary_lock = primary_lock;
     req.start_version = start_version;
     req.lock_ttl = lock_ttl;
-    // FIXME: Lite resolve lock is currently disabled
-    req.txn_size = u64::MAX;
 
     req
 }
@@ -251,41 +251,150 @@ impl KvRequest for kvrpcpb::PrewriteRequest {
     type Response = kvrpcpb::PrewriteResponse;
 }
 
+#[derive(Debug, Clone)]
+pub struct PrewriteRequestShard {
+    mutations: Vec<kvrpcpb::Mutation>,
+    pessimistic_actions: Vec<i32>,
+    for_update_ts_constraints: Vec<kvrpcpb::prewrite_request::ForUpdateTsConstraint>,
+    txn_size: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PrewriteMutation {
+    key: Key,
+    mutation: kvrpcpb::Mutation,
+    pessimistic_action: Option<i32>,
+    expected_for_update_ts: Option<u64>,
+}
+
+impl AsRef<Key> for PrewriteMutation {
+    fn as_ref(&self) -> &Key {
+        &self.key
+    }
+}
+
 impl Shardable for kvrpcpb::PrewriteRequest {
-    type Shard = Vec<kvrpcpb::Mutation>;
+    type Shard = PrewriteRequestShard;
 
     fn shards(
         &self,
         pd_client: &Arc<impl PdClient>,
     ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
-        let mut mutations = self.mutations.clone();
+        let pessimistic_action_enabled = !self.pessimistic_actions.is_empty();
+        debug_assert!(
+            !pessimistic_action_enabled || self.pessimistic_actions.len() == self.mutations.len()
+        );
+
+        let mut expected_for_update_ts_by_index = vec![None; self.mutations.len()];
+        for constraint in &self.for_update_ts_constraints {
+            let index = constraint.index as usize;
+            if index < expected_for_update_ts_by_index.len() {
+                expected_for_update_ts_by_index[index] = Some(constraint.expected_for_update_ts);
+            }
+        }
+
+        let mut mutations = self
+            .mutations
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, mutation)| PrewriteMutation {
+                key: Key::from(mutation.key.clone()),
+                pessimistic_action: pessimistic_action_enabled
+                    .then(|| self.pessimistic_actions[index]),
+                expected_for_update_ts: expected_for_update_ts_by_index[index],
+                mutation,
+            })
+            .collect::<Vec<_>>();
         mutations.sort_by(|a, b| a.key.cmp(&b.key));
 
         region_stream_for_keys(mutations.into_iter(), pd_client.clone())
-            .flat_map(|result| match result {
-                Ok((mutations, region)) => stream::iter(kvrpcpb::PrewriteRequest::batches(
-                    mutations,
-                    TXN_COMMIT_BATCH_SIZE,
-                ))
-                .map(move |batch| Ok((batch, region.clone())))
-                .boxed(),
-                Err(e) => stream::iter(Err(e)).boxed(),
-            })
+            .flat_map(
+                move |result: Result<(Vec<PrewriteMutation>, RegionWithLeader)>| match result {
+                    Ok((mutations, region)) => {
+                        let region_txn_size = mutations.len() as u64;
+                        let batches = {
+                            let mut batches: Vec<Vec<PrewriteMutation>> = Vec::new();
+                            let mut batch: Vec<PrewriteMutation> = Vec::new();
+                            let mut size = 0;
+
+                            for item in mutations {
+                                let item_size = item.mutation.key.len() as u64
+                                    + item.mutation.value.len() as u64;
+                                if size + item_size >= TXN_COMMIT_BATCH_SIZE && !batch.is_empty() {
+                                    batches.push(batch);
+                                    batch = Vec::new();
+                                    size = 0;
+                                }
+                                size += item_size;
+                                batch.push(item);
+                            }
+                            if !batch.is_empty() {
+                                batches.push(batch)
+                            }
+                            batches
+                        };
+
+                        stream::iter(batches)
+                            .map(move |batch| {
+                                let mut mutations = Vec::with_capacity(batch.len());
+                                let mut pessimistic_actions = pessimistic_action_enabled
+                                    .then(|| Vec::with_capacity(batch.len()))
+                                    .unwrap_or_default();
+                                let mut for_update_ts_constraints = Vec::new();
+
+                                for (index, item) in batch.into_iter().enumerate() {
+                                    mutations.push(item.mutation);
+                                    if pessimistic_action_enabled {
+                                        pessimistic_actions.push(item.pessimistic_action.unwrap());
+                                    }
+                                    if let Some(expected_for_update_ts) =
+                                        item.expected_for_update_ts
+                                    {
+                                        for_update_ts_constraints.push(
+                                            kvrpcpb::prewrite_request::ForUpdateTsConstraint {
+                                                index: index as u32,
+                                                expected_for_update_ts,
+                                            },
+                                        );
+                                    }
+                                }
+
+                                Ok((
+                                    PrewriteRequestShard {
+                                        mutations,
+                                        pessimistic_actions,
+                                        for_update_ts_constraints,
+                                        txn_size: region_txn_size,
+                                    },
+                                    region.clone(),
+                                ))
+                            })
+                            .boxed()
+                    }
+                    Err(e) => stream::iter(iter::once(Err(e))).boxed(),
+                },
+            )
             .boxed()
     }
 
     fn apply_shard(&mut self, shard: Self::Shard) {
+        let shard_contains_primary = shard.mutations.iter().any(|m| m.key == self.primary_lock);
+
         // Only need to set secondary keys if we're sending the primary key.
-        if self.use_async_commit && !self.mutations.iter().any(|m| m.key == self.primary_lock) {
+        if self.use_async_commit && !shard_contains_primary {
             self.secondaries = vec![];
         }
 
-        // Only if there is only one request to send
-        if self.try_one_pc && shard.len() != self.secondaries.len() + 1 {
+        // Only if there is only one request to send.
+        if self.try_one_pc && shard.mutations.len() != self.mutations.len() {
             self.try_one_pc = false;
         }
 
-        self.mutations = shard;
+        self.txn_size = shard.txn_size;
+        self.mutations = shard.mutations;
+        self.pessimistic_actions = shard.pessimistic_actions;
+        self.for_update_ts_constraints = shard.for_update_ts_constraints;
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
@@ -337,7 +446,7 @@ impl Shardable for kvrpcpb::CommitRequest {
                         .map(move |batch| Ok((batch, region.clone())))
                         .boxed()
                 }
-                Err(e) => stream::iter(Err(e)).boxed(),
+                Err(e) => stream::iter(iter::once(Err(e))).boxed(),
             })
             .boxed()
     }
@@ -892,12 +1001,18 @@ impl Merge<kvrpcpb::UnsafeDestroyRangeResponse> for Collect {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+
     use crate::common::Error::PessimisticLockError;
     use crate::common::Error::ResolveLockError;
+    use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb;
     use crate::request::plan::Merge;
     use crate::request::CollectWithShard;
     use crate::request::ResponseWithShard;
+    use crate::request::Shardable;
     use crate::KvPair;
 
     #[tokio::test]
@@ -991,5 +1106,108 @@ mod tests {
                 panic!();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_prewrite_request_shards_set_txn_size_and_async_commit_secondaries() {
+        let large_value = vec![0_u8; 8 * 1024];
+
+        let primary = vec![1_u8];
+        let key2 = vec![2_u8];
+        let key3 = vec![3_u8];
+        let key10 = vec![10_u8];
+
+        // Intentionally unsorted to test mapping logic.
+        let mutations = vec![
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: key2.clone(),
+                value: large_value.clone(),
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: primary.clone(),
+                value: large_value.clone(),
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: key10.clone(),
+                value: vec![0],
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: key3.clone(),
+                value: large_value,
+                ..Default::default()
+            },
+        ];
+
+        let mut req =
+            super::new_pessimistic_prewrite_request(mutations, primary.clone(), 1, 100, 5);
+        req.use_async_commit = true;
+        req.try_one_pc = true;
+        req.secondaries = vec![key2.clone(), key10.clone(), key3.clone()];
+        req.for_update_ts_constraints = vec![kvrpcpb::prewrite_request::ForUpdateTsConstraint {
+            index: 3,
+            expected_for_update_ts: 123,
+        }];
+
+        let pd_client = Arc::new(MockPdClient::default());
+        let shards = req
+            .shards(&pd_client)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(shards.len(), 4);
+
+        let do_pessimistic_check: i32 =
+            kvrpcpb::prewrite_request::PessimisticAction::DoPessimisticCheck.into();
+
+        let mut primary_shard_count = 0;
+        for (shard, _) in shards {
+            let mut shard_req = req.clone();
+            shard_req.apply_shard(shard);
+
+            assert!(!shard_req.mutations.is_empty());
+            assert!(!shard_req.try_one_pc);
+            assert_eq!(shard_req.pessimistic_actions, vec![do_pessimistic_check]);
+
+            let shard_key = shard_req.mutations[0].key.as_slice();
+            if shard_key == primary.as_slice() {
+                primary_shard_count += 1;
+                assert_eq!(shard_req.txn_size, 3);
+                assert_eq!(
+                    shard_req.secondaries,
+                    vec![key2.clone(), key10.clone(), key3.clone()]
+                );
+                assert!(shard_req.for_update_ts_constraints.is_empty());
+            } else if shard_key == key10.as_slice() {
+                assert_eq!(shard_req.txn_size, 1);
+                assert!(shard_req.secondaries.is_empty());
+                assert!(shard_req.for_update_ts_constraints.is_empty());
+            } else if shard_key == key2.as_slice() {
+                assert_eq!(shard_req.txn_size, 3);
+                assert!(shard_req.secondaries.is_empty());
+                assert!(shard_req.for_update_ts_constraints.is_empty());
+            } else if shard_key == key3.as_slice() {
+                assert_eq!(shard_req.txn_size, 3);
+                assert!(shard_req.secondaries.is_empty());
+                assert_eq!(
+                    shard_req.for_update_ts_constraints,
+                    vec![kvrpcpb::prewrite_request::ForUpdateTsConstraint {
+                        index: 0,
+                        expected_for_update_ts: 123,
+                    }]
+                );
+            } else {
+                panic!("unexpected shard key: {:?}", shard_key);
+            }
+        }
+        assert_eq!(primary_shard_count, 1);
     }
 }

@@ -222,7 +222,7 @@ impl Shardable for kvrpcpb::RawBatchPutRequest {
                 ))
                 .map(move |batch| Ok((batch, region.clone())))
                 .boxed(),
-                Err(e) => stream::iter(Err(e)).boxed(),
+                Err(e) => stream::iter(std::iter::once(Err(e))).boxed(),
             })
             .boxed()
     }
@@ -315,7 +315,7 @@ impl Shardable for kvrpcpb::RawBatchDeleteRequest {
                 ))
                 .map(move |batch| Ok((batch, region.clone())))
                 .boxed(),
-                Err(e) => stream::iter(Err(e)).boxed(),
+                Err(e) => stream::iter(std::iter::once(Err(e))).boxed(),
             })
             .boxed()
     }

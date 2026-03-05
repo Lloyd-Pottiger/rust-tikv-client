@@ -54,6 +54,8 @@ pub async fn resolve_locks(
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
 ) -> Result<Vec<kvrpcpb::LockInfo> /* live_locks */> {
+    const RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
+
     debug!("resolving locks");
     let ts = pd_client.clone().get_timestamp().await?;
     let caller_start_ts = timestamp.version();
@@ -123,30 +125,40 @@ pub async fn resolve_locks(
         };
 
         if let Some(commit_version) = commit_version {
+            let resolve_lite = lock.txn_size < RESOLVE_LOCK_LITE_THRESHOLD;
+            // The primary lock has been resolved by CheckTxnStatus already.
+            if resolve_lite && lock.key == lock.primary_lock {
+                continue;
+            }
             let cleaned_region = resolve_lock_with_retry(
                 &lock.key,
                 lock.lock_version,
                 commit_version,
                 lock.is_txn_file,
+                resolve_lite,
                 pd_client.clone(),
                 keyspace,
                 OPTIMISTIC_BACKOFF,
             )
             .await?;
-            clean_regions
-                .entry(lock.lock_version)
-                .or_default()
-                .insert(cleaned_region);
+            if !resolve_lite {
+                clean_regions
+                    .entry(lock.lock_version)
+                    .or_default()
+                    .insert(cleaned_region);
+            }
         }
     }
     Ok(live_locks)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_lock_with_retry(
     #[allow(clippy::ptr_arg)] key: &Vec<u8>,
     start_version: u64,
     commit_version: u64,
     is_txn_file: bool,
+    resolve_lite: bool,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
     mut backoff: Backoff,
@@ -158,8 +170,11 @@ async fn resolve_lock_with_retry(
         debug!("resolving locks: attempt {}", attempt);
         let store = pd_client.clone().store_for_key(key.into()).await?;
         let ver_id = store.region_with_leader.ver_id();
-        let request =
+        let mut request =
             requests::new_resolve_lock_request(start_version, commit_version, is_txn_file);
+        if resolve_lite {
+            request.keys = vec![key.clone()];
+        }
         let plan_builder =
             match crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
                 .single_region_with_store(store.clone())
@@ -651,10 +666,18 @@ mod tests {
 
         let key = vec![1];
         let region1 = MockPdClient::region1();
-        let resolved_region =
-            resolve_lock_with_retry(&key, 1, 2, false, client.clone(), keyspace, backoff.clone())
-                .await
-                .unwrap();
+        let resolved_region = resolve_lock_with_retry(
+            &key,
+            1,
+            2,
+            false,
+            false,
+            client.clone(),
+            keyspace,
+            backoff.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(region1.ver_id(), resolved_region);
 
         // Test resolve lock over retry limit
@@ -664,7 +687,7 @@ mod tests {
         )
         .unwrap();
         let key = vec![100];
-        resolve_lock_with_retry(&key, 3, 4, false, client, keyspace, backoff)
+        resolve_lock_with_retry(&key, 3, 4, false, false, client, keyspace, backoff)
             .await
             .expect_err("should return error");
     }
@@ -698,7 +721,7 @@ mod tests {
 
         let mut lock = kvrpcpb::LockInfo::default();
         lock.key = vec![1];
-        lock.primary_lock = vec![1];
+        lock.primary_lock = vec![2];
         lock.lock_version = 1;
         lock.lock_ttl = 100; // not expired under MockPdClient's Timestamp::default()
 
@@ -709,5 +732,75 @@ mod tests {
         assert!(live_locks.is_empty());
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_resolve_lock_lite_sends_keys() {
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 2,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    assert_eq!(req.keys, vec![vec![1]]);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 1;
+        lock.lock_ttl = 100;
+        lock.txn_size = 1;
+
+        let live_locks = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
+            .await
+            .unwrap();
+        assert!(live_locks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_resolve_lock_lite_skips_primary() {
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 2,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if req.is::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![1];
+        lock.lock_version = 1;
+        lock.lock_ttl = 100;
+        lock.txn_size = 1;
+
+        let live_locks = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
+            .await
+            .unwrap();
+        assert!(live_locks.is_empty());
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
     }
 }
