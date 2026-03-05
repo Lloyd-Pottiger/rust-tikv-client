@@ -127,38 +127,72 @@ impl<P: Plan + HasKvContext, PdC: PdClient> HasKvContext for CleanupLocks<P, PdC
 fn select_replica_read_peer(
     region: &RegionWithLeader,
     replica_read: ReplicaReadType,
+    attempt: u32,
 ) -> Option<metapb::Peer> {
     let leader_store_id = region.leader.as_ref().map(|p| p.store_id);
     let peers = &region.region.peers;
 
-    let peer = match replica_read {
-        ReplicaReadType::Follower => peers
+    fn select_peer_with_attempt<F>(
+        peers: &[metapb::Peer],
+        attempt: u32,
+        predicate: F,
+    ) -> Option<metapb::Peer>
+    where
+        F: Copy + Fn(&metapb::Peer) -> bool,
+    {
+        let candidates = peers.iter().filter(|peer| predicate(peer)).count();
+        if candidates == 0 {
+            return None;
+        }
+        let target = (attempt as usize) % candidates;
+        peers
             .iter()
-            .find(|p| {
-                Some(p.store_id) != leader_store_id && p.role != metapb::PeerRole::Learner as i32
-            })
-            .cloned(),
-        ReplicaReadType::Learner => peers
-            .iter()
-            .find(|p| p.role == metapb::PeerRole::Learner as i32)
-            .cloned(),
-        ReplicaReadType::Mixed => peers
-            .iter()
-            .find(|p| {
-                Some(p.store_id) != leader_store_id && p.role != metapb::PeerRole::Learner as i32
-            })
+            .filter(|peer| predicate(peer))
+            .nth(target)
             .cloned()
-            .or_else(|| {
-                peers
-                    .iter()
-                    .find(|p| Some(p.store_id) != leader_store_id)
-                    .cloned()
-            }),
+    }
+
+    let peer = match replica_read {
+        ReplicaReadType::Follower => select_peer_with_attempt(peers, attempt, |peer| {
+            Some(peer.store_id) != leader_store_id && peer.role != metapb::PeerRole::Learner as i32
+        }),
+        ReplicaReadType::Learner => select_peer_with_attempt(peers, attempt, |peer| {
+            peer.role == metapb::PeerRole::Learner as i32
+        }),
+        ReplicaReadType::Mixed => select_peer_with_attempt(peers, attempt, |peer| {
+            Some(peer.store_id) != leader_store_id
+        }),
         ReplicaReadType::Leader | ReplicaReadType::PreferLeader => None,
     };
 
     peer.or_else(|| region.leader.clone())
         .or_else(|| region.region.peers.first().cloned())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReplicaReadState {
+    read_type: ReplicaReadType,
+    attempt_base: u32,
+}
+
+impl ReplicaReadState {
+    fn new(read_type: ReplicaReadType) -> Self {
+        Self {
+            read_type,
+            attempt_base: 0,
+        }
+    }
+
+    fn attempt(self, current_attempts: u32) -> u32 {
+        current_attempts.saturating_sub(self.attempt_base)
+    }
+
+    fn switch_to(self, read_type: ReplicaReadType, current_attempts: u32) -> Self {
+        Self {
+            read_type,
+            attempt_base: current_attempts,
+        }
+    }
 }
 
 pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
@@ -186,7 +220,7 @@ where
         backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
-        replica_read: Option<ReplicaReadType>,
+        replica_read: Option<ReplicaReadState>,
     ) -> Result<<Self as Plan>::Result> {
         let shards = current_plan.shards(&pd_client).collect::<Vec<_>>().await;
         debug!("single_plan_handler, shards: {}", shards.len());
@@ -234,13 +268,16 @@ where
         mut backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
-        replica_read: Option<ReplicaReadType>,
+        replica_read: Option<ReplicaReadState>,
     ) -> Result<<Self as Plan>::Result> {
         debug!("single_shard_handler");
         let leader_store_id = region.leader.as_ref().map(|peer| peer.store_id);
-        if let Some(read_type) = replica_read {
+        let current_attempts = backoff.current_attempts();
+        if let Some(replica_read) = replica_read {
+            let read_type = replica_read.read_type;
             if read_type.is_follower_read() {
-                if let Some(peer) = select_replica_read_peer(&region, read_type) {
+                let attempt = replica_read.attempt(current_attempts);
+                if let Some(peer) = select_replica_read_peer(&region, read_type, attempt) {
                     region.leader = Some(peer);
                 }
             }
@@ -251,9 +288,9 @@ where
             .await
             .and_then(|region_store| {
                 plan.apply_store(&region_store)?;
-                if let Some(read_type) = replica_read {
+                if let Some(replica_read) = replica_read {
                     if let Some(ctx) = plan.kv_context_mut() {
-                        adjust_replica_read_flag(ctx, leader_store_id, read_type);
+                        adjust_replica_read_flag(ctx, leader_store_id, replica_read.read_type);
                     }
                 }
                 Ok(region_store)
@@ -316,6 +353,7 @@ where
             Ok(vec![Err(Error::MultipleKeyErrors(e))])
         } else if let Some(e) = resp.region_error() {
             debug!("single_shard_handler:execute: region error: {:?}", e);
+            let is_server_busy = e.server_is_busy.is_some();
             match backoff.next_delay_duration() {
                 Some(duration) => {
                     let region_error_resolved =
@@ -324,6 +362,14 @@ where
                     if !region_error_resolved {
                         sleep(duration).await;
                     }
+                    let replica_read = match (is_server_busy, replica_read) {
+                        (true, Some(state)) if state.read_type == ReplicaReadType::PreferLeader => {
+                            Some(
+                                state.switch_to(ReplicaReadType::Mixed, backoff.current_attempts()),
+                            )
+                        }
+                        _ => replica_read,
+                    };
                     Self::single_plan_handler(
                         pd_client,
                         plan,
@@ -350,22 +396,29 @@ where
         mut backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
-        replica_read: Option<ReplicaReadType>,
+        replica_read: Option<ReplicaReadState>,
         e: Error,
     ) -> Result<<Self as Plan>::Result> {
         debug!("handle_other_error: {:?}", e);
-        pd_client.invalidate_region_cache(region).await;
+        let is_grpc_error = is_grpc_error(&e);
         let mut replica_read = replica_read;
-        if is_grpc_error(&e) {
+        if is_grpc_error {
             if let Some(store_id) = store {
                 pd_client.invalidate_store_cache(store_id).await;
             }
-            if replica_read == Some(ReplicaReadType::PreferLeader) {
-                replica_read = Some(ReplicaReadType::Mixed);
-            }
-        };
+        } else {
+            pd_client.invalidate_region_cache(region).await;
+        }
         match backoff.next_delay_duration() {
             Some(duration) => {
+                if is_grpc_error {
+                    replica_read = match replica_read {
+                        Some(state) if state.read_type == ReplicaReadType::PreferLeader => Some(
+                            state.switch_to(ReplicaReadType::Mixed, backoff.current_attempts()),
+                        ),
+                        _ => replica_read,
+                    };
+                }
                 sleep(duration).await;
                 Self::single_plan_handler(
                     pd_client,
@@ -444,10 +497,9 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
     } else if e.stale_command.is_some() || e.region_not_found.is_some() {
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
-    } else if e.server_is_busy.is_some()
-        || e.raft_entry_too_large.is_some()
-        || e.max_timestamp_not_synced.is_some()
-    {
+    } else if e.server_is_busy.is_some() {
+        Ok(false)
+    } else if e.raft_entry_too_large.is_some() || e.max_timestamp_not_synced.is_some() {
         Err(Error::RegionError(Box::new(e)))
     } else {
         // TODO: pass the logger around
@@ -530,7 +582,7 @@ where
             self.backoff.clone(),
             concurrency_permits.clone(),
             self.preserve_region_results,
-            self.replica_read,
+            self.replica_read.map(ReplicaReadState::new),
         )
         .await
     }
