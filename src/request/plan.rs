@@ -95,6 +95,35 @@ pub(crate) fn is_grpc_error(e: &Error) -> bool {
     matches!(e, Error::GrpcAPI(_) | Error::Grpc(_))
 }
 
+#[doc(hidden)]
+pub trait HasKvContext {
+    fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context>;
+}
+
+impl<Req: KvRequest> HasKvContext for Dispatch<Req> {
+    fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.request.context_mut()
+    }
+}
+
+impl<P: Plan + Shardable + HasKvContext> HasKvContext for PreserveShard<P> {
+    fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.inner.kv_context_mut()
+    }
+}
+
+impl<P: Plan + HasKvContext, PdC: PdClient> HasKvContext for ResolveLock<P, PdC> {
+    fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.inner.kv_context_mut()
+    }
+}
+
+impl<P: Plan + HasKvContext, PdC: PdClient> HasKvContext for CleanupLocks<P, PdC> {
+    fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.inner.kv_context_mut()
+    }
+}
+
 fn select_replica_read_peer(
     region: &RegionWithLeader,
     replica_read: ReplicaReadType,
@@ -145,7 +174,7 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     pub(super) replica_read: Option<ReplicaReadType>,
 }
 
-impl<P: Plan + Shardable, PdC: PdClient> RetryableMultiRegion<P, PdC>
+impl<P: Plan + Shardable + HasKvContext, PdC: PdClient> RetryableMultiRegion<P, PdC>
 where
     P::Result: HasKeyErrors + HasRegionError,
 {
@@ -208,6 +237,7 @@ where
         replica_read: Option<ReplicaReadType>,
     ) -> Result<<Self as Plan>::Result> {
         debug!("single_shard_handler");
+        let leader_store_id = region.leader.as_ref().map(|peer| peer.store_id);
         if let Some(read_type) = replica_read {
             if read_type.is_follower_read() {
                 if let Some(peer) = select_replica_read_peer(&region, read_type) {
@@ -221,6 +251,11 @@ where
             .await
             .and_then(|region_store| {
                 plan.apply_store(&region_store)?;
+                if let Some(read_type) = replica_read {
+                    if let Some(ctx) = plan.kv_context_mut() {
+                        adjust_replica_read_flag(ctx, leader_store_id, read_type);
+                    }
+                }
                 Ok(region_store)
             }) {
             Ok(region_store) => region_store,
@@ -347,6 +382,25 @@ where
     }
 }
 
+fn adjust_replica_read_flag(
+    ctx: &mut kvrpcpb::Context,
+    leader_store_id: Option<StoreId>,
+    replica_read: ReplicaReadType,
+) {
+    if ctx.stale_read || !replica_read.is_follower_read() {
+        ctx.replica_read = false;
+        return;
+    }
+
+    let (Some(leader_store_id), Some(peer_store_id)) =
+        (leader_store_id, ctx.peer.as_ref().map(|peer| peer.store_id))
+    else {
+        return;
+    };
+
+    ctx.replica_read = peer_store_id != leader_store_id;
+}
+
 // Returns
 // 1. Ok(true): error has been resolved, retry immediately
 // 2. Ok(false): backoff, and then retry
@@ -459,7 +513,7 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
 }
 
 #[async_trait]
-impl<P: Plan + Shardable, PdC: PdClient> Plan for RetryableMultiRegion<P, PdC>
+impl<P: Plan + Shardable + HasKvContext, PdC: PdClient> Plan for RetryableMultiRegion<P, PdC>
 where
     P::Result: HasKeyErrors + HasRegionError,
 {
@@ -1012,6 +1066,12 @@ mod test {
 
         async fn execute(&self) -> Result<Self::Result> {
             Err(Error::Unimplemented)
+        }
+    }
+
+    impl HasKvContext for ErrPlan {
+        fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+            None
         }
     }
 

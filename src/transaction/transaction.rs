@@ -2116,7 +2116,7 @@ mod tests {
         let _ = snapshot.get(key).await.unwrap();
 
         assert_eq!(store_id.load(Ordering::SeqCst), 41);
-        assert!(replica_read.load(Ordering::SeqCst));
+        assert!(!replica_read.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

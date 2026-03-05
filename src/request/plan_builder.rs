@@ -7,7 +7,7 @@ use super::plan::PreserveShard;
 use super::Keyspace;
 use crate::backoff::Backoff;
 use crate::pd::PdClient;
-use crate::request::plan::{CleanupLocks, RetryableAllStores};
+use crate::request::plan::{CleanupLocks, HasKvContext, RetryableAllStores};
 use crate::request::shard::HasNextBatch;
 use crate::request::Dispatch;
 use crate::request::ExtractError;
@@ -158,7 +158,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
     }
 }
 
-impl<PdC: PdClient, P: Plan + Shardable> PlanBuilder<PdC, P, NoTarget>
+impl<PdC: PdClient, P: Plan + Shardable + HasKvContext> PlanBuilder<PdC, P, NoTarget>
 where
     P::Result: HasKeyErrors + HasRegionError,
 {
