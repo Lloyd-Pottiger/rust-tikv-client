@@ -29,3 +29,16 @@ pub enum IsolationLevel {
     /// Read committed + extra check for more recent versions.
     RcCheckTs = 2,
 }
+
+/// Used to tell TiKV whether operations are allowed or not on different disk usages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum DiskFullOpt {
+    /// Disallow operations on both almost-full and already-full disks.
+    #[default]
+    NotAllowedOnFull = 0,
+    /// Allow operations when disk is almost full.
+    AllowedOnAlmostFull = 1,
+    /// Allow operations when disk is already full.
+    AllowedOnAlreadyFull = 2,
+}

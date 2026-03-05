@@ -157,6 +157,8 @@ pub use crate::request::RetryOptions;
 #[doc(inline)]
 pub use crate::request_context::CommandPriority;
 #[doc(inline)]
+pub use crate::request_context::DiskFullOpt;
+#[doc(inline)]
 pub use crate::request_context::IsolationLevel;
 #[doc(inline)]
 pub use crate::timestamp::Timestamp;

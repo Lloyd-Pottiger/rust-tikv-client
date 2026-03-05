@@ -35,6 +35,7 @@ use crate::transaction::buffer::Buffer;
 use crate::transaction::lowering::*;
 use crate::BoundRange;
 use crate::CommandPriority;
+use crate::DiskFullOpt;
 use crate::Error;
 use crate::IsolationLevel;
 use crate::Key;
@@ -99,10 +100,12 @@ struct SnapshotReadContext {
     not_fill_cache: bool,
     task_id: u64,
     max_execution_duration_ms: u64,
+    busy_threshold_ms: u32,
     priority: CommandPriority,
     isolation_level: IsolationLevel,
     resource_group_tag: Option<Vec<u8>>,
     resource_group_name: Option<String>,
+    request_source: Option<String>,
 }
 
 impl<PdC: PdClient> Transaction<PdC> {
@@ -137,13 +140,18 @@ impl<PdC: PdClient> Transaction<PdC> {
                 not_fill_cache: self.options.not_fill_cache,
                 task_id: self.options.task_id,
                 max_execution_duration_ms: self.options.max_execution_duration_ms,
+                busy_threshold_ms: self.options.busy_threshold_ms,
                 priority: self.options.priority,
                 isolation_level: self.options.isolation_level,
                 resource_group_tag: self.options.resource_group_tag.clone(),
                 resource_group_name: self.options.resource_group_name.clone(),
+                request_source: self.options.request_source.clone(),
             }
         } else {
-            SnapshotReadContext::default()
+            SnapshotReadContext {
+                request_source: self.options.request_source.clone(),
+                ..SnapshotReadContext::default()
+            }
         }
     }
 
@@ -152,6 +160,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         ctx.not_fill_cache = opts.not_fill_cache;
         ctx.task_id = opts.task_id;
         ctx.max_execution_duration_ms = opts.max_execution_duration_ms;
+        ctx.busy_threshold_ms = opts.busy_threshold_ms;
         ctx.priority = opts.priority as i32;
         ctx.isolation_level = opts.isolation_level as i32;
         ctx.resource_group_tag = opts.resource_group_tag.unwrap_or_default();
@@ -161,6 +170,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                     resource_group_name,
                     ..Default::default()
                 });
+        if let Some(request_source) = opts.request_source {
+            ctx.request_source = request_source;
+        }
         if opts.stale_read {
             ctx.stale_read = true;
             ctx.replica_read = false;
@@ -1190,6 +1202,8 @@ pub struct TransactionOptions {
     task_id: u64,
     /// Server-side maximum execution duration for read requests (read-only snapshots only).
     max_execution_duration_ms: u64,
+    /// TiKV may reject requests early if estimated wait time exceeds the threshold (read-only snapshots only).
+    busy_threshold_ms: u32,
     /// Command priority for read requests (read-only snapshots only).
     priority: CommandPriority,
     /// Isolation level for read requests (read-only snapshots only).
@@ -1198,6 +1212,12 @@ pub struct TransactionOptions {
     resource_group_tag: Option<Vec<u8>>,
     /// Resource group name for read requests (read-only snapshots only).
     resource_group_name: Option<String>,
+    /// The source tag for metrics (`kvrpcpb::Context.request_source`).
+    request_source: Option<String>,
+    /// The source of the current transaction (`kvrpcpb::Context.txn_source`).
+    txn_source: u64,
+    /// Whether operations are allowed on different disk usage levels (`kvrpcpb::Context.disk_full_opt`).
+    disk_full_opt: DiskFullOpt,
     /// Try using 1pc rather than 2pc (default is to always use 2pc).
     try_one_pc: bool,
     /// Try to use async commit (default is not to).
@@ -1234,10 +1254,14 @@ impl TransactionOptions {
             not_fill_cache: false,
             task_id: 0,
             max_execution_duration_ms: 0,
+            busy_threshold_ms: 0,
             priority: CommandPriority::Normal,
             isolation_level: IsolationLevel::Si,
             resource_group_tag: None,
             resource_group_name: None,
+            request_source: None,
+            txn_source: 0,
+            disk_full_opt: DiskFullOpt::NotAllowedOnFull,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1256,10 +1280,14 @@ impl TransactionOptions {
             not_fill_cache: false,
             task_id: 0,
             max_execution_duration_ms: 0,
+            busy_threshold_ms: 0,
             priority: CommandPriority::Normal,
             isolation_level: IsolationLevel::Si,
             resource_group_tag: None,
             resource_group_name: None,
+            request_source: None,
+            txn_source: 0,
+            disk_full_opt: DiskFullOpt::NotAllowedOnFull,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1280,6 +1308,27 @@ impl TransactionOptions {
     #[must_use]
     pub fn try_one_pc(mut self) -> TransactionOptions {
         self.try_one_pc = true;
+        self
+    }
+
+    /// Set whether operations are allowed when TiKV disk is full.
+    #[must_use]
+    pub fn disk_full_opt(mut self, opt: DiskFullOpt) -> TransactionOptions {
+        self.disk_full_opt = opt;
+        self
+    }
+
+    /// Set the source of the transaction.
+    #[must_use]
+    pub fn txn_source(mut self, source: u64) -> TransactionOptions {
+        self.txn_source = source;
+        self
+    }
+
+    /// Set the request source label for TiKV metrics.
+    #[must_use]
+    pub fn request_source(mut self, source: impl Into<String>) -> TransactionOptions {
+        self.request_source = Some(source.into());
         self
     }
 
@@ -1339,6 +1388,19 @@ impl TransactionOptions {
     #[must_use]
     pub fn max_execution_duration(mut self, duration: Duration) -> TransactionOptions {
         self.max_execution_duration_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+        self
+    }
+
+    /// Set the busy threshold for read requests.
+    ///
+    /// If set, TiKV can reject the request with a `ServerIsBusy` error before processing when the
+    /// estimated waiting duration exceeds the threshold.
+    ///
+    /// This option is only effective for read-only snapshots created via
+    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    #[must_use]
+    pub fn busy_threshold(mut self, threshold: Duration) -> TransactionOptions {
+        self.busy_threshold_ms = threshold.as_millis().min(u128::from(u32::MAX)) as u32;
         self
     }
 
@@ -1408,6 +1470,15 @@ impl TransactionOptions {
     pub fn drop_check(mut self, level: CheckLevel) -> TransactionOptions {
         self.check_level = level;
         self
+    }
+
+    fn apply_write_context(&self, ctx: &mut Option<kvrpcpb::Context>) {
+        let ctx = ctx.get_or_insert_with(kvrpcpb::Context::default);
+        ctx.disk_full_opt = self.disk_full_opt as i32;
+        ctx.txn_source = self.txn_source;
+        if let Some(request_source) = &self.request_source {
+            ctx.request_source = request_source.clone();
+        }
     }
 
     fn push_for_update_ts(&mut self, for_update_ts: Timestamp) {
@@ -1565,6 +1636,7 @@ impl<PdC: PdClient> Committer<PdC> {
             .filter(|m| self.primary_key.as_ref().unwrap() != m.key.as_ref())
             .map(|m| m.key.clone())
             .collect();
+        self.options.apply_write_context(&mut request.context);
         // FIXME set max_commit_ts and min_commit_ts
 
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
@@ -1606,11 +1678,12 @@ impl<PdC: PdClient> Committer<PdC> {
         debug!("committing primary");
         let primary_key = self.primary_key.clone().into_iter();
         let commit_version = self.rpc.clone().get_timestamp().await?;
-        let req = new_commit_request(
+        let mut req = new_commit_request(
             primary_key,
             self.start_version.clone(),
             commit_version.clone(),
         );
+        self.options.apply_write_context(&mut req.context);
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .resolve_lock(
                 self.start_version.clone(),
@@ -1715,7 +1788,7 @@ impl<PdC: PdClient> Committer<PdC> {
             fp()?
         });
 
-        let req = if self.options.async_commit {
+        let mut req = if self.options.async_commit {
             let keys = mutations.map(|m| m.key.into());
             new_commit_request(keys, start_version.clone(), commit_version)
         } else if primary_only {
@@ -1727,6 +1800,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 .filter(|key| &primary_key != key);
             new_commit_request(keys, start_version.clone(), commit_version)
         };
+        self.options.apply_write_context(&mut req.context);
         let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
             .resolve_lock(
                 start_version,
@@ -1848,6 +1922,7 @@ mod tests {
     use crate::transaction::HeartbeatOption;
     use crate::CheckLevel;
     use crate::CommandPriority;
+    use crate::DiskFullOpt;
     use crate::Error;
     use crate::IsolationLevel;
     use crate::Key;
@@ -2419,6 +2494,135 @@ mod tests {
         let _ = snapshot.get(key).await.unwrap();
 
         assert_eq!(seen_timeout_ms.load(Ordering::SeqCst), 123);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_busy_threshold_propagates_to_context() {
+        let seen_busy_threshold_ms = Arc::new(AtomicU64::new(0));
+
+        let seen_busy_threshold_ms_cloned = seen_busy_threshold_ms.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                seen_busy_threshold_ms_cloned
+                    .store(u64::from(ctx.busy_threshold_ms), Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .busy_threshold(Duration::from_millis(321)),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(seen_busy_threshold_ms.load(Ordering::SeqCst), 321);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_request_source_propagates_to_context() {
+        let seen_source = Arc::new(std::sync::Mutex::new(String::new()));
+        let source = "snapshot-source".to_string();
+
+        let seen_source_cloned = seen_source.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                *seen_source_cloned.lock().unwrap() = ctx.request_source.clone();
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .request_source(source.clone()),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(*seen_source.lock().unwrap(), source);
+    }
+
+    #[tokio::test]
+    async fn test_txn_source_disk_full_opt_request_source_propagates_to_commit_requests() {
+        let prewrite_txn_source = Arc::new(AtomicU64::new(0));
+        let commit_txn_source = Arc::new(AtomicU64::new(0));
+        let prewrite_disk_full_opt = Arc::new(std::sync::atomic::AtomicI32::new(-1));
+        let commit_disk_full_opt = Arc::new(std::sync::atomic::AtomicI32::new(-1));
+        let prewrite_request_source = Arc::new(std::sync::Mutex::new(String::new()));
+        let commit_request_source = Arc::new(std::sync::Mutex::new(String::new()));
+        let request_source = "txn-source".to_string();
+
+        let prewrite_txn_source_cloned = prewrite_txn_source.clone();
+        let commit_txn_source_cloned = commit_txn_source.clone();
+        let prewrite_disk_full_opt_cloned = prewrite_disk_full_opt.clone();
+        let commit_disk_full_opt_cloned = commit_disk_full_opt.clone();
+        let prewrite_request_source_cloned = prewrite_request_source.clone();
+        let commit_request_source_cloned = commit_request_source.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    prewrite_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
+                    prewrite_disk_full_opt_cloned.store(ctx.disk_full_opt, Ordering::SeqCst);
+                    *prewrite_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
+                    return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    commit_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
+                    commit_disk_full_opt_cloned.store(ctx.disk_full_opt, Ordering::SeqCst);
+                    *commit_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
+                    return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .disk_full_opt(DiskFullOpt::AllowedOnAlmostFull)
+                .txn_source(42)
+                .request_source(request_source.clone())
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.put("key".to_owned(), "value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert_eq!(prewrite_txn_source.load(Ordering::SeqCst), 42);
+        assert_eq!(commit_txn_source.load(Ordering::SeqCst), 42);
+        assert_eq!(
+            prewrite_disk_full_opt.load(Ordering::SeqCst),
+            DiskFullOpt::AllowedOnAlmostFull as i32
+        );
+        assert_eq!(
+            commit_disk_full_opt.load(Ordering::SeqCst),
+            DiskFullOpt::AllowedOnAlmostFull as i32
+        );
+        assert_eq!(*prewrite_request_source.lock().unwrap(), request_source);
+        assert_eq!(*commit_request_source.lock().unwrap(), request_source);
     }
 
     #[rstest::rstest]
