@@ -149,6 +149,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         } else {
             SnapshotReadContext {
+                priority: self.options.priority,
                 resource_group_tag: self.options.resource_group_tag.clone(),
                 resource_group_name: self.options.resource_group_name.clone(),
                 request_source: self.options.request_source.clone(),
@@ -1206,13 +1207,13 @@ pub struct TransactionOptions {
     max_execution_duration_ms: u64,
     /// TiKV may reject requests early if estimated wait time exceeds the threshold (read-only snapshots only).
     busy_threshold_ms: u32,
-    /// Command priority for read requests (read-only snapshots only).
+    /// Command priority for requests.
     priority: CommandPriority,
     /// Isolation level for read requests (read-only snapshots only).
     isolation_level: IsolationLevel,
-    /// Resource group tag for read requests (read-only snapshots only).
+    /// Resource group tag for requests.
     resource_group_tag: Option<Vec<u8>>,
-    /// Resource group name for read requests (read-only snapshots only).
+    /// Resource group name for requests.
     resource_group_name: Option<String>,
     /// The source tag for metrics (`kvrpcpb::Context.request_source`).
     request_source: Option<String>,
@@ -1220,6 +1221,8 @@ pub struct TransactionOptions {
     txn_source: u64,
     /// Whether operations are allowed on different disk usage levels (`kvrpcpb::Context.disk_full_opt`).
     disk_full_opt: DiskFullOpt,
+    /// Whether to force syncing logs for transactional write requests (`kvrpcpb::Context.sync_log`).
+    sync_log: bool,
     /// Try using 1pc rather than 2pc (default is to always use 2pc).
     try_one_pc: bool,
     /// Try to use async commit (default is not to).
@@ -1264,6 +1267,7 @@ impl TransactionOptions {
             request_source: None,
             txn_source: 0,
             disk_full_opt: DiskFullOpt::NotAllowedOnFull,
+            sync_log: false,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1290,6 +1294,7 @@ impl TransactionOptions {
             request_source: None,
             txn_source: 0,
             disk_full_opt: DiskFullOpt::NotAllowedOnFull,
+            sync_log: false,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1331,6 +1336,15 @@ impl TransactionOptions {
     #[must_use]
     pub fn request_source(mut self, source: impl Into<String>) -> TransactionOptions {
         self.request_source = Some(source.into());
+        self
+    }
+
+    /// Set whether transactional write requests should force TiKV to sync logs.
+    ///
+    /// This option writes to `kvrpcpb::Context.sync_log`.
+    #[must_use]
+    pub fn sync_log(mut self, enabled: bool) -> TransactionOptions {
+        self.sync_log = enabled;
         self
     }
 
@@ -1406,10 +1420,9 @@ impl TransactionOptions {
         self
     }
 
-    /// Set the priority for read requests.
+    /// Set the priority for requests.
     ///
-    /// This option is only effective for read-only snapshots created via
-    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    /// This option writes to `kvrpcpb::Context.priority`.
     #[must_use]
     pub fn priority(mut self, priority: CommandPriority) -> TransactionOptions {
         self.priority = priority;
@@ -1476,6 +1489,8 @@ impl TransactionOptions {
         let ctx = ctx.get_or_insert_with(kvrpcpb::Context::default);
         ctx.disk_full_opt = self.disk_full_opt as i32;
         ctx.txn_source = self.txn_source;
+        ctx.sync_log = self.sync_log;
+        ctx.priority = self.priority as i32;
         if let Some(tag) = &self.resource_group_tag {
             ctx.resource_group_tag = tag.clone();
         }
@@ -2578,6 +2593,10 @@ mod tests {
         let commit_disk_full_opt = Arc::new(std::sync::atomic::AtomicI32::new(-1));
         let prewrite_request_source = Arc::new(std::sync::Mutex::new(String::new()));
         let commit_request_source = Arc::new(std::sync::Mutex::new(String::new()));
+        let prewrite_priority = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let commit_priority = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let prewrite_sync_log = Arc::new(AtomicBool::new(false));
+        let commit_sync_log = Arc::new(AtomicBool::new(false));
         let prewrite_resource_group_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
         let commit_resource_group_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
         let prewrite_resource_group_name = Arc::new(std::sync::Mutex::new(String::new()));
@@ -2592,6 +2611,10 @@ mod tests {
         let commit_disk_full_opt_cloned = commit_disk_full_opt.clone();
         let prewrite_request_source_cloned = prewrite_request_source.clone();
         let commit_request_source_cloned = commit_request_source.clone();
+        let prewrite_priority_cloned = prewrite_priority.clone();
+        let commit_priority_cloned = commit_priority.clone();
+        let prewrite_sync_log_cloned = prewrite_sync_log.clone();
+        let commit_sync_log_cloned = commit_sync_log.clone();
         let prewrite_resource_group_tag_cloned = prewrite_resource_group_tag.clone();
         let commit_resource_group_tag_cloned = commit_resource_group_tag.clone();
         let prewrite_resource_group_name_cloned = prewrite_resource_group_name.clone();
@@ -2603,6 +2626,8 @@ mod tests {
                     prewrite_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
                     prewrite_disk_full_opt_cloned.store(ctx.disk_full_opt, Ordering::SeqCst);
                     *prewrite_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
+                    prewrite_priority_cloned.store(ctx.priority, Ordering::SeqCst);
+                    prewrite_sync_log_cloned.store(ctx.sync_log, Ordering::SeqCst);
                     *prewrite_resource_group_tag_cloned.lock().unwrap() =
                         ctx.resource_group_tag.clone();
                     *prewrite_resource_group_name_cloned.lock().unwrap() = ctx
@@ -2618,6 +2643,8 @@ mod tests {
                     commit_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
                     commit_disk_full_opt_cloned.store(ctx.disk_full_opt, Ordering::SeqCst);
                     *commit_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
+                    commit_priority_cloned.store(ctx.priority, Ordering::SeqCst);
+                    commit_sync_log_cloned.store(ctx.sync_log, Ordering::SeqCst);
                     *commit_resource_group_tag_cloned.lock().unwrap() =
                         ctx.resource_group_tag.clone();
                     *commit_resource_group_name_cloned.lock().unwrap() = ctx
@@ -2640,8 +2667,10 @@ mod tests {
                 .disk_full_opt(DiskFullOpt::AllowedOnAlmostFull)
                 .txn_source(42)
                 .request_source(request_source.clone())
+                .sync_log(true)
                 .resource_group_tag(resource_group_tag.clone())
                 .resource_group_name(resource_group_name.clone())
+                .priority(CommandPriority::High)
                 .heartbeat_option(HeartbeatOption::NoHeartbeat)
                 .drop_check(CheckLevel::None),
             Keyspace::Disable,
@@ -2661,6 +2690,16 @@ mod tests {
         );
         assert_eq!(*prewrite_request_source.lock().unwrap(), request_source);
         assert_eq!(*commit_request_source.lock().unwrap(), request_source);
+        assert_eq!(
+            prewrite_priority.load(Ordering::SeqCst),
+            CommandPriority::High as i32
+        );
+        assert_eq!(
+            commit_priority.load(Ordering::SeqCst),
+            CommandPriority::High as i32
+        );
+        assert!(prewrite_sync_log.load(Ordering::SeqCst));
+        assert!(commit_sync_log.load(Ordering::SeqCst));
         assert_eq!(
             *prewrite_resource_group_tag.lock().unwrap(),
             resource_group_tag
