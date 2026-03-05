@@ -320,11 +320,15 @@ where
     ) -> Result<<Self as Plan>::Result> {
         debug!("handle_other_error: {:?}", e);
         pd_client.invalidate_region_cache(region).await;
+        let mut replica_read = replica_read;
         if is_grpc_error(&e) {
             if let Some(store_id) = store {
                 pd_client.invalidate_store_cache(store_id).await;
             }
-        }
+            if replica_read == Some(ReplicaReadType::PreferLeader) {
+                replica_read = Some(ReplicaReadType::Mixed);
+            }
+        };
         match backoff.next_delay_duration() {
             Some(duration) => {
                 sleep(duration).await;

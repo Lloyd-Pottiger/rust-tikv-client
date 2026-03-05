@@ -21,17 +21,14 @@ pub enum ReplicaReadType {
     Learner,
     /// Prefer reading from leader, but may fall back if leader is abnormal.
     ///
-    /// Note: currently treated the same as [`ReplicaReadType::Leader`] by the
-    /// Rust client.
+    /// This mode reads from the leader when possible, but may fall back to
+    /// other replicas when the leader is unreachable.
     PreferLeader,
 }
 
 impl ReplicaReadType {
     #[inline]
     pub(crate) fn is_follower_read(self) -> bool {
-        matches!(
-            self,
-            ReplicaReadType::Follower | ReplicaReadType::Mixed | ReplicaReadType::Learner
-        )
+        self != ReplicaReadType::Leader
     }
 }

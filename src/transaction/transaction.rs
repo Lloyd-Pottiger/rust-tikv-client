@@ -1809,6 +1809,7 @@ mod tests {
     use crate::transaction::HeartbeatOption;
     use crate::CheckLevel;
     use crate::CommandPriority;
+    use crate::Error;
     use crate::IsolationLevel;
     use crate::Key;
     use crate::ReplicaReadType;
@@ -1930,7 +1931,7 @@ mod tests {
     #[tokio::test]
     async fn test_snapshot_replica_read_prefer_leader_defaults_to_leader() {
         let store_id = Arc::new(AtomicU64::new(0));
-        let replica_read = Arc::new(AtomicBool::new(true));
+        let replica_read = Arc::new(AtomicBool::new(false));
 
         let store_id_cloned = store_id.clone();
         let replica_read_cloned = replica_read.clone();
@@ -1960,7 +1961,51 @@ mod tests {
         let _ = snapshot.get(key).await.unwrap();
 
         assert_eq!(store_id.load(Ordering::SeqCst), 41);
-        assert!(!replica_read.load(Ordering::SeqCst));
+        assert!(replica_read.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_replica_read_prefer_leader_grpc_error_falls_back_to_replica() {
+        let get_count = Arc::new(AtomicUsize::new(0));
+        let first_store_id = Arc::new(AtomicU64::new(0));
+        let second_store_id = Arc::new(AtomicU64::new(0));
+
+        let get_count_captured = get_count.clone();
+        let first_store_id_captured = first_store_id.clone();
+        let second_store_id_captured = second_store_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+
+                let attempt = get_count_captured.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    first_store_id_captured.store(peer.store_id, Ordering::SeqCst);
+                    return Err(Error::GrpcAPI(tonic::Status::unavailable("unavailable")));
+                }
+
+                second_store_id_captured.store(peer.store_id, Ordering::SeqCst);
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::PreferLeader),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(get_count.load(Ordering::SeqCst), 2);
+        assert_eq!(first_store_id.load(Ordering::SeqCst), 41);
+        assert_eq!(second_store_id.load(Ordering::SeqCst), 51);
     }
 
     #[tokio::test]
