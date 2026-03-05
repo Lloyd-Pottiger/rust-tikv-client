@@ -114,12 +114,16 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
     }
 
-    fn apply_replica_read_context(
+    fn apply_snapshot_read_context(
         ctx: &mut Option<kvrpcpb::Context>,
         replica_read: ReplicaReadType,
         stale_read: bool,
+        not_fill_cache: bool,
+        task_id: u64,
     ) {
         let ctx = ctx.get_or_insert_with(kvrpcpb::Context::default);
+        ctx.not_fill_cache = not_fill_cache;
+        ctx.task_id = task_id;
         if stale_read {
             ctx.stale_read = true;
             ctx.replica_read = false;
@@ -155,16 +159,27 @@ impl<PdC: PdClient> Transaction<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let retry_options = self.options.retry_options.clone();
         let keyspace = self.keyspace;
-        let (replica_read, stale_read) = if self.options.read_only {
-            (self.options.replica_read, self.options.stale_read)
+        let (replica_read, stale_read, not_fill_cache, task_id) = if self.options.read_only {
+            (
+                self.options.replica_read,
+                self.options.stale_read,
+                self.options.not_fill_cache,
+                self.options.task_id,
+            )
         } else {
-            (ReplicaReadType::Leader, false)
+            (ReplicaReadType::Leader, false, false, 0)
         };
 
         self.buffer
             .get_or_else(key, |key| async move {
                 let mut request = new_get_request(key, timestamp.clone());
-                Self::apply_replica_read_context(&mut request.context, replica_read, stale_read);
+                Self::apply_snapshot_read_context(
+                    &mut request.context,
+                    replica_read,
+                    stale_read,
+                    not_fill_cache,
+                    task_id,
+                );
 
                 let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
                     timestamp,
@@ -306,16 +321,27 @@ impl<PdC: PdClient> Transaction<PdC> {
             .into_iter()
             .map(move |k| k.into().encode_keyspace(keyspace, KeyMode::Txn));
         let retry_options = self.options.retry_options.clone();
-        let (replica_read, stale_read) = if self.options.read_only {
-            (self.options.replica_read, self.options.stale_read)
+        let (replica_read, stale_read, not_fill_cache, task_id) = if self.options.read_only {
+            (
+                self.options.replica_read,
+                self.options.stale_read,
+                self.options.not_fill_cache,
+                self.options.task_id,
+            )
         } else {
-            (ReplicaReadType::Leader, false)
+            (ReplicaReadType::Leader, false, false, 0)
         };
 
         self.buffer
             .batch_get_or_else(keys, move |keys| async move {
                 let mut request = new_batch_get_request(keys, timestamp.clone());
-                Self::apply_replica_read_context(&mut request.context, replica_read, stale_read);
+                Self::apply_snapshot_read_context(
+                    &mut request.context,
+                    replica_read,
+                    stale_read,
+                    not_fill_cache,
+                    task_id,
+                );
 
                 let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
                     timestamp,
@@ -834,10 +860,15 @@ impl<PdC: PdClient> Transaction<PdC> {
         let retry_options = self.options.retry_options.clone();
         let keyspace = self.keyspace;
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
-        let (replica_read, stale_read) = if self.options.read_only {
-            (self.options.replica_read, self.options.stale_read)
+        let (replica_read, stale_read, not_fill_cache, task_id) = if self.options.read_only {
+            (
+                self.options.replica_read,
+                self.options.stale_read,
+                self.options.not_fill_cache,
+                self.options.task_id,
+            )
         } else {
-            (ReplicaReadType::Leader, false)
+            (ReplicaReadType::Leader, false, false, 0)
         };
 
         self.buffer
@@ -854,10 +885,12 @@ impl<PdC: PdClient> Transaction<PdC> {
                         key_only,
                         reverse,
                     );
-                    Self::apply_replica_read_context(
+                    Self::apply_snapshot_read_context(
                         &mut request.context,
                         replica_read,
                         stale_read,
+                        not_fill_cache,
+                        task_id,
                     );
 
                     let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
@@ -1156,6 +1189,10 @@ pub struct TransactionOptions {
     replica_read: ReplicaReadType,
     /// Mark reads as stale read (read-only snapshots only).
     stale_read: bool,
+    /// Read requests should not fill block cache (read-only snapshots only).
+    not_fill_cache: bool,
+    /// A hint for TiKV to schedule tasks more fairly (read-only snapshots only).
+    task_id: u64,
     /// Try using 1pc rather than 2pc (default is to always use 2pc).
     try_one_pc: bool,
     /// Try to use async commit (default is not to).
@@ -1189,6 +1226,8 @@ impl TransactionOptions {
             kind: TransactionKind::Optimistic,
             replica_read: ReplicaReadType::Leader,
             stale_read: false,
+            not_fill_cache: false,
+            task_id: 0,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1204,6 +1243,8 @@ impl TransactionOptions {
             kind: TransactionKind::Pessimistic(Timestamp::from_version(0)),
             replica_read: ReplicaReadType::Leader,
             stale_read: false,
+            not_fill_cache: false,
+            task_id: 0,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1253,6 +1294,26 @@ impl TransactionOptions {
     #[must_use]
     pub fn stale_read(mut self) -> TransactionOptions {
         self.stale_read = true;
+        self
+    }
+
+    /// Set whether read requests should fill TiKV block cache.
+    ///
+    /// This option is only effective for read-only snapshots created via
+    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    #[must_use]
+    pub fn not_fill_cache(mut self, not_fill_cache: bool) -> TransactionOptions {
+        self.not_fill_cache = not_fill_cache;
+        self
+    }
+
+    /// Set task ID hint for TiKV.
+    ///
+    /// This option is only effective for read-only snapshots created via
+    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    #[must_use]
+    pub fn task_id(mut self, task_id: u64) -> TransactionOptions {
+        self.task_id = task_id;
         self
     }
 
@@ -1720,6 +1781,7 @@ mod tests {
     use crate::proto::pdpb::Timestamp;
     use crate::request::Keyspace;
     use crate::transaction::HeartbeatOption;
+    use crate::CheckLevel;
     use crate::Key;
     use crate::ReplicaReadType;
     use crate::Transaction;
@@ -1831,6 +1893,102 @@ mod tests {
 
         assert!(!replica_read.load(Ordering::SeqCst));
         assert!(stale_read.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_not_fill_cache_propagates_to_context() {
+        let not_fill_cache = Arc::new(AtomicBool::new(false));
+
+        let not_fill_cache_cloned = not_fill_cache.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                not_fill_cache_cloned.store(ctx.not_fill_cache, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .not_fill_cache(true),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert!(not_fill_cache.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_task_id_propagates_to_context() {
+        let task_id = Arc::new(AtomicU64::new(0));
+
+        let task_id_cloned = task_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                task_id_cloned.store(ctx.task_id, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only().task_id(42),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(task_id.load(Ordering::SeqCst), 42);
+    }
+
+    #[tokio::test]
+    async fn test_not_fill_cache_task_id_ignored_for_read_write_transactions() {
+        let not_fill_cache = Arc::new(AtomicBool::new(true));
+        let task_id = Arc::new(AtomicU64::new(u64::MAX));
+
+        let not_fill_cache_cloned = not_fill_cache.clone();
+        let task_id_cloned = task_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                not_fill_cache_cloned.store(ctx.not_fill_cache, Ordering::SeqCst);
+                task_id_cloned.store(ctx.task_id, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .not_fill_cache(true)
+                .task_id(42)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = txn.get(key).await.unwrap();
+
+        assert!(!not_fill_cache.load(Ordering::SeqCst));
+        assert_eq!(task_id.load(Ordering::SeqCst), 0);
     }
 
     #[rstest::rstest]
