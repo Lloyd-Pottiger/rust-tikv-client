@@ -98,6 +98,7 @@ struct SnapshotReadContext {
     stale_read: bool,
     not_fill_cache: bool,
     task_id: u64,
+    max_execution_duration_ms: u64,
     priority: CommandPriority,
     isolation_level: IsolationLevel,
     resource_group_tag: Option<Vec<u8>>,
@@ -135,6 +136,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 stale_read: self.options.stale_read,
                 not_fill_cache: self.options.not_fill_cache,
                 task_id: self.options.task_id,
+                max_execution_duration_ms: self.options.max_execution_duration_ms,
                 priority: self.options.priority,
                 isolation_level: self.options.isolation_level,
                 resource_group_tag: self.options.resource_group_tag.clone(),
@@ -149,6 +151,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let ctx = ctx.get_or_insert_with(kvrpcpb::Context::default);
         ctx.not_fill_cache = opts.not_fill_cache;
         ctx.task_id = opts.task_id;
+        ctx.max_execution_duration_ms = opts.max_execution_duration_ms;
         ctx.priority = opts.priority as i32;
         ctx.isolation_level = opts.isolation_level as i32;
         ctx.resource_group_tag = opts.resource_group_tag.unwrap_or_default();
@@ -1185,6 +1188,8 @@ pub struct TransactionOptions {
     not_fill_cache: bool,
     /// A hint for TiKV to schedule tasks more fairly (read-only snapshots only).
     task_id: u64,
+    /// Server-side maximum execution duration for read requests (read-only snapshots only).
+    max_execution_duration_ms: u64,
     /// Command priority for read requests (read-only snapshots only).
     priority: CommandPriority,
     /// Isolation level for read requests (read-only snapshots only).
@@ -1228,6 +1233,7 @@ impl TransactionOptions {
             stale_read: false,
             not_fill_cache: false,
             task_id: 0,
+            max_execution_duration_ms: 0,
             priority: CommandPriority::Normal,
             isolation_level: IsolationLevel::Si,
             resource_group_tag: None,
@@ -1249,6 +1255,7 @@ impl TransactionOptions {
             stale_read: false,
             not_fill_cache: false,
             task_id: 0,
+            max_execution_duration_ms: 0,
             priority: CommandPriority::Normal,
             isolation_level: IsolationLevel::Si,
             resource_group_tag: None,
@@ -1322,6 +1329,16 @@ impl TransactionOptions {
     #[must_use]
     pub fn task_id(mut self, task_id: u64) -> TransactionOptions {
         self.task_id = task_id;
+        self
+    }
+
+    /// Set the server-side maximum execution duration for read requests.
+    ///
+    /// This option is only effective for read-only snapshots created via
+    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    #[must_use]
+    pub fn max_execution_duration(mut self, duration: Duration) -> TransactionOptions {
+        self.max_execution_duration_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
         self
     }
 
@@ -2371,6 +2388,37 @@ mod tests {
         let _ = snapshot.get(key).await.unwrap();
 
         assert_eq!(*seen_name.lock().unwrap(), name);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_max_execution_duration_propagates_to_context() {
+        let seen_timeout_ms = Arc::new(AtomicU64::new(0));
+
+        let seen_timeout_ms_cloned = seen_timeout_ms.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                seen_timeout_ms_cloned.store(ctx.max_execution_duration_ms, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .max_execution_duration(Duration::from_millis(123)),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(seen_timeout_ms.load(Ordering::SeqCst), 123);
     }
 
     #[rstest::rstest]
