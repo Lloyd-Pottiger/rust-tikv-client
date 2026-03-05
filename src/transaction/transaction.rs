@@ -101,6 +101,7 @@ struct SnapshotReadContext {
     priority: CommandPriority,
     isolation_level: IsolationLevel,
     resource_group_tag: Option<Vec<u8>>,
+    resource_group_name: Option<String>,
 }
 
 impl<PdC: PdClient> Transaction<PdC> {
@@ -137,6 +138,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 priority: self.options.priority,
                 isolation_level: self.options.isolation_level,
                 resource_group_tag: self.options.resource_group_tag.clone(),
+                resource_group_name: self.options.resource_group_name.clone(),
             }
         } else {
             SnapshotReadContext::default()
@@ -150,6 +152,12 @@ impl<PdC: PdClient> Transaction<PdC> {
         ctx.priority = opts.priority as i32;
         ctx.isolation_level = opts.isolation_level as i32;
         ctx.resource_group_tag = opts.resource_group_tag.unwrap_or_default();
+        ctx.resource_control_context =
+            opts.resource_group_name
+                .map(|resource_group_name| kvrpcpb::ResourceControlContext {
+                    resource_group_name,
+                    ..Default::default()
+                });
         if opts.stale_read {
             ctx.stale_read = true;
             ctx.replica_read = false;
@@ -1183,6 +1191,8 @@ pub struct TransactionOptions {
     isolation_level: IsolationLevel,
     /// Resource group tag for read requests (read-only snapshots only).
     resource_group_tag: Option<Vec<u8>>,
+    /// Resource group name for read requests (read-only snapshots only).
+    resource_group_name: Option<String>,
     /// Try using 1pc rather than 2pc (default is to always use 2pc).
     try_one_pc: bool,
     /// Try to use async commit (default is not to).
@@ -1221,6 +1231,7 @@ impl TransactionOptions {
             priority: CommandPriority::Normal,
             isolation_level: IsolationLevel::Si,
             resource_group_tag: None,
+            resource_group_name: None,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1241,6 +1252,7 @@ impl TransactionOptions {
             priority: CommandPriority::Normal,
             isolation_level: IsolationLevel::Si,
             resource_group_tag: None,
+            resource_group_name: None,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1340,6 +1352,16 @@ impl TransactionOptions {
     #[must_use]
     pub fn resource_group_tag(mut self, tag: Vec<u8>) -> TransactionOptions {
         self.resource_group_tag = Some(tag);
+        self
+    }
+
+    /// Set resource group name for read requests.
+    ///
+    /// This option is only effective for read-only snapshots created via
+    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    #[must_use]
+    pub fn resource_group_name(mut self, name: impl Into<String>) -> TransactionOptions {
+        self.resource_group_name = Some(name.into());
         self
     }
 
@@ -2312,6 +2334,43 @@ mod tests {
         let _ = snapshot.get(key).await.unwrap();
 
         assert_eq!(*seen_tag.lock().unwrap(), tag);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_resource_group_name_propagates_to_context() {
+        let seen_name = Arc::new(std::sync::Mutex::new(String::new()));
+        let name = "rg-name".to_string();
+
+        let seen_name_cloned = seen_name.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let resource_control_context = ctx
+                    .resource_control_context
+                    .as_ref()
+                    .expect("resource_control_context");
+                *seen_name_cloned.lock().unwrap() =
+                    resource_control_context.resource_group_name.clone();
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .resource_group_name(name.clone()),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(*seen_name.lock().unwrap(), name);
     }
 
     #[rstest::rstest]
