@@ -108,6 +108,7 @@ mod proto;
 mod region;
 mod region_cache;
 mod replica_read;
+mod request_context;
 mod stats;
 mod store;
 mod timestamp;
@@ -153,6 +154,10 @@ pub use crate::raw::ColumnFamily;
 pub use crate::replica_read::ReplicaReadType;
 #[doc(inline)]
 pub use crate::request::RetryOptions;
+#[doc(inline)]
+pub use crate::request_context::CommandPriority;
+#[doc(inline)]
+pub use crate::request_context::IsolationLevel;
 #[doc(inline)]
 pub use crate::timestamp::Timestamp;
 #[doc(inline)]
