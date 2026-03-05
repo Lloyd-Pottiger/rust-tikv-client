@@ -79,6 +79,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         keyspace: Keyspace,
     ) -> PlanBuilder<PdC, ResolveLock<P, PdC>, Ph>
     where
+        P: Shardable,
         P::Result: HasLocks,
     {
         PlanBuilder {

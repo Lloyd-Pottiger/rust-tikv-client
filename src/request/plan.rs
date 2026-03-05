@@ -37,6 +37,7 @@ use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
 use crate::util::iter::FlatMapOkIterExt;
 use crate::Error;
+use crate::Key;
 use crate::ReplicaReadType;
 use crate::Result;
 
@@ -675,41 +676,53 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLock<P, PdC> {
 }
 
 #[async_trait]
-impl<P: Plan, PdC: PdClient> Plan for ResolveLock<P, PdC>
+impl<P: Plan + Shardable, PdC: PdClient> Plan for ResolveLock<P, PdC>
 where
     P::Result: HasLocks,
 {
     type Result = P::Result;
 
     async fn execute(&self) -> Result<Self::Result> {
-        let mut result = self.inner.execute().await?;
-        let mut clone = self.clone();
+        let mut plan = self.inner.clone();
+        let mut result = plan.execute().await?;
+        let mut backoff = self.backoff.clone();
+        let mut forced_leader = false;
         loop {
             let locks = result.take_locks();
             if locks.is_empty() {
                 return Ok(result);
             }
 
-            if self.backoff.is_none() {
+            if backoff.is_none() {
                 return Err(Error::ResolveLockError(locks));
             }
 
-            let pd_client = self.pd_client.clone();
+            if !forced_leader {
+                if let Some(lock_key) = locks.first().map(|lock| lock.key.clone()) {
+                    // Once we meet a lock, retrying against a follower/learner can keep seeing stale
+                    // state. Align with client-go behavior by retrying on the region leader.
+                    let region = self.pd_client.region_for_key(&Key::from(lock_key)).await?;
+                    let region_store = self.pd_client.clone().map_region_to_store(region).await?;
+                    plan.apply_store(&region_store)?;
+                    forced_leader = true;
+                }
+            }
+
             let live_locks = resolve_locks(
                 locks,
                 self.timestamp.clone(),
-                pd_client.clone(),
+                self.pd_client.clone(),
                 self.keyspace,
             )
             .await?;
             if live_locks.is_empty() {
-                result = self.inner.execute().await?;
+                result = plan.execute().await?;
             } else {
-                match clone.backoff.next_delay_duration() {
+                match backoff.next_delay_duration() {
                     None => return Err(Error::ResolveLockError(live_locks)),
                     Some(delay_duration) => {
                         sleep(delay_duration).await;
-                        result = clone.inner.execute().await?;
+                        result = plan.execute().await?;
                     }
                 }
             }
