@@ -1223,6 +1223,8 @@ pub struct TransactionOptions {
     disk_full_opt: DiskFullOpt,
     /// Whether to force syncing logs for transactional write requests (`kvrpcpb::Context.sync_log`).
     sync_log: bool,
+    /// Server-side maximum execution duration for transactional write requests (`kvrpcpb::Context.max_execution_duration_ms`).
+    max_write_execution_duration_ms: u64,
     /// Try using 1pc rather than 2pc (default is to always use 2pc).
     try_one_pc: bool,
     /// Try to use async commit (default is not to).
@@ -1268,6 +1270,7 @@ impl TransactionOptions {
             txn_source: 0,
             disk_full_opt: DiskFullOpt::NotAllowedOnFull,
             sync_log: false,
+            max_write_execution_duration_ms: 0,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1295,6 +1298,7 @@ impl TransactionOptions {
             txn_source: 0,
             disk_full_opt: DiskFullOpt::NotAllowedOnFull,
             sync_log: false,
+            max_write_execution_duration_ms: 0,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1345,6 +1349,17 @@ impl TransactionOptions {
     #[must_use]
     pub fn sync_log(mut self, enabled: bool) -> TransactionOptions {
         self.sync_log = enabled;
+        self
+    }
+
+    /// Set the server-side maximum execution duration for transactional write requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.max_execution_duration_ms` for 2PC prewrite and
+    /// commit requests.
+    #[must_use]
+    pub fn max_write_execution_duration(mut self, duration: Duration) -> TransactionOptions {
+        self.max_write_execution_duration_ms =
+            duration.as_millis().min(u128::from(u64::MAX)) as u64;
         self
     }
 
@@ -1491,6 +1506,7 @@ impl TransactionOptions {
         ctx.txn_source = self.txn_source;
         ctx.sync_log = self.sync_log;
         ctx.priority = self.priority as i32;
+        ctx.max_execution_duration_ms = self.max_write_execution_duration_ms;
         if let Some(tag) = &self.resource_group_tag {
             ctx.resource_group_tag = tag.clone();
         }
@@ -2597,6 +2613,8 @@ mod tests {
         let commit_priority = Arc::new(std::sync::atomic::AtomicI32::new(0));
         let prewrite_sync_log = Arc::new(AtomicBool::new(false));
         let commit_sync_log = Arc::new(AtomicBool::new(false));
+        let prewrite_max_execution_duration_ms = Arc::new(AtomicU64::new(0));
+        let commit_max_execution_duration_ms = Arc::new(AtomicU64::new(0));
         let prewrite_resource_group_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
         let commit_resource_group_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
         let prewrite_resource_group_name = Arc::new(std::sync::Mutex::new(String::new()));
@@ -2615,6 +2633,8 @@ mod tests {
         let commit_priority_cloned = commit_priority.clone();
         let prewrite_sync_log_cloned = prewrite_sync_log.clone();
         let commit_sync_log_cloned = commit_sync_log.clone();
+        let prewrite_max_execution_duration_ms_cloned = prewrite_max_execution_duration_ms.clone();
+        let commit_max_execution_duration_ms_cloned = commit_max_execution_duration_ms.clone();
         let prewrite_resource_group_tag_cloned = prewrite_resource_group_tag.clone();
         let commit_resource_group_tag_cloned = commit_resource_group_tag.clone();
         let prewrite_resource_group_name_cloned = prewrite_resource_group_name.clone();
@@ -2628,6 +2648,8 @@ mod tests {
                     *prewrite_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
                     prewrite_priority_cloned.store(ctx.priority, Ordering::SeqCst);
                     prewrite_sync_log_cloned.store(ctx.sync_log, Ordering::SeqCst);
+                    prewrite_max_execution_duration_ms_cloned
+                        .store(ctx.max_execution_duration_ms, Ordering::SeqCst);
                     *prewrite_resource_group_tag_cloned.lock().unwrap() =
                         ctx.resource_group_tag.clone();
                     *prewrite_resource_group_name_cloned.lock().unwrap() = ctx
@@ -2645,6 +2667,8 @@ mod tests {
                     *commit_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
                     commit_priority_cloned.store(ctx.priority, Ordering::SeqCst);
                     commit_sync_log_cloned.store(ctx.sync_log, Ordering::SeqCst);
+                    commit_max_execution_duration_ms_cloned
+                        .store(ctx.max_execution_duration_ms, Ordering::SeqCst);
                     *commit_resource_group_tag_cloned.lock().unwrap() =
                         ctx.resource_group_tag.clone();
                     *commit_resource_group_name_cloned.lock().unwrap() = ctx
@@ -2668,6 +2692,7 @@ mod tests {
                 .txn_source(42)
                 .request_source(request_source.clone())
                 .sync_log(true)
+                .max_write_execution_duration(Duration::from_millis(987))
                 .resource_group_tag(resource_group_tag.clone())
                 .resource_group_name(resource_group_name.clone())
                 .priority(CommandPriority::High)
@@ -2700,6 +2725,11 @@ mod tests {
         );
         assert!(prewrite_sync_log.load(Ordering::SeqCst));
         assert!(commit_sync_log.load(Ordering::SeqCst));
+        assert_eq!(
+            prewrite_max_execution_duration_ms.load(Ordering::SeqCst),
+            987
+        );
+        assert_eq!(commit_max_execution_duration_ms.load(Ordering::SeqCst), 987);
         assert_eq!(
             *prewrite_resource_group_tag.lock().unwrap(),
             resource_group_tag
