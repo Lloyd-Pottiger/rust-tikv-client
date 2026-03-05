@@ -92,6 +92,17 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     start_instant: Instant,
 }
 
+#[derive(Clone, Default)]
+struct SnapshotReadContext {
+    replica_read: ReplicaReadType,
+    stale_read: bool,
+    not_fill_cache: bool,
+    task_id: u64,
+    priority: CommandPriority,
+    isolation_level: IsolationLevel,
+    resource_group_tag: Option<Vec<u8>>,
+}
+
 impl<PdC: PdClient> Transaction<PdC> {
     pub(crate) fn new(
         timestamp: Timestamp,
@@ -116,26 +127,35 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
     }
 
-    fn apply_snapshot_read_context(
-        ctx: &mut Option<kvrpcpb::Context>,
-        replica_read: ReplicaReadType,
-        stale_read: bool,
-        not_fill_cache: bool,
-        task_id: u64,
-        priority: CommandPriority,
-        isolation_level: IsolationLevel,
-    ) {
+    fn snapshot_read_context(&self) -> SnapshotReadContext {
+        if self.options.read_only {
+            SnapshotReadContext {
+                replica_read: self.options.replica_read,
+                stale_read: self.options.stale_read,
+                not_fill_cache: self.options.not_fill_cache,
+                task_id: self.options.task_id,
+                priority: self.options.priority,
+                isolation_level: self.options.isolation_level,
+                resource_group_tag: self.options.resource_group_tag.clone(),
+            }
+        } else {
+            SnapshotReadContext::default()
+        }
+    }
+
+    fn apply_snapshot_read_context(ctx: &mut Option<kvrpcpb::Context>, opts: SnapshotReadContext) {
         let ctx = ctx.get_or_insert_with(kvrpcpb::Context::default);
-        ctx.not_fill_cache = not_fill_cache;
-        ctx.task_id = task_id;
-        ctx.priority = priority as i32;
-        ctx.isolation_level = isolation_level as i32;
-        if stale_read {
+        ctx.not_fill_cache = opts.not_fill_cache;
+        ctx.task_id = opts.task_id;
+        ctx.priority = opts.priority as i32;
+        ctx.isolation_level = opts.isolation_level as i32;
+        ctx.resource_group_tag = opts.resource_group_tag.unwrap_or_default();
+        if opts.stale_read {
             ctx.stale_read = true;
             ctx.replica_read = false;
         } else {
             ctx.stale_read = false;
-            ctx.replica_read = replica_read.is_follower_read();
+            ctx.replica_read = opts.replica_read.is_follower_read();
         }
     }
 
@@ -165,39 +185,13 @@ impl<PdC: PdClient> Transaction<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let retry_options = self.options.retry_options.clone();
         let keyspace = self.keyspace;
-        let (replica_read, stale_read, not_fill_cache, task_id, priority, isolation_level) =
-            if self.options.read_only {
-                (
-                    self.options.replica_read,
-                    self.options.stale_read,
-                    self.options.not_fill_cache,
-                    self.options.task_id,
-                    self.options.priority,
-                    self.options.isolation_level,
-                )
-            } else {
-                (
-                    ReplicaReadType::Leader,
-                    false,
-                    false,
-                    0,
-                    CommandPriority::Normal,
-                    IsolationLevel::Si,
-                )
-            };
+        let snapshot_ctx = self.snapshot_read_context();
+        let replica_read = snapshot_ctx.replica_read;
 
         self.buffer
             .get_or_else(key, |key| async move {
                 let mut request = new_get_request(key, timestamp.clone());
-                Self::apply_snapshot_read_context(
-                    &mut request.context,
-                    replica_read,
-                    stale_read,
-                    not_fill_cache,
-                    task_id,
-                    priority,
-                    isolation_level,
-                );
+                Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
 
                 let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
                     timestamp,
@@ -339,39 +333,13 @@ impl<PdC: PdClient> Transaction<PdC> {
             .into_iter()
             .map(move |k| k.into().encode_keyspace(keyspace, KeyMode::Txn));
         let retry_options = self.options.retry_options.clone();
-        let (replica_read, stale_read, not_fill_cache, task_id, priority, isolation_level) =
-            if self.options.read_only {
-                (
-                    self.options.replica_read,
-                    self.options.stale_read,
-                    self.options.not_fill_cache,
-                    self.options.task_id,
-                    self.options.priority,
-                    self.options.isolation_level,
-                )
-            } else {
-                (
-                    ReplicaReadType::Leader,
-                    false,
-                    false,
-                    0,
-                    CommandPriority::Normal,
-                    IsolationLevel::Si,
-                )
-            };
+        let snapshot_ctx = self.snapshot_read_context();
+        let replica_read = snapshot_ctx.replica_read;
 
         self.buffer
             .batch_get_or_else(keys, move |keys| async move {
                 let mut request = new_batch_get_request(keys, timestamp.clone());
-                Self::apply_snapshot_read_context(
-                    &mut request.context,
-                    replica_read,
-                    stale_read,
-                    not_fill_cache,
-                    task_id,
-                    priority,
-                    isolation_level,
-                );
+                Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
 
                 let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
                     timestamp,
@@ -890,26 +858,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         let retry_options = self.options.retry_options.clone();
         let keyspace = self.keyspace;
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
-        let (replica_read, stale_read, not_fill_cache, task_id, priority, isolation_level) =
-            if self.options.read_only {
-                (
-                    self.options.replica_read,
-                    self.options.stale_read,
-                    self.options.not_fill_cache,
-                    self.options.task_id,
-                    self.options.priority,
-                    self.options.isolation_level,
-                )
-            } else {
-                (
-                    ReplicaReadType::Leader,
-                    false,
-                    false,
-                    0,
-                    CommandPriority::Normal,
-                    IsolationLevel::Si,
-                )
-            };
+        let snapshot_ctx = self.snapshot_read_context();
+        let replica_read = snapshot_ctx.replica_read;
 
         self.buffer
             .scan_and_fetch(
@@ -925,15 +875,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                         key_only,
                         reverse,
                     );
-                    Self::apply_snapshot_read_context(
-                        &mut request.context,
-                        replica_read,
-                        stale_read,
-                        not_fill_cache,
-                        task_id,
-                        priority,
-                        isolation_level,
-                    );
+                    Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
 
                     let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock(
                         timestamp,
@@ -1239,6 +1181,8 @@ pub struct TransactionOptions {
     priority: CommandPriority,
     /// Isolation level for read requests (read-only snapshots only).
     isolation_level: IsolationLevel,
+    /// Resource group tag for read requests (read-only snapshots only).
+    resource_group_tag: Option<Vec<u8>>,
     /// Try using 1pc rather than 2pc (default is to always use 2pc).
     try_one_pc: bool,
     /// Try to use async commit (default is not to).
@@ -1276,6 +1220,7 @@ impl TransactionOptions {
             task_id: 0,
             priority: CommandPriority::Normal,
             isolation_level: IsolationLevel::Si,
+            resource_group_tag: None,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1295,6 +1240,7 @@ impl TransactionOptions {
             task_id: 0,
             priority: CommandPriority::Normal,
             isolation_level: IsolationLevel::Si,
+            resource_group_tag: None,
             try_one_pc: false,
             async_commit: false,
             read_only: false,
@@ -1384,6 +1330,16 @@ impl TransactionOptions {
     #[must_use]
     pub fn isolation_level(mut self, isolation_level: IsolationLevel) -> TransactionOptions {
         self.isolation_level = isolation_level;
+        self
+    }
+
+    /// Set resource group tag for read requests.
+    ///
+    /// This option is only effective for read-only snapshots created via
+    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    #[must_use]
+    pub fn resource_group_tag(mut self, tag: Vec<u8>) -> TransactionOptions {
+        self.resource_group_tag = Some(tag);
         self
     }
 
@@ -2129,6 +2085,38 @@ mod tests {
             isolation_level.load(Ordering::SeqCst),
             IsolationLevel::RcCheckTs as i32
         );
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_resource_group_tag_propagates_to_context() {
+        let seen_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tag = b"rg-tag".to_vec();
+
+        let seen_tag_cloned = seen_tag.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                *seen_tag_cloned.lock().unwrap() = ctx.resource_group_tag.clone();
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .resource_group_tag(tag.clone()),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(*seen_tag.lock().unwrap(), tag);
     }
 
     #[rstest::rstest]
