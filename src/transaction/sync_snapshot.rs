@@ -71,6 +71,11 @@ impl SyncSnapshot {
         safe_block_on(&self.runtime, self.inner.scan_keys_reverse(range, limit))
     }
 
+    /// Set replica read behavior.
+    pub fn set_replica_read(&mut self, read_type: ReplicaReadType) {
+        self.inner.set_replica_read(read_type);
+    }
+
     /// Set a replica read adjuster for point/batch gets.
     pub fn set_replica_read_adjuster<F>(&mut self, adjuster: F)
     where

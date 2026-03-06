@@ -26,6 +26,13 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Set replica read behavior.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_replica_read(&mut self, read_type: ReplicaReadType) {
+        self.transaction.set_replica_read(read_type);
+    }
+
     /// Set a replica read adjuster for point/batch gets.
     ///
     /// This option is only effective when `TransactionOptions::replica_read` is
