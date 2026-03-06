@@ -1831,6 +1831,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_locks_primary_mismatch_region_resolve_primary_lock_skips_rollback() {
+        let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
+        let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let mut mismatch = kvrpcpb::PrimaryMismatch::default();
+                    mismatch.lock_info = Some(kvrpcpb::LockInfo {
+                        key: vec![1],
+                        primary_lock: vec![1],
+                        lock_version: 7,
+                        lock_for_update_ts: 9,
+                        lock_type: kvrpcpb::Op::PessimisticLock as i32,
+                        ..Default::default()
+                    });
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        error: Some(kvrpcpb::KeyError {
+                            primary_mismatch: Some(mismatch),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if req.is::<kvrpcpb::PessimisticRollbackRequest>() {
+                    pessimistic_rollback_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                if req.is::<kvrpcpb::ResolveLockRequest>() {
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![1];
+        lock.lock_version = 7;
+        lock.lock_for_update_ts = 9;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+
+        let live_locks = resolve_locks_with_options(
+            vec![lock],
+            Timestamp::default(),
+            client,
+            Keyspace::Disable,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(live_locks.is_empty());
+        assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn test_resolve_locks_primary_mismatch_uses_max_for_update_ts_when_missing() {
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
