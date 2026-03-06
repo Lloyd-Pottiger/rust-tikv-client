@@ -561,7 +561,11 @@ impl LockResolver {
             let txn_id = l.lock_version;
             let is_pessimistic = is_pessimistic_lock(l.lock_type);
             let seen_non_pessimistic_txn = !is_pessimistic && txn_infos.contains_key(&txn_id);
-            if seen_non_pessimistic_txn || self.ctx.is_region_cleaned(txn_id, &region).await {
+            // `clean_regions` comes from `BatchResolveLock` (non-pessimistic path) and should not
+            // suppress explicit `PessimisticRollback` for later pessimistic locks of the same txn.
+            let region_already_cleaned =
+                !is_pessimistic && self.ctx.is_region_cleaned(txn_id, &region).await;
+            if seen_non_pessimistic_txn || region_already_cleaned {
                 continue;
             }
 
@@ -2488,6 +2492,90 @@ mod tests {
             .unwrap();
 
         // Committed txn status should be cached and reused across lock types.
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
+        assert_eq!(non_empty_batch_resolve_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_mixed_lock_types_across_calls_keeps_pessimistic_rollback() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
+        let non_empty_batch_resolve_count = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
+        let non_empty_batch_resolve_count_captured = non_empty_batch_resolve_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 9,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    assert_eq!(req.keys, vec![vec![2]]);
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.for_update_ts, 11);
+                    pessimistic_rollback_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    if !req.txn_infos.is_empty() {
+                        assert_eq!(req.txn_infos.len(), 1);
+                        assert_eq!(req.txn_infos[0].txn, 7);
+                        assert_eq!(req.txn_infos[0].status, 9);
+                        non_empty_batch_resolve_count_captured.fetch_add(1, Ordering::SeqCst);
+                    }
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut non_pessimistic_lock = kvrpcpb::LockInfo::default();
+        non_pessimistic_lock.key = vec![1];
+        non_pessimistic_lock.primary_lock = vec![1];
+        non_pessimistic_lock.lock_version = 7;
+        non_pessimistic_lock.lock_ttl = 100;
+        non_pessimistic_lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let mut pessimistic_lock = kvrpcpb::LockInfo::default();
+        pessimistic_lock.key = vec![2];
+        pessimistic_lock.primary_lock = vec![1];
+        pessimistic_lock.lock_version = 7;
+        pessimistic_lock.lock_for_update_ts = 11;
+        pessimistic_lock.lock_ttl = 100;
+        pessimistic_lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+
+        let store = client
+            .clone()
+            .store_for_key(&non_pessimistic_lock.key.clone().into())
+            .await
+            .unwrap();
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+
+        lock_resolver
+            .cleanup_locks(
+                store.clone(),
+                vec![non_pessimistic_lock],
+                client.clone(),
+                Keyspace::Disable,
+            )
+            .await
+            .unwrap();
+        lock_resolver
+            .cleanup_locks(store, vec![pessimistic_lock], client, Keyspace::Disable)
+            .await
+            .unwrap();
+
+        // Txn status is cached across calls, but pessimistic rollback must still execute.
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(non_empty_batch_resolve_count.load(Ordering::SeqCst), 1);
