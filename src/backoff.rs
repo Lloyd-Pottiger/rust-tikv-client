@@ -9,8 +9,10 @@ use rand::Rng;
 
 pub const DEFAULT_REGION_BACKOFF: Backoff = Backoff::no_jitter_backoff(2, 500, 10);
 pub const DEFAULT_STORE_BACKOFF: Backoff = Backoff::no_jitter_backoff(2, 1000, 10);
-pub const OPTIMISTIC_BACKOFF: Backoff = Backoff::no_jitter_backoff(2, 500, 10);
-pub const PESSIMISTIC_BACKOFF: Backoff = Backoff::no_jitter_backoff(2, 500, 10);
+// Match client-go `BoTxnLockFast` defaults (base 2ms, cap 3000ms, equal jitter).
+// `max_attempts` is chosen to cover typical lock TTL durations without timing out too early.
+pub const OPTIMISTIC_BACKOFF: Backoff = Backoff::equal_jitter_backoff(2, 3000, 16);
+pub const PESSIMISTIC_BACKOFF: Backoff = Backoff::equal_jitter_backoff(2, 3000, 16);
 
 /// When a request is retried, we can backoff for some time to avoid saturating the network.
 ///
@@ -146,7 +148,7 @@ impl Backoff {
     //
     // temp = min(max_delay, base_delay * 2 ** attempts)
     // new_delay = random_between(temp / 2, temp)
-    pub fn equal_jitter_backoff(
+    pub const fn equal_jitter_backoff(
         base_delay_ms: u64,
         max_delay_ms: u64,
         max_attempts: u32,
