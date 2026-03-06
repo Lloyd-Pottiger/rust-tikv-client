@@ -126,7 +126,10 @@ pub(crate) async fn resolve_locks_with_options(
 
     // records the commit version of each primary lock (representing the status of the transaction)
     let mut commit_versions: HashMap<u64, u64> = HashMap::new();
+    // Keep separate cleaned-region caches to match client-go behavior:
+    // pessimistic rollback region dedupe must not suppress normal resolve-lock dedupe.
     let mut clean_regions: HashMap<u64, HashSet<RegionVerId>> = HashMap::new();
+    let mut pessimistic_clean_regions: HashMap<u64, HashSet<RegionVerId>> = HashMap::new();
     // We must check txn status for *all* locks, not only TTL-expired ones.
     //
     // TTL only indicates whether a lock is *possibly* orphaned; it does not mean the transaction
@@ -147,8 +150,15 @@ pub(crate) async fn resolve_locks_with_options(
             .region_for_key(&lock.key.clone().into())
             .await?
             .ver_id();
-        // skip if the region is cleaned
-        if clean_regions
+        let is_pessimistic = is_pessimistic_lock(lock.lock_type);
+
+        let cleaned_regions = if is_pessimistic {
+            &pessimistic_clean_regions
+        } else {
+            &clean_regions
+        };
+        // Skip if the region has already been resolved for this lock type.
+        if cleaned_regions
             .get(&lock.lock_version)
             .map(|regions| regions.contains(&region_ver_id))
             .unwrap_or(false)
@@ -182,7 +192,7 @@ pub(crate) async fn resolve_locks_with_options(
                             )
                             .await?
                             {
-                                clean_regions
+                                pessimistic_clean_regions
                                     .entry(lock.lock_version)
                                     .or_default()
                                     .insert(cleaned_region);
@@ -214,7 +224,7 @@ pub(crate) async fn resolve_locks_with_options(
         if let Some(commit_version) = commit_version {
             // Match client-go `resolve`: pessimistic locks should be handled by
             // `PessimisticRollback`, not `ResolveLock`.
-            if is_pessimistic_lock(lock.lock_type) {
+            if is_pessimistic {
                 if pessimistic_region_resolve {
                     if let Some(cleaned_region) = rollback_pessimistic_lock_with_retry(
                         &lock,
@@ -224,7 +234,7 @@ pub(crate) async fn resolve_locks_with_options(
                     )
                     .await?
                     {
-                        clean_regions
+                        pessimistic_clean_regions
                             .entry(lock.lock_version)
                             .or_default()
                             .insert(cleaned_region);
@@ -1682,6 +1692,78 @@ mod tests {
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_mixed_lock_types_keep_separate_region_cleanup() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 9,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    assert!(req.keys.is_empty());
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.for_update_ts, 11);
+                    pessimistic_rollback_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.commit_version, 9);
+                    assert!(req.keys.is_empty());
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut pessimistic_lock = kvrpcpb::LockInfo::default();
+        pessimistic_lock.key = vec![2];
+        pessimistic_lock.primary_lock = vec![1];
+        pessimistic_lock.lock_version = 7;
+        pessimistic_lock.lock_for_update_ts = 11;
+        pessimistic_lock.lock_ttl = 100;
+        pessimistic_lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+        pessimistic_lock.txn_size = 16;
+
+        let mut prewrite_lock = kvrpcpb::LockInfo::default();
+        prewrite_lock.key = vec![3];
+        prewrite_lock.primary_lock = vec![1];
+        prewrite_lock.lock_version = 7;
+        prewrite_lock.lock_ttl = 100;
+        prewrite_lock.lock_type = kvrpcpb::Op::Put as i32;
+        prewrite_lock.txn_size = 16;
+
+        let live_locks = resolve_locks_with_options(
+            vec![pessimistic_lock, prewrite_lock],
+            Timestamp::default(),
+            client,
+            Keyspace::Disable,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(live_locks.is_empty());
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
