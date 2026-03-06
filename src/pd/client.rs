@@ -82,6 +82,15 @@ pub trait PdClient: Send + Sync + 'static {
 
     async fn all_stores(&self) -> Result<Vec<Store>>;
 
+    /// The `txn_size` threshold for ResolveLock "lite" mode.
+    ///
+    /// When `lock.txn_size < threshold`, lock resolution uses ResolveLock lite (populate
+    /// `kvrpcpb::ResolveLockRequest.keys`) to resolve only the conflicting key instead of scanning
+    /// the whole region for `start_ts`.
+    fn resolve_lock_lite_threshold(&self) -> u64 {
+        crate::config::DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD
+    }
+
     fn group_keys_by_region<K, K2>(
         self: Arc<Self>,
         keys: impl Iterator<Item = K> + Send + Sync + 'static,
@@ -217,11 +226,16 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     kv_client_cache: Arc<RwLock<HashMap<String, KvC::KvClient>>>,
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
+    resolve_lock_lite_threshold: u64,
 }
 
 #[async_trait]
 impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     type KvClient = KvC::KvClient;
+
+    fn resolve_lock_lite_threshold(&self) -> u64 {
+        self.resolve_lock_lite_threshold
+    }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
         let store_id = region.get_store_id()?;
@@ -316,6 +330,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         MakeKvC: FnOnce(Arc<SecurityManager>) -> KvC,
         MakePd: FnOnce(Arc<SecurityManager>) -> PdFut,
     {
+        let resolve_lock_lite_threshold = config.resolve_lock_lite_threshold;
         let security_mgr = Arc::new(
             if let (Some(ca_path), Some(cert_path), Some(key_path)) =
                 (&config.ca_path, &config.cert_path, &config.key_path)
@@ -334,6 +349,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             kv_connect: kv_connect(security_mgr),
             enable_codec,
             region_cache: RegionCache::new(pd),
+            resolve_lock_lite_threshold,
         })
     }
 

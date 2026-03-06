@@ -26,10 +26,12 @@ pub struct Config {
     pub timeout: Duration,
     pub grpc_max_decoding_message_size: usize,
     pub keyspace: Option<String>,
+    pub resolve_lock_lite_threshold: u64,
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
+pub(crate) const DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
 
 impl Default for Config {
     fn default() -> Self {
@@ -40,6 +42,7 @@ impl Default for Config {
             timeout: DEFAULT_REQUEST_TIMEOUT,
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
             keyspace: None,
+            resolve_lock_lite_threshold: DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD,
         }
     }
 }
@@ -115,6 +118,19 @@ impl Config {
     #[must_use]
     pub fn with_keyspace(mut self, keyspace: &str) -> Self {
         self.keyspace = Some(keyspace.to_owned());
+        self
+    }
+
+    /// Set the `txn_size` threshold for ResolveLock "lite" mode.
+    ///
+    /// When resolving locks, transactions with `txn_size < threshold` will use ResolveLock lite
+    /// (populate `kvrpcpb::ResolveLockRequest.keys`) to resolve only the conflicting key, avoiding
+    /// scanning the whole region for `start_ts`.
+    ///
+    /// The default is `16` (matching client-go).
+    #[must_use]
+    pub fn with_resolve_lock_lite_threshold(mut self, threshold: u64) -> Self {
+        self.resolve_lock_lite_threshold = threshold;
         self
     }
 }

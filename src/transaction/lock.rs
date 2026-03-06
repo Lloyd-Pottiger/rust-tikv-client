@@ -184,7 +184,7 @@ pub(crate) async fn resolve_locks_with_options(
     keyspace: Keyspace,
     pessimistic_region_resolve: bool,
 ) -> Result<ResolveLocksResult> {
-    const RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
+    let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
 
     debug!("resolving locks");
     let ts = pd_client.clone().get_timestamp().await?;
@@ -325,7 +325,7 @@ pub(crate) async fn resolve_locks_with_options(
                 continue;
             }
 
-            let resolve_lite = lock.txn_size < RESOLVE_LOCK_LITE_THRESHOLD;
+            let resolve_lite = lock.txn_size < resolve_lock_lite_threshold;
             // The primary lock has been resolved by CheckTxnStatus already.
             if resolve_lite && lock.key == lock.primary_lock {
                 continue;
@@ -362,7 +362,7 @@ pub(crate) async fn resolve_locks_for_read(
     keyspace: Keyspace,
     lock_tracker: ReadLockTracker,
 ) -> Result<ResolveLocksForReadResult> {
-    const RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
+    let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
 
     debug!("resolving locks for read");
     let ts = pd_client.clone().get_timestamp().await?;
@@ -461,7 +461,7 @@ pub(crate) async fn resolve_locks_for_read(
             continue;
         }
 
-        let resolve_lite = lock.txn_size < RESOLVE_LOCK_LITE_THRESHOLD;
+        let resolve_lite = lock.txn_size < resolve_lock_lite_threshold;
         if resolve_lite && lock.key == lock.primary_lock {
             continue;
         }
@@ -1316,17 +1316,38 @@ mod tests {
     struct TimestampedPdClient {
         inner: Arc<MockPdClient>,
         timestamp: Timestamp,
+        resolve_lock_lite_threshold: u64,
     }
 
     impl TimestampedPdClient {
         fn new(inner: Arc<MockPdClient>, timestamp: Timestamp) -> Self {
-            Self { inner, timestamp }
+            Self {
+                inner,
+                timestamp,
+                resolve_lock_lite_threshold: crate::config::DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD,
+            }
+        }
+
+        fn new_with_resolve_lock_lite_threshold(
+            inner: Arc<MockPdClient>,
+            timestamp: Timestamp,
+            resolve_lock_lite_threshold: u64,
+        ) -> Self {
+            Self {
+                inner,
+                timestamp,
+                resolve_lock_lite_threshold,
+            }
         }
     }
 
     #[async_trait]
     impl PdClient for TimestampedPdClient {
         type KvClient = MockKvClient;
+
+        fn resolve_lock_lite_threshold(&self) -> u64 {
+            self.resolve_lock_lite_threshold
+        }
 
         async fn map_region_to_store(
             self: Arc<Self>,
@@ -1750,6 +1771,48 @@ mod tests {
                 panic!("unexpected request type: {:?}", req.type_id());
             },
         )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 1;
+        lock.lock_ttl = 100;
+        lock.txn_size = 1;
+
+        let live_locks = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
+            .await
+            .unwrap();
+        assert!(live_locks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_resolve_lock_lite_threshold_can_disable_lite() {
+        let base_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 2,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    assert!(
+                        req.keys.is_empty(),
+                        "resolve-lock-lite should be disabled when threshold is 0"
+                    );
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let client = Arc::new(TimestampedPdClient::new_with_resolve_lock_lite_threshold(
+            base_client,
+            Timestamp::default(),
+            0,
+        ));
 
         let mut lock = kvrpcpb::LockInfo::default();
         lock.key = vec![1];
