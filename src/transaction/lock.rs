@@ -918,6 +918,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_locks_primary_mismatch_non_pessimistic_returns_error() {
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let mut mismatch = kvrpcpb::PrimaryMismatch::default();
+                    mismatch.lock_info = Some(kvrpcpb::LockInfo {
+                        key: vec![1],
+                        primary_lock: vec![2],
+                        lock_version: 7,
+                        lock_type: kvrpcpb::Op::Put as i32,
+                        ..Default::default()
+                    });
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        error: Some(kvrpcpb::KeyError {
+                            primary_mismatch: Some(mismatch),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let err = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
+            .await
+            .expect_err("non-pessimistic primary_mismatch should surface as key error");
+        match err {
+            Error::KeyError(key_err) => assert!(key_err.primary_mismatch.is_some()),
+            other => panic!("unexpected error type: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_resolve_locks_primary_mismatch_primary_lock_skips_rollback() {
         let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
         let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
