@@ -207,6 +207,13 @@ impl ReplicaReadState {
             attempt_base: current_attempts,
         }
     }
+
+    fn keep_current_attempt_on_retry(self) -> Self {
+        Self {
+            read_type: self.read_type,
+            attempt_base: self.attempt_base.saturating_add(1),
+        }
+    }
 }
 
 pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
@@ -382,6 +389,14 @@ where
         } else if let Some(e) = resp.region_error() {
             debug!("single_shard_handler:execute: region error: {:?}", e);
             let is_server_busy = e.server_is_busy.is_some();
+            let retry_same_replica = !plan
+                .kv_context_mut()
+                .map(|ctx| ctx.stale_read)
+                .unwrap_or(false)
+                && (is_server_busy
+                    || e.max_timestamp_not_synced.is_some()
+                    || e.read_index_not_ready.is_some()
+                    || e.proposal_in_merging_mode.is_some());
             match backoff.next_delay_duration() {
                 Some(duration) => {
                     let region_error_resolved =
@@ -397,6 +412,11 @@ where
                             )
                         }
                         _ => replica_read,
+                    };
+                    let replica_read = if retry_same_replica {
+                        replica_read.map(ReplicaReadState::keep_current_attempt_on_retry)
+                    } else {
+                        replica_read
                     };
                     Self::single_plan_handler(
                         pd_client,
