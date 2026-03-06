@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
+use crate::internal_err;
 use crate::pd::Cluster;
 use crate::pd::Connection;
 use crate::proto::keyspacepb;
@@ -175,7 +176,7 @@ impl RetryClientTrait for RetryClient<Cluster> {
             cluster
                 .get_store(id, self.timeout)
                 .await
-                .map(|resp| resp.store.unwrap())
+                .and_then(|resp| store_from_response(resp, id))
         })
     }
 
@@ -222,6 +223,15 @@ fn region_from_response(
 ) -> Result<RegionWithLeader> {
     let region = resp.region.take().ok_or_else(err)?;
     Ok(RegionWithLeader::new(region, resp.leader.take()))
+}
+
+fn store_from_response(resp: pdpb::GetStoreResponse, store_id: StoreId) -> Result<metapb::Store> {
+    resp.store.ok_or_else(|| {
+        internal_err!(
+            "missing store in PD GetStoreResponse for store_id {}",
+            store_id
+        )
+    })
 }
 
 // A node-like thing that can be connected to.
@@ -314,6 +324,21 @@ mod test {
                 0
             );
         })
+    }
+
+    #[test]
+    fn test_store_from_response_missing_store_returns_error() {
+        let resp = pdpb::GetStoreResponse::default();
+        let err = store_from_response(resp, 7).unwrap_err().to_string();
+        assert!(err.contains("missing store"));
+    }
+
+    #[test]
+    fn test_store_from_response_returns_store_when_present() {
+        let mut resp = pdpb::GetStoreResponse::default();
+        resp.store = Some(metapb::Store::default());
+
+        store_from_response(resp, 7).unwrap();
     }
 
     #[test]
