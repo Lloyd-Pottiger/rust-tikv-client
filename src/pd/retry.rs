@@ -222,6 +222,12 @@ fn region_from_response(
     err: impl FnOnce() -> Error,
 ) -> Result<RegionWithLeader> {
     let region = resp.region.take().ok_or_else(err)?;
+    if region.region_epoch.is_none() {
+        return Err(internal_err!(
+            "missing region_epoch in PD GetRegionResponse for region_id {}",
+            region.id
+        ));
+    }
     Ok(RegionWithLeader::new(region, resp.leader.take()))
 }
 
@@ -339,6 +345,30 @@ mod test {
         resp.store = Some(metapb::Store::default());
 
         store_from_response(resp, 7).unwrap();
+    }
+
+    #[test]
+    fn test_region_from_response_missing_epoch_returns_error() {
+        let mut resp = pdpb::GetRegionResponse::default();
+        let mut region = metapb::Region::default();
+        region.id = 42;
+        resp.region = Some(region);
+
+        let err = region_from_response(resp, || Error::Unimplemented)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing region_epoch"));
+    }
+
+    #[test]
+    fn test_region_from_response_returns_region_when_epoch_present() {
+        let mut resp = pdpb::GetRegionResponse::default();
+        let mut region = metapb::Region::default();
+        region.id = 42;
+        region.region_epoch = Some(metapb::RegionEpoch::default());
+        resp.region = Some(region);
+
+        region_from_response(resp, || Error::Unimplemented).unwrap();
     }
 
     #[test]
