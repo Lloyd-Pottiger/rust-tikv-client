@@ -42,6 +42,15 @@ fn format_key_for_log(key: &[u8]) -> String {
     format!("len={}, prefix={:?}", key.len(), &key[..prefix_len])
 }
 
+// `client-go` treats both `PessimisticLock` and `SharedPessimisticLock` as pessimistic.
+// The generated Rust proto in this repo currently lacks `SharedPessimisticLock`, so keep
+// the numeric value for forward-compatible lock-type handling.
+const SHARED_PESSIMISTIC_LOCK_TYPE: i32 = 8;
+
+fn is_pessimistic_lock(lock_type: i32) -> bool {
+    lock_type == kvrpcpb::Op::PessimisticLock as i32 || lock_type == SHARED_PESSIMISTIC_LOCK_TYPE
+}
+
 enum TxnStatusFromLock {
     Status(Arc<TransactionStatus>),
     PessimisticLockRolledBack,
@@ -137,7 +146,7 @@ pub async fn resolve_locks(
         if let Some(commit_version) = commit_version {
             // Match client-go `resolve`: pessimistic locks should be handled by
             // `PessimisticRollback`, not `ResolveLock`.
-            if lock.lock_type == kvrpcpb::Op::PessimisticLock as i32 {
+            if is_pessimistic_lock(lock.lock_type) {
                 rollback_pessimistic_lock(&lock, pd_client.clone(), keyspace).await?;
                 continue;
             }
@@ -372,7 +381,7 @@ impl LockResolver {
         let mut txn_infos = HashMap::new();
         for l in locks {
             let txn_id = l.lock_version;
-            let is_pessimistic = l.lock_type == kvrpcpb::Op::PessimisticLock as i32;
+            let is_pessimistic = is_pessimistic_lock(l.lock_type);
             if txn_infos.contains_key(&txn_id) || self.ctx.is_region_cleaned(txn_id, &region).await
             {
                 continue;
@@ -689,7 +698,7 @@ impl LockResolver {
                     current_ts,
                     rollback_if_not_exist,
                     force_sync_commit,
-                    lock.lock_type == kvrpcpb::Op::PessimisticLock as i32,
+                    is_pessimistic_lock(lock.lock_type),
                     lock.is_txn_file,
                 )
                 .await
@@ -704,7 +713,7 @@ impl LockResolver {
                         );
                         rollback_if_not_exist = true;
                         continue;
-                    } else if lock.lock_type == kvrpcpb::Op::PessimisticLock as i32 {
+                    } else if is_pessimistic_lock(lock.lock_type) {
                         let status = TransactionStatus {
                             kind: TransactionStatusKind::Locked(lock.lock_ttl, lock.clone()),
                             action: kvrpcpb::Action::NoAction,
@@ -720,7 +729,7 @@ impl LockResolver {
                     return Err(Error::TxnNotFound(txn_not_found));
                 }
                 Err(Error::KeyError(key_err))
-                    if lock.lock_type == kvrpcpb::Op::PessimisticLock as i32
+                    if is_pessimistic_lock(lock.lock_type)
                         && key_err.primary_mismatch.is_some() =>
                 {
                     debug!(
@@ -985,6 +994,67 @@ mod tests {
         lock.lock_for_update_ts = 9;
         lock.lock_ttl = 100;
         lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+
+        let live_locks = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
+            .await
+            .unwrap();
+        assert!(live_locks.is_empty());
+        assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_primary_mismatch_rolls_back_shared_pessimistic_lock() {
+        let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+
+        let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let mut mismatch = kvrpcpb::PrimaryMismatch::default();
+                    mismatch.lock_info = Some(kvrpcpb::LockInfo {
+                        key: vec![1],
+                        primary_lock: vec![2],
+                        lock_version: 7,
+                        lock_for_update_ts: 9,
+                        lock_type: SHARED_PESSIMISTIC_LOCK_TYPE,
+                        ..Default::default()
+                    });
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        error: Some(kvrpcpb::KeyError {
+                            primary_mismatch: Some(mismatch),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    assert_eq!(req.keys, vec![vec![1]]);
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.for_update_ts, 9);
+                    pessimistic_rollback_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                if req.is::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_for_update_ts = 9;
+        lock.lock_ttl = 100;
+        lock.lock_type = SHARED_PESSIMISTIC_LOCK_TYPE;
 
         let live_locks = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
             .await
@@ -1346,6 +1416,68 @@ mod tests {
         lock.lock_for_update_ts = 11;
         lock.lock_ttl = 100;
         lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+
+        let store = client
+            .clone()
+            .store_for_key(&lock.key.clone().into())
+            .await
+            .unwrap();
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        lock_resolver
+            .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
+            .await
+            .unwrap();
+
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
+        assert_eq!(non_empty_batch_resolve_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_shared_pessimistic_lock_uses_pessimistic_rollback() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
+        let non_empty_batch_resolve_count = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
+        let non_empty_batch_resolve_count_captured = non_empty_batch_resolve_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        action: kvrpcpb::Action::LockNotExistDoNothing as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    assert_eq!(req.keys, vec![vec![1]]);
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.for_update_ts, 11);
+                    pessimistic_rollback_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    if !req.txn_infos.is_empty() {
+                        non_empty_batch_resolve_count_captured.fetch_add(1, Ordering::SeqCst);
+                    }
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_for_update_ts = 11;
+        lock.lock_ttl = 100;
+        lock.lock_type = SHARED_PESSIMISTIC_LOCK_TYPE;
 
         let store = client
             .clone()
