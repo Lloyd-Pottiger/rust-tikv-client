@@ -847,19 +847,14 @@ impl TransactionStatus {
         }
     }
 
-    // is_cacheable checks whether the transaction status is certain.
-    // If transaction is already committed, the result could be cached.
-    // Otherwise:
-    //   If l.LockType is pessimistic lock type:
-    //       - if its primary lock is pessimistic too, the check txn status result should not be cached.
-    //       - if its primary lock is prewrite lock type, the check txn status could be cached.
-    //   If l.lockType is prewrite lock type:
-    //       - always cache the check txn status result.
-    // For prewrite locks, their primary keys should ALWAYS be the correct one and will NOT change.
+    // Match client-go `TxnStatus.StatusCacheable`: cache only when final status is determined.
+    // Committed is always determined. RolledBack is determined only for rollback actions
+    // (`NoAction`, `LockNotExistRollback`, `TtlExpireRollback`); other actions like
+    // `LockNotExistDoNothing` are not cacheable.
     pub fn is_cacheable(&self) -> bool {
         match &self.kind {
-            TransactionStatusKind::RolledBack | TransactionStatusKind::Committed(..) => true,
-            TransactionStatusKind::Locked(..) if self.is_expired => matches!(
+            TransactionStatusKind::Committed(..) => true,
+            TransactionStatusKind::RolledBack => matches!(
                 self.action,
                 kvrpcpb::Action::NoAction
                     | kvrpcpb::Action::LockNotExistRollback
@@ -1079,6 +1074,27 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_process_check_txn_status_lock_not_exist_do_nothing_not_cacheable() {
+        let processor = super::DefaultProcessor;
+        let status = processor
+            .process(Ok(kvrpcpb::CheckTxnStatusResponse {
+                action: kvrpcpb::Action::LockNotExistDoNothing.into(),
+                ..Default::default()
+            }))
+            .expect("lock-not-exist-do-nothing should decode successfully");
+
+        assert!(matches!(
+            status.kind,
+            super::TransactionStatusKind::RolledBack
+        ));
+        assert_eq!(status.action, kvrpcpb::Action::LockNotExistDoNothing);
+        assert!(
+            !status.is_cacheable(),
+            "lock-not-exist-do-nothing status must not be cached"
+        );
     }
 
     #[test]
