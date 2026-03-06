@@ -45,10 +45,15 @@ fn format_key_for_log(key: &[u8]) -> String {
 // `client-go` treats both `PessimisticLock` and `SharedPessimisticLock` as pessimistic.
 // The generated Rust proto in this repo currently lacks `SharedPessimisticLock`, so keep
 // the numeric value for forward-compatible lock-type handling.
+const SHARED_LOCK_TYPE: i32 = 7;
 const SHARED_PESSIMISTIC_LOCK_TYPE: i32 = 8;
 
 fn is_pessimistic_lock(lock_type: i32) -> bool {
     lock_type == kvrpcpb::Op::PessimisticLock as i32 || lock_type == SHARED_PESSIMISTIC_LOCK_TYPE
+}
+
+fn is_shared_lock(lock_type: i32) -> bool {
+    lock_type == SHARED_LOCK_TYPE
 }
 
 enum TxnStatusFromLock {
@@ -94,6 +99,11 @@ pub async fn resolve_locks(
     // This matches the client-go `LockResolver.ResolveLocksWithOpts` flow: query txn status for
     // each encountered lock, then resolve immediately when the status is final.
     for lock in locks {
+        if is_shared_lock(lock.lock_type) {
+            return Err(Error::StringError(
+                "misuse of resolve_locks: trying to resolve a shared lock directly".to_owned(),
+            ));
+        }
         let region_ver_id = pd_client
             .region_for_key(&lock.key.clone().into())
             .await?
@@ -380,6 +390,11 @@ impl LockResolver {
 
         let mut txn_infos = HashMap::new();
         for l in locks {
+            if is_shared_lock(l.lock_type) {
+                return Err(Error::StringError(
+                    "misuse of cleanup_locks: trying to resolve a shared lock directly".to_owned(),
+                ));
+            }
             let txn_id = l.lock_version;
             let is_pessimistic = is_pessimistic_lock(l.lock_type);
             if txn_infos.contains_key(&txn_id) || self.ctx.is_region_cleaned(txn_id, &region).await
@@ -943,6 +958,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_locks_shared_lock_returns_error() {
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |_req: &dyn Any| panic!("shared lock should be rejected before sending requests"),
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.lock_type = SHARED_LOCK_TYPE;
+
+        let err = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
+            .await
+            .expect_err("shared lock wrapper should not be resolved directly");
+        match err {
+            Error::StringError(msg) => {
+                assert!(msg.contains("misuse of resolve_locks"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_resolve_locks_primary_mismatch_rolls_back_pessimistic_lock() {
         let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
         let resolve_lock_count = Arc::new(AtomicUsize::new(0));
@@ -1493,6 +1532,37 @@ mod tests {
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(non_empty_batch_resolve_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_shared_lock_returns_error() {
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |_req: &dyn Any| panic!("shared lock should be rejected before sending requests"),
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.lock_type = SHARED_LOCK_TYPE;
+
+        let store = client
+            .clone()
+            .store_for_key(&lock.key.clone().into())
+            .await
+            .unwrap();
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let err = lock_resolver
+            .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
+            .await
+            .expect_err("shared lock wrapper should not be cleaned directly");
+        match err {
+            Error::StringError(msg) => {
+                assert!(msg.contains("misuse of cleanup_locks"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
