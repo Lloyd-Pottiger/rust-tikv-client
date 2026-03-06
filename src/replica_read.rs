@@ -29,8 +29,13 @@ pub enum ReplicaReadType {
 }
 
 impl ReplicaReadType {
+    /// Returns `true` if this mode may read from non-leader replicas.
+    ///
+    /// This mirrors client-go `ReplicaReadType.IsFollowerRead()`: all modes except
+    /// [`ReplicaReadType::Leader`] are considered follower-read, including
+    /// [`ReplicaReadType::PreferLeader`].
     #[inline]
-    pub(crate) fn is_follower_read(self) -> bool {
+    pub fn is_follower_read(self) -> bool {
         self != ReplicaReadType::Leader
     }
 }
@@ -40,3 +45,17 @@ impl ReplicaReadType {
 /// This maps to the client-go `ReplicaReadAdjuster` hook used by `KVSnapshot` for
 /// `Get`/`BatchGet`.
 pub type ReplicaReadAdjuster = Arc<dyn Fn(usize) -> ReplicaReadType + Send + Sync + 'static>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replica_read_type_is_follower_read() {
+        assert!(!ReplicaReadType::Leader.is_follower_read());
+        assert!(ReplicaReadType::Follower.is_follower_read());
+        assert!(ReplicaReadType::Mixed.is_follower_read());
+        assert!(ReplicaReadType::Learner.is_follower_read());
+        assert!(ReplicaReadType::PreferLeader.is_follower_read());
+    }
+}

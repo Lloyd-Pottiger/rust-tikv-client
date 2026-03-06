@@ -127,7 +127,11 @@ impl Connection {
     ) -> Result<Cluster> {
         let members = self.validate_endpoints(endpoints, timeout).await?;
         let (client, keyspace_client, members) = self.try_connect_leader(&members, timeout).await?;
-        let id = members.header.as_ref().unwrap().cluster_id;
+        let id = members
+            .header
+            .as_ref()
+            .ok_or_else(|| internal_err!("PD get_members response missing header"))?
+            .cluster_id;
         let tso = TimestampOracle::new(id, &client)?;
         let cluster = Cluster {
             id,
@@ -182,7 +186,16 @@ impl Connection {
             };
 
             // Check cluster ID.
-            let cid = resp.header.as_ref().unwrap().cluster_id;
+            let cid = resp
+                .header
+                .as_ref()
+                .ok_or_else(|| {
+                    internal_err!(
+                        "PD endpoint {} returned get_members response missing header",
+                        ep
+                    )
+                })?
+                .cluster_id;
             if let Some(sample) = cluster_id {
                 if sample != cid {
                     return Err(internal_err!(
@@ -234,11 +247,11 @@ impl Connection {
             .get_members(pdpb::GetMembersRequest::default())
             .await?
             .into_inner();
-        if let Some(err) = resp
+        let header = resp
             .header
             .as_ref()
-            .and_then(|header| header.error.as_ref())
-        {
+            .ok_or_else(|| internal_err!("PD get_members response missing header"))?;
+        if let Some(err) = header.error.as_ref() {
             return Err(internal_err!("failed to get PD members, err {:?}", err));
         }
         if resp.leader.is_none() {
@@ -270,7 +283,16 @@ impl Connection {
         members: &pdpb::GetMembersResponse,
         cluster_id: u64,
     ) -> Result<()> {
-        let new_cluster_id = members.header.as_ref().unwrap().cluster_id;
+        let new_cluster_id = members
+            .header
+            .as_ref()
+            .ok_or_else(|| {
+                internal_err!(
+                    "PD endpoint {} returned get_members response missing header",
+                    addr
+                )
+            })?
+            .cluster_id;
         if new_cluster_id != cluster_id {
             Err(internal_err!(
                 "{} no longer belongs to cluster {}, it is in {}",
@@ -292,9 +314,16 @@ impl Connection {
         keyspacepb::keyspace_client::KeyspaceClient<Channel>,
         pdpb::GetMembersResponse,
     )> {
-        let previous_leader = previous.leader.as_ref().unwrap();
+        let previous_leader = previous
+            .leader
+            .as_ref()
+            .ok_or_else(|| internal_err!("no leader found in GetMembersResponse"))?;
         let members = &previous.members;
-        let cluster_id = previous.header.as_ref().unwrap().cluster_id;
+        let cluster_id = previous
+            .header
+            .as_ref()
+            .ok_or_else(|| internal_err!("GetMembersResponse missing header"))?
+            .cluster_id;
 
         let mut resp = None;
         // Try to connect to other members, then the previous leader.
@@ -351,7 +380,10 @@ trait PdMessage: Sized {
         req.set_timeout(timeout);
         let response = Self::rpc(req, client).await?;
 
-        if let Some(err) = &response.header().error {
+        let header = response
+            .header()
+            .ok_or_else(|| internal_err!("PD response missing header"))?;
+        if let Some(err) = &header.error {
             Err(internal_err!(err.message))
         } else {
             Ok(response)
@@ -420,35 +452,119 @@ impl PdMessage for keyspacepb::LoadKeyspaceRequest {
 }
 
 trait PdResponse {
-    fn header(&self) -> &pdpb::ResponseHeader;
+    fn header(&self) -> Option<&pdpb::ResponseHeader>;
 }
 
 impl PdResponse for pdpb::GetStoreResponse {
-    fn header(&self) -> &pdpb::ResponseHeader {
-        self.header.as_ref().unwrap()
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
     }
 }
 
 impl PdResponse for pdpb::GetRegionResponse {
-    fn header(&self) -> &pdpb::ResponseHeader {
-        self.header.as_ref().unwrap()
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
     }
 }
 
 impl PdResponse for pdpb::GetAllStoresResponse {
-    fn header(&self) -> &pdpb::ResponseHeader {
-        self.header.as_ref().unwrap()
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
     }
 }
 
 impl PdResponse for pdpb::UpdateGcSafePointResponse {
-    fn header(&self) -> &pdpb::ResponseHeader {
-        self.header.as_ref().unwrap()
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
     }
 }
 
 impl PdResponse for keyspacepb::LoadKeyspaceResponse {
-    fn header(&self) -> &pdpb::ResponseHeader {
-        self.header.as_ref().unwrap()
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Default)]
+    struct TestResponse {
+        header: Option<pdpb::ResponseHeader>,
+    }
+
+    impl PdResponse for TestResponse {
+        fn header(&self) -> Option<&pdpb::ResponseHeader> {
+            self.header.as_ref()
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TestRequest {
+        response: TestResponse,
+    }
+
+    #[async_trait::async_trait]
+    impl PdMessage for TestRequest {
+        type Client = ();
+        type Response = TestResponse;
+
+        async fn rpc(req: Request<Self>, _client: &mut Self::Client) -> GrpcResult<Self::Response> {
+            Ok(req.into_inner().response)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pd_message_send_missing_header_returns_error() {
+        let req = TestRequest::default();
+        let mut client = ();
+        let err = req
+            .send(&mut client, Duration::from_secs(1))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing header"));
+    }
+
+    #[tokio::test]
+    async fn test_pd_message_send_header_error_returns_error() {
+        let mut header = pdpb::ResponseHeader::default();
+        header.error = Some(pdpb::Error {
+            message: "boom".to_string(),
+            ..Default::default()
+        });
+        let req = TestRequest {
+            response: TestResponse {
+                header: Some(header),
+            },
+        };
+        let mut client = ();
+        let err = req
+            .send(&mut client, Duration::from_secs(1))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_pd_message_send_ok_when_header_has_no_error() {
+        let req = TestRequest {
+            response: TestResponse {
+                header: Some(pdpb::ResponseHeader::default()),
+            },
+        };
+        let mut client = ();
+        req.send(&mut client, Duration::from_secs(1)).await.unwrap();
+    }
+
+    #[test]
+    fn test_validate_cluster_id_missing_header_returns_error() {
+        let members = pdpb::GetMembersResponse::default();
+        let err = Connection::validate_cluster_id("127.0.0.1:2379", &members, 42)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing header"));
     }
 }
