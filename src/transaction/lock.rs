@@ -81,7 +81,7 @@ fn select_check_txn_status_error(mut errors: Vec<Error>) -> Error {
 
 enum TxnStatusFromLock {
     Status(Arc<TransactionStatus>),
-    PessimisticLockRolledBack,
+    PessimisticRollbackRequired,
 }
 
 /// _Resolves_ the given locks. Returns locks still live. When there is no live locks, all the given locks are resolved.
@@ -166,7 +166,26 @@ pub(crate) async fn resolve_locks_with_options(
                     .await?;
                 let status = match status {
                     TxnStatusFromLock::Status(status) => status,
-                    TxnStatusFromLock::PessimisticLockRolledBack => continue,
+                    TxnStatusFromLock::PessimisticRollbackRequired => {
+                        if pessimistic_region_resolve {
+                            if let Some(cleaned_region) = rollback_pessimistic_lock_with_retry(
+                                &lock,
+                                pd_client.clone(),
+                                keyspace,
+                                OPTIMISTIC_BACKOFF,
+                            )
+                            .await?
+                            {
+                                clean_regions
+                                    .entry(lock.lock_version)
+                                    .or_default()
+                                    .insert(cleaned_region);
+                            }
+                        } else {
+                            rollback_pessimistic_lock(&lock, pd_client.clone(), keyspace).await?;
+                        }
+                        continue;
+                    }
                 };
                 match &status.kind {
                     TransactionStatusKind::Committed(ts) => {
@@ -875,11 +894,10 @@ impl LockResolver {
                         && key_err.primary_mismatch.is_some() =>
                 {
                     debug!(
-                        "check_txn_status got primary_mismatch on pessimistic lock, rollback directly; lock: {}",
+                        "check_txn_status got primary_mismatch on pessimistic lock, defer rollback to resolve flow; lock: {}",
                         format_key_for_log(&lock.key)
                     );
-                    rollback_pessimistic_lock(lock, pd_client.clone(), keyspace).await?;
-                    return Ok(TxnStatusFromLock::PessimisticLockRolledBack);
+                    return Ok(TxnStatusFromLock::PessimisticRollbackRequired);
                 }
                 Err(err) => return Err(err),
             }
@@ -1182,6 +1200,73 @@ mod tests {
         let live_locks = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
             .await
             .unwrap();
+        assert!(live_locks.is_empty());
+        assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_primary_mismatch_region_resolve_rolls_back_region() {
+        let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+
+        let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let mut mismatch = kvrpcpb::PrimaryMismatch::default();
+                    mismatch.lock_info = Some(kvrpcpb::LockInfo {
+                        key: vec![1],
+                        primary_lock: vec![2],
+                        lock_version: 7,
+                        lock_for_update_ts: 9,
+                        lock_type: kvrpcpb::Op::PessimisticLock as i32,
+                        ..Default::default()
+                    });
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        error: Some(kvrpcpb::KeyError {
+                            primary_mismatch: Some(mismatch),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    assert!(req.keys.is_empty());
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.for_update_ts, 9);
+                    pessimistic_rollback_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                if req.is::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_for_update_ts = 9;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+
+        let live_locks = resolve_locks_with_options(
+            vec![lock],
+            Timestamp::default(),
+            client,
+            Keyspace::Disable,
+            true,
+        )
+        .await
+        .unwrap();
         assert!(live_locks.is_empty());
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
