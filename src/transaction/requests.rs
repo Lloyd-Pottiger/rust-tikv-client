@@ -21,7 +21,6 @@ use crate::proto::pdpb::Timestamp;
 use crate::region::RegionWithLeader;
 use crate::request::Collect;
 use crate::request::CollectSingle;
-use crate::request::CollectWithShard;
 use crate::request::DefaultProcessor;
 use crate::request::HasNextBatch;
 use crate::request::KvRequest;
@@ -566,10 +565,21 @@ impl Shardable for kvrpcpb::PessimisticLockRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CollectPessimisticLock {
+    need_value: bool,
+}
+
+impl CollectPessimisticLock {
+    pub(super) fn new(need_value: bool) -> Self {
+        Self { need_value }
+    }
+}
+
 // PessimisticLockResponse returns values that preserves the order with keys in request, thus the
-// kvpair result should be produced by zipping the keys in request and the values in respponse.
+// kvpair result should be produced by zipping the keys in request and the values in response.
 impl Merge<ResponseWithShard<kvrpcpb::PessimisticLockResponse, Vec<kvrpcpb::Mutation>>>
-    for CollectWithShard
+    for CollectPessimisticLock
 {
     type Out = Vec<KvPair>;
 
@@ -615,6 +625,24 @@ impl Merge<ResponseWithShard<kvrpcpb::PessimisticLockResponse, Vec<kvrpcpb::Muta
                 let values = resp.values;
                 let not_founds = resp.not_founds;
 
+                if !not_founds.is_empty() && not_founds.len() != mutations.len() {
+                    return Err(crate::Error::StringError(format!(
+                        "pessimistic lock response not_founds length {} does not match mutations length {}",
+                        not_founds.len(),
+                        mutations.len(),
+                    )));
+                }
+
+                if values.is_empty() {
+                    if self.need_value {
+                        return Err(crate::Error::StringError(format!(
+                            "pessimistic lock response missing values for {} mutations",
+                            mutations.len()
+                        )));
+                    }
+                    continue;
+                }
+
                 if values.len() != mutations.len() {
                     return Err(crate::Error::StringError(format!(
                         "pessimistic lock response values length {} does not match mutations length {}",
@@ -623,12 +651,8 @@ impl Merge<ResponseWithShard<kvrpcpb::PessimisticLockResponse, Vec<kvrpcpb::Muta
                     )));
                 }
 
-                if !not_founds.is_empty() && not_founds.len() != mutations.len() {
-                    return Err(crate::Error::StringError(format!(
-                        "pessimistic lock response not_founds length {} does not match mutations length {}",
-                        not_founds.len(),
-                        mutations.len(),
-                    )));
+                if !self.need_value {
+                    continue;
                 }
 
                 if not_founds.is_empty() {
@@ -1079,7 +1103,6 @@ mod tests {
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb;
     use crate::request::plan::Merge;
-    use crate::request::CollectWithShard;
     use crate::request::Process;
     use crate::request::ResponseWithShard;
     use crate::request::Shardable;
@@ -1248,7 +1271,7 @@ mod tests {
             ],
         );
 
-        let merger = CollectWithShard {};
+        let merger = super::CollectPessimisticLock::new(true);
         {
             // empty values & not founds are filtered.
             let input = vec![
@@ -1265,6 +1288,19 @@ mod tests {
                     KvPair::new(key4.to_vec(), value4.to_vec()),
                 ]
             );
+        }
+        {
+            let resp_no_values = ResponseWithShard(
+                kvrpcpb::PessimisticLockResponse::default(),
+                vec![kvrpcpb::Mutation {
+                    op: kvrpcpb::Op::PessimisticLock.into(),
+                    key: key1.to_vec(),
+                    ..Default::default()
+                }],
+            );
+            let merger = super::CollectPessimisticLock::new(false);
+            let result = merger.merge(vec![Ok(resp_no_values)]);
+            assert!(result.unwrap().is_empty());
         }
         {
             let input = vec![

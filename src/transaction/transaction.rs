@@ -12,6 +12,7 @@ use futures::prelude::*;
 use log::{debug, error, info, trace, warn};
 use tokio::time::Duration;
 
+use super::requests::CollectPessimisticLock;
 use crate::backoff::Backoff;
 use crate::backoff::DEFAULT_REGION_BACKOFF;
 use crate::kv::HexRepr;
@@ -22,7 +23,6 @@ use crate::proto::pdpb::Timestamp;
 use crate::request::Collect;
 use crate::request::CollectError;
 use crate::request::CollectSingle;
-use crate::request::CollectWithShard;
 use crate::request::EncodeKeyspace;
 use crate::request::KeyMode;
 use crate::request::Keyspace;
@@ -1037,7 +1037,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             )
             .preserve_shard()
             .retry_multi_region_preserve_results(self.options.retry_options.region_backoff.clone())
-            .merge(CollectWithShard)
+            .merge(CollectPessimisticLock::new(need_value))
             .plan();
         let pairs = plan.execute().await;
 
