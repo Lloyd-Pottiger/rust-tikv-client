@@ -3378,6 +3378,181 @@ mod tests {
         assert_eq!(timestamp_calls.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn test_committer_one_pc_success_returns_one_pc_commit_ts() {
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
+        let timestamp_calls = Arc::new(AtomicUsize::new(0));
+
+        let start_ts = Timestamp {
+            physical: 1,
+            logical: 0,
+            ..Default::default()
+        };
+        let pd_ts = Timestamp {
+            physical: 10,
+            logical: 0,
+            ..Default::default()
+        };
+        let one_pc_commit_ts = Timestamp {
+            physical: 3,
+            logical: 0,
+            ..Default::default()
+        };
+
+        let one_pc_commit_ts_version = one_pc_commit_ts.version();
+
+        let prewrite_count_captured = prewrite_count.clone();
+        let commit_count_captured = commit_count.clone();
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert!(req.try_one_pc);
+                let resp = kvrpcpb::PrewriteResponse {
+                    one_pc_commit_ts: one_pc_commit_ts_version,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                commit_count_captured.fetch_add(1, Ordering::SeqCst);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: pd_ts,
+            timestamp_calls: timestamp_calls.clone(),
+        });
+
+        let primary_key: Key = vec![1].into();
+        let mutations = vec![kvrpcpb::Mutation {
+            op: kvrpcpb::Op::Put.into(),
+            key: vec![1],
+            value: vec![42],
+            ..Default::default()
+        }];
+
+        let options = TransactionOptions::new_optimistic().try_one_pc();
+        let committer = super::Committer::new(
+            Some(primary_key),
+            mutations,
+            start_ts,
+            pd_client,
+            options,
+            Keyspace::Disable,
+            0,
+            Instant::now(),
+        );
+
+        let commit_result = committer
+            .commit()
+            .await
+            .unwrap()
+            .expect("expected commit_ts");
+        assert_eq!(commit_result.version(), one_pc_commit_ts_version);
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+        assert_eq!(commit_count.load(Ordering::SeqCst), 0);
+        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_committer_async_commit_success_uses_min_commit_ts_without_pd_tso() {
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
+        let timestamp_calls = Arc::new(AtomicUsize::new(0));
+        let commit_notify = Arc::new(tokio::sync::Notify::new());
+
+        let start_ts = Timestamp {
+            physical: 1,
+            logical: 0,
+            ..Default::default()
+        };
+        let pd_ts = Timestamp {
+            physical: 10,
+            logical: 0,
+            ..Default::default()
+        };
+        let async_commit_ts = Timestamp {
+            physical: 3,
+            logical: 0,
+            ..Default::default()
+        };
+
+        let start_ts_version = start_ts.version();
+        let async_commit_ts_version = async_commit_ts.version();
+
+        let prewrite_count_captured = prewrite_count.clone();
+        let commit_count_captured = commit_count.clone();
+        let commit_notify_captured = commit_notify.clone();
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert!(req.use_async_commit);
+                let resp = kvrpcpb::PrewriteResponse {
+                    min_commit_ts: async_commit_ts_version,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.keys, vec![vec![1]]);
+                assert_eq!(req.start_version, start_ts_version);
+                assert_eq!(req.commit_version, async_commit_ts_version);
+                commit_notify_captured.notify_one();
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: pd_ts,
+            timestamp_calls: timestamp_calls.clone(),
+        });
+
+        let primary_key: Key = vec![1].into();
+        let mutations = vec![kvrpcpb::Mutation {
+            op: kvrpcpb::Op::Put.into(),
+            key: vec![1],
+            value: vec![42],
+            ..Default::default()
+        }];
+
+        let options = TransactionOptions::new_optimistic().use_async_commit();
+        let committer = super::Committer::new(
+            Some(primary_key),
+            mutations,
+            start_ts,
+            pd_client,
+            options,
+            Keyspace::Disable,
+            0,
+            Instant::now(),
+        );
+
+        let commit_result = committer
+            .commit()
+            .await
+            .unwrap()
+            .expect("expected commit_ts");
+        assert_eq!(commit_result.version(), async_commit_ts_version);
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 0);
+
+        tokio::time::timeout(Duration::from_secs(1), commit_notify.notified())
+            .await
+            .expect("expected async commit request to be dispatched");
+        assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    }
+
     #[rstest::rstest]
     #[case(Keyspace::Disable)]
     #[case(Keyspace::Enable { keyspace_id: 0 })]
