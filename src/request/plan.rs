@@ -907,6 +907,23 @@ impl<P: Plan, PdC: PdClient> Clone for CleanupLocks<P, PdC> {
     }
 }
 
+fn classify_cleanup_extracted_errors(result: &mut CleanupLocksResult, mut errors: Vec<Error>) {
+    match errors.pop() {
+        Some(Error::RegionError(e)) => {
+            result.region_error = Some(*e);
+        }
+        Some(err) => {
+            // Keep the popped error so callers receive the original key error list.
+            errors.push(err);
+            result.key_error = Some(errors);
+        }
+        None => {
+            // Preserve existing behavior for malformed empty error lists.
+            result.key_error = Some(Vec::new());
+        }
+    }
+}
+
 #[async_trait]
 impl<P: Plan + Shardable + NextBatch, PdC: PdClient> Plan for CleanupLocks<P, PdC>
 where
@@ -973,13 +990,9 @@ where
                 Ok(()) => {
                     result.resolved_locks += lock_size;
                 }
-                Err(Error::ExtractedErrors(mut errors)) => {
+                Err(Error::ExtractedErrors(errors)) => {
                     // Propagate errors to `retry_multi_region` for retry.
-                    if let Error::RegionError(e) = errors.pop().unwrap() {
-                        result.region_error = Some(*e);
-                    } else {
-                        result.key_error = Some(errors);
-                    }
+                    classify_cleanup_extracted_errors(&mut result, errors);
                     return Ok(result);
                 }
                 Err(e) => {
@@ -1160,5 +1173,38 @@ mod test {
             replica_read: None,
         };
         assert!(plan.execute().await.is_err())
+    }
+
+    #[test]
+    fn test_classify_cleanup_extracted_errors_keeps_key_error() {
+        let mut result = CleanupLocksResult::default();
+        classify_cleanup_extracted_errors(
+            &mut result,
+            vec![Error::KeyError(Box::new(kvrpcpb::KeyError::default()))],
+        );
+
+        assert!(result.region_error.is_none());
+        let errors = result
+            .key_error
+            .expect("cleanup result should keep key errors");
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], Error::KeyError(_)));
+    }
+
+    #[test]
+    fn test_classify_cleanup_extracted_errors_sets_region_error() {
+        let mut result = CleanupLocksResult::default();
+        let mut region_error = errorpb::Error::default();
+        region_error.message = "region error".to_string();
+        classify_cleanup_extracted_errors(
+            &mut result,
+            vec![Error::RegionError(Box::new(region_error))],
+        );
+
+        assert!(result.key_error.is_none());
+        assert_eq!(
+            result.region_error.expect("expected region error").message,
+            "region error"
+        );
     }
 }
