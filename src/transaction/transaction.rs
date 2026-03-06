@@ -46,6 +46,17 @@ use crate::ReplicaReadType;
 use crate::Result;
 use crate::Value;
 
+/// Hook for validating schema versions during commit.
+///
+/// This mirrors the client-go v2 `SchemaLeaseChecker` concept. When configured via
+/// [`Transaction::set_schema_ver`] and [`Transaction::set_schema_lease_checker`], async-commit/1PC
+/// will invoke this check before calculating `max_commit_ts`.
+pub trait SchemaLeaseChecker: Send + Sync {
+    /// Check whether the schema has changed between the transaction's start schema version and the
+    /// schema version at `txn_ts`.
+    fn check_by_schema_ver(&self, txn_ts: Timestamp, start_schema_ver: i64) -> Result<()>;
+}
+
 /// An undo-able set of actions on the dataset.
 ///
 /// Create a transaction using a [`TransactionClient`](crate::TransactionClient), then run actions
@@ -92,6 +103,8 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     rpc: Arc<PdC>,
     options: TransactionOptions,
     replica_read_adjuster: Option<ReplicaReadAdjuster>,
+    schema_ver: Option<i64>,
+    schema_lease_checker: Option<Arc<dyn SchemaLeaseChecker>>,
     keyspace: Keyspace,
     is_heartbeat_started: bool,
     start_instant: Instant,
@@ -142,6 +155,8 @@ impl<PdC: PdClient> Transaction<PdC> {
             rpc,
             options,
             replica_read_adjuster: None,
+            schema_ver: None,
+            schema_lease_checker: None,
             keyspace,
             is_heartbeat_started: false,
             start_instant: std::time::Instant::now(),
@@ -234,6 +249,32 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// This option is only effective for read-only snapshots.
     pub fn set_load_based_replica_read_threshold(&mut self, threshold: Duration) {
         self.options.busy_threshold_ms = normalize_busy_threshold_ms(threshold);
+    }
+
+    /// Set the schema version used for schema validity checks during commit.
+    ///
+    /// The schema validity check is only performed when a schema lease checker is also configured
+    /// via [`Transaction::set_schema_lease_checker`].
+    pub fn set_schema_ver(&mut self, schema_ver: i64) {
+        self.schema_ver = Some(schema_ver);
+    }
+
+    /// Clear the configured schema version.
+    pub fn clear_schema_ver(&mut self) {
+        self.schema_ver = None;
+    }
+
+    /// Set a schema lease checker used to validate schema changes during commit.
+    ///
+    /// The checker is only consulted when a schema version is also configured via
+    /// [`Transaction::set_schema_ver`].
+    pub fn set_schema_lease_checker(&mut self, checker: Arc<dyn SchemaLeaseChecker>) {
+        self.schema_lease_checker = Some(checker);
+    }
+
+    /// Clear the configured schema lease checker.
+    pub fn clear_schema_lease_checker(&mut self) {
+        self.schema_lease_checker = None;
     }
 
     /// Create a new 'get' request
@@ -839,7 +880,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         self.start_auto_heartbeat().await;
 
-        let res = Committer::new(
+        let mut committer = Committer::new(
             primary_key,
             mutations,
             self.timestamp.clone(),
@@ -848,9 +889,10 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.keyspace,
             self.buffer.get_write_size() as u64,
             self.start_instant,
-        )
-        .commit()
-        .await;
+        );
+        committer.schema_ver = self.schema_ver;
+        committer.schema_lease_checker = self.schema_lease_checker.clone();
+        let res = committer.commit().await;
 
         if res.is_ok() {
             self.set_status(TransactionStatus::Committed);
@@ -892,7 +934,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         let primary_key = self.buffer.get_primary_key();
         let mutations = self.buffer.to_proto_mutations();
-        let res = Committer::new(
+        let mut committer = Committer::new(
             primary_key,
             mutations,
             self.timestamp.clone(),
@@ -901,9 +943,10 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.keyspace,
             self.buffer.get_write_size() as u64,
             self.start_instant,
-        )
-        .rollback()
-        .await;
+        );
+        committer.schema_ver = self.schema_ver;
+        committer.schema_lease_checker = self.schema_lease_checker.clone();
+        let res = committer.rollback().await;
 
         if res.is_ok() {
             self.set_status(TransactionStatus::Rolledback);
@@ -1711,6 +1754,10 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     undetermined: bool,
     write_size: u64,
     start_instant: Instant,
+    #[new(default)]
+    schema_ver: Option<i64>,
+    #[new(default)]
+    schema_lease_checker: Option<Arc<dyn SchemaLeaseChecker>>,
 }
 
 impl<PdC: PdClient> Committer<PdC> {
@@ -1811,6 +1858,11 @@ impl<PdC: PdClient> Committer<PdC> {
                 .start_version
                 .version()
                 .saturating_add(elapsed.saturating_mul(1_u64 << 18));
+            if let (Some(checker), Some(schema_ver)) =
+                (self.schema_lease_checker.as_ref(), self.schema_ver)
+            {
+                checker.check_by_schema_ver(Timestamp::from_version(current_ts), schema_ver)?;
+            }
             let safe_window_ms =
                 u64::try_from(DEFAULT_ASYNC_COMMIT_SAFE_WINDOW.as_millis()).unwrap_or(u64::MAX);
             request.max_commit_ts =
@@ -3689,6 +3741,71 @@ mod tests {
         async fn invalidate_region_cache(&self, _ver_id: crate::region::RegionVerId) {}
 
         async fn invalidate_store_cache(&self, _store_id: crate::region::StoreId) {}
+    }
+
+    struct FailingSchemaLeaseChecker {
+        calls: Arc<AtomicUsize>,
+        expected_schema_ver: i64,
+        min_check_ts: u64,
+    }
+
+    impl super::SchemaLeaseChecker for FailingSchemaLeaseChecker {
+        fn check_by_schema_ver(
+            &self,
+            txn_ts: Timestamp,
+            start_schema_ver: i64,
+        ) -> crate::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(start_schema_ver, self.expected_schema_ver);
+            assert!(txn_ts.version() >= self.min_check_ts);
+            Err(Error::StringError("schema changed".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_async_commit_schema_lease_check_blocks_prewrite() {
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let start_ts = Timestamp {
+            physical: 1,
+            logical: 0,
+            ..Default::default()
+        };
+        let start_ts_version = start_ts.version();
+
+        let checker = Arc::new(FailingSchemaLeaseChecker {
+            calls: calls.clone(),
+            expected_schema_ver: 42,
+            min_check_ts: start_ts_version,
+        });
+
+        let client = MockKvClient::with_dispatch_hook(|req: &dyn Any| {
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+        let pd_client = Arc::new(MockPdClient::new(client));
+
+        let mut txn = Transaction::new(
+            start_ts,
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .use_async_commit()
+                .causal_consistency(true)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_schema_ver(42);
+        txn.set_schema_lease_checker(checker);
+        txn.put("key".to_owned(), "value").await.unwrap();
+
+        let err = txn
+            .commit()
+            .await
+            .expect_err("expected schema lease check error");
+        assert!(matches!(
+            err,
+            Error::StringError(message) if message == "schema changed"
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
