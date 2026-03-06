@@ -2254,6 +2254,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_lock_for_read_batch_get_committed_locks_propagates_to_context() {
+        let batch_get_calls = Arc::new(AtomicUsize::new(0));
+        let batch_get_calls_cloned = batch_get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BatchGetRequest>() {
+                    let attempt = batch_get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    let ctx = req.context.as_ref().expect("context");
+
+                    if attempt == 0 {
+                        assert!(ctx.committed_locks.is_empty());
+                        assert!(ctx.resolved_locks.is_empty());
+
+                        let mut resp = kvrpcpb::BatchGetResponse::default();
+                        let mut key_err = kvrpcpb::KeyError::default();
+                        let mut lock = kvrpcpb::LockInfo::default();
+                        lock.key = b"k".to_vec();
+                        lock.primary_lock = b"k".to_vec();
+                        lock.lock_version = 1;
+                        lock.lock_ttl = 100;
+                        lock.txn_size = 1;
+                        lock.lock_type = kvrpcpb::Op::Put as i32;
+                        key_err.locked = Some(lock);
+                        resp.error = Some(key_err);
+                        return Ok(Box::new(resp) as Box<dyn Any>);
+                    }
+
+                    assert_eq!(ctx.committed_locks, vec![1]);
+                    assert!(ctx.resolved_locks.is_empty());
+
+                    let mut pair = kvrpcpb::KvPair::default();
+                    pair.key = b"k".to_vec();
+                    pair.value = b"v".to_vec();
+                    let mut resp = kvrpcpb::BatchGetResponse::default();
+                    resp.pairs = vec![pair];
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    let mut resp = kvrpcpb::CheckTxnStatusResponse::default();
+                    resp.action = kvrpcpb::Action::NoAction as i32;
+                    resp.commit_version = 5;
+                    resp.lock_ttl = 0;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type in resolve-lock-for-read batch_get test");
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+        );
+
+        let pairs: Vec<_> = snapshot
+            .batch_get(vec![b"k".to_vec()])
+            .await
+            .unwrap()
+            .collect();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, b"k".to_vec().into());
+        assert_eq!(pairs[0].1, b"v".to_vec());
+        assert_eq!(batch_get_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_lock_for_read_scan_resolved_locks_propagates_to_context() {
+        let scan_calls = Arc::new(AtomicUsize::new(0));
+        let scan_calls_cloned = scan_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ScanRequest>() {
+                    let attempt = scan_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    let ctx = req.context.as_ref().expect("context");
+
+                    if attempt == 0 {
+                        assert!(ctx.committed_locks.is_empty());
+                        assert!(ctx.resolved_locks.is_empty());
+
+                        let mut resp = kvrpcpb::ScanResponse::default();
+                        let mut key_err = kvrpcpb::KeyError::default();
+                        let mut lock = kvrpcpb::LockInfo::default();
+                        lock.key = b"k".to_vec();
+                        lock.primary_lock = b"k".to_vec();
+                        lock.lock_version = 1;
+                        lock.lock_ttl = 100;
+                        lock.txn_size = 1;
+                        lock.lock_type = kvrpcpb::Op::Put as i32;
+                        key_err.locked = Some(lock);
+                        resp.error = Some(key_err);
+                        return Ok(Box::new(resp) as Box<dyn Any>);
+                    }
+
+                    assert!(ctx.committed_locks.is_empty());
+                    assert_eq!(ctx.resolved_locks, vec![1]);
+
+                    let mut pair = kvrpcpb::KvPair::default();
+                    pair.key = b"k".to_vec();
+                    pair.value = b"v".to_vec();
+                    let mut resp = kvrpcpb::ScanResponse::default();
+                    resp.pairs = vec![pair];
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    let mut resp = kvrpcpb::CheckTxnStatusResponse::default();
+                    resp.action = kvrpcpb::Action::NoAction as i32;
+                    resp.commit_version = 20;
+                    resp.lock_ttl = 0;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type in resolve-lock-for-read scan test");
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+        );
+
+        let start: Key = b"a".to_vec().into();
+        let end: Key = b"z".to_vec().into();
+        let pairs: Vec<_> = snapshot.scan(start..end, 1).await.unwrap().collect();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, b"k".to_vec().into());
+        assert_eq!(pairs[0].1, b"v".to_vec());
+        assert_eq!(scan_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn test_snapshot_replica_read_follower() {
         let store_id = Arc::new(AtomicU64::new(0));
         let replica_read = Arc::new(AtomicBool::new(false));
