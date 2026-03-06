@@ -911,20 +911,29 @@ impl<P: Plan, PdC: PdClient> Clone for CleanupLocks<P, PdC> {
 }
 
 fn classify_cleanup_extracted_errors(result: &mut CleanupLocksResult, mut errors: Vec<Error>) {
-    match errors.pop() {
-        Some(Error::RegionError(e)) => {
+    if errors.is_empty() {
+        // Preserve existing behavior for malformed empty error lists.
+        result.key_error = Some(Vec::new());
+        return;
+    }
+
+    // Keep key errors regardless of ordering in extracted-error vectors.
+    if errors.iter().any(|err| matches!(err, Error::KeyError(_))) {
+        result.key_error = Some(errors);
+        return;
+    }
+
+    if let Some(index) = errors
+        .iter()
+        .rposition(|err| matches!(err, Error::RegionError(_)))
+    {
+        if let Error::RegionError(e) = errors.swap_remove(index) {
             result.region_error = Some(*e);
-        }
-        Some(err) => {
-            // Keep the popped error so callers receive the original key error list.
-            errors.push(err);
-            result.key_error = Some(errors);
-        }
-        None => {
-            // Preserve existing behavior for malformed empty error lists.
-            result.key_error = Some(Vec::new());
+            return;
         }
     }
+
+    result.key_error = Some(errors);
 }
 
 #[async_trait]
@@ -1210,5 +1219,26 @@ mod test {
             result.region_error.expect("expected region error").message,
             "region error"
         );
+    }
+
+    #[test]
+    fn test_classify_cleanup_extracted_errors_prefers_key_error_when_region_is_last() {
+        let mut result = CleanupLocksResult::default();
+        let mut region_error = errorpb::Error::default();
+        region_error.message = "region error".to_string();
+        classify_cleanup_extracted_errors(
+            &mut result,
+            vec![
+                Error::KeyError(Box::new(kvrpcpb::KeyError::default())),
+                Error::RegionError(Box::new(region_error)),
+            ],
+        );
+
+        assert!(result.region_error.is_none());
+        let errors = result
+            .key_error
+            .expect("cleanup result should preserve key error vectors");
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().any(|err| matches!(err, Error::KeyError(_))));
     }
 }
