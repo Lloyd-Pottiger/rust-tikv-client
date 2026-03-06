@@ -903,18 +903,29 @@ impl Merge<kvrpcpb::CheckSecondaryLocksResponse> for Collect {
                 }
                 out.min_commit_ts = cmp::max(out.min_commit_ts, lock.min_commit_ts);
             }
-            out.commit_ts = match (
-                out.commit_ts.take(),
-                Timestamp::try_from_version(resp.commit_ts),
-            ) {
-                (Some(a), Some(b)) => {
-                    assert_eq!(a, b);
-                    Some(a)
+            if let Some(commit_ts) = Timestamp::try_from_version(resp.commit_ts) {
+                if let Some(existing) = out.commit_ts.as_ref() {
+                    if existing != &commit_ts {
+                        return Err(crate::Error::StringError(format!(
+                            "check_secondary_locks commit_ts mismatch: {} vs {}",
+                            existing.version(),
+                            commit_ts.version(),
+                        )));
+                    }
+                } else {
+                    out.commit_ts = Some(commit_ts);
                 }
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
+            }
+
+            if let Some(commit_ts) = out.commit_ts.as_ref() {
+                if commit_ts.version() < out.min_commit_ts {
+                    return Err(crate::Error::StringError(format!(
+                        "check_secondary_locks commit_ts {} is less than min_commit_ts {}",
+                        commit_ts.version(),
+                        out.min_commit_ts,
+                    )));
+                }
+            }
         }
         Ok(out)
     }
@@ -1005,6 +1016,7 @@ mod tests {
 
     use futures::StreamExt;
 
+    use crate::common::Error;
     use crate::common::Error::PessimisticLockError;
     use crate::common::Error::ResolveLockError;
     use crate::mock::MockPdClient;
@@ -1014,6 +1026,62 @@ mod tests {
     use crate::request::ResponseWithShard;
     use crate::request::Shardable;
     use crate::KvPair;
+
+    #[test]
+    fn test_merge_check_secondary_locks_rejects_commit_ts_mismatch() {
+        let merger = super::Collect;
+        let input = vec![
+            Ok(kvrpcpb::CheckSecondaryLocksResponse {
+                commit_ts: 100,
+                ..Default::default()
+            }),
+            Ok(kvrpcpb::CheckSecondaryLocksResponse {
+                commit_ts: 101,
+                ..Default::default()
+            }),
+        ];
+
+        let err = match merger.merge(input) {
+            Ok(_) => panic!("expected commit_ts mismatch error"),
+            Err(err) => err,
+        };
+        match err {
+            Error::StringError(message) => {
+                assert!(message.contains("commit_ts mismatch"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_merge_check_secondary_locks_rejects_commit_ts_below_min_commit_ts() {
+        let merger = super::Collect;
+        let input = vec![
+            Ok(kvrpcpb::CheckSecondaryLocksResponse {
+                locks: vec![kvrpcpb::LockInfo {
+                    use_async_commit: true,
+                    min_commit_ts: 120,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            Ok(kvrpcpb::CheckSecondaryLocksResponse {
+                commit_ts: 119,
+                ..Default::default()
+            }),
+        ];
+
+        let err = match merger.merge(input) {
+            Ok(_) => panic!("expected commit_ts/min_commit_ts validation error"),
+            Err(err) => err,
+        };
+        match err {
+            Error::StringError(message) => {
+                assert!(message.contains("less than min_commit_ts"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn test_merge_pessimistic_lock_response() {
