@@ -1,6 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use log::debug;
 use log::info;
@@ -19,7 +20,7 @@ use crate::timestamp::TimestampExt;
 use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_scan_lock_request;
 use crate::transaction::lowering::new_unsafe_destroy_range_request;
-use crate::transaction::resolve_locks;
+use crate::transaction::resolve_locks_with_options;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::Snapshot;
 use crate::transaction::Transaction;
@@ -335,14 +336,16 @@ impl Client {
 
         let mut live_locks = locks;
         loop {
-            let resolved_locks = resolve_locks(
+            let resolve_result = resolve_locks_with_options(
                 live_locks.encode_keyspace(self.keyspace, KeyMode::Txn),
                 timestamp.clone(),
                 self.pd.clone(),
                 self.keyspace,
+                false,
             )
             .await?;
-            live_locks = resolved_locks.truncate_keyspace(self.keyspace);
+            let ms_before_txn_expired = resolve_result.ms_before_txn_expired;
+            live_locks = resolve_result.live_locks.truncate_keyspace(self.keyspace);
             if live_locks.is_empty() {
                 return Ok(live_locks);
             }
@@ -350,6 +353,11 @@ impl Client {
             match backoff.next_delay_duration() {
                 None => return Ok(live_locks),
                 Some(delay_duration) => {
+                    let delay_duration = if ms_before_txn_expired > 0 {
+                        delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64))
+                    } else {
+                        delay_duration
+                    };
                     tokio::time::sleep(delay_duration).await;
                 }
             }

@@ -90,6 +90,14 @@ enum TxnStatusFromLock {
     PessimisticRollbackRequired,
 }
 
+#[derive(Debug)]
+pub(crate) struct ResolveLocksResult {
+    pub(crate) live_locks: Vec<kvrpcpb::LockInfo>,
+    // The minimum remaining time (in milliseconds) before any still-live lock expires.
+    // Returns 0 when there is no live lock or the lock is already expired.
+    pub(crate) ms_before_txn_expired: i64,
+}
+
 /// _Resolves_ the given locks. Returns locks still live. When there is no live locks, all the given locks are resolved.
 ///
 /// If a key has a lock, the latest status of the key is unknown. We need to "resolve" the lock,
@@ -98,13 +106,18 @@ enum TxnStatusFromLock {
 /// rolled back), then resolve the remaining locks:
 /// - non-pessimistic locks are resolved by `ResolveLock`;
 /// - pessimistic locks are resolved by `PessimisticRollback`.
+#[cfg(test)]
 pub async fn resolve_locks(
     locks: Vec<kvrpcpb::LockInfo>,
     timestamp: Timestamp,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
 ) -> Result<Vec<kvrpcpb::LockInfo> /* live_locks */> {
-    resolve_locks_with_options(locks, timestamp, pd_client, keyspace, false).await
+    Ok(
+        resolve_locks_with_options(locks, timestamp, pd_client, keyspace, false)
+            .await?
+            .live_locks,
+    )
 }
 
 pub(crate) async fn resolve_locks_with_options(
@@ -113,7 +126,7 @@ pub(crate) async fn resolve_locks_with_options(
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
     pessimistic_region_resolve: bool,
-) -> Result<Vec<kvrpcpb::LockInfo> /* live_locks */> {
+) -> Result<ResolveLocksResult> {
     const RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
 
     debug!("resolving locks");
@@ -122,6 +135,7 @@ pub(crate) async fn resolve_locks_with_options(
     let current_ts = ts.version();
 
     let mut live_locks = Vec::new();
+    let mut ms_before_txn_expired: Option<i64> = None;
     let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
 
     // records the commit version of each primary lock (representing the status of the transaction)
@@ -213,8 +227,17 @@ pub(crate) async fn resolve_locks_with_options(
                         commit_versions.insert(lock.lock_version, 0);
                         Some(0)
                     }
-                    TransactionStatusKind::Locked(_, lock_info) => {
+                    TransactionStatusKind::Locked(ttl, lock_info) => {
                         live_locks.push(lock_info.clone());
+                        let mut ms_before_lock_expired =
+                            lock_until_expired_ms(lock_info.lock_version, *ttl, ts.clone());
+                        if ms_before_lock_expired <= 0 {
+                            ms_before_lock_expired = 0;
+                        }
+                        ms_before_txn_expired = Some(match ms_before_txn_expired {
+                            None => ms_before_lock_expired,
+                            Some(prev) => prev.min(ms_before_lock_expired),
+                        });
                         None
                     }
                 }
@@ -269,7 +292,10 @@ pub(crate) async fn resolve_locks_with_options(
             }
         }
     }
-    Ok(live_locks)
+    Ok(ResolveLocksResult {
+        live_locks,
+        ms_before_txn_expired: ms_before_txn_expired.unwrap_or(0),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1231,6 +1257,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_locks_live_lock_returns_ms_before_txn_expired() {
+        let base_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        lock_ttl: 100,
+                        lock_info: Some(kvrpcpb::LockInfo {
+                            key: vec![1],
+                            primary_lock: vec![1],
+                            lock_version: 7,
+                            lock_ttl: 100,
+                            lock_type: kvrpcpb::Op::Put as i32,
+                            ..Default::default()
+                        }),
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+        let client = Arc::new(TimestampedPdClient::new(
+            base_client,
+            Timestamp {
+                physical: 0,
+                logical: 0,
+                ..Default::default()
+            },
+        ));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![1];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let resolve_result = resolve_locks_with_options(
+            vec![lock],
+            Timestamp::default(),
+            client,
+            Keyspace::Disable,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolve_result.live_locks.len(), 1);
+        assert_eq!(resolve_result.ms_before_txn_expired, 100);
+    }
+
+    #[tokio::test]
     async fn test_resolve_locks_expired_async_commit_lock_checks_secondaries() {
         let check_txn_status_count = Arc::new(AtomicUsize::new(0));
         let check_secondary_locks_count = Arc::new(AtomicUsize::new(0));
@@ -1602,7 +1680,7 @@ mod tests {
         lock.lock_ttl = 100;
         lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
 
-        let live_locks = resolve_locks_with_options(
+        let resolve_result = resolve_locks_with_options(
             vec![lock],
             Timestamp::default(),
             client,
@@ -1611,7 +1689,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(live_locks.is_empty());
+        assert!(resolve_result.live_locks.is_empty());
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
     }
@@ -1996,7 +2074,7 @@ mod tests {
         lock_2.lock_type = kvrpcpb::Op::PessimisticLock as i32;
         lock_2.txn_size = 16;
 
-        let live_locks = resolve_locks_with_options(
+        let resolve_result = resolve_locks_with_options(
             vec![lock_1, lock_2],
             Timestamp::default(),
             client,
@@ -2005,7 +2083,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(live_locks.is_empty());
+        assert!(resolve_result.live_locks.is_empty());
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
@@ -2068,7 +2146,7 @@ mod tests {
         prewrite_lock.lock_type = kvrpcpb::Op::Put as i32;
         prewrite_lock.txn_size = 16;
 
-        let live_locks = resolve_locks_with_options(
+        let resolve_result = resolve_locks_with_options(
             vec![pessimistic_lock, prewrite_lock],
             Timestamp::default(),
             client,
@@ -2077,7 +2155,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(live_locks.is_empty());
+        assert!(resolve_result.live_locks.is_empty());
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
@@ -2136,7 +2214,7 @@ mod tests {
         lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
         lock.txn_size = 16;
 
-        let live_locks = resolve_locks_with_options(
+        let resolve_result = resolve_locks_with_options(
             vec![lock],
             Timestamp::default(),
             client,
@@ -2145,7 +2223,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(live_locks.is_empty());
+        assert!(resolve_result.live_locks.is_empty());
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 2);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
@@ -2292,7 +2370,7 @@ mod tests {
         lock.lock_ttl = 100;
         lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
 
-        let live_locks = resolve_locks_with_options(
+        let resolve_result = resolve_locks_with_options(
             vec![lock],
             Timestamp::default(),
             client,
@@ -2301,7 +2379,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(live_locks.is_empty());
+        assert!(resolve_result.live_locks.is_empty());
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 0);
     }
 

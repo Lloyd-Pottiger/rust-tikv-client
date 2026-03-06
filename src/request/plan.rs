@@ -2,6 +2,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
@@ -820,20 +821,28 @@ where
                 }
             }
 
-            let live_locks = resolve_locks_with_options(
-                locks,
-                self.timestamp.clone(),
-                self.pd_client.clone(),
-                self.keyspace,
-                self.pessimistic_region_resolve,
-            )
-            .await?;
+            let resolve_result: crate::transaction::ResolveLocksResult =
+                resolve_locks_with_options(
+                    locks,
+                    self.timestamp.clone(),
+                    self.pd_client.clone(),
+                    self.keyspace,
+                    self.pessimistic_region_resolve,
+                )
+                .await?;
+            let ms_before_txn_expired = resolve_result.ms_before_txn_expired;
+            let live_locks = resolve_result.live_locks;
             if live_locks.is_empty() {
                 result = plan.execute().await?;
             } else {
                 match backoff.next_delay_duration() {
                     None => return Err(Error::ResolveLockError(live_locks)),
                     Some(delay_duration) => {
+                        let delay_duration = if ms_before_txn_expired > 0 {
+                            delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64))
+                        } else {
+                            delay_duration
+                        };
                         sleep(delay_duration).await;
                         result = plan.execute().await?;
                     }
