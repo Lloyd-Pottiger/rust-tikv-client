@@ -600,15 +600,60 @@ impl LockResolver {
         store: RegionStore,
         txn_infos: Vec<TxnInfo>,
     ) -> Result<RegionVerId> {
-        let ver_id = store.region_with_leader.ver_id();
-        let request = requests::new_batch_resolve_lock_request(txn_infos.clone());
-        let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
-            .single_region_with_store(store.clone())
-            .await?
-            .extract_error()
-            .plan();
-        let _ = plan.execute().await?;
-        Ok(ver_id)
+        let mut backoff = DEFAULT_REGION_BACKOFF;
+        loop {
+            let ver_id = store.region_with_leader.ver_id();
+            let request = requests::new_batch_resolve_lock_request(txn_infos.clone());
+            let plan_builder =
+                match crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
+                    .single_region_with_store(store.clone())
+                    .await
+                {
+                    Ok(plan_builder) => plan_builder,
+                    Err(Error::LeaderNotFound { region }) => {
+                        pd_client.invalidate_region_cache(region.clone()).await;
+                        match backoff.next_delay_duration() {
+                            Some(duration) => {
+                                sleep(duration).await;
+                                continue;
+                            }
+                            None => return Err(Error::LeaderNotFound { region }),
+                        }
+                    }
+                    Err(err) => return Err(err),
+                };
+            let plan = plan_builder.extract_error().plan();
+            match plan.execute().await {
+                Ok(_) => return Ok(ver_id),
+                Err(Error::ExtractedErrors(mut errors)) => match errors.pop() {
+                    Some(Error::RegionError(e)) => match backoff.next_delay_duration() {
+                        Some(duration) => {
+                            let region_error_resolved =
+                                handle_region_error(pd_client.clone(), *e, store.clone()).await?;
+                            if !region_error_resolved {
+                                sleep(duration).await;
+                            }
+                            continue;
+                        }
+                        None => return Err(Error::RegionError(e)),
+                    },
+                    Some(err) => return Err(err),
+                    None => unreachable!(),
+                },
+                Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
+                    Some(duration) => {
+                        pd_client.invalidate_region_cache(ver_id.clone()).await;
+                        if let Ok(store_id) = store.region_with_leader.get_store_id() {
+                            pd_client.invalidate_store_cache(store_id).await;
+                        }
+                        sleep(duration).await;
+                        continue;
+                    }
+                    None => return Err(e),
+                },
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1316,6 +1361,61 @@ mod tests {
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(non_empty_batch_resolve_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_batch_resolve_retries_on_region_error() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let batch_resolve_attempts = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let batch_resolve_attempts_captured = batch_resolve_attempts.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 0,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    assert_eq!(req.txn_infos.len(), 1);
+                    let attempt = batch_resolve_attempts_captured.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 {
+                        let resp = kvrpcpb::ResolveLockResponse {
+                            region_error: Some(errorpb::Error::default()),
+                            ..Default::default()
+                        };
+                        return Ok(Box::new(resp) as Box<dyn Any>);
+                    }
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let store = client
+            .clone()
+            .store_for_key(&lock.key.clone().into())
+            .await
+            .unwrap();
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        lock_resolver
+            .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
+            .await
+            .unwrap();
+
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(batch_resolve_attempts.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
