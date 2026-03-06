@@ -1756,6 +1756,13 @@ impl<PdC: PdClient> Committer<PdC> {
             if let TransactionKind::Pessimistic(for_update_ts) = &self.options.kind {
                 min_commit_ts = min_commit_ts.max(for_update_ts.version().saturating_add(1));
             }
+
+            // Match client-go's default (linearizable) behavior: when using async-commit or 1PC,
+            // seed `min_commit_ts` from a fresh PD TSO so the final commit TS is guaranteed to be
+            // newer than any existing reader snapshot TS.
+            let latest_ts = self.rpc.clone().get_timestamp().await?;
+            min_commit_ts = min_commit_ts.max(latest_ts.version().saturating_add(1));
+
             request.min_commit_ts = min_commit_ts;
 
             let current_ts = self
@@ -3291,7 +3298,7 @@ mod tests {
         assert_eq!(commit_result.version(), commit_ts_version);
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
         assert_eq!(commit_count.load(Ordering::SeqCst), 1);
-        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -3375,7 +3382,7 @@ mod tests {
         assert_eq!(commit_result.version(), commit_ts_version);
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
         assert_eq!(commit_count.load(Ordering::SeqCst), 1);
-        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -3390,7 +3397,7 @@ mod tests {
             ..Default::default()
         };
         let pd_ts = Timestamp {
-            physical: 10,
+            physical: 2,
             logical: 0,
             ..Default::default()
         };
@@ -3457,11 +3464,11 @@ mod tests {
         assert_eq!(commit_result.version(), one_pc_commit_ts_version);
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
         assert_eq!(commit_count.load(Ordering::SeqCst), 0);
-        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn test_committer_async_commit_success_uses_min_commit_ts_without_pd_tso() {
+    async fn test_committer_async_commit_success_uses_min_commit_ts() {
         let prewrite_count = Arc::new(AtomicUsize::new(0));
         let commit_count = Arc::new(AtomicUsize::new(0));
         let timestamp_calls = Arc::new(AtomicUsize::new(0));
@@ -3473,7 +3480,7 @@ mod tests {
             ..Default::default()
         };
         let pd_ts = Timestamp {
-            physical: 10,
+            physical: 2,
             logical: 0,
             ..Default::default()
         };
@@ -3545,7 +3552,7 @@ mod tests {
             .expect("expected commit_ts");
         assert_eq!(commit_result.version(), async_commit_ts_version);
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
-        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 1);
 
         tokio::time::timeout(Duration::from_secs(1), commit_notify.notified())
             .await
