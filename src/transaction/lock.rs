@@ -76,7 +76,13 @@ fn select_check_txn_status_error(mut errors: Vec<Error>) -> Error {
         return errors.swap_remove(index);
     }
 
-    errors.pop().unwrap_or_else(|| unreachable!())
+    errors
+        .pop()
+        .unwrap_or_else(|| empty_extracted_errors("check_txn_status"))
+}
+
+fn empty_extracted_errors(operation: &str) -> Error {
+    Error::StringError(format!("{operation} returned empty extracted errors"))
 }
 
 enum TxnStatusFromLock {
@@ -330,7 +336,7 @@ async fn resolve_lock_with_retry(
                         return Err(Error::KeyError(key_err));
                     }
                     Some(e) => return Err(e),
-                    None => unreachable!(),
+                    None => return Err(empty_extracted_errors("resolve_lock")),
                 }
             }
             Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
@@ -440,7 +446,7 @@ async fn rollback_pessimistic_lock_with_retry(
                     return Err(Error::KeyError(key_err));
                 }
                 Some(err) => return Err(err),
-                None => unreachable!(),
+                None => return Err(empty_extracted_errors("pessimistic_rollback")),
             },
             Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
                 Some(duration) => {
@@ -808,7 +814,7 @@ impl LockResolver {
                         None => return Err(Error::RegionError(e)),
                     },
                     Some(err) => return Err(err),
-                    None => unreachable!(),
+                    None => return Err(empty_extracted_errors("batch_resolve_locks")),
                 },
                 Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
                     Some(duration) => {
@@ -947,6 +953,17 @@ mod tests {
             Error::Unimplemented,
         ]);
         assert!(matches!(selected, Error::Unimplemented));
+    }
+
+    #[test]
+    fn test_select_check_txn_status_error_handles_empty_error_list() {
+        let selected = select_check_txn_status_error(Vec::new());
+        match selected {
+            Error::StringError(message) => {
+                assert_eq!(message, "check_txn_status returned empty extracted errors");
+            }
+            other => panic!("unexpected error type: {other:?}"),
+        }
     }
 
     #[rstest::rstest]
