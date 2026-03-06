@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use fail::fail_point;
@@ -678,11 +679,50 @@ async fn rollback_pessimistic_lock_with_retry(
     }
 }
 
+const RESOLVED_CACHE_SIZE: usize = 2048;
+
+#[derive(Default)]
+struct ResolvedTxnStatusCache {
+    map: HashMap<u64, Arc<TransactionStatus>>,
+    order: VecDeque<u64>,
+}
+
+impl ResolvedTxnStatusCache {
+    fn get(&self, txn_id: u64) -> Option<Arc<TransactionStatus>> {
+        self.map.get(&txn_id).cloned()
+    }
+
+    fn remove(&mut self, txn_id: u64) {
+        if self.map.remove(&txn_id).is_some() {
+            self.order.retain(|&id| id != txn_id);
+        }
+    }
+
+    fn insert(&mut self, txn_id: u64, txn_status: Arc<TransactionStatus>) {
+        // Preserve insertion order (FIFO), matching client-go `ResolvedCacheSize` behavior.
+        if self.map.contains_key(&txn_id) {
+            self.map.insert(txn_id, txn_status);
+            return;
+        }
+
+        if self.map.len() >= RESOLVED_CACHE_SIZE {
+            while let Some(evict) = self.order.pop_front() {
+                if self.map.remove(&evict).is_some() {
+                    break;
+                }
+            }
+        }
+
+        self.order.push_back(txn_id);
+        self.map.insert(txn_id, txn_status);
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct ResolveLocksContext {
     // Record the status of each transaction.
-    pub(crate) resolved: Arc<RwLock<HashMap<u64, Arc<TransactionStatus>>>>,
-    pub(crate) clean_regions: Arc<RwLock<HashMap<u64, HashSet<RegionVerId>>>>,
+    resolved: Arc<RwLock<ResolvedTxnStatusCache>>,
+    clean_regions: Arc<RwLock<HashMap<u64, HashSet<RegionVerId>>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -702,7 +742,7 @@ impl Default for ResolveLocksOptions {
 
 impl ResolveLocksContext {
     pub async fn get_resolved(&self, txn_id: u64) -> Option<Arc<TransactionStatus>> {
-        self.resolved.read().await.get(&txn_id).cloned()
+        self.resolved.read().await.get(txn_id)
     }
 
     pub async fn save_resolved(&mut self, txn_id: u64, txn_status: Arc<TransactionStatus>) {
@@ -1135,7 +1175,7 @@ impl LockResolver {
                             )
                             .await?;
                         if secondary_status.fallback_2pc {
-                            self.ctx.resolved.write().await.remove(&lock.lock_version);
+                            self.ctx.resolved.write().await.remove(lock.lock_version);
                             force_sync_commit = true;
                             continue;
                         }
@@ -1231,6 +1271,27 @@ mod tests {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::errorpb;
+
+    #[tokio::test]
+    async fn test_resolve_locks_context_resolved_cache_is_bounded_fifo() {
+        let mut ctx = ResolveLocksContext::default();
+        let status = Arc::new(TransactionStatus {
+            kind: TransactionStatusKind::RolledBack,
+            action: kvrpcpb::Action::NoAction,
+            is_expired: false,
+        });
+
+        for txn_id in 0..(RESOLVED_CACHE_SIZE as u64 + 1) {
+            ctx.save_resolved(txn_id, status.clone()).await;
+        }
+
+        assert!(
+            ctx.get_resolved(0).await.is_none(),
+            "oldest entry should be evicted once cache exceeds RESOLVED_CACHE_SIZE"
+        );
+        assert!(ctx.get_resolved(1).await.is_some());
+        assert!(ctx.get_resolved(RESOLVED_CACHE_SIZE as u64).await.is_some());
+    }
 
     struct TimestampedPdClient {
         inner: Arc<MockPdClient>,
