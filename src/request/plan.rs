@@ -70,17 +70,22 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
 
     async fn execute(&self) -> Result<Self::Result> {
         let stats = tikv_stats(self.request.label());
-        let result = self
-            .kv_client
-            .as_ref()
-            .expect("Unreachable: kv_client has not been initialised in Dispatch")
-            .dispatch(&self.request)
-            .await;
-        let result = stats.done(result);
-        result.map(|r| {
-            *r.downcast()
-                .expect("Downcast failed: request and response type mismatch")
-        })
+        let result = match self.kv_client.as_ref() {
+            Some(kv_client) => kv_client.dispatch(&self.request).await.and_then(|r| {
+                r.downcast::<Req::Response>()
+                    .map(|r| *r)
+                    .map_err(|_| Error::InternalError {
+                        message: format!(
+                            "downcast failed: request and response type mismatch, expected {}",
+                            std::any::type_name::<Req::Response>()
+                        ),
+                    })
+            }),
+            None => Err(Error::InternalError {
+                message: "kv_client has not been initialised in Dispatch".to_owned(),
+            }),
+        };
+        stats.done(result)
     }
 }
 
@@ -1401,5 +1406,39 @@ mod test {
 
         let resolved = handle_region_error(pd_client, err, store).await.unwrap();
         assert!(resolved);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_execute_missing_kv_client_returns_error() {
+        let plan = Dispatch {
+            request: kvrpcpb::GetRequest::default(),
+            kv_client: None,
+        };
+
+        let err = plan.execute().await.unwrap_err();
+        match err {
+            Error::InternalError { message } => {
+                assert!(message.contains("kv_client has not been initialised in Dispatch"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_execute_downcast_failure_returns_error() {
+        let kv_client: Arc<dyn KvClient + Send + Sync> =
+            Arc::new(MockKvClient::with_dispatch_hook(|_| Ok(Box::new(()))));
+        let plan = Dispatch {
+            request: kvrpcpb::GetRequest::default(),
+            kv_client: Some(kv_client),
+        };
+
+        let err = plan.execute().await.unwrap_err();
+        match err {
+            Error::InternalError { message } => {
+                assert!(message.contains("downcast failed"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
