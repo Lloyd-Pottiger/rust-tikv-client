@@ -31,7 +31,7 @@ use crate::store::HasRegionErrors;
 use crate::store::KvClient;
 use crate::store::RegionStore;
 use crate::store::{HasKeyErrors, Store};
-use crate::transaction::resolve_locks;
+use crate::transaction::resolve_locks_with_options;
 use crate::transaction::HasLocks;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
@@ -771,6 +771,7 @@ pub struct ResolveLock<P: Plan, PdC: PdClient> {
     pub pd_client: Arc<PdC>,
     pub backoff: Backoff,
     pub keyspace: Keyspace,
+    pub pessimistic_region_resolve: bool,
 }
 
 impl<P: Plan, PdC: PdClient> Clone for ResolveLock<P, PdC> {
@@ -781,6 +782,7 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLock<P, PdC> {
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
             keyspace: self.keyspace,
+            pessimistic_region_resolve: self.pessimistic_region_resolve,
         }
     }
 }
@@ -818,11 +820,12 @@ where
                 }
             }
 
-            let live_locks = resolve_locks(
+            let live_locks = resolve_locks_with_options(
                 locks,
                 self.timestamp.clone(),
                 self.pd_client.clone(),
                 self.keyspace,
+                self.pessimistic_region_resolve,
             )
             .await?;
             if live_locks.is_empty() {
@@ -1166,6 +1169,7 @@ mod test {
                 backoff: Backoff::no_backoff(),
                 pd_client: Arc::new(MockPdClient::default()),
                 keyspace: Keyspace::Disable,
+                pessimistic_region_resolve: false,
             },
             pd_client: Arc::new(MockPdClient::default()),
             backoff: Backoff::no_backoff(),

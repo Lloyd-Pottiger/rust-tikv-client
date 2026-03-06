@@ -1029,10 +1029,11 @@ impl<PdC: PdClient> Transaction<PdC> {
             need_value,
         );
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .resolve_lock(
+            .resolve_lock_with_pessimistic_region(
                 self.timestamp.clone(),
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
+                true,
             )
             .preserve_shard()
             .retry_multi_region_preserve_results(self.options.retry_options.region_backoff.clone())
@@ -1741,10 +1742,11 @@ impl<PdC: PdClient> Committer<PdC> {
         // FIXME set max_commit_ts and min_commit_ts
 
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .resolve_lock(
+            .resolve_lock_with_pessimistic_region(
                 self.start_version.clone(),
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
+                true,
             )
             .retry_multi_region(self.options.retry_options.region_backoff.clone())
             .merge(CollectError)

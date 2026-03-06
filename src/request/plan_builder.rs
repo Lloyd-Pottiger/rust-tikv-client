@@ -82,6 +82,20 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         P: Shardable,
         P::Result: HasLocks,
     {
+        self.resolve_lock_with_pessimistic_region(timestamp, backoff, keyspace, false)
+    }
+
+    pub fn resolve_lock_with_pessimistic_region(
+        self,
+        timestamp: Timestamp,
+        backoff: Backoff,
+        keyspace: Keyspace,
+        pessimistic_region_resolve: bool,
+    ) -> PlanBuilder<PdC, ResolveLock<P, PdC>, Ph>
+    where
+        P: Shardable,
+        P::Result: HasLocks,
+    {
         PlanBuilder {
             pd_client: self.pd_client.clone(),
             plan: ResolveLock {
@@ -90,6 +104,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 backoff,
                 pd_client: self.pd_client,
                 keyspace,
+                pessimistic_region_resolve,
             },
             phantom: PhantomData,
         }
