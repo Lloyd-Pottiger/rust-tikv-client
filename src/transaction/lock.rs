@@ -883,6 +883,7 @@ impl LockResolver {
             current_ts
         };
 
+        let mut force_sync_commit = force_sync_commit;
         let mut rollback_if_not_exist = false;
         loop {
             match self
@@ -900,7 +901,60 @@ impl LockResolver {
                 )
                 .await
             {
-                Ok(status) => return Ok(TxnStatusFromLock::Status(status)),
+                Ok(status) => {
+                    let expired_async_commit_primary = match &status.kind {
+                        TransactionStatusKind::Locked(_, primary_lock)
+                            if primary_lock.use_async_commit
+                                && status.is_expired
+                                && !force_sync_commit =>
+                        {
+                            Some(primary_lock.clone())
+                        }
+                        _ => None,
+                    };
+
+                    // Match client-go `resolve`: expired async-commit locks must be
+                    // determined via secondary checks (or force-sync fallback), not
+                    // returned as live locks indefinitely.
+                    if let Some(primary_lock) = expired_async_commit_primary {
+                        let secondary_status = self
+                            .check_all_secondaries(
+                                pd_client.clone(),
+                                keyspace,
+                                primary_lock.secondaries.clone(),
+                                lock.lock_version,
+                                primary_lock.min_commit_ts,
+                            )
+                            .await?;
+                        if secondary_status.fallback_2pc {
+                            force_sync_commit = true;
+                            continue;
+                        }
+
+                        let commit_version = secondary_status
+                            .commit_ts
+                            .as_ref()
+                            .map_or(secondary_status.min_commit_ts, |ts| ts.version());
+                        let mut resolved_status = status.as_ref().clone();
+                        resolved_status.kind = if commit_version == 0 {
+                            TransactionStatusKind::RolledBack
+                        } else {
+                            TransactionStatusKind::Committed(Timestamp::from_version(
+                                commit_version,
+                            ))
+                        };
+                        resolved_status.is_expired = false;
+                        let resolved_status = Arc::new(resolved_status);
+                        if resolved_status.is_cacheable() {
+                            self.ctx
+                                .save_resolved(lock.lock_version, resolved_status.clone())
+                                .await;
+                        }
+                        return Ok(TxnStatusFromLock::Status(resolved_status));
+                    }
+
+                    return Ok(TxnStatusFromLock::Status(status));
+                }
                 Err(Error::TxnNotFound(txn_not_found)) => {
                     let current = pd_client.clone().get_timestamp().await?;
                     if lock_until_expired_ms(lock.lock_version, lock.lock_ttl, current) <= 0 {
@@ -958,7 +1012,9 @@ mod tests {
     use std::any::Any;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
+    use async_trait::async_trait;
     use fail::FailScenario;
     use serial_test::serial;
 
@@ -966,6 +1022,78 @@ mod tests {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::errorpb;
+
+    struct TimestampedPdClient {
+        inner: Arc<MockPdClient>,
+        timestamp: Timestamp,
+    }
+
+    impl TimestampedPdClient {
+        fn new(inner: Arc<MockPdClient>, timestamp: Timestamp) -> Self {
+            Self { inner, timestamp }
+        }
+    }
+
+    #[async_trait]
+    impl PdClient for TimestampedPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            region: crate::region::RegionWithLeader,
+        ) -> Result<RegionStore> {
+            self.inner.clone().map_region_to_store(region).await
+        }
+
+        async fn region_for_key(
+            &self,
+            key: &crate::Key,
+        ) -> Result<crate::region::RegionWithLeader> {
+            self.inner.region_for_key(key).await
+        }
+
+        async fn region_for_id(
+            &self,
+            id: crate::region::RegionId,
+        ) -> Result<crate::region::RegionWithLeader> {
+            self.inner.region_for_id(id).await
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Ok(self.timestamp.clone())
+        }
+
+        async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<bool> {
+            self.inner.clone().update_safepoint(safepoint).await
+        }
+
+        async fn load_keyspace(
+            &self,
+            keyspace: &str,
+        ) -> Result<crate::proto::keyspacepb::KeyspaceMeta> {
+            self.inner.load_keyspace(keyspace).await
+        }
+
+        async fn all_stores(&self) -> Result<Vec<crate::store::Store>> {
+            self.inner.all_stores().await
+        }
+
+        async fn update_leader(
+            &self,
+            ver_id: crate::region::RegionVerId,
+            leader: crate::proto::metapb::Peer,
+        ) -> Result<()> {
+            self.inner.update_leader(ver_id, leader).await
+        }
+
+        async fn invalidate_region_cache(&self, ver_id: crate::region::RegionVerId) {
+            self.inner.invalidate_region_cache(ver_id).await
+        }
+
+        async fn invalidate_store_cache(&self, store_id: crate::region::StoreId) {
+            self.inner.invalidate_store_cache(store_id).await
+        }
+    }
 
     #[test]
     fn test_select_check_txn_status_error_prefers_key_error() {
@@ -1094,6 +1222,84 @@ mod tests {
 
         assert!(live_locks.is_empty());
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_expired_async_commit_lock_checks_secondaries() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let check_secondary_locks_count = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let check_secondary_locks_count_captured = check_secondary_locks_count.clone();
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+        let base_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    assert!(!req.force_sync_commit);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        lock_ttl: 1,
+                        lock_info: Some(kvrpcpb::LockInfo {
+                            lock_version: 7,
+                            use_async_commit: true,
+                            min_commit_ts: 150,
+                            secondaries: vec![vec![3]],
+                            ..Default::default()
+                        }),
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckSecondaryLocksRequest>() {
+                    check_secondary_locks_count_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.keys, vec![vec![3]]);
+                    let resp = kvrpcpb::CheckSecondaryLocksResponse {
+                        commit_ts: 200,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.commit_version, 200);
+                    assert!(
+                        req.keys.is_empty(),
+                        "non-lite resolve should not send key list"
+                    );
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+        let client = Arc::new(TimestampedPdClient::new(
+            base_client,
+            Timestamp {
+                physical: 100,
+                logical: 0,
+                ..Default::default()
+            },
+        ));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.txn_size = 20;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let live_locks = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
+            .await
+            .unwrap();
+
+        assert!(live_locks.is_empty());
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(check_secondary_locks_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
     }
 
