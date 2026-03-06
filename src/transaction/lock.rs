@@ -111,6 +111,15 @@ pub(crate) struct ResolveLocksForReadResult {
 struct ReadLockTrackerState {
     resolved_locks: HashSet<u64>,
     committed_locks: HashSet<u64>,
+    async_cleanup_tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for ReadLockTrackerState {
+    fn drop(&mut self) {
+        for task in &self.async_cleanup_tasks {
+            task.abort();
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -134,6 +143,14 @@ impl ReadLockTracker {
         let mut state = self.inner.write().await;
         state.resolved_locks.extend(resolved_locks);
         state.committed_locks.extend(committed_locks);
+    }
+
+    pub(crate) async fn track_cleanup_task(&self, task: tokio::task::JoinHandle<()>) {
+        let mut state = self.inner.write().await;
+        state
+            .async_cleanup_tasks
+            .retain(|existing| !existing.is_finished());
+        state.async_cleanup_tasks.push(task);
     }
 }
 
@@ -342,6 +359,7 @@ pub(crate) async fn resolve_locks_for_read(
     timestamp: Timestamp,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
+    lock_tracker: ReadLockTracker,
 ) -> Result<ResolveLocksForReadResult> {
     const RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
 
@@ -451,7 +469,7 @@ pub(crate) async fn resolve_locks_for_read(
         let start_version = lock.lock_version;
         let is_txn_file = lock.is_txn_file;
         let pd_client = pd_client.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             if let Err(err) = resolve_lock_with_retry(
                 &key,
                 start_version,
@@ -467,6 +485,7 @@ pub(crate) async fn resolve_locks_for_read(
                 warn!("async resolve_lock_for_read failed: {err}");
             }
         });
+        lock_tracker.track_cleanup_task(task).await;
     }
 
     Ok(ResolveLocksForReadResult {

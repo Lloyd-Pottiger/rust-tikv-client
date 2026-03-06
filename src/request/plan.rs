@@ -928,6 +928,7 @@ where
                     self.timestamp.clone(),
                     self.pd_client.clone(),
                     self.keyspace,
+                    self.lock_tracker.clone(),
                 )
                 .await?;
 
