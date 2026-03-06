@@ -796,7 +796,7 @@ impl Process<kvrpcpb::CheckTxnStatusResponse> for DefaultProcessor {
     type Out = TransactionStatus;
 
     fn process(&self, input: Result<kvrpcpb::CheckTxnStatusResponse>) -> Result<Self::Out> {
-        Ok(input?.into())
+        input?.try_into()
     }
 }
 
@@ -807,13 +807,25 @@ pub struct TransactionStatus {
     pub is_expired: bool, // Available only when kind is Locked.
 }
 
-impl From<kvrpcpb::CheckTxnStatusResponse> for TransactionStatus {
-    fn from(mut resp: kvrpcpb::CheckTxnStatusResponse) -> TransactionStatus {
-        TransactionStatus {
-            action: Action::try_from(resp.action).unwrap(),
-            kind: (resp.commit_version, resp.lock_ttl, resp.lock_info.take()).into(),
+impl TryFrom<kvrpcpb::CheckTxnStatusResponse> for TransactionStatus {
+    type Error = crate::common::Error;
+
+    fn try_from(mut resp: kvrpcpb::CheckTxnStatusResponse) -> Result<Self> {
+        let action = Action::try_from(resp.action).map_err(|value| {
+            crate::common::Error::StringError(format!(
+                "check_txn_status returned unknown action value {value}"
+            ))
+        })?;
+        let kind = transaction_status_kind_from_parts(
+            resp.commit_version,
+            resp.lock_ttl,
+            resp.lock_info.take(),
+        )?;
+        Ok(TransactionStatus {
+            action,
+            kind,
             is_expired: false,
-        }
+        })
     }
 }
 
@@ -858,14 +870,19 @@ impl TransactionStatus {
     }
 }
 
-impl From<(u64, u64, Option<kvrpcpb::LockInfo>)> for TransactionStatusKind {
-    fn from((ts, ttl, info): (u64, u64, Option<kvrpcpb::LockInfo>)) -> TransactionStatusKind {
-        match (ts, ttl, info) {
-            (0, 0, None) => TransactionStatusKind::RolledBack,
-            (ts, 0, None) => TransactionStatusKind::Committed(Timestamp::from_version(ts)),
-            (0, ttl, Some(info)) => TransactionStatusKind::Locked(ttl, info),
-            _ => unreachable!(),
-        }
+fn transaction_status_kind_from_parts(
+    commit_version: u64,
+    lock_ttl: u64,
+    lock_info: Option<kvrpcpb::LockInfo>,
+) -> Result<TransactionStatusKind> {
+    match (commit_version, lock_ttl, lock_info) {
+        (0, 0, None) => Ok(TransactionStatusKind::RolledBack),
+        (ts, 0, None) if ts > 0 => Ok(TransactionStatusKind::Committed(Timestamp::from_version(ts))),
+        (0, ttl, Some(info)) if ttl > 0 => Ok(TransactionStatusKind::Locked(ttl, info)),
+        (ts, ttl, info) => Err(crate::common::Error::StringError(format!(
+            "invalid check_txn_status response shape: commit_version={ts}, lock_ttl={ttl}, has_lock_info={}",
+            info.is_some()
+        ))),
     }
 }
 
@@ -1023,9 +1040,46 @@ mod tests {
     use crate::proto::kvrpcpb;
     use crate::request::plan::Merge;
     use crate::request::CollectWithShard;
+    use crate::request::Process;
     use crate::request::ResponseWithShard;
     use crate::request::Shardable;
     use crate::KvPair;
+
+    #[test]
+    fn test_process_check_txn_status_rejects_unknown_action_value() {
+        let processor = super::DefaultProcessor;
+        let err = processor
+            .process(Ok(kvrpcpb::CheckTxnStatusResponse {
+                action: i32::MAX,
+                ..Default::default()
+            }))
+            .expect_err("unexpected action value should not panic");
+        match err {
+            Error::StringError(message) => {
+                assert!(message.contains("unknown action value"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_process_check_txn_status_rejects_invalid_status_shape() {
+        let processor = super::DefaultProcessor;
+        let err = processor
+            .process(Ok(kvrpcpb::CheckTxnStatusResponse {
+                action: kvrpcpb::Action::NoAction.into(),
+                commit_version: 100,
+                lock_ttl: 1,
+                ..Default::default()
+            }))
+            .expect_err("invalid status shape should not panic");
+        match err {
+            Error::StringError(message) => {
+                assert!(message.contains("invalid check_txn_status response shape"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 
     #[test]
     fn test_merge_check_secondary_locks_rejects_commit_ts_mismatch() {
