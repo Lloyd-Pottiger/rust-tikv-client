@@ -1476,12 +1476,17 @@ impl TransactionOptions {
     /// Enable stale reads for read-only snapshots.
     ///
     /// When enabled, read requests will set `kvrpcpb::Context.stale_read = true`.
+    /// If replica read routing is still set to `ReplicaReadType::Leader`, this also switches it to
+    /// `ReplicaReadType::Mixed`, matching client-go's `EnableStaleWithMixedReplicaRead` behavior.
     ///
     /// This option is only effective for read-only snapshots created via
     /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
     #[must_use]
     pub fn stale_read(mut self) -> TransactionOptions {
         self.stale_read = true;
+        if self.replica_read == ReplicaReadType::Leader {
+            self.replica_read = ReplicaReadType::Mixed;
+        }
         self
     }
 
@@ -2797,6 +2802,47 @@ mod tests {
         let key: Key = vec![0].into();
         let _ = snapshot.get(key).await.unwrap();
 
+        assert!(!replica_read.load(Ordering::SeqCst));
+        assert!(stale_read.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_stale_read_defaults_to_mixed_replica_routing() {
+        let store_id = Arc::new(AtomicU64::new(0));
+        let replica_read = Arc::new(AtomicBool::new(true));
+        let stale_read = Arc::new(AtomicBool::new(false));
+
+        let store_id_cloned = store_id.clone();
+        let replica_read_cloned = replica_read.clone();
+        let stale_read_cloned = stale_read.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+
+                store_id_cloned.store(peer.store_id, Ordering::SeqCst);
+                replica_read_cloned.store(ctx.replica_read, Ordering::SeqCst);
+                stale_read_cloned.store(ctx.stale_read, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .stale_read(),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(store_id.load(Ordering::SeqCst), 51);
         assert!(!replica_read.load(Ordering::SeqCst));
         assert!(stale_read.load(Ordering::SeqCst));
     }
