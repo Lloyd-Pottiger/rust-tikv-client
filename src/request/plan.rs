@@ -536,24 +536,21 @@ pub(crate) async fn on_region_epoch_not_match<PdC: PdClient>(
         return Ok(true);
     }
 
+    let current_conf_ver = ver_id.conf_ver;
+    let current_version = ver_id.ver;
     for r in error.current_regions {
         if r.id == region_store.region_with_leader.id() {
-            let region_epoch = r.region_epoch.unwrap();
+            let Some(region_epoch) = r.region_epoch else {
+                break;
+            };
             let returned_conf_ver = region_epoch.conf_ver;
             let returned_version = region_epoch.version;
-            let current_region_epoch = region_store
-                .region_with_leader
-                .region
-                .region_epoch
-                .clone()
-                .unwrap();
-            let current_conf_ver = current_region_epoch.conf_ver;
-            let current_version = current_region_epoch.version;
 
             // Find whether the current region is ahead of TiKV's. If so, backoff.
             if returned_conf_ver < current_conf_ver || returned_version < current_version {
                 return Ok(false);
             }
+            break;
         }
     }
     // TODO: finer grained processing
@@ -1252,6 +1249,7 @@ mod test {
     use futures::stream::{self};
 
     use super::*;
+    use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb::BatchGetResponse;
 
@@ -1358,5 +1356,50 @@ mod test {
             .expect("cleanup result should preserve key error vectors");
         assert_eq!(errors.len(), 2);
         assert!(errors.iter().any(|err| matches!(err, Error::KeyError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_on_region_epoch_not_match_missing_region_epoch_does_not_panic() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let store = RegionStore::new(
+            MockPdClient::region1(),
+            Arc::new(MockKvClient::with_dispatch_hook(|_| {
+                unreachable!("dispatch not expected")
+            })),
+        );
+
+        let mut current_region = metapb::Region::default();
+        current_region.id = store.region_with_leader.id();
+        current_region.region_epoch = None;
+
+        let mut err = EpochNotMatch::default();
+        err.current_regions = vec![current_region];
+
+        let resolved = on_region_epoch_not_match(pd_client, store, err)
+            .await
+            .unwrap();
+        assert!(!resolved);
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_not_leader_with_leader_retries_immediately() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let store = RegionStore::new(
+            MockPdClient::region1(),
+            Arc::new(MockKvClient::with_dispatch_hook(|_| {
+                unreachable!("dispatch not expected")
+            })),
+        );
+
+        let mut err = errorpb::Error::default();
+        let mut not_leader = errorpb::NotLeader::default();
+        not_leader.leader = Some(metapb::Peer {
+            store_id: 123,
+            ..Default::default()
+        });
+        err.not_leader = Some(not_leader);
+
+        let resolved = handle_region_error(pd_client, err, store).await.unwrap();
+        assert!(resolved);
     }
 }

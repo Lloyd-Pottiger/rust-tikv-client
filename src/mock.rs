@@ -274,7 +274,7 @@ impl PdClient for MockPdClient {
         _ver_id: crate::region::RegionVerId,
         _leader: metapb::Peer,
     ) -> Result<()> {
-        todo!()
+        Ok(())
     }
 
     async fn invalidate_region_cache(&self, _ver_id: crate::region::RegionVerId) {}
