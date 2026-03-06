@@ -1,5 +1,6 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -719,8 +720,8 @@ impl ResolvedTxnStatusCache {
 
     fn insert(&mut self, txn_id: u64, txn_status: Arc<TransactionStatus>) {
         // Preserve insertion order (FIFO), matching client-go `ResolvedCacheSize` behavior.
-        if self.map.contains_key(&txn_id) {
-            self.map.insert(txn_id, txn_status);
+        if let Entry::Occupied(mut entry) = self.map.entry(txn_id) {
+            entry.insert(txn_status);
             return;
         }
 
