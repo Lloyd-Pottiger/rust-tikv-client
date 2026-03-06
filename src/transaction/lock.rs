@@ -65,6 +65,20 @@ fn pessimistic_rollback_for_update_ts(lock: &kvrpcpb::LockInfo) -> u64 {
     }
 }
 
+fn select_check_txn_status_error(mut errors: Vec<Error>) -> Error {
+    // Retry plans can preserve intermediate non-key errors before the final key error.
+    // For `CheckTxnStatus`, we need key-error details (`txn_not_found` / `primary_mismatch`)
+    // whenever available, regardless of vector ordering.
+    if let Some(index) = errors
+        .iter()
+        .rposition(|err| matches!(err, Error::KeyError(_)))
+    {
+        return errors.swap_remove(index);
+    }
+
+    errors.pop().unwrap_or_else(|| unreachable!())
+}
+
 enum TxnStatusFromLock {
     Status(Arc<TransactionStatus>),
     PessimisticLockRolledBack,
@@ -689,9 +703,9 @@ impl LockResolver {
             .plan();
         let mut status: TransactionStatus = match plan.execute().await {
             Ok(status) => status,
-            Err(Error::ExtractedErrors(mut errors)) | Err(Error::MultipleKeyErrors(mut errors)) => {
-                match errors.pop() {
-                    Some(Error::KeyError(key_err)) => {
+            Err(Error::ExtractedErrors(errors)) | Err(Error::MultipleKeyErrors(errors)) => {
+                match select_check_txn_status_error(errors) {
+                    Error::KeyError(key_err) => {
                         if let Some(txn_not_found) = key_err.txn_not_found {
                             return Err(Error::TxnNotFound(txn_not_found));
                         }
@@ -699,8 +713,7 @@ impl LockResolver {
                         // perform a pessimistic rollback when this error is `primary_mismatch`.
                         return Err(Error::KeyError(key_err));
                     }
-                    Some(err) => return Err(err),
-                    None => unreachable!(),
+                    err => return Err(err),
                 }
             }
             Err(err) => return Err(err),
@@ -899,6 +912,24 @@ mod tests {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::errorpb;
+
+    #[test]
+    fn test_select_check_txn_status_error_prefers_key_error() {
+        let selected = select_check_txn_status_error(vec![
+            Error::KeyError(Box::new(kvrpcpb::KeyError::default())),
+            Error::RegionError(Box::new(errorpb::Error::default())),
+        ]);
+        assert!(matches!(selected, Error::KeyError(_)));
+    }
+
+    #[test]
+    fn test_select_check_txn_status_error_falls_back_to_last_non_key_error() {
+        let selected = select_check_txn_status_error(vec![
+            Error::RegionError(Box::new(errorpb::Error::default())),
+            Error::Unimplemented,
+        ]);
+        assert!(matches!(selected, Error::Unimplemented));
+    }
 
     #[rstest::rstest]
     #[case(Keyspace::Disable)]
