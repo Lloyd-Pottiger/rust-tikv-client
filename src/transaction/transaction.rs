@@ -2922,6 +2922,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_stale_read_meets_lock_disables_stale_read_and_falls_back_to_leader() {
+        let get_count = Arc::new(AtomicUsize::new(0));
+        let first_store_id = Arc::new(AtomicU64::new(0));
+        let second_store_id = Arc::new(AtomicU64::new(0));
+        let first_stale_read = Arc::new(AtomicBool::new(false));
+        let second_stale_read = Arc::new(AtomicBool::new(true));
+
+        let get_count_captured = get_count.clone();
+        let first_store_id_captured = first_store_id.clone();
+        let second_store_id_captured = second_store_id.clone();
+        let first_stale_read_captured = first_stale_read.clone();
+        let second_stale_read_captured = second_stale_read.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::GetRequest>() {
+                    let req = req
+                        .downcast_ref::<kvrpcpb::GetRequest>()
+                        .expect("expected get request");
+                    let ctx = req.context.as_ref().expect("context");
+                    let peer = ctx.peer.as_ref().expect("peer");
+
+                    let attempt = get_count_captured.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 {
+                        first_store_id_captured.store(peer.store_id, Ordering::SeqCst);
+                        first_stale_read_captured.store(ctx.stale_read, Ordering::SeqCst);
+
+                        let mut lock = kvrpcpb::LockInfo::default();
+                        lock.key = req.key.clone();
+                        lock.primary_lock = req.key.clone();
+                        lock.lock_version = 1;
+                        lock.lock_ttl = 100; // not expired under MockPdClient's Timestamp::default()
+
+                        let resp = kvrpcpb::GetResponse {
+                            error: Some(kvrpcpb::KeyError {
+                                locked: Some(lock),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        };
+                        return Ok(Box::new(resp) as Box<dyn Any>);
+                    }
+
+                    second_store_id_captured.store(peer.store_id, Ordering::SeqCst);
+                    second_stale_read_captured.store(ctx.stale_read, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>);
+                }
+
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 2,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if req.is::<kvrpcpb::ResolveLockRequest>() {
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .stale_read(),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(first_store_id.load(Ordering::SeqCst), 51);
+        assert_eq!(second_store_id.load(Ordering::SeqCst), 41);
+        assert!(first_stale_read.load(Ordering::SeqCst));
+        assert!(!second_stale_read.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn test_snapshot_not_fill_cache_propagates_to_context() {
         let not_fill_cache = Arc::new(AtomicBool::new(false));
 

@@ -920,6 +920,14 @@ where
                     let region = self.pd_client.region_for_key(&Key::from(lock_key)).await?;
                     let region_store = self.pd_client.clone().map_region_to_store(region).await?;
                     plan.apply_store(&region_store)?;
+                    if let Some(ctx) = plan.kv_context_mut() {
+                        if ctx.stale_read {
+                            // Align with client-go `DisableStaleReadMeetLock`: once a stale read
+                            // meets a lock, fall back to normal reads on the leader.
+                            ctx.stale_read = false;
+                            ctx.replica_read = false;
+                        }
+                    }
                     forced_leader = true;
                 }
             }
