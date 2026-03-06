@@ -52,7 +52,9 @@ enum TxnStatusFromLock {
 /// If a key has a lock, the latest status of the key is unknown. We need to "resolve" the lock,
 /// which means the key is finally either committed or rolled back, before we read the value of
 /// the key. We first use `CheckTxnStatus` to get the transaction's final status (committed or
-/// rolled back), then use `ResolveLock` to resolve the remaining locks in the transaction.
+/// rolled back), then resolve the remaining locks:
+/// - non-pessimistic locks are resolved by `ResolveLock`;
+/// - pessimistic locks are resolved by `PessimisticRollback`.
 pub async fn resolve_locks(
     locks: Vec<kvrpcpb::LockInfo>,
     timestamp: Timestamp,
@@ -1024,6 +1026,72 @@ mod tests {
             .unwrap();
         assert!(live_locks.is_empty());
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 0);
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_pessimistic_final_status_primary_then_secondary_rolls_back_once() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        action: kvrpcpb::Action::LockNotExistDoNothing as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    assert_eq!(req.keys, vec![vec![2]]);
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.for_update_ts, 11);
+                    pessimistic_rollback_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                if req.is::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut primary_lock = kvrpcpb::LockInfo::default();
+        primary_lock.key = vec![1];
+        primary_lock.primary_lock = vec![1];
+        primary_lock.lock_version = 7;
+        primary_lock.lock_for_update_ts = 11;
+        primary_lock.lock_ttl = 100;
+        primary_lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+
+        let mut secondary_lock = kvrpcpb::LockInfo::default();
+        secondary_lock.key = vec![2];
+        secondary_lock.primary_lock = vec![1];
+        secondary_lock.lock_version = 7;
+        secondary_lock.lock_for_update_ts = 11;
+        secondary_lock.lock_ttl = 100;
+        secondary_lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+
+        let live_locks = resolve_locks(
+            vec![primary_lock, secondary_lock],
+            Timestamp::default(),
+            client,
+            Keyspace::Disable,
+        )
+        .await
+        .unwrap();
+        assert!(live_locks.is_empty());
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
     }
 
