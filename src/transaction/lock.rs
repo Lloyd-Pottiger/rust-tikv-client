@@ -372,13 +372,14 @@ impl LockResolver {
         let mut txn_infos = HashMap::new();
         for l in locks {
             let txn_id = l.lock_version;
+            let is_pessimistic = l.lock_type == kvrpcpb::Op::PessimisticLock as i32;
             if txn_infos.contains_key(&txn_id) || self.ctx.is_region_cleaned(txn_id, &region).await
             {
                 continue;
             }
 
             // Use currentTS = math.MaxUint64 means rollback the txn, no matter the lock is expired or not!
-            let mut status = self
+            let mut status = match self
                 .check_txn_status(
                     pd_client.clone(),
                     keyspace,
@@ -388,12 +389,26 @@ impl LockResolver {
                     u64::MAX,
                     true,
                     false,
-                    l.lock_type == kvrpcpb::Op::PessimisticLock as i32,
+                    is_pessimistic,
                     l.is_txn_file,
                 )
-                .await?;
+                .await
+            {
+                Ok(status) => status,
+                Err(Error::KeyError(key_err))
+                    if is_pessimistic && key_err.primary_mismatch.is_some() =>
+                {
+                    debug!(
+                        "cleanup_locks got primary_mismatch on pessimistic lock, rollback directly; lock: {}",
+                        format_key_for_log(&l.key)
+                    );
+                    rollback_pessimistic_lock(&l, pd_client.clone(), keyspace).await?;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
 
-            if l.lock_type == kvrpcpb::Op::PessimisticLock as i32 {
+            if is_pessimistic {
                 // Match client-go `BatchResolveLocks`: pessimistic locks are cleaned by
                 // `PessimisticRollback` instead of being packed into `TxnInfo` for
                 // `BatchResolveLock`.
@@ -435,7 +450,7 @@ impl LockResolver {
                             u64::MAX,
                             true,
                             true,
-                            l.lock_type == kvrpcpb::Op::PessimisticLock as i32,
+                            is_pessimistic,
                             l.is_txn_file,
                         )
                         .await?;
@@ -1358,6 +1373,79 @@ mod tests {
             .unwrap();
 
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(non_empty_batch_resolve_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_primary_mismatch_rolls_back_pessimistic_lock() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
+        let non_empty_batch_resolve_count = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
+        let non_empty_batch_resolve_count_captured = non_empty_batch_resolve_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let mut mismatch = kvrpcpb::PrimaryMismatch::default();
+                    mismatch.lock_info = Some(kvrpcpb::LockInfo {
+                        key: vec![9],
+                        primary_lock: vec![10],
+                        lock_version: 123,
+                        lock_type: kvrpcpb::Op::PessimisticLock as i32,
+                        ..Default::default()
+                    });
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        error: Some(kvrpcpb::KeyError {
+                            primary_mismatch: Some(mismatch),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    assert_eq!(req.keys, vec![vec![1]]);
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.for_update_ts, 11);
+                    pessimistic_rollback_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    if !req.txn_infos.is_empty() {
+                        non_empty_batch_resolve_count_captured.fetch_add(1, Ordering::SeqCst);
+                    }
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_for_update_ts = 11;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+
+        let store = client
+            .clone()
+            .store_for_key(&lock.key.clone().into())
+            .await
+            .unwrap();
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        lock_resolver
+            .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
+            .await
+            .unwrap();
+
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(non_empty_batch_resolve_count.load(Ordering::SeqCst), 0);
     }
 
