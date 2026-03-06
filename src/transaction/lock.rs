@@ -927,6 +927,7 @@ impl LockResolver {
                             )
                             .await?;
                         if secondary_status.fallback_2pc {
+                            self.ctx.resolved.write().await.remove(&lock.lock_version);
                             force_sync_commit = true;
                             continue;
                         }
@@ -1299,6 +1300,92 @@ mod tests {
 
         assert!(live_locks.is_empty());
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(check_secondary_locks_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_expired_async_commit_lock_fallbacks_to_force_sync() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let check_secondary_locks_count = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let check_secondary_locks_count_captured = check_secondary_locks_count.clone();
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+        let base_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let call = check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        assert!(!req.force_sync_commit);
+                        let resp = kvrpcpb::CheckTxnStatusResponse {
+                            lock_ttl: 1,
+                            lock_info: Some(kvrpcpb::LockInfo {
+                                lock_version: 9,
+                                use_async_commit: true,
+                                min_commit_ts: 151,
+                                secondaries: vec![vec![4]],
+                                ..Default::default()
+                            }),
+                            action: kvrpcpb::Action::NoAction as i32,
+                            ..Default::default()
+                        };
+                        return Ok(Box::new(resp) as Box<dyn Any>);
+                    }
+                    assert!(req.force_sync_commit);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 250,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckSecondaryLocksRequest>() {
+                    check_secondary_locks_count_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.start_version, 9);
+                    assert_eq!(req.keys, vec![vec![4]]);
+                    let resp = kvrpcpb::CheckSecondaryLocksResponse {
+                        locks: vec![kvrpcpb::LockInfo {
+                            use_async_commit: false,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.start_version, 9);
+                    assert_eq!(req.commit_version, 250);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+        let client = Arc::new(TimestampedPdClient::new(
+            base_client,
+            Timestamp {
+                physical: 100,
+                logical: 0,
+                ..Default::default()
+            },
+        ));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 9;
+        lock.lock_ttl = 100;
+        lock.txn_size = 20;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let live_locks = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
+            .await
+            .unwrap();
+
+        assert!(live_locks.is_empty());
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 2);
         assert_eq!(check_secondary_locks_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
     }
