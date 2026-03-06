@@ -285,12 +285,26 @@ where
         replica_read: Option<ReplicaReadState>,
     ) -> Result<<Self as Plan>::Result> {
         debug!("single_shard_handler");
-        let leader_store_id = region.leader.as_ref().map(|peer| peer.store_id);
+        let region_leader = region.leader.clone();
+        let leader_store_id = region_leader.as_ref().map(|peer| peer.store_id);
+        let is_stale_read = plan
+            .kv_context_mut()
+            .map(|ctx| ctx.stale_read)
+            .unwrap_or(false);
         let current_attempts = backoff.current_attempts();
         if let Some(replica_read) = replica_read {
+            let attempt = replica_read.attempt(current_attempts);
             let read_type = replica_read.read_type;
-            if read_type.is_follower_read() {
-                let attempt = replica_read.attempt(current_attempts);
+            if is_stale_read && attempt == 1 {
+                // Align with client-go replica selector behavior:
+                // stale-read retries should fall back to normal snapshot reads on the leader.
+                if let Some(ctx) = plan.kv_context_mut() {
+                    ctx.stale_read = false;
+                }
+                if let Some(region_leader) = region_leader {
+                    region.leader = Some(region_leader);
+                }
+            } else if read_type.is_follower_read() {
                 if let Some(peer) = select_replica_read_peer(&region, read_type, attempt) {
                     region.leader = Some(peer);
                 }
@@ -511,9 +525,13 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
     } else if e.stale_command.is_some() || e.region_not_found.is_some() {
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
-    } else if e.server_is_busy.is_some() {
+    } else if e.data_is_not_ready.is_some() {
+        // Specific to stale read. The target replica is randomly selected and may not have caught up
+        // yet. Retry immediately.
+        Ok(true)
+    } else if e.server_is_busy.is_some() || e.max_timestamp_not_synced.is_some() {
         Ok(false)
-    } else if e.raft_entry_too_large.is_some() || e.max_timestamp_not_synced.is_some() {
+    } else if e.raft_entry_too_large.is_some() {
         Err(Error::RegionError(Box::new(e)))
     } else {
         // TODO: pass the logger around

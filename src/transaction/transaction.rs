@@ -3099,6 +3099,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_stale_read_data_is_not_ready_retries_on_leader_and_disables_stale_read()
+    {
+        let get_count = Arc::new(AtomicUsize::new(0));
+        let first_store_id = Arc::new(AtomicU64::new(0));
+        let second_store_id = Arc::new(AtomicU64::new(0));
+        let first_stale_read = Arc::new(AtomicBool::new(false));
+        let second_stale_read = Arc::new(AtomicBool::new(true));
+
+        let get_count_captured = get_count.clone();
+        let first_store_id_captured = first_store_id.clone();
+        let second_store_id_captured = second_store_id.clone();
+        let first_stale_read_captured = first_stale_read.clone();
+        let second_stale_read_captured = second_stale_read.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+
+                let attempt = get_count_captured.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    first_store_id_captured.store(peer.store_id, Ordering::SeqCst);
+                    first_stale_read_captured.store(ctx.stale_read, Ordering::SeqCst);
+
+                    let resp = kvrpcpb::GetResponse {
+                        region_error: Some(crate::proto::errorpb::Error {
+                            data_is_not_ready: Some(
+                                crate::proto::errorpb::DataIsNotReady::default(),
+                            ),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                second_store_id_captured.store(peer.store_id, Ordering::SeqCst);
+                second_stale_read_captured.store(ctx.stale_read, Ordering::SeqCst);
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .stale_read(),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(get_count.load(Ordering::SeqCst), 2);
+        assert_eq!(first_store_id.load(Ordering::SeqCst), 51);
+        assert_eq!(second_store_id.load(Ordering::SeqCst), 41);
+        assert!(first_stale_read.load(Ordering::SeqCst));
+        assert!(!second_stale_read.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_retries_on_max_timestamp_not_synced_region_error() {
+        let get_count = Arc::new(AtomicUsize::new(0));
+
+        let get_count_captured = get_count.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                req.downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+
+                let attempt = get_count_captured.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    let resp = kvrpcpb::GetResponse {
+                        region_error: Some(crate::proto::errorpb::Error {
+                            max_timestamp_not_synced: Some(
+                                crate::proto::errorpb::MaxTimestampNotSynced::default(),
+                            ),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(get_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn test_snapshot_not_fill_cache_propagates_to_context() {
         let not_fill_cache = Arc::new(AtomicBool::new(false));
 
