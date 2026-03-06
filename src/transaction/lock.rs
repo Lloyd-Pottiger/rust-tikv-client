@@ -56,6 +56,15 @@ fn is_shared_lock(lock_type: i32) -> bool {
     lock_type == SHARED_LOCK_TYPE
 }
 
+fn pessimistic_rollback_for_update_ts(lock: &kvrpcpb::LockInfo) -> u64 {
+    if lock.lock_for_update_ts == 0 {
+        // Match client-go behavior: lock info from mismatch paths may miss for_update_ts.
+        u64::MAX
+    } else {
+        lock.lock_for_update_ts
+    }
+}
+
 enum TxnStatusFromLock {
     Status(Arc<TransactionStatus>),
     PessimisticLockRolledBack,
@@ -154,14 +163,28 @@ pub async fn resolve_locks(
         };
 
         if let Some(commit_version) = commit_version {
+            let resolve_lite = lock.txn_size < RESOLVE_LOCK_LITE_THRESHOLD;
             // Match client-go `resolve`: pessimistic locks should be handled by
             // `PessimisticRollback`, not `ResolveLock`.
             if is_pessimistic_lock(lock.lock_type) {
-                rollback_pessimistic_lock(&lock, pd_client.clone(), keyspace).await?;
+                if resolve_lite {
+                    rollback_pessimistic_lock(&lock, pd_client.clone(), keyspace).await?;
+                } else if let Some(cleaned_region) = rollback_pessimistic_lock_with_retry(
+                    &lock,
+                    pd_client.clone(),
+                    keyspace,
+                    OPTIMISTIC_BACKOFF,
+                )
+                .await?
+                {
+                    clean_regions
+                        .entry(lock.lock_version)
+                        .or_default()
+                        .insert(cleaned_region);
+                }
                 continue;
             }
 
-            let resolve_lite = lock.txn_size < RESOLVE_LOCK_LITE_THRESHOLD;
             // The primary lock has been resolved by CheckTxnStatus already.
             if resolve_lite && lock.key == lock.primary_lock {
                 continue;
@@ -292,12 +315,7 @@ async fn rollback_pessimistic_lock(
         return Ok(());
     }
 
-    let for_update_ts = if lock.lock_for_update_ts == 0 {
-        // Match client-go behavior: lock info from mismatch paths may miss for_update_ts.
-        u64::MAX
-    } else {
-        lock.lock_for_update_ts
-    };
+    let for_update_ts = pessimistic_rollback_for_update_ts(lock);
     let request = requests::new_pessimistic_rollback_request(
         vec![lock.key.clone()],
         lock.lock_version,
@@ -309,6 +327,90 @@ async fn rollback_pessimistic_lock(
         .plan();
     let _ = plan.execute().await?;
     Ok(())
+}
+
+async fn rollback_pessimistic_lock_with_retry(
+    lock: &kvrpcpb::LockInfo,
+    pd_client: Arc<impl PdClient>,
+    keyspace: Keyspace,
+    mut backoff: Backoff,
+) -> Result<Option<RegionVerId>> {
+    // Match client-go `resolvePessimisticLock`: primary key is considered resolved by
+    // CheckTxnStatus, so no extra rollback request is needed here.
+    if lock.key == lock.primary_lock {
+        return Ok(None);
+    }
+
+    let for_update_ts = pessimistic_rollback_for_update_ts(lock);
+    loop {
+        let store = pd_client.clone().store_for_key((&lock.key).into()).await?;
+        let ver_id = store.region_with_leader.ver_id();
+        let request = requests::new_pessimistic_rollback_request(
+            Vec::new(),
+            lock.lock_version,
+            for_update_ts,
+        );
+        let plan_builder =
+            match crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
+                .single_region_with_store(store.clone())
+                .await
+            {
+                Ok(plan_builder) => plan_builder,
+                Err(Error::LeaderNotFound { region }) => {
+                    pd_client.invalidate_region_cache(region.clone()).await;
+                    match backoff.next_delay_duration() {
+                        Some(duration) => {
+                            sleep(duration).await;
+                            continue;
+                        }
+                        None => return Err(Error::LeaderNotFound { region }),
+                    }
+                }
+                Err(err) => return Err(err),
+            };
+        let plan = plan_builder.extract_error().plan();
+        match plan.execute().await {
+            Ok(_) => return Ok(Some(ver_id)),
+            Err(Error::ExtractedErrors(mut errors)) => match errors.pop() {
+                Some(Error::RegionError(e)) => match backoff.next_delay_duration() {
+                    Some(duration) => {
+                        let region_error_resolved =
+                            handle_region_error(pd_client.clone(), *e, store.clone()).await?;
+                        if !region_error_resolved {
+                            sleep(duration).await;
+                        }
+                        continue;
+                    }
+                    None => return Err(Error::RegionError(e)),
+                },
+                Some(Error::KeyError(key_err)) => {
+                    // Keyspace is not truncated here because we need full key info for logging.
+                    error!(
+                        "pessimistic_rollback error, unexpected resolve err: {:?}, lock: {{key: {}, start_version: {}, for_update_ts: {}}}",
+                        key_err,
+                        format_key_for_log(&lock.key),
+                        lock.lock_version,
+                        for_update_ts,
+                    );
+                    return Err(Error::KeyError(key_err));
+                }
+                Some(err) => return Err(err),
+                None => unreachable!(),
+            },
+            Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
+                Some(duration) => {
+                    pd_client.invalidate_region_cache(ver_id.clone()).await;
+                    if let Ok(store_id) = store.region_with_leader.get_store_id() {
+                        pd_client.invalidate_store_cache(store_id).await;
+                    }
+                    sleep(duration).await;
+                    continue;
+                }
+                None => return Err(e),
+            },
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -1301,6 +1403,75 @@ mod tests {
 
         let live_locks = resolve_locks(
             vec![primary_lock, secondary_lock],
+            Timestamp::default(),
+            client,
+            Keyspace::Disable,
+        )
+        .await
+        .unwrap();
+        assert!(live_locks.is_empty());
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_pessimistic_non_lite_rolls_back_region_once() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        action: kvrpcpb::Action::LockNotExistDoNothing as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    assert!(req.keys.is_empty());
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.for_update_ts, 11);
+                    pessimistic_rollback_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                if req.is::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock_1 = kvrpcpb::LockInfo::default();
+        lock_1.key = vec![2];
+        lock_1.primary_lock = vec![1];
+        lock_1.lock_version = 7;
+        lock_1.lock_for_update_ts = 11;
+        lock_1.lock_ttl = 100;
+        lock_1.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+        // txn_size >= RESOLVE_LOCK_LITE_THRESHOLD triggers region-level resolve.
+        lock_1.txn_size = 16;
+
+        let mut lock_2 = kvrpcpb::LockInfo::default();
+        lock_2.key = vec![3];
+        lock_2.primary_lock = vec![1];
+        lock_2.lock_version = 7;
+        lock_2.lock_for_update_ts = 11;
+        lock_2.lock_ttl = 100;
+        lock_2.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+        lock_2.txn_size = 16;
+
+        let live_locks = resolve_locks(
+            vec![lock_1, lock_2],
             Timestamp::default(),
             client,
             Keyspace::Disable,
