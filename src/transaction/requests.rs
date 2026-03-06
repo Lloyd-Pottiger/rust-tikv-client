@@ -718,6 +718,7 @@ impl Shardable for kvrpcpb::ScanLockRequest {
 
     fn apply_shard(&mut self, shard: Self::Shard) {
         self.start_key = shard.0;
+        self.end_key = shard.1;
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
@@ -1107,6 +1108,20 @@ mod tests {
     use crate::request::ResponseWithShard;
     use crate::request::Shardable;
     use crate::KvPair;
+
+    #[test]
+    fn test_scan_lock_request_apply_shard_sets_end_key() {
+        let mut req = kvrpcpb::ScanLockRequest {
+            start_key: vec![0],
+            end_key: vec![100],
+            max_version: 1,
+            limit: 10,
+            ..Default::default()
+        };
+        req.apply_shard((vec![10], vec![20]));
+        assert_eq!(req.start_key, vec![10]);
+        assert_eq!(req.end_key, vec![20]);
+    }
 
     #[test]
     fn test_process_check_txn_status_rejects_unknown_action_value() {
