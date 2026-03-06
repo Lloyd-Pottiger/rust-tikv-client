@@ -266,7 +266,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
-        unimplemented!()
+        Err(Error::Unimplemented)
     }
 
     async fn update_leader(
@@ -282,6 +282,6 @@ impl PdClient for MockPdClient {
     async fn invalidate_store_cache(&self, _store_id: crate::region::StoreId) {}
 
     async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
-        unimplemented!()
+        Err(Error::Unimplemented)
     }
 }
