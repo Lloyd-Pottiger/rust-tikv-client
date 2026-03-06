@@ -4,7 +4,6 @@ use std::cmp;
 use std::iter;
 use std::sync::Arc;
 
-use either::Either;
 use futures::stream::BoxStream;
 use futures::stream::{self};
 use futures::StreamExt;
@@ -281,9 +280,14 @@ impl Shardable for kvrpcpb::PrewriteRequest {
         pd_client: &Arc<impl PdClient>,
     ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
         let pessimistic_action_enabled = !self.pessimistic_actions.is_empty();
-        debug_assert!(
-            !pessimistic_action_enabled || self.pessimistic_actions.len() == self.mutations.len()
-        );
+        if pessimistic_action_enabled && self.pessimistic_actions.len() != self.mutations.len() {
+            return stream::iter(iter::once(Err(crate::Error::StringError(format!(
+                "prewrite request pessimistic_actions length {} does not match mutations length {}",
+                self.pessimistic_actions.len(),
+                self.mutations.len(),
+            )))))
+            .boxed();
+        }
 
         let mut expected_for_update_ts_by_index = vec![None; self.mutations.len()];
         for constraint in &self.for_update_ts_constraints {
@@ -300,8 +304,11 @@ impl Shardable for kvrpcpb::PrewriteRequest {
             .enumerate()
             .map(|(index, mutation)| PrewriteMutation {
                 key: Key::from(mutation.key.clone()),
-                pessimistic_action: pessimistic_action_enabled
-                    .then(|| self.pessimistic_actions[index]),
+                pessimistic_action: if pessimistic_action_enabled {
+                    self.pessimistic_actions.get(index).copied()
+                } else {
+                    None
+                },
                 expected_for_update_ts: expected_for_update_ts_by_index[index],
                 mutation,
             })
@@ -346,7 +353,13 @@ impl Shardable for kvrpcpb::PrewriteRequest {
                                 for (index, item) in batch.into_iter().enumerate() {
                                     mutations.push(item.mutation);
                                     if pessimistic_action_enabled {
-                                        pessimistic_actions.push(item.pessimistic_action.unwrap());
+                                        let action = item.pessimistic_action.ok_or_else(|| {
+                                            crate::Error::StringError(
+                                                "prewrite request missing pessimistic action for mutation"
+                                                    .to_owned(),
+                                            )
+                                        })?;
+                                        pessimistic_actions.push(action);
                                     }
                                     if let Some(expected_for_update_ts) =
                                         item.expected_for_update_ts
@@ -569,49 +582,81 @@ impl Merge<ResponseWithShard<kvrpcpb::PessimisticLockResponse, Vec<kvrpcpb::Muta
         if input.iter().any(Result::is_err) {
             let (success, mut errors): (Vec<_>, Vec<_>) =
                 input.into_iter().partition(Result::is_ok);
-            let first_err = errors.pop().unwrap();
+            let last_err = match errors.pop() {
+                Some(err) => match err {
+                    Ok(_) => {
+                        return Err(crate::Error::StringError(
+                            "pessimistic lock merge error partition contained Ok".to_owned(),
+                        ));
+                    }
+                    Err(err) => err,
+                },
+                None => {
+                    return Err(crate::Error::StringError(
+                        "pessimistic lock merge encountered an error but no errors were collected"
+                            .to_owned(),
+                    ));
+                }
+            };
             let success_keys = success
                 .into_iter()
-                .map(Result::unwrap)
+                .filter_map(Result::ok)
                 .flat_map(|ResponseWithShard(_resp, mutations)| {
                     mutations.into_iter().map(|m| m.key)
                 })
                 .collect();
             Err(PessimisticLockError {
-                inner: Box::new(first_err.unwrap_err()),
+                inner: Box::new(last_err),
                 success_keys,
             })
         } else {
-            Ok(input
-                .into_iter()
-                .map(Result::unwrap)
-                .flat_map(|ResponseWithShard(resp, mutations)| {
-                    let values: Vec<Vec<u8>> = resp.values;
-                    let values_len = values.len();
-                    let not_founds = resp.not_founds;
-                    let kvpairs = mutations
-                        .into_iter()
-                        .map(|m| m.key)
-                        .zip(values)
-                        .map(KvPair::from);
-                    assert_eq!(kvpairs.len(), values_len);
-                    if not_founds.is_empty() {
-                        // Legacy TiKV does not distinguish not existing key and existing key
-                        // that with empty value. We assume that key does not exist if value
-                        // is empty.
-                        Either::Left(kvpairs.filter(|kvpair| !kvpair.value().is_empty()))
-                    } else {
-                        assert_eq!(kvpairs.len(), not_founds.len());
-                        Either::Right(kvpairs.zip(not_founds).filter_map(|(kvpair, not_found)| {
-                            if not_found {
-                                None
-                            } else {
-                                Some(kvpair)
-                            }
-                        }))
-                    }
-                })
-                .collect())
+            let mut out = Vec::new();
+            for ResponseWithShard(resp, mutations) in input.into_iter().filter_map(Result::ok) {
+                let values = resp.values;
+                let not_founds = resp.not_founds;
+
+                if values.len() != mutations.len() {
+                    return Err(crate::Error::StringError(format!(
+                        "pessimistic lock response values length {} does not match mutations length {}",
+                        values.len(),
+                        mutations.len(),
+                    )));
+                }
+
+                if !not_founds.is_empty() && not_founds.len() != mutations.len() {
+                    return Err(crate::Error::StringError(format!(
+                        "pessimistic lock response not_founds length {} does not match mutations length {}",
+                        not_founds.len(),
+                        mutations.len(),
+                    )));
+                }
+
+                if not_founds.is_empty() {
+                    // Legacy TiKV does not distinguish not existing key and existing key
+                    // that with empty value. We assume that key does not exist if value
+                    // is empty.
+                    out.extend(
+                        mutations
+                            .into_iter()
+                            .map(|m| m.key)
+                            .zip(values)
+                            .filter(|(_key, value)| !value.is_empty())
+                            .map(|(key, value)| KvPair::new(key, value)),
+                    );
+                } else {
+                    out.extend(
+                        mutations
+                            .into_iter()
+                            .map(|m| m.key)
+                            .zip(values)
+                            .zip(not_founds.into_iter())
+                            .filter_map(|((key, value), not_found)| {
+                                (!not_found).then(|| KvPair::new(key, value))
+                            }),
+                    );
+                }
+            }
+            Ok(out)
         }
     }
 }
@@ -1244,6 +1289,49 @@ mod tests {
                 panic!();
             }
         }
+        {
+            let resp_values_len_mismatch = ResponseWithShard(
+                kvrpcpb::PessimisticLockResponse {
+                    values: vec![value1.to_vec(), value4.to_vec()],
+                    ..Default::default()
+                },
+                vec![kvrpcpb::Mutation {
+                    op: kvrpcpb::Op::PessimisticLock.into(),
+                    key: key1.to_vec(),
+                    ..Default::default()
+                }],
+            );
+
+            let result = merger.merge(vec![Ok(resp_values_len_mismatch)]);
+            match result.unwrap_err() {
+                Error::StringError(message) => {
+                    assert!(message.contains("values length"));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+        {
+            let resp_not_founds_len_mismatch = ResponseWithShard(
+                kvrpcpb::PessimisticLockResponse {
+                    values: vec![value1.to_vec()],
+                    not_founds: vec![true, false],
+                    ..Default::default()
+                },
+                vec![kvrpcpb::Mutation {
+                    op: kvrpcpb::Op::PessimisticLock.into(),
+                    key: key1.to_vec(),
+                    ..Default::default()
+                }],
+            );
+
+            let result = merger.merge(vec![Ok(resp_not_founds_len_mismatch)]);
+            match result.unwrap_err() {
+                Error::StringError(message) => {
+                    assert!(message.contains("not_founds length"));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -1347,5 +1435,46 @@ mod tests {
             }
         }
         assert_eq!(primary_shard_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_prewrite_request_shards_rejects_pessimistic_actions_len_mismatch() {
+        let primary = vec![1_u8];
+        let key2 = vec![2_u8];
+
+        let mutations = vec![
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: primary.clone(),
+                value: vec![0],
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: key2,
+                value: vec![0],
+                ..Default::default()
+            },
+        ];
+
+        let mut req = super::new_prewrite_request(mutations, primary, 1, 100);
+        req.pessimistic_actions =
+            vec![kvrpcpb::prewrite_request::PessimisticAction::DoPessimisticCheck.into()];
+
+        let pd_client = Arc::new(MockPdClient::default());
+        let err = req
+            .shards(&pd_client)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .expect_err("invalid pessimistic_actions length should return an error");
+
+        match err {
+            Error::StringError(message) => {
+                assert!(message.contains("pessimistic_actions length"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

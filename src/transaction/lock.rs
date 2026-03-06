@@ -1103,8 +1103,8 @@ mod tests {
     #[test]
     fn test_select_check_txn_status_error_prefers_key_error() {
         let selected = select_check_txn_status_error(vec![
-            Error::KeyError(Box::new(kvrpcpb::KeyError::default())),
-            Error::RegionError(Box::new(errorpb::Error::default())),
+            Error::KeyError(Box::default()),
+            Error::RegionError(Box::default()),
         ]);
         assert!(matches!(selected, Error::KeyError(_)));
     }
@@ -1112,7 +1112,7 @@ mod tests {
     #[test]
     fn test_select_check_txn_status_error_falls_back_to_last_non_key_error() {
         let selected = select_check_txn_status_error(vec![
-            Error::RegionError(Box::new(errorpb::Error::default())),
+            Error::RegionError(Box::default()),
             Error::Unimplemented,
         ]);
         assert!(matches!(selected, Error::Unimplemented));

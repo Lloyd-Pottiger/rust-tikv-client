@@ -1191,10 +1191,7 @@ mod test {
     #[test]
     fn test_classify_cleanup_extracted_errors_keeps_key_error() {
         let mut result = CleanupLocksResult::default();
-        classify_cleanup_extracted_errors(
-            &mut result,
-            vec![Error::KeyError(Box::new(kvrpcpb::KeyError::default()))],
-        );
+        classify_cleanup_extracted_errors(&mut result, vec![Error::KeyError(Box::default())]);
 
         assert!(result.region_error.is_none());
         let errors = result
@@ -1229,7 +1226,7 @@ mod test {
         classify_cleanup_extracted_errors(
             &mut result,
             vec![
-                Error::KeyError(Box::new(kvrpcpb::KeyError::default())),
+                Error::KeyError(Box::default()),
                 Error::RegionError(Box::new(region_error)),
             ],
         );
