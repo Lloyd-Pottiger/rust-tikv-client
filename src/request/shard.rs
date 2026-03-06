@@ -12,6 +12,7 @@ use crate::request::Dispatch;
 use crate::request::KvRequest;
 use crate::request::Plan;
 use crate::request::ResolveLock;
+use crate::request::ResolveLockForRead;
 use crate::store::RegionStore;
 use crate::store::Request;
 use crate::Result;
@@ -161,6 +162,10 @@ impl<P: Plan + Shardable> Shardable for PreserveShard<P> {
 }
 
 impl<P: Plan + Shardable, PdC: PdClient> Shardable for ResolveLock<P, PdC> {
+    impl_inner_shardable!();
+}
+
+impl<P: Plan + Shardable, PdC: PdClient> Shardable for ResolveLockForRead<P, PdC> {
     impl_inner_shardable!();
 }
 

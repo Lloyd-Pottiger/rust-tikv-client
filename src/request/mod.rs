@@ -20,6 +20,7 @@ pub use self::plan::Plan;
 pub use self::plan::Process;
 pub use self::plan::ProcessResponse;
 pub use self::plan::ResolveLock;
+pub(crate) use self::plan::ResolveLockForRead;
 pub use self::plan::ResponseWithShard;
 pub use self::plan::RetryableMultiRegion;
 pub use self::plan_builder::PlanBuilder;

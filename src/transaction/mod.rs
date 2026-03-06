@@ -10,8 +10,11 @@
 
 pub use client::Client;
 pub use client::ProtoLockInfo;
+pub(crate) use lock::resolve_locks_for_read;
 pub(crate) use lock::resolve_locks_with_options;
 pub(crate) use lock::HasLocks;
+pub(crate) use lock::ReadLockTracker;
+pub(crate) use lock::ResolveLocksForReadResult;
 pub(crate) use lock::ResolveLocksResult;
 pub use snapshot::Snapshot;
 pub use sync_client::SyncTransactionClient;

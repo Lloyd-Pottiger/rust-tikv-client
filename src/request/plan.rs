@@ -32,8 +32,10 @@ use crate::store::HasRegionErrors;
 use crate::store::KvClient;
 use crate::store::RegionStore;
 use crate::store::{HasKeyErrors, Store};
+use crate::transaction::resolve_locks_for_read;
 use crate::transaction::resolve_locks_with_options;
 use crate::transaction::HasLocks;
+use crate::transaction::ReadLockTracker;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
 use crate::util::iter::FlatMapOkIterExt;
@@ -114,6 +116,12 @@ impl<P: Plan + Shardable + HasKvContext> HasKvContext for PreserveShard<P> {
 }
 
 impl<P: Plan + HasKvContext, PdC: PdClient> HasKvContext for ResolveLock<P, PdC> {
+    fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.inner.kv_context_mut()
+    }
+}
+
+impl<P: Plan + HasKvContext, PdC: PdClient> HasKvContext for ResolveLockForRead<P, PdC> {
     fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         self.inner.kv_context_mut()
     }
@@ -846,6 +854,109 @@ where
                         sleep(delay_duration).await;
                         result = plan.execute().await?;
                     }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) struct ResolveLockForRead<P: Plan, PdC: PdClient> {
+    pub(crate) inner: P,
+    pub(crate) timestamp: Timestamp,
+    pub(crate) pd_client: Arc<PdC>,
+    pub(crate) backoff: Backoff,
+    pub(crate) keyspace: Keyspace,
+    pub(crate) lock_tracker: ReadLockTracker,
+}
+
+impl<P: Plan, PdC: PdClient> Clone for ResolveLockForRead<P, PdC> {
+    fn clone(&self) -> Self {
+        ResolveLockForRead {
+            inner: self.inner.clone(),
+            timestamp: self.timestamp.clone(),
+            pd_client: self.pd_client.clone(),
+            backoff: self.backoff.clone(),
+            keyspace: self.keyspace,
+            lock_tracker: self.lock_tracker.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl<P: Plan + Shardable + HasKvContext, PdC: PdClient> Plan for ResolveLockForRead<P, PdC>
+where
+    P::Result: HasLocks,
+{
+    type Result = P::Result;
+
+    async fn execute(&self) -> Result<Self::Result> {
+        let mut plan = self.inner.clone();
+        let mut backoff = self.backoff.clone();
+        let mut forced_leader = false;
+
+        let (resolved_locks, committed_locks) = self.lock_tracker.snapshot().await;
+        if let Some(ctx) = plan.kv_context_mut() {
+            ctx.resolved_locks = resolved_locks;
+            ctx.committed_locks = committed_locks;
+        }
+
+        let mut result = plan.execute().await?;
+        loop {
+            let locks = result.take_locks();
+            if locks.is_empty() {
+                return Ok(result);
+            }
+
+            if backoff.is_none() {
+                return Err(Error::ResolveLockError(locks));
+            }
+
+            if !forced_leader {
+                if let Some(lock_key) = locks.first().map(|lock| lock.key.clone()) {
+                    // Once we meet a lock, retrying against a follower/learner can keep seeing stale
+                    // state. Align with client-go behavior by retrying on the region leader.
+                    let region = self.pd_client.region_for_key(&Key::from(lock_key)).await?;
+                    let region_store = self.pd_client.clone().map_region_to_store(region).await?;
+                    plan.apply_store(&region_store)?;
+                    forced_leader = true;
+                }
+            }
+
+            let resolve_result: crate::transaction::ResolveLocksForReadResult =
+                resolve_locks_for_read(
+                    locks,
+                    self.timestamp.clone(),
+                    self.pd_client.clone(),
+                    self.keyspace,
+                )
+                .await?;
+
+            let ms_before_txn_expired = resolve_result.ms_before_txn_expired;
+            self.lock_tracker
+                .extend(
+                    resolve_result.resolved_locks,
+                    resolve_result.committed_locks,
+                )
+                .await;
+
+            let (resolved_locks, committed_locks) = self.lock_tracker.snapshot().await;
+            if let Some(ctx) = plan.kv_context_mut() {
+                ctx.resolved_locks = resolved_locks;
+                ctx.committed_locks = committed_locks;
+            }
+
+            if ms_before_txn_expired <= 0 {
+                result = plan.execute().await?;
+                continue;
+            }
+
+            match backoff.next_delay_duration() {
+                None => return Err(Error::ResolveLockError(resolve_result.live_locks)),
+                Some(delay_duration) => {
+                    let delay_duration =
+                        delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64));
+                    sleep(delay_duration).await;
+                    result = plan.execute().await?;
                 }
             }
         }

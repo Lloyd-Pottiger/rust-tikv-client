@@ -19,6 +19,7 @@ use crate::request::Plan;
 use crate::request::Process;
 use crate::request::ProcessResponse;
 use crate::request::ResolveLock;
+use crate::request::ResolveLockForRead;
 use crate::request::RetryableMultiRegion;
 use crate::request::Shardable;
 use crate::request::{DefaultProcessor, StoreRequest};
@@ -27,6 +28,7 @@ use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
 use crate::store::RegionStore;
 use crate::transaction::HasLocks;
+use crate::transaction::ReadLockTracker;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
 use crate::ReplicaReadType;
@@ -83,6 +85,33 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         P::Result: HasLocks,
     {
         self.resolve_lock_with_pessimistic_region(timestamp, backoff, keyspace, false)
+    }
+
+    /// If there is a lock error, then resolve the lock for read requests by updating
+    /// `kvrpcpb::Context.{resolved_locks, committed_locks}` and retrying the request.
+    pub(crate) fn resolve_lock_for_read(
+        self,
+        timestamp: Timestamp,
+        backoff: Backoff,
+        keyspace: Keyspace,
+        lock_tracker: ReadLockTracker,
+    ) -> PlanBuilder<PdC, ResolveLockForRead<P, PdC>, Ph>
+    where
+        P: Shardable + HasKvContext,
+        P::Result: HasLocks,
+    {
+        PlanBuilder {
+            pd_client: self.pd_client.clone(),
+            plan: ResolveLockForRead {
+                inner: self.plan,
+                timestamp,
+                backoff,
+                pd_client: self.pd_client,
+                keyspace,
+                lock_tracker,
+            },
+            phantom: PhantomData,
+        }
     }
 
     pub fn resolve_lock_with_pessimistic_region(
