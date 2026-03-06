@@ -1236,6 +1236,10 @@ const MAX_TTL: u64 = 20000;
 const DEFAULT_LOCK_TTL: u64 = 3000;
 /// The default heartbeat interval
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(MAX_TTL / 2);
+/// Default safe window for async commit / 1PC max-commit-ts calculation.
+///
+/// This matches the default in client-go.
+const DEFAULT_ASYNC_COMMIT_SAFE_WINDOW: Duration = Duration::from_secs(2);
 /// TiKV recommends each RPC packet should be less than around 1MB. We keep KV size of
 /// each request below 16KB.
 pub const TXN_COMMIT_BATCH_SIZE: u64 = 16 * 1024;
@@ -1687,8 +1691,14 @@ impl<PdC: PdClient> Committer<PdC> {
         }
 
         let commit_ts = if self.options.async_commit {
-            // FIXME: min_commit_ts == 0 => fallback to normal 2PC
-            min_commit_ts.unwrap()
+            match min_commit_ts {
+                Some(ts) => ts,
+                None => {
+                    return Err(Error::StringError(
+                        "invalid min_commit_ts after async-commit prewrite".to_owned(),
+                    ));
+                }
+            }
         } else {
             match self.commit_primary_with_retry().await {
                 Ok(commit_ts) => commit_ts,
@@ -1739,7 +1749,24 @@ impl<PdC: PdClient> Committer<PdC> {
             .map(|m| m.key.clone())
             .collect();
         self.options.apply_write_context(&mut request.context);
-        // FIXME set max_commit_ts and min_commit_ts
+
+        let commit_ts_may_be_calculated = self.options.async_commit || self.options.try_one_pc;
+        if commit_ts_may_be_calculated {
+            let mut min_commit_ts = self.start_version.version().saturating_add(1);
+            if let TransactionKind::Pessimistic(for_update_ts) = &self.options.kind {
+                min_commit_ts = min_commit_ts.max(for_update_ts.version().saturating_add(1));
+            }
+            request.min_commit_ts = min_commit_ts;
+
+            let current_ts = self
+                .start_version
+                .version()
+                .saturating_add(elapsed.saturating_mul(1_u64 << 18));
+            let safe_window_ms =
+                u64::try_from(DEFAULT_ASYNC_COMMIT_SAFE_WINDOW.as_millis()).unwrap_or(u64::MAX);
+            request.max_commit_ts =
+                current_ts.saturating_add(safe_window_ms.saturating_mul(1_u64 << 18));
+        }
 
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .resolve_lock_with_pessimistic_region(
@@ -1756,22 +1783,44 @@ impl<PdC: PdClient> Committer<PdC> {
 
         if self.options.try_one_pc && response.len() == 1 {
             if response[0].one_pc_commit_ts == 0 {
-                return Err(Error::OnePcFailure);
+                if response[0].min_commit_ts != 0 {
+                    return Err(Error::StringError(
+                        "MinCommitTs must be 0 when 1pc falls back to 2pc".to_owned(),
+                    ));
+                }
+                warn!(
+                    "1pc failed and fallbacks to normal commit procedure, start_ts: {}",
+                    self.start_version.version()
+                );
+                self.options.try_one_pc = false;
+                self.options.async_commit = false;
+                return Ok(None);
             }
 
             return Ok(Timestamp::try_from_version(response[0].one_pc_commit_ts));
         }
 
+        if response.iter().any(|r| r.one_pc_commit_ts != 0) {
+            return Err(Error::StringError(format!(
+                "prewrite returned one_pc_commit_ts for non-1pc transaction, start_ts: {}",
+                self.start_version.version()
+            )));
+        }
+
         self.options.try_one_pc = false;
 
-        let min_commit_ts = response
-            .iter()
-            .map(|r| {
-                assert_eq!(r.one_pc_commit_ts, 0);
-                r.min_commit_ts
-            })
-            .max()
-            .map(Timestamp::from_version);
+        let has_zero_min_commit_ts = response.iter().any(|r| r.min_commit_ts == 0);
+        let max_min_commit_ts = response.iter().map(|r| r.min_commit_ts).max().unwrap_or(0);
+        let min_commit_ts = Timestamp::try_from_version(max_min_commit_ts);
+
+        if self.options.async_commit && (has_zero_min_commit_ts || min_commit_ts.is_none()) {
+            warn!(
+                "async commit cannot proceed since the returned min_commit_ts is zero, fallback to normal path, start_ts: {}",
+                self.start_version.version()
+            );
+            self.options.async_commit = false;
+            return Ok(None);
+        }
 
         Ok(min_commit_ts)
     }
@@ -2014,14 +2063,18 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::Duration;
+    use std::time::Instant;
 
+    use async_trait::async_trait;
     use fail::FailScenario;
 
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
+    use crate::pd::PdClient;
     use crate::proto::kvrpcpb;
     use crate::proto::pdpb::Timestamp;
     use crate::request::Keyspace;
+    use crate::timestamp::TimestampExt;
     use crate::transaction::HeartbeatOption;
     use crate::CheckLevel;
     use crate::CommandPriority;
@@ -3089,6 +3142,240 @@ mod tests {
         assert_eq!(heartbeats.load(Ordering::SeqCst), 1);
         scenario.teardown();
         Ok(())
+    }
+
+    #[derive(Clone)]
+    struct FixedTimestampPdClient {
+        inner: Arc<MockPdClient>,
+        timestamp: Timestamp,
+        timestamp_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl PdClient for FixedTimestampPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            region: crate::region::RegionWithLeader,
+        ) -> crate::Result<crate::store::RegionStore> {
+            self.inner.clone().map_region_to_store(region).await
+        }
+
+        async fn region_for_key(
+            &self,
+            key: &crate::Key,
+        ) -> crate::Result<crate::region::RegionWithLeader> {
+            self.inner.region_for_key(key).await
+        }
+
+        async fn region_for_id(
+            &self,
+            id: crate::region::RegionId,
+        ) -> crate::Result<crate::region::RegionWithLeader> {
+            self.inner.region_for_id(id).await
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> crate::Result<Timestamp> {
+            self.timestamp_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.timestamp.clone())
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> crate::Result<bool> {
+            Ok(true)
+        }
+
+        async fn load_keyspace(
+            &self,
+            _keyspace: &str,
+        ) -> crate::Result<crate::proto::keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn all_stores(&self) -> crate::Result<Vec<crate::store::Store>> {
+            self.inner.all_stores().await
+        }
+
+        async fn update_leader(
+            &self,
+            _ver_id: crate::region::RegionVerId,
+            _leader: crate::proto::metapb::Peer,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: crate::region::RegionVerId) {}
+
+        async fn invalidate_store_cache(&self, _store_id: crate::region::StoreId) {}
+    }
+
+    #[tokio::test]
+    async fn test_committer_one_pc_fallbacks_to_two_pc() {
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
+        let timestamp_calls = Arc::new(AtomicUsize::new(0));
+
+        let start_ts = Timestamp {
+            physical: 1,
+            logical: 0,
+            ..Default::default()
+        };
+        let commit_ts = Timestamp {
+            physical: 2,
+            logical: 0,
+            ..Default::default()
+        };
+
+        let start_ts_version = start_ts.version();
+        let commit_ts_version = commit_ts.version();
+
+        let prewrite_count_captured = prewrite_count.clone();
+        let commit_count_captured = commit_count.clone();
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert!(req.try_one_pc);
+                assert!(req.min_commit_ts > 0);
+                assert!(req.max_commit_ts > 0);
+
+                let resp = kvrpcpb::PrewriteResponse {
+                    one_pc_commit_ts: 0,
+                    min_commit_ts: 0,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.keys, vec![vec![1]]);
+                assert_eq!(req.start_version, start_ts_version);
+                assert_eq!(req.commit_version, commit_ts_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: commit_ts,
+            timestamp_calls: timestamp_calls.clone(),
+        });
+
+        let primary_key: Key = vec![1].into();
+        let mutations = vec![kvrpcpb::Mutation {
+            op: kvrpcpb::Op::Put.into(),
+            key: vec![1],
+            value: vec![42],
+            ..Default::default()
+        }];
+
+        let options = TransactionOptions::new_optimistic().try_one_pc();
+        let committer = super::Committer::new(
+            Some(primary_key),
+            mutations,
+            start_ts,
+            pd_client,
+            options,
+            Keyspace::Disable,
+            0,
+            Instant::now(),
+        );
+
+        let commit_result = committer
+            .commit()
+            .await
+            .unwrap()
+            .expect("expected commit_ts");
+        assert_eq!(commit_result.version(), commit_ts_version);
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+        assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_committer_async_commit_fallbacks_to_two_pc_when_min_commit_ts_is_zero() {
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
+        let timestamp_calls = Arc::new(AtomicUsize::new(0));
+
+        let start_ts = Timestamp {
+            physical: 1,
+            logical: 0,
+            ..Default::default()
+        };
+        let commit_ts = Timestamp {
+            physical: 2,
+            logical: 0,
+            ..Default::default()
+        };
+
+        let start_ts_version = start_ts.version();
+        let commit_ts_version = commit_ts.version();
+
+        let prewrite_count_captured = prewrite_count.clone();
+        let commit_count_captured = commit_count.clone();
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert!(req.use_async_commit);
+                assert!(req.min_commit_ts > 0);
+                assert!(req.max_commit_ts > 0);
+
+                let resp = kvrpcpb::PrewriteResponse {
+                    min_commit_ts: 0,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.keys, vec![vec![1]]);
+                assert_eq!(req.start_version, start_ts_version);
+                assert_eq!(req.commit_version, commit_ts_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: commit_ts,
+            timestamp_calls: timestamp_calls.clone(),
+        });
+
+        let primary_key: Key = vec![1].into();
+        let mutations = vec![kvrpcpb::Mutation {
+            op: kvrpcpb::Op::Put.into(),
+            key: vec![1],
+            value: vec![42],
+            ..Default::default()
+        }];
+
+        let options = TransactionOptions::new_optimistic().use_async_commit();
+        let committer = super::Committer::new(
+            Some(primary_key),
+            mutations,
+            start_ts,
+            pd_client,
+            options,
+            Keyspace::Disable,
+            0,
+            Instant::now(),
+        );
+
+        let commit_result = committer
+            .commit()
+            .await
+            .unwrap()
+            .expect("expected commit_ts");
+        assert_eq!(commit_result.version(), commit_ts_version);
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+        assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+        assert_eq!(timestamp_calls.load(Ordering::SeqCst), 1);
     }
 
     #[rstest::rstest]
