@@ -258,6 +258,12 @@ async fn rollback_pessimistic_lock(
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
 ) -> Result<()> {
+    // Match client-go `resolvePessimisticLock`: primary key is considered resolved by
+    // CheckTxnStatus, so no extra rollback request is needed here.
+    if lock.key == lock.primary_lock {
+        return Ok(());
+    }
+
     let for_update_ts = if lock.lock_for_update_ts == 0 {
         // Match client-go behavior: lock info from mismatch paths may miss for_update_ts.
         u64::MAX
@@ -909,6 +915,59 @@ mod tests {
         assert!(live_locks.is_empty());
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_primary_mismatch_primary_lock_skips_rollback() {
+        let pessimistic_rollback_count = Arc::new(AtomicUsize::new(0));
+        let pessimistic_rollback_count_captured = pessimistic_rollback_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let mut mismatch = kvrpcpb::PrimaryMismatch::default();
+                    mismatch.lock_info = Some(kvrpcpb::LockInfo {
+                        key: vec![1],
+                        primary_lock: vec![1],
+                        lock_version: 7,
+                        lock_for_update_ts: 9,
+                        lock_type: kvrpcpb::Op::PessimisticLock as i32,
+                        ..Default::default()
+                    });
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        error: Some(kvrpcpb::KeyError {
+                            primary_mismatch: Some(mismatch),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if req.is::<kvrpcpb::PessimisticRollbackRequest>() {
+                    pessimistic_rollback_count_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                if req.is::<kvrpcpb::ResolveLockRequest>() {
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![1];
+        lock.lock_version = 7;
+        lock.lock_for_update_ts = 9;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+
+        let live_locks = resolve_locks(vec![lock], Timestamp::default(), client, Keyspace::Disable)
+            .await
+            .unwrap();
+        assert!(live_locks.is_empty());
+        assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
