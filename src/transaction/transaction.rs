@@ -1267,6 +1267,14 @@ impl<PdC: PdClient> Transaction<PdC> {
         lock_wait_start: Instant,
     ) -> Result<Vec<KvPair>> {
         fn collect_lock_errors(error: &Error, locks: &mut Vec<kvrpcpb::LockInfo>) -> bool {
+            fn extend_lock_infos(locks: &mut Vec<kvrpcpb::LockInfo>, lock: &kvrpcpb::LockInfo) {
+                if lock.shared_lock_infos.is_empty() {
+                    locks.push(lock.clone());
+                } else {
+                    locks.extend(lock.shared_lock_infos.iter().cloned());
+                }
+            }
+
             match error {
                 Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
                     let mut has_non_lock_error = false;
@@ -1276,12 +1284,14 @@ impl<PdC: PdClient> Transaction<PdC> {
                     has_non_lock_error
                 }
                 Error::ResolveLockError(live_locks) => {
-                    locks.extend(live_locks.clone());
+                    for lock in live_locks {
+                        extend_lock_infos(locks, lock);
+                    }
                     false
                 }
                 Error::KeyError(key_error) => {
                     if let Some(lock) = &key_error.locked {
-                        locks.push(lock.clone());
+                        extend_lock_infos(locks, lock);
                         false
                     } else {
                         true
@@ -5823,6 +5833,100 @@ mod tests {
 
         assert_eq!(lock_requests.load(Ordering::SeqCst), 1);
         assert_eq!(check_txn_status_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_flattens_shared_lock_wrapper() {
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_requests = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_requests = Arc::new(AtomicUsize::new(0));
+        let timestamp_calls = Arc::new(AtomicUsize::new(0));
+
+        let embedded_lock_key = vec![1_u8];
+        let embedded_lock_key_hook = embedded_lock_key.clone();
+        let embedded_primary_lock = vec![99_u8];
+        let embedded_primary_lock_hook = embedded_primary_lock.clone();
+
+        let lock_requests_captured = lock_requests.clone();
+        let check_txn_status_requests_captured = check_txn_status_requests.clone();
+        let resolve_lock_requests_captured = resolve_lock_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req
+                .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
+                .is_some()
+            {
+                let call = lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    let embedded = kvrpcpb::LockInfo {
+                        key: embedded_lock_key_hook.clone(),
+                        primary_lock: embedded_primary_lock_hook.clone(),
+                        lock_version: 7,
+                        lock_ttl: 100,
+                        txn_size: 1,
+                        lock_type: kvrpcpb::Op::Put as i32,
+                        ..Default::default()
+                    };
+                    let wrapper = kvrpcpb::LockInfo {
+                        lock_type: kvrpcpb::Op::SharedLock as i32,
+                        shared_lock_infos: vec![embedded],
+                        ..Default::default()
+                    };
+                    let resp = kvrpcpb::PessimisticLockResponse {
+                        errors: vec![kvrpcpb::KeyError {
+                            locked: Some(wrapper),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                check_txn_status_requests_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.primary_key, embedded_primary_lock_hook);
+                let resp = kvrpcpb::CheckTxnStatusResponse {
+                    commit_version: 5,
+                    action: kvrpcpb::Action::NoAction as i32,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                resolve_lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, 7);
+                assert_eq!(req.commit_version, 5);
+                assert_eq!(req.keys, vec![embedded_lock_key_hook.clone()]);
+                return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls,
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.lock_keys(vec![embedded_lock_key]).await.unwrap();
+
+        assert_eq!(lock_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(check_txn_status_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_lock_requests.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
