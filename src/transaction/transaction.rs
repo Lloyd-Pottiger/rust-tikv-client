@@ -2800,6 +2800,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_lock_for_read_reuses_resolved_txn_cache_across_snapshots() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_calls = Arc::new(AtomicUsize::new(0));
+        let pessimistic_rollback_calls = Arc::new(AtomicUsize::new(0));
+
+        let get_calls_captured = get_calls.clone();
+        let check_txn_status_calls_captured = check_txn_status_calls.clone();
+        let pessimistic_rollback_calls_captured = pessimistic_rollback_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
+                    let attempt = get_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    let ctx = req.context.as_ref().expect("context");
+
+                    match attempt {
+                        0 => {
+                            assert!(ctx.committed_locks.is_empty());
+                            assert!(ctx.resolved_locks.is_empty());
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            let mut key_err = kvrpcpb::KeyError::default();
+                            let mut lock = kvrpcpb::LockInfo::default();
+                            lock.key = b"k1".to_vec();
+                            lock.primary_lock = b"k1".to_vec();
+                            lock.lock_version = 1;
+                            lock.lock_ttl = 100;
+                            lock.txn_size = 1;
+                            lock.lock_type = kvrpcpb::Op::Put as i32;
+                            key_err.locked = Some(lock);
+                            resp.error = Some(key_err);
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        1 => {
+                            assert!(ctx.committed_locks.is_empty());
+                            assert_eq!(ctx.resolved_locks, vec![1]);
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            resp.value = b"v1".to_vec();
+                            resp.not_found = false;
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        2 => {
+                            // New snapshot → lock-tracker context starts empty, but resolved-txn
+                            // status should be cached by the shared ResolveLocksContext.
+                            assert!(ctx.committed_locks.is_empty());
+                            assert!(ctx.resolved_locks.is_empty());
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            let mut key_err = kvrpcpb::KeyError::default();
+                            let mut lock = kvrpcpb::LockInfo::default();
+                            lock.key = b"k2".to_vec();
+                            lock.primary_lock = b"k1".to_vec();
+                            lock.lock_version = 1;
+                            lock.lock_for_update_ts = 11;
+                            lock.lock_ttl = 100;
+                            lock.txn_size = 1;
+                            lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+                            key_err.locked = Some(lock);
+                            resp.error = Some(key_err);
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        3 => {
+                            assert!(ctx.committed_locks.is_empty());
+                            assert_eq!(ctx.resolved_locks, vec![1]);
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            resp.value = b"v2".to_vec();
+                            resp.not_found = false;
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        _ => panic!("unexpected get attempt: {attempt}"),
+                    }
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    check_txn_status_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    let mut resp = kvrpcpb::CheckTxnStatusResponse::default();
+                    resp.action = kvrpcpb::Action::NoAction as i32;
+                    resp.commit_version = 20;
+                    resp.lock_ttl = 0;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    pessimistic_rollback_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.keys, vec![b"k2".to_vec()]);
+                    assert_eq!(req.start_version, 1);
+                    assert_eq!(req.for_update_ts, 11);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+
+                panic!("unexpected request type in resolve-lock-for-read snapshot cache test");
+            },
+        )));
+
+        let resolve_locks_ctx = crate::transaction::ResolveLocksContext::default();
+
+        let mut snapshot1 = Transaction::new_with_resolve_locks_ctx(
+            Timestamp::from_version(10),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+            resolve_locks_ctx.clone(),
+        );
+        let value1 = snapshot1.get(b"k1".to_vec()).await.unwrap();
+        assert_eq!(value1, Some(b"v1".to_vec()));
+
+        let mut snapshot2 = Transaction::new_with_resolve_locks_ctx(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+            resolve_locks_ctx,
+        );
+        let value2 = snapshot2.get(b"k2".to_vec()).await.unwrap();
+        assert_eq!(value2, Some(b"v2".to_vec()));
+
+        assert_eq!(get_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(check_txn_status_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(pessimistic_rollback_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn test_resolve_lock_for_read_batch_get_committed_locks_propagates_to_context() {
         let batch_get_calls = Arc::new(AtomicUsize::new(0));
         let batch_get_calls_cloned = batch_get_calls.clone();
