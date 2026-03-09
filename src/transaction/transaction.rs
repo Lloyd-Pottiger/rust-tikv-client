@@ -2257,43 +2257,68 @@ impl<PdC: PdClient> Committer<PdC> {
         Ok(commit_version)
     }
 
+    fn handle_commit_primary_extracted_errors(&self, mut errors: Vec<Error>) -> Result<()> {
+        let err = errors.pop().ok_or_else(|| Error::InternalError {
+            message: "commit primary returned extracted errors but the vector was empty".to_owned(),
+        })?;
+        match err {
+            Error::KeyError(key_err) => {
+                if let Some(expired) = key_err.commit_ts_expired {
+                    // Ref: https://github.com/tikv/client-go/blob/tidb-8.5/txnkv/transaction/commit.go
+                    info!(
+                        "2PC commit_ts rejected by TiKV, retry with a newer commit_ts, start_ts: {}",
+                        self.start_version.version()
+                    );
+
+                    let primary_key = self.primary_key.as_ref().ok_or_else(|| {
+                        Error::InternalError {
+                            message: "commit primary returned commit_ts_expired but primary key is missing"
+                                .to_owned(),
+                        }
+                    })?;
+                    if primary_key != expired.key.as_ref() {
+                        error!(
+                            "2PC commit_ts rejected by TiKV, but the key is not the primary key, start_ts: {}, key: {}, primary: {:?}",
+                            self.start_version.version(),
+                            HexRepr(&expired.key),
+                            primary_key
+                        );
+                        return Err(Error::StringError(
+                            "2PC commitTS rejected by TiKV, but the key is not the primary key"
+                                .to_string(),
+                        ));
+                    }
+
+                    // Do not retry for a txn which has a too large min_commit_ts.
+                    // 3600000 << 18 = 943718400000
+                    if expired
+                        .min_commit_ts
+                        .saturating_sub(expired.attempted_commit_ts)
+                        > 943718400000
+                    {
+                        let msg = format!(
+                            "2PC min_commit_ts is too large, we got min_commit_ts: {}, and attempted_commit_ts: {}",
+                            expired.min_commit_ts, expired.attempted_commit_ts
+                        );
+                        return Err(Error::StringError(msg));
+                    }
+                    Ok(())
+                } else {
+                    Err(Error::KeyError(key_err))
+                }
+            }
+            other => Err(other),
+        }
+    }
+
     async fn commit_primary_with_retry(&mut self) -> Result<Timestamp> {
         loop {
             match self.commit_primary().await {
                 Ok(commit_version) => return Ok(commit_version),
-                Err(Error::ExtractedErrors(mut errors)) => match errors.pop() {
-                    Some(Error::KeyError(key_err)) => {
-                        if let Some(expired) = key_err.commit_ts_expired {
-                            // Ref: https://github.com/tikv/client-go/blob/tidb-8.5/txnkv/transaction/commit.go
-                            info!("2PC commit_ts rejected by TiKV, retry with a newer commit_ts, start_ts: {}",
-                                self.start_version.version());
-
-                            let primary_key = self.primary_key.as_ref().unwrap();
-                            if primary_key != expired.key.as_ref() {
-                                error!("2PC commit_ts rejected by TiKV, but the key is not the primary key, start_ts: {}, key: {}, primary: {:?}",
-                                    self.start_version.version(), HexRepr(&expired.key), primary_key);
-                                return Err(Error::StringError("2PC commitTS rejected by TiKV, but the key is not the primary key".to_string()));
-                            }
-
-                            // Do not retry for a txn which has a too large min_commit_ts.
-                            // 3600000 << 18 = 943718400000
-                            if expired
-                                .min_commit_ts
-                                .saturating_sub(expired.attempted_commit_ts)
-                                > 943718400000
-                            {
-                                let msg = format!("2PC min_commit_ts is too large, we got min_commit_ts: {}, and attempted_commit_ts: {}",
-                                                     expired.min_commit_ts, expired.attempted_commit_ts);
-                                return Err(Error::StringError(msg));
-                            }
-                            continue;
-                        } else {
-                            return Err(Error::KeyError(key_err));
-                        }
-                    }
-                    Some(err) => return Err(err),
-                    None => unreachable!(),
-                },
+                Err(Error::ExtractedErrors(errors)) => {
+                    self.handle_commit_primary_extracted_errors(errors)?;
+                    continue;
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -4412,6 +4437,35 @@ mod tests {
             Error::StringError(message) if message == "schema changed"
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_commit_primary_extracted_errors_empty_is_internal_error() {
+        let client = MockKvClient::with_dispatch_hook(|req: &dyn Any| {
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+        let pd_client = Arc::new(MockPdClient::new(client));
+
+        let committer = super::Committer::new(
+            Some(vec![1].into()),
+            vec![kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: vec![1],
+                value: vec![42],
+                ..Default::default()
+            }],
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic(),
+            Keyspace::Disable,
+            0,
+            Instant::now(),
+        );
+
+        let err = committer
+            .handle_commit_primary_extracted_errors(Vec::new())
+            .expect_err("expected internal error");
+        assert!(matches!(err, Error::InternalError { .. }));
     }
 
     #[tokio::test]
