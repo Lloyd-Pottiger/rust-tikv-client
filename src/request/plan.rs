@@ -556,14 +556,32 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
     } else if e.stale_command.is_some() || e.region_not_found.is_some() {
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
+    } else if e.key_not_in_region.is_some() {
+        pd_client.invalidate_region_cache(ver_id).await;
+        Ok(false)
     } else if e.data_is_not_ready.is_some() {
         // Specific to stale read. The target replica is randomly selected and may not have caught up
         // yet. Retry immediately.
         Ok(true)
     } else if e.server_is_busy.is_some() || e.max_timestamp_not_synced.is_some() {
         Ok(false)
+    } else if e.read_index_not_ready.is_some() || e.proposal_in_merging_mode.is_some() {
+        Ok(false)
+    } else if e.region_not_initialized.is_some() {
+        Ok(false)
     } else if e.raft_entry_too_large.is_some() {
         Err(Error::RegionError(Box::new(e)))
+    } else if e.recovery_in_progress.is_some() {
+        pd_client.invalidate_region_cache(ver_id).await;
+        Ok(false)
+    } else if e.flashback_in_progress.is_some() || e.flashback_not_prepared.is_some() {
+        Err(Error::RegionError(Box::new(e)))
+    } else if e.is_witness.is_some()
+        || e.mismatch_peer_id.is_some()
+        || e.bucket_version_not_match.is_some()
+    {
+        pd_client.invalidate_region_cache(ver_id).await;
+        Ok(false)
     } else {
         // TODO: pass the logger around
         // info!("unknwon region error: {:?}", e);
@@ -1640,6 +1658,53 @@ mod test {
 
         let resolved = handle_region_error(pd_client, err, store).await.unwrap();
         assert!(!resolved);
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_read_index_not_ready_retries_with_backoff() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let store = RegionStore::new(
+            MockPdClient::region1(),
+            Arc::new(MockKvClient::with_dispatch_hook(|_| {
+                unreachable!("dispatch not expected")
+            })),
+        );
+
+        let mut err = errorpb::Error::default();
+        err.read_index_not_ready = Some(errorpb::ReadIndexNotReady {
+            reason: "not ready".to_owned(),
+            region_id: store.region_with_leader.id(),
+        });
+
+        let resolved = handle_region_error(pd_client, err, store).await.unwrap();
+        assert!(!resolved);
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_flashback_in_progress_returns_error() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let store = RegionStore::new(
+            MockPdClient::region1(),
+            Arc::new(MockKvClient::with_dispatch_hook(|_| {
+                unreachable!("dispatch not expected")
+            })),
+        );
+
+        let mut err = errorpb::Error::default();
+        err.flashback_in_progress = Some(errorpb::FlashbackInProgress {
+            region_id: store.region_with_leader.id(),
+            flashback_start_ts: 42,
+        });
+
+        let err = handle_region_error(pd_client, err, store)
+            .await
+            .expect_err("flashback_in_progress should not be retryable");
+        match err {
+            Error::RegionError(inner) => {
+                assert!(inner.flashback_in_progress.is_some());
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
