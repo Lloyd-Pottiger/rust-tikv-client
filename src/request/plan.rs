@@ -548,7 +548,9 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
         }
         Ok(false)
     } else if e.disk_full.is_some() {
-        Err(Error::RegionError(Box::new(e)))
+        // Match client-go `RegionRequestSender.onRegionError`: disk-full is treated as retryable
+        // with backoff.
+        Ok(false)
     } else if let Some(epoch_not_match) = e.epoch_not_match.take() {
         on_region_epoch_not_match(pd_client.clone(), region_store, epoch_not_match).await
     } else if e.stale_command.is_some() || e.region_not_found.is_some() {
@@ -1621,7 +1623,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_handle_region_error_disk_full_returns_error() {
+    async fn test_handle_region_error_disk_full_retries_with_backoff() {
         let pd_client = Arc::new(MockPdClient::default());
         let store = RegionStore::new(
             MockPdClient::region1(),
@@ -1636,15 +1638,8 @@ mod test {
             reason: "disk full".to_owned(),
         });
 
-        let err = handle_region_error(pd_client, err, store)
-            .await
-            .expect_err("disk full should not be retried");
-        match err {
-            Error::RegionError(inner) => {
-                assert!(inner.disk_full.is_some());
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        let resolved = handle_region_error(pd_client, err, store).await.unwrap();
+        assert!(!resolved);
     }
 
     #[tokio::test]
