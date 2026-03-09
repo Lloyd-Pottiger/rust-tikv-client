@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -202,6 +203,7 @@ fn select_replica_read_peer(
 #[derive(Debug, Default)]
 struct StoreLiveness {
     unreachable_store_ids: RwLock<Vec<StoreId>>,
+    server_is_busy_store_ids: RwLock<Vec<StoreId>>,
 }
 
 impl StoreLiveness {
@@ -212,8 +214,22 @@ impl StoreLiveness {
         }
     }
 
+    async fn mark_server_is_busy(&self, store_id: StoreId) {
+        let mut server_is_busy_store_ids = self.server_is_busy_store_ids.write().await;
+        if !server_is_busy_store_ids.contains(&store_id) {
+            server_is_busy_store_ids.push(store_id);
+        }
+    }
+
     async fn unreachable_store_ids(&self) -> Vec<StoreId> {
         self.unreachable_store_ids.read().await.clone()
+    }
+
+    async fn is_server_is_busy(&self, store_id: StoreId) -> bool {
+        self.server_is_busy_store_ids
+            .read()
+            .await
+            .contains(&store_id)
     }
 }
 
@@ -221,24 +237,44 @@ impl StoreLiveness {
 struct ReplicaReadState {
     read_type: ReplicaReadType,
     attempt_base: u32,
+    stale_read: bool,
+    stale_read_disabled: Arc<AtomicBool>,
     store_liveness: Arc<StoreLiveness>,
 }
 
 impl ReplicaReadState {
-    fn new(read_type: ReplicaReadType) -> Self {
+    fn new(read_type: ReplicaReadType, stale_read: bool) -> Self {
         Self {
             read_type,
             attempt_base: 0,
+            stale_read,
+            stale_read_disabled: Arc::new(AtomicBool::new(false)),
             store_liveness: Arc::new(StoreLiveness::default()),
         }
+    }
+
+    fn stale_read_enabled(&self) -> bool {
+        self.stale_read && !self.stale_read_disabled.load(Ordering::Relaxed)
+    }
+
+    fn disable_stale_read(&self) {
+        self.stale_read_disabled.store(true, Ordering::Relaxed);
     }
 
     async fn mark_store_unreachable(&self, store_id: StoreId) {
         self.store_liveness.mark_unreachable(store_id).await;
     }
 
+    async fn mark_store_server_is_busy(&self, store_id: StoreId) {
+        self.store_liveness.mark_server_is_busy(store_id).await;
+    }
+
     async fn unreachable_store_ids(&self) -> Vec<StoreId> {
         self.store_liveness.unreachable_store_ids().await
+    }
+
+    async fn is_store_server_is_busy(&self, store_id: StoreId) -> bool {
+        self.store_liveness.is_server_is_busy(store_id).await
     }
 
     fn attempt(&self, current_attempts: u32) -> u32 {
@@ -249,6 +285,8 @@ impl ReplicaReadState {
         Self {
             read_type,
             attempt_base: current_attempts,
+            stale_read: self.stale_read,
+            stale_read_disabled: self.stale_read_disabled,
             store_liveness: self.store_liveness,
         }
     }
@@ -257,6 +295,8 @@ impl ReplicaReadState {
         Self {
             read_type: self.read_type,
             attempt_base: self.attempt_base.saturating_add(1),
+            stale_read: self.stale_read,
+            stale_read_disabled: self.stale_read_disabled,
             store_liveness: self.store_liveness,
         }
     }
@@ -346,28 +386,56 @@ where
         debug!("single_shard_handler");
         let region_leader = region.leader.clone();
         let leader_store_id = region_leader.as_ref().map(|peer| peer.store_id);
-        let is_stale_read = plan
-            .kv_context_mut()
-            .map(|ctx| ctx.stale_read)
-            .unwrap_or(false);
         let current_attempts = backoff.current_attempts();
         let unreachable_store_ids = match replica_read.as_ref() {
             Some(replica_read) => replica_read.unreachable_store_ids().await,
             None => Vec::new(),
         };
+        let mut patched_stale_read = false;
         if let Some(replica_read) = replica_read.as_ref() {
             let attempt = replica_read.attempt(current_attempts);
             let read_type = replica_read.read_type;
-            if is_stale_read && attempt == 1 {
-                // Align with client-go replica selector behavior:
-                // stale-read retries should fall back to normal snapshot reads on the leader.
-                if let Some(ctx) = plan.kv_context_mut() {
-                    ctx.stale_read = false;
+
+            let stale_read_enabled = replica_read.stale_read_enabled();
+            if stale_read_enabled {
+                let leader_can_send_replica_read = if attempt >= 2 {
+                    match leader_store_id {
+                        Some(leader_store_id)
+                            if !unreachable_store_ids.contains(&leader_store_id)
+                                && !replica_read.is_store_server_is_busy(leader_store_id).await =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+
+                if attempt == 1 {
+                    // Align with client-go replica selector behavior:
+                    // stale-read retries should fall back to normal snapshot reads on the leader.
+                    if let Some(ctx) = plan.kv_context_mut() {
+                        ctx.stale_read = false;
+                        ctx.replica_read = false;
+                    }
+                    if let Some(region_leader) = region_leader {
+                        region.leader = Some(region_leader);
+                    }
+                } else if leader_can_send_replica_read {
+                    if let Some(ctx) = plan.kv_context_mut() {
+                        ctx.stale_read = false;
+                        ctx.replica_read = false;
+                    }
+                } else if let Some(ctx) = plan.kv_context_mut() {
+                    ctx.stale_read = true;
+                    ctx.replica_read = false;
+                    patched_stale_read = true;
                 }
-                if let Some(region_leader) = region_leader {
-                    region.leader = Some(region_leader);
-                }
-            } else if read_type.is_follower_read() {
+            }
+
+            let is_stale_read_leader_fallback = stale_read_enabled && attempt == 1;
+            if !is_stale_read_leader_fallback && read_type.is_follower_read() {
                 if let Some(peer) =
                     select_replica_read_peer(&region, read_type, attempt, &unreachable_store_ids)
                 {
@@ -421,6 +489,15 @@ where
         let res = plan.execute().await;
         drop(permit);
 
+        if patched_stale_read {
+            if let (Some(replica_read), Some(ctx)) = (replica_read.as_ref(), plan.kv_context_mut())
+            {
+                if !ctx.stale_read {
+                    replica_read.disable_stale_read();
+                }
+            }
+        }
+
         let mut resp = match res {
             Ok(resp) => resp,
             Err(e) if is_grpc_error(&e) => {
@@ -450,16 +527,32 @@ where
         } else if let Some(e) = resp.region_error() {
             debug!("single_shard_handler:execute: region error: {:?}", e);
             let is_server_busy = e.server_is_busy.is_some();
+            let is_stale_read_leader_fallback_attempt = match replica_read.as_ref() {
+                Some(replica_read) => {
+                    replica_read.stale_read_enabled()
+                        && replica_read.attempt(backoff.current_attempts()) == 1
+                }
+                None => false,
+            };
             let retry_same_replica = !plan
                 .kv_context_mut()
                 .map(|ctx| ctx.stale_read)
                 .unwrap_or(false)
+                && !is_stale_read_leader_fallback_attempt
                 && (is_server_busy
                     || e.max_timestamp_not_synced.is_some()
                     || e.read_index_not_ready.is_some()
                     || e.proposal_in_merging_mode.is_some());
             match backoff.next_delay_duration() {
                 Some(duration) => {
+                    let store_id = region_store.region_with_leader.get_store_id().ok();
+                    if is_server_busy {
+                        if let (Some(store_id), Some(replica_read)) =
+                            (store_id, replica_read.as_ref())
+                        {
+                            replica_read.mark_store_server_is_busy(store_id).await;
+                        }
+                    }
                     let region_error_resolved =
                         handle_region_error(pd_client.clone(), e, region_store).await?;
                     // don't sleep if we have resolved the region error
@@ -724,13 +817,19 @@ where
         // too many concurrent requests, TiKV is more likely to return a "TiKV
         // is busy" error
         let concurrency_permits = Arc::new(Semaphore::new(MULTI_REGION_CONCURRENCY));
+        let mut inner = self.inner.clone();
+        let stale_read = inner
+            .kv_context_mut()
+            .map(|ctx| ctx.stale_read)
+            .unwrap_or(false);
         Self::single_plan_handler(
             self.pd_client.clone(),
-            self.inner.clone(),
+            inner,
             self.backoff.clone(),
             concurrency_permits.clone(),
             self.preserve_region_results,
-            self.replica_read.map(ReplicaReadState::new),
+            self.replica_read
+                .map(|read_type| ReplicaReadState::new(read_type, stale_read)),
         )
         .await
     }
