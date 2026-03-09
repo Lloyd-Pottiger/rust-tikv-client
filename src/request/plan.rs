@@ -399,14 +399,11 @@ where
             let stale_read_enabled = replica_read.stale_read_enabled();
             if stale_read_enabled {
                 let leader_can_send_replica_read = if attempt >= 2 {
-                    match leader_store_id {
-                        Some(leader_store_id)
-                            if !unreachable_store_ids.contains(&leader_store_id)
-                                && !replica_read.is_store_server_is_busy(leader_store_id).await =>
-                        {
-                            true
-                        }
-                        _ => false,
+                    if let Some(leader_store_id) = leader_store_id {
+                        !unreachable_store_ids.contains(&leader_store_id)
+                            && !replica_read.is_store_server_is_busy(leader_store_id).await
+                    } else {
+                        false
                     }
                 } else {
                     false
