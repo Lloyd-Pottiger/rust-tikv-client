@@ -1067,41 +1067,47 @@ impl<PdC: PdClient> Transaction<PdC> {
             "`pessimistic_lock` is only valid to use with pessimistic transactions"
         );
 
-        let keys: Vec<_> = keys.into_iter().collect();
-        if keys.is_empty() {
+        let mut locks: Vec<(Key, kvrpcpb::Assertion)> = keys
+            .into_iter()
+            .map(|lock| {
+                let assertion = lock.assertion();
+                let key = lock.key();
+                (key, assertion)
+            })
+            .collect();
+        if locks.is_empty() {
             return Ok(vec![]);
         }
+
+        // Match client-go: sort and deduplicate keys to keep the lock request deterministic and
+        // avoid locking the same key twice in a single call (which can also affect is_first_lock).
+        locks.sort_by(|a, b| a.0.cmp(&b.0));
+        locks.dedup_by(|a, b| {
+            if a.0 == b.0 {
+                a.1 = a.1.max(b.1);
+                true
+            } else {
+                false
+            }
+        });
 
         // we do not set the primary key here, because pessimistic lock request
         // can fail, in which case the keys may not be part of the transaction.
         let existing_primary_key = self.buffer.get_primary_key();
-        let is_first_lock = existing_primary_key.is_none() && keys.len() == 1;
-        let primary_lock = match existing_primary_key {
-            Some(primary_key) => primary_key,
-            None => {
-                let mut primary_key = keys[0].clone().key();
-                for lock in keys.iter().skip(1) {
-                    let key = lock.clone().key();
-                    if key < primary_key {
-                        primary_key = key;
-                    }
-                }
-                primary_key
-            }
-        };
+        let is_first_lock = existing_primary_key.is_none() && locks.len() == 1;
+        let primary_lock = existing_primary_key.unwrap_or_else(|| locks[0].0.clone());
         let for_update_ts = self.rpc.clone().get_timestamp().await?;
         self.options.push_for_update_ts(for_update_ts.clone());
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = elapsed.saturating_add(MAX_TTL);
-        let primary_in_request = keys.iter().any(|lock| lock.clone().key() == primary_lock);
+        let primary_in_request = locks.iter().any(|(key, _)| key == &primary_lock);
 
-        let pairs = if primary_in_request && keys.len() > 1 {
+        let pairs = if primary_in_request && locks.len() > 1 {
             let primary_region = self.rpc.region_for_key(&primary_lock).await?;
             let mut primary_locks = Vec::new();
             let mut secondary_locks = Vec::new();
-            for lock in &keys {
-                let key = lock.clone().key();
-                if primary_region.contains(&key) {
+            for lock in &locks {
+                if primary_region.contains(&lock.0) {
                     primary_locks.push(lock.clone());
                 } else {
                     secondary_locks.push(lock.clone());
@@ -1110,7 +1116,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
             if primary_locks.is_empty() || secondary_locks.is_empty() {
                 let request = new_pessimistic_lock_request(
-                    keys.clone().into_iter(),
+                    locks.clone().into_iter(),
                     primary_lock.clone(),
                     self.timestamp.clone(),
                     lock_ttl,
@@ -1178,7 +1184,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         } else {
             let request = new_pessimistic_lock_request(
-                keys.clone().into_iter(),
+                locks.clone().into_iter(),
                 primary_lock.clone(),
                 self.timestamp.clone(),
                 lock_ttl,
@@ -1192,8 +1198,8 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         self.buffer.primary_key_or(&primary_lock);
         self.start_auto_heartbeat().await;
-        for key in keys {
-            self.buffer.lock(key.key());
+        for (key, _assertion) in locks {
+            self.buffer.lock(key);
         }
         Ok(pairs)
     }
@@ -4844,6 +4850,38 @@ mod tests {
         );
 
         txn.lock_keys(vec![vec![5u8], vec![1u8]]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_deduplicates_keys_and_sets_first_lock() {
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                assert!(req.is_first_lock);
+                assert_eq!(req.primary_lock, vec![1]);
+                assert_eq!(req.mutations.len(), 1);
+                assert_eq!(req.mutations[0].key, vec![1]);
+                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.lock_keys(vec![vec![1u8], vec![1u8]]).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
