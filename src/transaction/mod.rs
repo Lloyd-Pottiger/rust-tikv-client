@@ -23,6 +23,7 @@ pub use sync_transaction::SyncTransaction;
 pub use transaction::CheckLevel;
 #[doc(hidden)]
 pub use transaction::HeartbeatOption;
+pub use transaction::LockWaitTimeout;
 pub use transaction::Mutation;
 pub use transaction::SchemaLeaseChecker;
 pub use transaction::Transaction;

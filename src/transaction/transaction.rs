@@ -27,6 +27,7 @@ use crate::request::CollectSingle;
 use crate::request::EncodeKeyspace;
 use crate::request::KeyMode;
 use crate::request::Keyspace;
+use crate::request::Merge;
 use crate::request::Plan;
 use crate::request::PlanBuilder;
 use crate::request::RetryOptions;
@@ -1105,6 +1106,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.push_for_update_ts(for_update_ts.clone());
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = elapsed.saturating_add(MAX_TTL);
+        let lock_wait_start = Instant::now();
         let primary_in_request = locks.iter().any(|(key, _)| key == &primary_lock);
 
         let pairs = if primary_in_request && locks.len() > 1 {
@@ -1129,8 +1131,13 @@ impl<PdC: PdClient> Transaction<PdC> {
                     need_value,
                     is_first_lock,
                 );
-                self.execute_pessimistic_lock_request(request, for_update_ts.clone(), need_value)
-                    .await?
+                self.execute_pessimistic_lock_request(
+                    request,
+                    for_update_ts.clone(),
+                    need_value,
+                    lock_wait_start,
+                )
+                .await?
             } else {
                 let primary_request = new_pessimistic_lock_request(
                     primary_locks.into_iter(),
@@ -1151,6 +1158,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                         primary_request,
                         for_update_ts.clone(),
                         need_value,
+                        lock_wait_start,
                     )
                     .await?;
 
@@ -1168,6 +1176,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                         secondary_request,
                         for_update_ts.clone(),
                         need_value,
+                        lock_wait_start,
                     )
                     .await
                 {
@@ -1197,8 +1206,13 @@ impl<PdC: PdClient> Transaction<PdC> {
                 need_value,
                 is_first_lock,
             );
-            self.execute_pessimistic_lock_request(request, for_update_ts.clone(), need_value)
-                .await?
+            self.execute_pessimistic_lock_request(
+                request,
+                for_update_ts.clone(),
+                need_value,
+                lock_wait_start,
+            )
+            .await?
         };
 
         self.buffer.primary_key_or(&primary_lock);
@@ -1211,34 +1225,116 @@ impl<PdC: PdClient> Transaction<PdC> {
 
     async fn execute_pessimistic_lock_request(
         &mut self,
-        request: kvrpcpb::PessimisticLockRequest,
+        mut request: kvrpcpb::PessimisticLockRequest,
         for_update_ts: Timestamp,
         need_value: bool,
+        lock_wait_start: Instant,
     ) -> Result<Vec<KvPair>> {
-        let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .resolve_lock_with_pessimistic_region(
-                self.timestamp.clone(),
-                self.options.retry_options.lock_backoff.clone(),
+        fn collect_lock_errors(error: &Error, locks: &mut Vec<kvrpcpb::LockInfo>) -> bool {
+            match error {
+                Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
+                    let mut has_non_lock_error = false;
+                    for err in errors {
+                        has_non_lock_error |= collect_lock_errors(err, locks);
+                    }
+                    has_non_lock_error
+                }
+                Error::ResolveLockError(live_locks) => {
+                    locks.extend(live_locks.clone());
+                    false
+                }
+                Error::KeyError(key_error) => {
+                    if let Some(lock) = &key_error.locked {
+                        locks.push(lock.clone());
+                        false
+                    } else {
+                        true
+                    }
+                }
+                _ => true,
+            }
+        }
+
+        let lock_wait_timeout = self.options.lock_wait_timeout;
+
+        loop {
+            request.wait_timeout = lock_wait_timeout.effective_wait_timeout_ms(lock_wait_start);
+
+            let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request.clone())
+                .preserve_shard()
+                .retry_multi_region_preserve_results(
+                    self.options.retry_options.region_backoff.clone(),
+                )
+                .plan();
+            let results = plan.execute().await?;
+
+            let mut success = Vec::new();
+            let mut errors = Vec::new();
+            for result in results {
+                match result {
+                    Ok(result) => success.push(result),
+                    Err(err) => errors.push(err),
+                }
+            }
+
+            if errors.is_empty() {
+                return CollectPessimisticLock::new(need_value)
+                    .merge(success.into_iter().map(Ok).collect());
+            }
+
+            let success_keys = success
+                .into_iter()
+                .flat_map(|crate::request::ResponseWithShard(_resp, mutations)| {
+                    mutations
+                        .into_iter()
+                        .map(|mutation| Key::from(mutation.key))
+                })
+                .collect::<Vec<_>>();
+            if !success_keys.is_empty() {
+                self.pessimistic_lock_rollback(
+                    success_keys.into_iter(),
+                    self.timestamp.clone(),
+                    for_update_ts.clone(),
+                )
+                .await?;
+            }
+
+            let mut locks = Vec::new();
+            let mut first_non_lock_error = None;
+            for (idx, err) in errors.iter().enumerate() {
+                if collect_lock_errors(err, &mut locks) && first_non_lock_error.is_none() {
+                    first_non_lock_error = Some(idx);
+                }
+            }
+
+            if let Some(idx) = first_non_lock_error {
+                return Err(errors.swap_remove(idx));
+            }
+            if locks.is_empty() {
+                return Err(errors.swap_remove(0));
+            }
+
+            let resolve_result = super::resolve_locks_with_options(
+                locks,
+                Timestamp::default(),
+                self.rpc.clone(),
                 self.keyspace,
                 true,
             )
-            .preserve_shard()
-            .retry_multi_region_preserve_results(self.options.retry_options.region_backoff.clone())
-            .merge(CollectPessimisticLock::new(need_value))
-            .plan();
+            .await?;
 
-        match plan.execute().await {
-            Ok(pairs) => Ok(pairs),
-            Err(Error::PessimisticLockError {
-                inner,
-                success_keys,
-            }) if !success_keys.is_empty() => {
-                let keys = success_keys.into_iter().map(Key::from);
-                self.pessimistic_lock_rollback(keys, self.timestamp.clone(), for_update_ts)
-                    .await?;
-                Err(*inner)
+            if resolve_result.live_locks.is_empty() {
+                continue;
             }
-            Err(err) => Err(err),
+
+            if lock_wait_timeout.is_no_wait() {
+                return Err(Error::StringError(
+                    "lock acquire failed and no wait is set".to_owned(),
+                ));
+            }
+            if lock_wait_timeout.is_timed_out(lock_wait_start) {
+                return Err(Error::StringError("lock wait timeout".to_owned()));
+            }
         }
     }
 
@@ -1476,6 +1572,10 @@ pub struct TransactionOptions {
     read_only: bool,
     /// How to retry in the event of certain errors.
     retry_options: RetryOptions,
+    /// Lock wait timeout for pessimistic lock requests (`kvrpcpb::PessimisticLockRequest.wait_timeout`).
+    ///
+    /// Only effective for pessimistic transactions.
+    lock_wait_timeout: LockWaitTimeout,
     /// What to do if the transaction is dropped without an attempt to commit or rollback
     check_level: CheckLevel,
     #[doc(hidden)]
@@ -1486,6 +1586,60 @@ pub struct TransactionOptions {
 pub enum HeartbeatOption {
     NoHeartbeat,
     FixedTime(Duration),
+}
+
+/// Lock wait timeout for pessimistic lock requests.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LockWaitTimeout {
+    /// Use TiKV's default lock wait timeout (`wait_timeout = 0`).
+    Default,
+    /// Do not wait when encountering locks (`wait_timeout = -1`).
+    NoWait,
+    /// Always wait when encountering locks (`wait_timeout = i64::MAX`).
+    AlwaysWait,
+    /// Wait for at most the given duration.
+    Wait(Duration),
+}
+
+impl LockWaitTimeout {
+    fn effective_wait_timeout_ms(self, wait_start: Instant) -> i64 {
+        match self {
+            LockWaitTimeout::Default => 0,
+            LockWaitTimeout::NoWait => -1,
+            LockWaitTimeout::AlwaysWait => i64::MAX,
+            LockWaitTimeout::Wait(duration) => {
+                if duration.is_zero() {
+                    return -1;
+                }
+                let elapsed_ms = wait_start.elapsed().as_millis();
+                let remaining_ms = duration.as_millis().saturating_sub(elapsed_ms);
+                if remaining_ms == 0 {
+                    return -1;
+                }
+                i64::try_from(remaining_ms).unwrap_or(i64::MAX)
+            }
+        }
+    }
+
+    fn is_no_wait(self) -> bool {
+        match self {
+            LockWaitTimeout::NoWait => true,
+            LockWaitTimeout::Wait(duration) => duration.is_zero(),
+            LockWaitTimeout::Default | LockWaitTimeout::AlwaysWait => false,
+        }
+    }
+
+    fn is_timed_out(self, wait_start: Instant) -> bool {
+        match self {
+            LockWaitTimeout::Wait(duration) if !duration.is_zero() => {
+                wait_start.elapsed() >= duration
+            }
+            LockWaitTimeout::Default
+            | LockWaitTimeout::NoWait
+            | LockWaitTimeout::AlwaysWait
+            | LockWaitTimeout::Wait(_) => false,
+        }
+    }
 }
 
 impl Default for TransactionOptions {
@@ -1519,6 +1673,7 @@ impl TransactionOptions {
             causal_consistency: false,
             read_only: false,
             retry_options: RetryOptions::default_optimistic(),
+            lock_wait_timeout: LockWaitTimeout::Default,
             check_level: CheckLevel::Panic,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
         }
@@ -1548,6 +1703,7 @@ impl TransactionOptions {
             causal_consistency: false,
             read_only: false,
             retry_options: RetryOptions::default_pessimistic(),
+            lock_wait_timeout: LockWaitTimeout::AlwaysWait,
             check_level: CheckLevel::Panic,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
         }
@@ -1616,6 +1772,15 @@ impl TransactionOptions {
     pub fn max_write_execution_duration(mut self, duration: Duration) -> TransactionOptions {
         self.max_write_execution_duration_ms =
             duration.as_millis().min(u128::from(u64::MAX)) as u64;
+        self
+    }
+
+    /// Set the lock wait timeout for pessimistic lock requests.
+    ///
+    /// This option writes to `kvrpcpb::PessimisticLockRequest.wait_timeout`.
+    #[must_use]
+    pub fn lock_wait_timeout(mut self, timeout: LockWaitTimeout) -> TransactionOptions {
+        self.lock_wait_timeout = timeout;
         self
     }
 
@@ -4929,6 +5094,7 @@ mod tests {
                 let attempt = lock_requests_captured.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(req.for_update_ts, FOR_UPDATE_TS_VERSION);
                 assert_eq!(req.min_commit_ts, EXPECTED_MIN_COMMIT_TS);
+                assert_eq!(req.wait_timeout, i64::MAX);
                 assert!(req.lock_ttl >= super::MAX_TTL + ELAPSED_LOWER_BOUND.as_millis() as u64);
 
                 match attempt {
@@ -4976,6 +5142,88 @@ mod tests {
             .unwrap();
 
         assert_eq!(lock_requests.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_no_wait_returns_error_on_live_lock() {
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_requests = Arc::new(AtomicUsize::new(0));
+        let timestamp_calls = Arc::new(AtomicUsize::new(0));
+
+        let lock_requests_captured = lock_requests.clone();
+        let check_txn_status_requests_captured = check_txn_status_requests.clone();
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.wait_timeout, -1);
+                let resp = kvrpcpb::PessimisticLockResponse {
+                    errors: vec![kvrpcpb::KeyError {
+                        locked: Some(kvrpcpb::LockInfo {
+                            key: vec![1],
+                            primary_lock: vec![1],
+                            lock_version: 7,
+                            lock_ttl: 100,
+                            lock_type: kvrpcpb::Op::Put as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                check_txn_status_requests_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.caller_start_ts, 0);
+                let resp = kvrpcpb::CheckTxnStatusResponse {
+                    lock_ttl: 100,
+                    lock_info: Some(kvrpcpb::LockInfo {
+                        key: vec![1],
+                        primary_lock: vec![1],
+                        lock_version: 7,
+                        lock_ttl: 100,
+                        lock_type: kvrpcpb::Op::Put as i32,
+                        ..Default::default()
+                    }),
+                    action: kvrpcpb::Action::NoAction as i32,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls,
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .lock_wait_timeout(crate::LockWaitTimeout::NoWait)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let err = txn
+            .lock_keys(vec![vec![1u8]])
+            .await
+            .expect_err("expected no-wait lock error");
+        match err {
+            Error::StringError(message) => {
+                assert_eq!(message, "lock acquire failed and no wait is set");
+            }
+            err => panic!("unexpected error: {err:?}"),
+        }
+
+        assert_eq!(lock_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(check_txn_status_requests.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
