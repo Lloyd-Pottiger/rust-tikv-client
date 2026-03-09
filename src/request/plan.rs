@@ -553,21 +553,22 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
         Ok(false)
     } else if let Some(epoch_not_match) = e.epoch_not_match.take() {
         on_region_epoch_not_match(pd_client.clone(), region_store, epoch_not_match).await
-    } else if e.stale_command.is_some() || e.region_not_found.is_some() {
-        pd_client.invalidate_region_cache(ver_id).await;
-        Ok(false)
-    } else if e.key_not_in_region.is_some() {
+    } else if e.stale_command.is_some()
+        || e.region_not_found.is_some()
+        || e.key_not_in_region.is_some()
+    {
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
     } else if e.data_is_not_ready.is_some() {
         // Specific to stale read. The target replica is randomly selected and may not have caught up
         // yet. Retry immediately.
         Ok(true)
-    } else if e.server_is_busy.is_some() || e.max_timestamp_not_synced.is_some() {
-        Ok(false)
-    } else if e.read_index_not_ready.is_some() || e.proposal_in_merging_mode.is_some() {
-        Ok(false)
-    } else if e.region_not_initialized.is_some() {
+    } else if e.server_is_busy.is_some()
+        || e.max_timestamp_not_synced.is_some()
+        || e.read_index_not_ready.is_some()
+        || e.proposal_in_merging_mode.is_some()
+        || e.region_not_initialized.is_some()
+    {
         Ok(false)
     } else if e.raft_entry_too_large.is_some() {
         Err(Error::RegionError(Box::new(e)))
