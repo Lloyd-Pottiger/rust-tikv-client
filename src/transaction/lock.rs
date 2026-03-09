@@ -804,6 +804,35 @@ impl LockResolver {
         Self { ctx }
     }
 
+    /// Get the transaction status for `txn_id` (start TS) and `primary` key.
+    ///
+    /// This is a convenience wrapper around [`LockResolver::check_txn_status`] that fetches a
+    /// `current_ts` from PD and sets `rollback_if_not_exist=true`, matching client-go
+    /// `LockResolver.GetTxnStatus`.
+    pub async fn get_txn_status(
+        &mut self,
+        pd_client: Arc<impl PdClient>,
+        keyspace: Keyspace,
+        txn_id: u64,
+        primary: Vec<u8>,
+        caller_start_ts: u64,
+    ) -> Result<Arc<TransactionStatus>> {
+        let current_ts = pd_client.clone().get_timestamp().await?.version();
+        self.check_txn_status(
+            pd_client,
+            keyspace,
+            txn_id,
+            primary,
+            caller_start_ts,
+            current_ts,
+            true,
+            false,
+            false,
+            false,
+        )
+        .await
+    }
+
     /// _Cleanup_ the given locks. Returns whether all the given locks are resolved.
     ///
     /// Note: Will rollback RUNNING transactions. ONLY use in GC.
@@ -1318,6 +1347,56 @@ mod tests {
         );
         assert!(ctx.get_resolved(1).await.is_some());
         assert!(ctx.get_resolved(RESOLVED_CACHE_SIZE as u64).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_get_txn_status_wires_defaults_and_uses_cache() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let base_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.primary_key, b"p".to_vec());
+                    assert_eq!(req.lock_ts, 7);
+                    assert_eq!(req.caller_start_ts, 9);
+                    assert_eq!(req.current_ts, 42);
+                    assert!(req.rollback_if_not_exist);
+                    assert!(!req.force_sync_commit);
+                    assert!(!req.resolving_pessimistic_lock);
+                    assert!(req.verify_is_primary);
+                    assert!(!req.is_txn_file);
+
+                    let mut resp = kvrpcpb::CheckTxnStatusResponse::default();
+                    resp.action = kvrpcpb::Action::NoAction as i32;
+                    resp.commit_version = 50;
+                    resp.lock_ttl = 0;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+        let pd_client = Arc::new(TimestampedPdClient::new(
+            base_client,
+            Timestamp::from_version(42),
+        ));
+
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let status = lock_resolver
+            .get_txn_status(pd_client.clone(), Keyspace::Disable, 7, b"p".to_vec(), 9)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &status.kind,
+            TransactionStatusKind::Committed(ts) if ts.version() == 50
+        ));
+
+        let _ = lock_resolver
+            .get_txn_status(pd_client, Keyspace::Disable, 7, b"p".to_vec(), 9)
+            .await
+            .unwrap();
+
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
     }
 
     struct TimestampedPdClient {
