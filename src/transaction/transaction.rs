@@ -880,6 +880,11 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         self.start_auto_heartbeat().await;
 
+        let primary_key = match &self.options.kind {
+            TransactionKind::Optimistic => None,
+            TransactionKind::Pessimistic(_) => primary_key,
+        };
+
         let mut committer = Committer::new(
             primary_key,
             mutations,
@@ -1876,7 +1881,9 @@ impl<PdC: PdClient> Committer<PdC> {
             let primary_key = self
                 .mutations
                 .iter()
+                .filter(|m| m.op != kvrpcpb::Op::CheckNotExists as i32)
                 .min_by(|a, b| a.key.cmp(&b.key))
+                .or_else(|| self.mutations.iter().min_by(|a, b| a.key.cmp(&b.key)))
                 .map(|m| Key::from(m.key.clone()));
             self.primary_key = match primary_key {
                 Some(primary_key) => Some(primary_key),
@@ -4572,6 +4579,61 @@ mod tests {
             .expect("expected commit_ts");
         assert_eq!(commit_result.version(), one_pc_commit_ts_version);
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_optimistic_commit_selects_smallest_key_as_primary() {
+        let start_ts = Timestamp {
+            physical: 1,
+            logical: 0,
+            ..Default::default()
+        };
+        let pd_ts = Timestamp {
+            physical: 2,
+            logical: 0,
+            ..Default::default()
+        };
+        let one_pc_commit_ts = Timestamp {
+            physical: 3,
+            logical: 0,
+            ..Default::default()
+        };
+        let one_pc_commit_ts_version = one_pc_commit_ts.version();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert!(req.try_one_pc);
+                assert_eq!(req.primary_lock, vec![1]);
+                let resp = kvrpcpb::PrewriteResponse {
+                    one_pc_commit_ts: one_pc_commit_ts_version,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: pd_ts,
+            timestamp_calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let mut txn = Transaction::new(
+            start_ts,
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .try_one_pc()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![2u8], b"v2".to_vec()).await.unwrap();
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), one_pc_commit_ts_version);
     }
 
     #[tokio::test]
