@@ -2487,6 +2487,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::time::Duration;
     use std::time::Instant;
 
@@ -2939,6 +2940,70 @@ mod tests {
         assert_eq!(get_count.load(Ordering::SeqCst), 2);
         assert_eq!(first_store_id.load(Ordering::SeqCst), 51);
         assert_eq!(second_store_id.load(Ordering::SeqCst), 61);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_replica_read_mixed_skips_unreachable_store_after_grpc_error() {
+        let store_ids = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let store_61_attempts = Arc::new(AtomicUsize::new(0));
+
+        let store_ids_captured = store_ids.clone();
+        let store_61_attempts_captured = store_61_attempts.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+
+                store_ids_captured
+                    .lock()
+                    .expect("mutex poisoned")
+                    .push(peer.store_id);
+
+                match peer.store_id {
+                    51 => Err(Error::GrpcAPI(tonic::Status::deadline_exceeded(
+                        "deadline exceeded",
+                    ))),
+                    61 => {
+                        let attempt = store_61_attempts_captured.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            let mut not_leader = crate::proto::errorpb::NotLeader::default();
+                            not_leader.leader = Some(crate::proto::metapb::Peer {
+                                store_id: 41,
+                                ..Default::default()
+                            });
+                            let mut region_error = crate::proto::errorpb::Error::default();
+                            region_error.not_leader = Some(not_leader);
+
+                            let resp = kvrpcpb::GetResponse {
+                                region_error: Some(region_error),
+                                ..Default::default()
+                            };
+                            Ok(Box::new(resp) as Box<dyn Any>)
+                        } else {
+                            Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+                        }
+                    }
+                    _ => Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>),
+                }
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Mixed),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        let store_ids = store_ids.lock().expect("mutex poisoned").clone();
+        assert_eq!(store_ids, vec![51, 61, 61]);
     }
 
     #[tokio::test]

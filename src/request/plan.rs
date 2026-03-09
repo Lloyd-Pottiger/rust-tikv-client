@@ -10,7 +10,7 @@ use futures::future::try_join_all;
 use futures::prelude::*;
 use log::debug;
 use log::info;
-use tokio::sync::Semaphore;
+use tokio::sync::{RwLock, Semaphore};
 use tokio::time::sleep;
 
 use crate::backoff::Backoff;
@@ -142,9 +142,14 @@ fn select_replica_read_peer(
     region: &RegionWithLeader,
     replica_read: ReplicaReadType,
     attempt: u32,
+    unreachable_store_ids: &[StoreId],
 ) -> Option<metapb::Peer> {
     let leader_store_id = region.leader.as_ref().map(|p| p.store_id);
     let peers = &region.region.peers;
+
+    fn is_store_reachable(unreachable_store_ids: &[StoreId], store_id: StoreId) -> bool {
+        !unreachable_store_ids.contains(&store_id)
+    }
 
     fn select_peer_with_attempt<F>(
         peers: &[metapb::Peer],
@@ -168,25 +173,55 @@ fn select_replica_read_peer(
 
     let peer = match replica_read {
         ReplicaReadType::Follower => select_peer_with_attempt(peers, attempt, |peer| {
-            Some(peer.store_id) != leader_store_id && peer.role != metapb::PeerRole::Learner as i32
+            Some(peer.store_id) != leader_store_id
+                && peer.role != metapb::PeerRole::Learner as i32
+                && is_store_reachable(unreachable_store_ids, peer.store_id)
         }),
         ReplicaReadType::Learner => select_peer_with_attempt(peers, attempt, |peer| {
             peer.role == metapb::PeerRole::Learner as i32
+                && is_store_reachable(unreachable_store_ids, peer.store_id)
         }),
         ReplicaReadType::Mixed => select_peer_with_attempt(peers, attempt, |peer| {
             Some(peer.store_id) != leader_store_id
+                && is_store_reachable(unreachable_store_ids, peer.store_id)
         }),
-        ReplicaReadType::Leader | ReplicaReadType::PreferLeader => None,
+        ReplicaReadType::Leader => None,
+        ReplicaReadType::PreferLeader => match leader_store_id {
+            Some(store_id) if is_store_reachable(unreachable_store_ids, store_id) => None,
+            _ => select_peer_with_attempt(peers, attempt, |peer| {
+                Some(peer.store_id) != leader_store_id
+                    && is_store_reachable(unreachable_store_ids, peer.store_id)
+            }),
+        },
     };
 
     peer.or_else(|| region.leader.clone())
         .or_else(|| region.region.peers.first().cloned())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Default)]
+struct StoreLiveness {
+    unreachable_store_ids: RwLock<Vec<StoreId>>,
+}
+
+impl StoreLiveness {
+    async fn mark_unreachable(&self, store_id: StoreId) {
+        let mut unreachable_store_ids = self.unreachable_store_ids.write().await;
+        if !unreachable_store_ids.contains(&store_id) {
+            unreachable_store_ids.push(store_id);
+        }
+    }
+
+    async fn unreachable_store_ids(&self) -> Vec<StoreId> {
+        self.unreachable_store_ids.read().await.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
 struct ReplicaReadState {
     read_type: ReplicaReadType,
     attempt_base: u32,
+    store_liveness: Arc<StoreLiveness>,
 }
 
 impl ReplicaReadState {
@@ -194,10 +229,19 @@ impl ReplicaReadState {
         Self {
             read_type,
             attempt_base: 0,
+            store_liveness: Arc::new(StoreLiveness::default()),
         }
     }
 
-    fn attempt(self, current_attempts: u32) -> u32 {
+    async fn mark_store_unreachable(&self, store_id: StoreId) {
+        self.store_liveness.mark_unreachable(store_id).await;
+    }
+
+    async fn unreachable_store_ids(&self) -> Vec<StoreId> {
+        self.store_liveness.unreachable_store_ids().await
+    }
+
+    fn attempt(&self, current_attempts: u32) -> u32 {
         current_attempts.saturating_sub(self.attempt_base)
     }
 
@@ -205,6 +249,7 @@ impl ReplicaReadState {
         Self {
             read_type,
             attempt_base: current_attempts,
+            store_liveness: self.store_liveness,
         }
     }
 
@@ -212,6 +257,7 @@ impl ReplicaReadState {
         Self {
             read_type: self.read_type,
             attempt_base: self.attempt_base.saturating_add(1),
+            store_liveness: self.store_liveness,
         }
     }
 }
@@ -254,6 +300,7 @@ where
         for shard in shards {
             let (shard, region) = shard?;
             let clone = current_plan.clone_then_apply_shard(shard);
+            let replica_read = replica_read.clone();
             let handle = tokio::spawn(Self::single_shard_handler(
                 pd_client.clone(),
                 clone,
@@ -304,7 +351,11 @@ where
             .map(|ctx| ctx.stale_read)
             .unwrap_or(false);
         let current_attempts = backoff.current_attempts();
-        if let Some(replica_read) = replica_read {
+        let unreachable_store_ids = match replica_read.as_ref() {
+            Some(replica_read) => replica_read.unreachable_store_ids().await,
+            None => Vec::new(),
+        };
+        if let Some(replica_read) = replica_read.as_ref() {
             let attempt = replica_read.attempt(current_attempts);
             let read_type = replica_read.read_type;
             if is_stale_read && attempt == 1 {
@@ -317,20 +368,23 @@ where
                     region.leader = Some(region_leader);
                 }
             } else if read_type.is_follower_read() {
-                if let Some(peer) = select_replica_read_peer(&region, read_type, attempt) {
+                if let Some(peer) =
+                    select_replica_read_peer(&region, read_type, attempt, &unreachable_store_ids)
+                {
                     region.leader = Some(peer);
                 }
             }
         }
+        let replica_read_type = replica_read.as_ref().map(|state| state.read_type);
         let region_store = match pd_client
             .clone()
             .map_region_to_store(region)
             .await
             .and_then(|region_store| {
                 plan.apply_store(&region_store)?;
-                if let Some(replica_read) = replica_read {
+                if let Some(replica_read_type) = replica_read_type {
                     if let Some(ctx) = plan.kv_context_mut() {
-                        adjust_replica_read_flag(ctx, leader_store_id, replica_read.read_type);
+                        adjust_replica_read_flag(ctx, leader_store_id, replica_read_type);
                     }
                 }
                 Ok(region_store)
@@ -430,7 +484,7 @@ where
                                 state.switch_to(ReplicaReadType::Mixed, backoff.current_attempts()),
                             )
                         }
-                        _ => replica_read,
+                        (_, replica_read) => replica_read,
                     };
                     let replica_read = if retry_same_replica {
                         replica_read.map(ReplicaReadState::keep_current_attempt_on_retry)
@@ -470,6 +524,9 @@ where
         let is_grpc_error = is_grpc_error(&e);
         let mut replica_read = replica_read;
         if is_grpc_error {
+            if let (Some(store_id), Some(replica_read)) = (store, replica_read.as_ref()) {
+                replica_read.mark_store_unreachable(store_id).await;
+            }
             if let Some(store_id) = store {
                 pd_client.invalidate_store_cache(store_id).await;
             }
@@ -1354,6 +1411,22 @@ mod test {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb::BatchGetResponse;
+
+    #[test]
+    fn test_select_replica_read_peer_mixed_skips_unreachable_store() {
+        let region = MockPdClient::region1();
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[51])
+            .expect("expected a reachable replica");
+        assert_eq!(peer.store_id, 61);
+    }
+
+    #[test]
+    fn test_select_replica_read_peer_prefer_leader_skips_unreachable_leader() {
+        let region = MockPdClient::region1();
+        let peer = select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[41])
+            .expect("expected a reachable replica");
+        assert_eq!(peer.store_id, 51);
+    }
 
     #[derive(Clone)]
     struct ErrPlan;
