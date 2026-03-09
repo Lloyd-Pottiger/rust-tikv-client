@@ -110,7 +110,10 @@ pub trait PdClient: Send + Sync + 'static {
                         if !region.contains(key.as_ref()) {
                             break;
                         }
-                        grouped.push(keys.next().unwrap().into());
+                        let Some(next_key) = keys.next() else {
+                            break;
+                        };
+                        grouped.push(next_key.into());
                     }
                     Ok(Some((keys, (grouped, region))))
                 } else {
