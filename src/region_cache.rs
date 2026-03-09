@@ -80,13 +80,13 @@ impl<C: RetryClientTrait> RegionCache<C> {
         };
 
         if let Some((_, candidate_region_ver_id)) = res {
-            let region = region_cache_guard
+            if let Some(region) = region_cache_guard
                 .ver_id_to_region
                 .get(&candidate_region_ver_id)
-                .unwrap();
-
-            if region.contains(key) {
-                return Ok(region.clone());
+            {
+                if region.contains(key) {
+                    return Ok(region.clone());
+                }
             }
         }
         drop(region_cache_guard);
@@ -99,10 +99,10 @@ impl<C: RetryClientTrait> RegionCache<C> {
             let region_cache_guard = self.region_cache.read().await;
 
             // check cache
-            let ver_id = region_cache_guard.id_to_ver_id.get(&id);
-            if let Some(ver_id) = ver_id {
-                let region = region_cache_guard.ver_id_to_region.get(ver_id).unwrap();
-                return Ok(region.clone());
+            if let Some(ver_id) = region_cache_guard.id_to_ver_id.get(&id) {
+                if let Some(region) = region_cache_guard.ver_id_to_region.get(ver_id) {
+                    return Ok(region.clone());
+                }
             }
 
             // check concurrent requests
@@ -186,19 +186,41 @@ impl<C: RetryClientTrait> RegionCache<C> {
             }
         };
         while let Some((_, ver_id_in_cache)) = search_range.next_back() {
-            let region_in_cache = cache.ver_id_to_region.get(ver_id_in_cache).unwrap();
-
-            if region_in_cache.region.end_key > region.region.start_key {
-                to_be_removed.insert(ver_id_in_cache.clone());
-            } else {
-                break;
+            match cache.ver_id_to_region.get(ver_id_in_cache) {
+                Some(region_in_cache) => {
+                    if region_in_cache.region.end_key > region.region.start_key {
+                        to_be_removed.insert(ver_id_in_cache.clone());
+                    } else {
+                        break;
+                    }
+                }
+                None => {
+                    // Inconsistent internal state: key-to-ver-id points to a missing region.
+                    // Treat it as stale and remove it.
+                    to_be_removed.insert(ver_id_in_cache.clone());
+                }
             }
         }
 
+        let mut stale_ver_ids = HashSet::new();
         for ver_id in to_be_removed {
-            let region_to_remove = cache.ver_id_to_region.remove(&ver_id).unwrap();
-            cache.key_to_ver_id.remove(&region_to_remove.start_key());
-            cache.id_to_ver_id.remove(&region_to_remove.id());
+            match cache.ver_id_to_region.remove(&ver_id) {
+                Some(region_to_remove) => {
+                    cache.key_to_ver_id.remove(&region_to_remove.start_key());
+                    cache.id_to_ver_id.remove(&region_to_remove.id());
+                }
+                None => {
+                    stale_ver_ids.insert(ver_id);
+                }
+            }
+        }
+        if !stale_ver_ids.is_empty() {
+            cache
+                .key_to_ver_id
+                .retain(|_, ver_id| !stale_ver_ids.contains(ver_id));
+            cache
+                .id_to_ver_id
+                .retain(|_, ver_id| !stale_ver_ids.contains(ver_id));
         }
         cache
             .key_to_ver_id
@@ -432,6 +454,41 @@ mod test {
             cache.get_region_by_id(2).await?.leader.unwrap().store_id,
             102
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tolerate_inconsistent_cache_maps() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new(retry_client.clone());
+
+        let region1 = region(1, vec![], vec![10]);
+        retry_client.regions.lock().await.insert(1, region1.clone());
+
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+        assert_eq!(
+            cache.get_region_by_key(&vec![5].into()).await?,
+            region1.clone()
+        );
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 1);
+
+        // Corrupt internal maps so lookups must tolerate missing region entries.
+        {
+            let mut guard = cache.region_cache.write().await;
+            guard.ver_id_to_region.clear();
+        }
+
+        assert_eq!(cache.get_region_by_key(&vec![5].into()).await?.id(), 1);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 2);
+
+        {
+            let mut guard = cache.region_cache.write().await;
+            guard.ver_id_to_region.clear();
+        }
+
+        assert_eq!(cache.get_region_by_id(1).await?.id(), 1);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 3);
 
         Ok(())
     }
