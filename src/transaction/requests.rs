@@ -313,11 +313,23 @@ impl Shardable for kvrpcpb::PrewriteRequest {
             .collect::<Vec<_>>();
         mutations.sort_by(|a, b| a.key.cmp(&b.key));
 
+        // Match client-go behavior: once a prewrite request is retried (e.g. region-miss retry),
+        // set txn_size to a large value to avoid unexpected resolve-lock-lite.
+        let is_retry_request = self
+            .context
+            .as_ref()
+            .map(|ctx| ctx.is_retry_request)
+            .unwrap_or(false);
+
         region_stream_for_keys(mutations.into_iter(), pd_client.clone())
             .flat_map(
                 move |result: Result<(Vec<PrewriteMutation>, RegionWithLeader)>| match result {
                     Ok((mutations, region)) => {
-                        let region_txn_size = mutations.len() as u64;
+                        let region_txn_size = if is_retry_request {
+                            u64::MAX
+                        } else {
+                            mutations.len() as u64
+                        };
                         let batches = {
                             let mut batches: Vec<Vec<PrewriteMutation>> = Vec::new();
                             let mut batch: Vec<PrewriteMutation> = Vec::new();
@@ -1485,6 +1497,84 @@ mod tests {
             }
         }
         assert_eq!(primary_shard_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_prewrite_request_shards_retry_uses_u64_max_txn_size() {
+        let large_value = vec![0_u8; 8 * 1024];
+
+        let primary = vec![1_u8];
+        let key2 = vec![2_u8];
+        let key3 = vec![3_u8];
+
+        let mutations = vec![
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: key2.clone(),
+                value: large_value.clone(),
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: primary.clone(),
+                value: large_value.clone(),
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: key3.clone(),
+                value: large_value,
+                ..Default::default()
+            },
+        ];
+
+        let req = super::new_pessimistic_prewrite_request(mutations, primary.clone(), 1, 100, 5);
+        let pd_client = Arc::new(MockPdClient::default());
+
+        let shards = req
+            .shards(&pd_client)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        let (shard, _) = shards
+            .into_iter()
+            .find(|(shard, _)| {
+                shard
+                    .mutations
+                    .first()
+                    .map(|m| m.key == key2)
+                    .unwrap_or(false)
+            })
+            .expect("missing expected shard for key2");
+
+        let mut shard_req = req.clone();
+        shard_req.apply_shard(shard);
+        assert_eq!(shard_req.mutations.len(), 1);
+        assert_eq!(shard_req.txn_size, 3);
+
+        shard_req
+            .context
+            .get_or_insert_with(kvrpcpb::Context::default)
+            .is_retry_request = true;
+
+        let retry_shards = shard_req
+            .shards(&pd_client)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!retry_shards.is_empty());
+
+        for (retry_shard, _) in retry_shards {
+            assert_eq!(retry_shard.txn_size, u64::MAX);
+            let mut retry_req = shard_req.clone();
+            retry_req.apply_shard(retry_shard);
+            assert_eq!(retry_req.txn_size, u64::MAX);
+        }
     }
 
     #[tokio::test]

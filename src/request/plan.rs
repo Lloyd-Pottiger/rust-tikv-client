@@ -237,12 +237,17 @@ where
     #[async_recursion]
     async fn single_plan_handler(
         pd_client: Arc<PdC>,
-        current_plan: P,
+        mut current_plan: P,
         backoff: Backoff,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
         replica_read: Option<ReplicaReadState>,
     ) -> Result<<Self as Plan>::Result> {
+        if backoff.current_attempts() > 0 {
+            if let Some(ctx) = current_plan.kv_context_mut() {
+                ctx.is_retry_request = true;
+            }
+        }
         let shards = current_plan.shards(&pd_client).collect::<Vec<_>>().await;
         debug!("single_plan_handler, shards: {}", shards.len());
         let mut handles = Vec::with_capacity(shards.len());
