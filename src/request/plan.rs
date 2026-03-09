@@ -33,6 +33,7 @@ use crate::store::HasRegionErrors;
 use crate::store::KvClient;
 use crate::store::RegionStore;
 use crate::store::{HasKeyErrors, Store};
+use crate::timestamp::TimestampExt;
 use crate::transaction::resolve_locks_for_read;
 use crate::transaction::resolve_locks_with_options;
 use crate::transaction::HasLocks;
@@ -1238,6 +1239,9 @@ where
         let mut plan = self.inner.clone();
         let mut backoff = self.backoff.clone();
         let mut forced_leader = false;
+        let caller_start_ts = self.timestamp.version();
+        let mut lock_resolver = crate::transaction::LockResolver::new(self.ctx.clone());
+        let mut resolving_record_token: Option<usize> = None;
 
         let (resolved_locks, committed_locks) = self.lock_tracker.snapshot().await;
         if let Some(ctx) = plan.kv_context_mut() {
@@ -1249,10 +1253,20 @@ where
         loop {
             let locks = result.take_locks();
             if locks.is_empty() {
+                if let Some(token) = resolving_record_token.take() {
+                    lock_resolver
+                        .resolve_locks_done(caller_start_ts, token)
+                        .await;
+                }
                 return Ok(result);
             }
 
             if backoff.is_none() {
+                if let Some(token) = resolving_record_token.take() {
+                    lock_resolver
+                        .resolve_locks_done(caller_start_ts, token)
+                        .await;
+                }
                 return Err(Error::ResolveLockError(locks));
             }
 
@@ -1275,8 +1289,24 @@ where
                 }
             }
 
+            let token = match resolving_record_token {
+                Some(token) => {
+                    lock_resolver
+                        .update_resolving_locks(&locks, caller_start_ts, token)
+                        .await;
+                    token
+                }
+                None => {
+                    let token = lock_resolver
+                        .record_resolving_locks(&locks, caller_start_ts)
+                        .await;
+                    resolving_record_token = Some(token);
+                    token
+                }
+            };
+
             let resolve_result: crate::transaction::ResolveLocksForReadResult =
-                resolve_locks_for_read(
+                match resolve_locks_for_read(
                     self.ctx.clone(),
                     locks,
                     self.timestamp.clone(),
@@ -1285,7 +1315,16 @@ where
                     self.force_resolve_lock_lite,
                     self.lock_tracker.clone(),
                 )
-                .await?;
+                .await
+                {
+                    Ok(resolve_result) => resolve_result,
+                    Err(err) => {
+                        lock_resolver
+                            .resolve_locks_done(caller_start_ts, token)
+                            .await;
+                        return Err(err);
+                    }
+                };
 
             let ms_before_txn_expired = resolve_result.ms_before_txn_expired;
             self.lock_tracker
@@ -1302,17 +1341,38 @@ where
             }
 
             if ms_before_txn_expired <= 0 {
-                result = plan.execute().await?;
+                result = match plan.execute().await {
+                    Ok(result) => result,
+                    Err(err) => {
+                        lock_resolver
+                            .resolve_locks_done(caller_start_ts, token)
+                            .await;
+                        return Err(err);
+                    }
+                };
                 continue;
             }
 
             match backoff.next_delay_duration() {
-                None => return Err(Error::ResolveLockError(resolve_result.live_locks)),
+                None => {
+                    lock_resolver
+                        .resolve_locks_done(caller_start_ts, token)
+                        .await;
+                    return Err(Error::ResolveLockError(resolve_result.live_locks));
+                }
                 Some(delay_duration) => {
                     let delay_duration =
                         delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64));
                     sleep(delay_duration).await;
-                    result = plan.execute().await?;
+                    result = match plan.execute().await {
+                        Ok(result) => result,
+                        Err(err) => {
+                            lock_resolver
+                                .resolve_locks_done(caller_start_ts, token)
+                                .await;
+                            return Err(err);
+                        }
+                    };
                 }
             }
         }

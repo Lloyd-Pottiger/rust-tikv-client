@@ -37,6 +37,7 @@ mod requests;
 pub use lock::LockResolver;
 pub use lock::ResolveLocksContext;
 pub use lock::ResolveLocksOptions;
+pub use lock::ResolvingLock;
 mod snapshot;
 mod sync_client;
 mod sync_snapshot;

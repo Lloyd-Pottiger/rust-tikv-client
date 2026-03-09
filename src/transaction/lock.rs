@@ -751,6 +751,25 @@ pub struct ResolveLocksContext {
     // Record the status of each transaction.
     resolved: Arc<RwLock<ResolvedTxnStatusCache>>,
     clean_regions: Arc<RwLock<HashMap<u64, HashSet<RegionVerId>>>>,
+    resolving: Arc<RwLock<ResolvingLocksState>>,
+}
+
+#[derive(Default)]
+struct ResolvingLocksState {
+    // caller_start_ts -> token -> resolving locks
+    resolving: HashMap<u64, Vec<Option<Vec<ResolvingLock>>>>,
+}
+
+/// A lock currently being resolved by the client.
+///
+/// This is intended for debugging and introspection, matching client-go
+/// `LockResolver.Resolving`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvingLock {
+    pub txn_id: u64,
+    pub lock_txn_id: u64,
+    pub key: Vec<u8>,
+    pub primary: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -803,6 +822,92 @@ pub struct LockResolver {
 impl LockResolver {
     pub fn new(ctx: ResolveLocksContext) -> Self {
         Self { ctx }
+    }
+
+    /// Records the locks being resolved for a given `caller_start_ts` and returns a token.
+    ///
+    /// This mirrors client-go `LockResolver.RecordResolvingLocks`.
+    pub async fn record_resolving_locks(
+        &mut self,
+        locks: &[kvrpcpb::LockInfo],
+        caller_start_ts: u64,
+    ) -> usize {
+        let resolving: Vec<ResolvingLock> = locks
+            .iter()
+            .map(|lock| ResolvingLock {
+                txn_id: caller_start_ts,
+                lock_txn_id: lock.lock_version,
+                key: lock.key.clone(),
+                primary: lock.primary_lock.clone(),
+            })
+            .collect();
+
+        let mut state = self.ctx.resolving.write().await;
+        let tokens = state.resolving.entry(caller_start_ts).or_default();
+        let token = tokens.len();
+        tokens.push(Some(resolving));
+        token
+    }
+
+    /// Updates the recorded resolving-lock information for `caller_start_ts` and `token`.
+    ///
+    /// This mirrors client-go `LockResolver.UpdateResolvingLocks`.
+    pub async fn update_resolving_locks(
+        &mut self,
+        locks: &[kvrpcpb::LockInfo],
+        caller_start_ts: u64,
+        token: usize,
+    ) {
+        let resolving: Vec<ResolvingLock> = locks
+            .iter()
+            .map(|lock| ResolvingLock {
+                txn_id: caller_start_ts,
+                lock_txn_id: lock.lock_version,
+                key: lock.key.clone(),
+                primary: lock.primary_lock.clone(),
+            })
+            .collect();
+
+        let mut state = self.ctx.resolving.write().await;
+        let Some(tokens) = state.resolving.get_mut(&caller_start_ts) else {
+            return;
+        };
+        let Some(slot) = tokens.get_mut(token) else {
+            return;
+        };
+        *slot = Some(resolving);
+    }
+
+    /// Removes the recorded resolving-lock information for `caller_start_ts` and `token`.
+    ///
+    /// This mirrors client-go `LockResolver.ResolveLocksDone`.
+    pub async fn resolve_locks_done(&mut self, caller_start_ts: u64, token: usize) {
+        let mut state = self.ctx.resolving.write().await;
+        let Some(tokens) = state.resolving.get_mut(&caller_start_ts) else {
+            return;
+        };
+        let Some(slot) = tokens.get_mut(token) else {
+            return;
+        };
+        *slot = None;
+
+        if tokens.iter().all(|slot| slot.is_none()) {
+            state.resolving.remove(&caller_start_ts);
+        }
+    }
+
+    /// Returns the locks currently being resolved.
+    ///
+    /// This mirrors client-go `LockResolver.Resolving`.
+    pub async fn resolving(&mut self) -> Vec<ResolvingLock> {
+        let state = self.ctx.resolving.read().await;
+        state
+            .resolving
+            .values()
+            .flat_map(|tokens| tokens.iter())
+            .filter_map(|slot| slot.as_ref())
+            .flat_map(|locks| locks.iter().cloned())
+            .collect()
     }
 
     /// Get the transaction status for `txn_id` (start TS) and `primary` key.
@@ -1399,6 +1504,63 @@ mod tests {
             .unwrap();
 
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_resolving_records_updates_and_cleans_up() {
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+
+        let mut lock1 = kvrpcpb::LockInfo::default();
+        lock1.key = vec![1];
+        lock1.primary_lock = vec![9];
+        lock1.lock_version = 10;
+
+        let mut lock2 = kvrpcpb::LockInfo::default();
+        lock2.key = vec![2];
+        lock2.primary_lock = vec![9];
+        lock2.lock_version = 11;
+
+        let locks = vec![lock1, lock2.clone()];
+        let token = lock_resolver.record_resolving_locks(&locks, 42).await;
+
+        let mut resolving = lock_resolver.resolving().await;
+        resolving.sort_by_key(|lock| (lock.txn_id, lock.lock_txn_id));
+        assert_eq!(
+            resolving,
+            vec![
+                ResolvingLock {
+                    txn_id: 42,
+                    lock_txn_id: 10,
+                    key: vec![1],
+                    primary: vec![9],
+                },
+                ResolvingLock {
+                    txn_id: 42,
+                    lock_txn_id: 11,
+                    key: vec![2],
+                    primary: vec![9],
+                },
+            ],
+        );
+
+        lock_resolver
+            .update_resolving_locks(&[lock2], 42, token)
+            .await;
+
+        let mut resolving = lock_resolver.resolving().await;
+        resolving.sort_by_key(|lock| (lock.txn_id, lock.lock_txn_id));
+        assert_eq!(
+            resolving,
+            vec![ResolvingLock {
+                txn_id: 42,
+                lock_txn_id: 11,
+                key: vec![2],
+                primary: vec![9],
+            }],
+        );
+
+        lock_resolver.resolve_locks_done(42, token).await;
+        assert!(lock_resolver.resolving().await.is_empty());
     }
 
     struct TimestampedPdClient {
