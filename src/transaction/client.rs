@@ -302,6 +302,7 @@ impl Client {
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let req = new_scan_lock_request(range, safepoint, options.batch_size);
         let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .preserve_shard()
             .cleanup_locks(ctx.clone(), options, backoff, self.keyspace)
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .extract_error()

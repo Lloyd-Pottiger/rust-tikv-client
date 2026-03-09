@@ -1551,7 +1551,7 @@ impl<P: Plan + Shardable> Clone for PreserveShard<P> {
     fn clone(&self) -> Self {
         PreserveShard {
             inner: self.inner.clone(),
-            shard: None,
+            shard: self.shard.clone(),
         }
     }
 }
@@ -1598,10 +1598,24 @@ impl<Resp: HasRegionError, Shard> HasRegionError for ResponseWithShard<Resp, Sha
     }
 }
 
+impl HasNextBatch for ResponseWithShard<kvrpcpb::ScanLockResponse, (Vec<u8>, Vec<u8>)> {
+    fn has_next_batch(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        let end_key = &self.1 .1;
+        let last_lock = self.0.locks.last()?;
+        let mut start_key: Vec<u8> = last_lock.key.clone();
+        start_key.push(0);
+        if !end_key.is_empty() && start_key.as_slice() >= end_key.as_slice() {
+            return None;
+        }
+        Some((start_key, end_key.clone()))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use futures::stream::BoxStream;
     use futures::stream::{self};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::mock::MockKvClient;
@@ -2021,5 +2035,90 @@ mod test {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_scan_lock_stops_at_shard_end_key_without_extra_scan() -> Result<()>
+    {
+        #[derive(Clone)]
+        struct CountingScanLockPlan {
+            execute_calls: Arc<AtomicUsize>,
+            next_batch_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl Plan for CountingScanLockPlan {
+            type Result = kvrpcpb::ScanLockResponse;
+
+            async fn execute(&self) -> Result<Self::Result> {
+                let call = self.execute_calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    Ok(kvrpcpb::ScanLockResponse {
+                        locks: vec![kvrpcpb::LockInfo {
+                            key: vec![10],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })
+                } else {
+                    Ok(kvrpcpb::ScanLockResponse::default())
+                }
+            }
+        }
+
+        impl Shardable for CountingScanLockPlan {
+            type Shard = (Vec<u8>, Vec<u8>);
+
+            fn shards(
+                &self,
+                _: &Arc<impl crate::pd::PdClient>,
+            ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+                Box::pin(stream::empty()).boxed()
+            }
+
+            fn apply_shard(&mut self, _: Self::Shard) {}
+
+            fn apply_store(&mut self, _: &RegionStore) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        impl NextBatch for CountingScanLockPlan {
+            fn next_batch(&mut self, _: (Vec<u8>, Vec<u8>)) {
+                self.next_batch_calls.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let execute_calls = Arc::new(AtomicUsize::new(0));
+        let next_batch_calls = Arc::new(AtomicUsize::new(0));
+        let inner = PreserveShard {
+            inner: CountingScanLockPlan {
+                execute_calls: execute_calls.clone(),
+                next_batch_calls: next_batch_calls.clone(),
+            },
+            shard: Some((vec![10], vec![10, 0])),
+        };
+
+        let plan = CleanupLocks {
+            inner,
+            ctx: ResolveLocksContext::default(),
+            options: ResolveLocksOptions {
+                async_commit_only: true,
+                batch_size: 1,
+            },
+            store: Some(RegionStore::new(
+                MockPdClient::region2(),
+                Arc::new(MockKvClient::default()),
+            )),
+            pd_client: Arc::new(MockPdClient::default()),
+            keyspace: Keyspace::Disable,
+            backoff: Backoff::no_backoff(),
+        };
+
+        let result = plan.execute().await?;
+        assert_eq!(result.resolved_locks, 0);
+        assert_eq!(execute_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(next_batch_calls.load(Ordering::SeqCst), 0);
+        Ok(())
     }
 }

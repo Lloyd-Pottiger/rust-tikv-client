@@ -162,6 +162,12 @@ impl<P: Plan + Shardable> Shardable for PreserveShard<P> {
     }
 }
 
+impl<P: Plan + Shardable + NextBatch> NextBatch for PreserveShard<P> {
+    fn next_batch(&mut self, range: (Vec<u8>, Vec<u8>)) {
+        self.inner.next_batch(range);
+    }
+}
+
 impl<P: Plan + Shardable, PdC: PdClient> Shardable for ResolveLock<P, PdC> {
     impl_inner_shardable!();
 }
