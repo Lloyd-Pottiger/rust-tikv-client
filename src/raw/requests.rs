@@ -10,7 +10,6 @@ use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::range_request;
 use crate::region::RegionWithLeader;
 use crate::request::plan::ResponseWithShard;
-use crate::request::CollectSingle;
 use crate::request::DefaultProcessor;
 use crate::request::KvRequest;
 use crate::request::Merge;

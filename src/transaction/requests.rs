@@ -20,7 +20,6 @@ use crate::proto::kvrpcpb::{self};
 use crate::proto::pdpb::Timestamp;
 use crate::region::RegionWithLeader;
 use crate::request::Collect;
-use crate::request::CollectSingle;
 use crate::request::DefaultProcessor;
 use crate::request::HasNextBatch;
 use crate::request::KvRequest;

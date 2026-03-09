@@ -356,7 +356,9 @@ where
         };
 
         // limit concurrent requests
-        let permit = permits.acquire().await.unwrap();
+        let permit = permits.acquire().await.map_err(|_| Error::InternalError {
+            message: "request concurrency semaphore closed".to_owned(),
+        })?;
         let res = plan.execute().await;
         drop(permit);
 
@@ -508,7 +510,7 @@ fn adjust_replica_read_flag(
 // 3. Err(Error): can't be resolved, return the error to upper level
 pub(crate) async fn handle_region_error<PdC: PdClient>(
     pd_client: Arc<PdC>,
-    e: errorpb::Error,
+    mut e: errorpb::Error,
     region_store: RegionStore,
 ) -> Result<bool> {
     debug!("handle_region_error: {:?}", e);
@@ -540,8 +542,8 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
             pd_client.invalidate_store_cache(store_id).await;
         }
         Ok(false)
-    } else if e.epoch_not_match.is_some() {
-        on_region_epoch_not_match(pd_client.clone(), region_store, e.epoch_not_match.unwrap()).await
+    } else if let Some(epoch_not_match) = e.epoch_not_match.take() {
+        on_region_epoch_not_match(pd_client.clone(), region_store, epoch_not_match).await
     } else if e.stale_command.is_some() || e.region_not_found.is_some() {
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
@@ -693,7 +695,9 @@ where
         permits: Arc<Semaphore>,
     ) -> Result<P::Result> {
         loop {
-            let permit = permits.acquire().await.unwrap();
+            let permit = permits.acquire().await.map_err(|_| Error::InternalError {
+                message: "store request concurrency semaphore closed".to_owned(),
+            })?;
             let res = plan.execute().await;
             drop(permit);
 
@@ -759,12 +763,19 @@ pub struct CollectSingle;
 #[macro_export]
 macro_rules! collect_single {
     ($type_: ty) => {
-        impl Merge<$type_> for CollectSingle {
+        impl $crate::request::Merge<$type_> for $crate::request::CollectSingle {
             type Out = $type_;
 
-            fn merge(&self, mut input: Vec<Result<$type_>>) -> Result<Self::Out> {
-                assert!(input.len() == 1);
-                input.pop().unwrap()
+            fn merge(&self, mut input: Vec<$crate::Result<$type_>>) -> $crate::Result<Self::Out> {
+                if input.len() != 1 {
+                    return Err($crate::Error::InternalError {
+                        message: format!("expected a single response, got {}", input.len()),
+                    });
+                }
+
+                input.pop().ok_or_else(|| $crate::Error::InternalError {
+                    message: "expected a single response".to_owned(),
+                })?
             }
         }
     };
@@ -1116,7 +1127,10 @@ where
         let mut result = CleanupLocksResult::default();
         let mut inner = self.inner.clone();
         let mut lock_resolver = crate::transaction::LockResolver::new(self.ctx.clone());
-        let region = &self.store.as_ref().unwrap().region_with_leader;
+        let store = self.store.as_ref().ok_or_else(|| Error::InternalError {
+            message: "cleanup locks executed without store".to_owned(),
+        })?;
+        let region = &store.region_with_leader;
         let mut has_more_batch = true;
 
         while has_more_batch {
@@ -1160,12 +1174,7 @@ where
 
             let lock_size = locks.len();
             match lock_resolver
-                .cleanup_locks(
-                    self.store.clone().unwrap(),
-                    locks,
-                    self.pd_client.clone(),
-                    self.keyspace,
-                )
+                .cleanup_locks(store.clone(), locks, self.pd_client.clone(), self.keyspace)
                 .await
             {
                 Ok(()) => {
@@ -1262,12 +1271,14 @@ where
     type Result = ResponseWithShard<P::Result, P::Shard>;
 
     async fn execute(&self) -> Result<Self::Result> {
-        let res = self.inner.execute().await?;
         let shard = self
             .shard
             .as_ref()
-            .expect("Unreachable: Shardable::apply_shard() is not called before executing PreserveShard")
+            .ok_or_else(|| Error::InternalError {
+                message: "preserve shard executed without shard".to_owned(),
+            })?
             .clone();
+        let res = self.inner.execute().await?;
         Ok(ResponseWithShard(res, shard))
     }
 }
@@ -1356,6 +1367,154 @@ mod test {
             replica_read: None,
         };
         assert!(plan.execute().await.is_err())
+    }
+
+    #[tokio::test]
+    async fn test_preserve_shard_execute_missing_shard_returns_error_without_executing_inner() {
+        #[derive(Clone)]
+        struct PanicPlan;
+
+        #[async_trait]
+        impl Plan for PanicPlan {
+            type Result = BatchGetResponse;
+
+            async fn execute(&self) -> Result<Self::Result> {
+                panic!("inner plan executed unexpectedly");
+            }
+        }
+
+        impl Shardable for PanicPlan {
+            type Shard = ();
+
+            fn shards(
+                &self,
+                _: &Arc<impl crate::pd::PdClient>,
+            ) -> BoxStream<'static, crate::Result<(Self::Shard, RegionWithLeader)>> {
+                Box::pin(stream::empty()).boxed()
+            }
+
+            fn apply_shard(&mut self, _: Self::Shard) {}
+
+            fn apply_store(&mut self, _: &crate::store::RegionStore) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let plan = PreserveShard {
+            inner: PanicPlan,
+            shard: None,
+        };
+
+        let err = plan.execute().await.unwrap_err();
+        match err {
+            Error::InternalError { message } => {
+                assert!(message.contains("preserve shard executed without shard"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_execute_missing_store_returns_error_without_executing_inner() {
+        #[derive(Clone)]
+        struct DummyCleanupResp;
+
+        impl HasLocks for DummyCleanupResp {}
+
+        impl HasNextBatch for DummyCleanupResp {
+            fn has_next_batch(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+                None
+            }
+        }
+
+        impl HasKeyErrors for DummyCleanupResp {
+            fn key_errors(&mut self) -> Option<Vec<Error>> {
+                None
+            }
+        }
+
+        impl HasRegionError for DummyCleanupResp {
+            fn region_error(&mut self) -> Option<errorpb::Error> {
+                None
+            }
+        }
+
+        #[derive(Clone)]
+        struct PanicPlan;
+
+        #[async_trait]
+        impl Plan for PanicPlan {
+            type Result = DummyCleanupResp;
+
+            async fn execute(&self) -> Result<Self::Result> {
+                panic!("inner plan executed unexpectedly");
+            }
+        }
+
+        impl Shardable for PanicPlan {
+            type Shard = ();
+
+            fn shards(
+                &self,
+                _: &Arc<impl crate::pd::PdClient>,
+            ) -> BoxStream<'static, crate::Result<(Self::Shard, RegionWithLeader)>> {
+                Box::pin(stream::empty()).boxed()
+            }
+
+            fn apply_shard(&mut self, _: Self::Shard) {}
+
+            fn apply_store(&mut self, _: &crate::store::RegionStore) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        impl NextBatch for PanicPlan {
+            fn next_batch(&mut self, _: (Vec<u8>, Vec<u8>)) {}
+        }
+
+        let plan = CleanupLocks {
+            inner: PanicPlan,
+            ctx: ResolveLocksContext::default(),
+            options: ResolveLocksOptions::default(),
+            store: None,
+            pd_client: Arc::new(MockPdClient::default()),
+            keyspace: Keyspace::Disable,
+            backoff: Backoff::no_backoff(),
+        };
+
+        let err = plan.execute().await.unwrap_err();
+        match err {
+            Error::InternalError { message } => {
+                assert!(message.contains("cleanup locks executed without store"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_collect_single_merge_requires_exactly_one_response() {
+        let merge = CollectSingle;
+        let err =
+            <CollectSingle as Merge<kvrpcpb::RawGetResponse>>::merge(&merge, vec![]).unwrap_err();
+        assert!(matches!(err, Error::InternalError { .. }));
+
+        let err = <CollectSingle as Merge<kvrpcpb::RawGetResponse>>::merge(
+            &merge,
+            vec![
+                Ok(kvrpcpb::RawGetResponse::default()),
+                Ok(kvrpcpb::RawGetResponse::default()),
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InternalError { .. }));
+
+        let out = <CollectSingle as Merge<kvrpcpb::RawGetResponse>>::merge(
+            &merge,
+            vec![Ok(kvrpcpb::RawGetResponse::default())],
+        )
+        .unwrap();
+        let mut out = out;
+        assert!(out.key_errors().is_none());
     }
 
     #[test]
