@@ -58,6 +58,7 @@ const SCAN_LOCK_BATCH_SIZE: u32 = 1024;
 pub struct Client {
     pd: Arc<PdRpcClient>,
     keyspace: Keyspace,
+    resolve_locks_ctx: ResolveLocksContext,
 }
 
 impl Clone for Client {
@@ -65,6 +66,7 @@ impl Clone for Client {
         Self {
             pd: self.pd.clone(),
             keyspace: self.keyspace,
+            resolve_locks_ctx: self.resolve_locks_ctx.clone(),
         }
     }
 }
@@ -127,7 +129,11 @@ impl Client {
             }
             None => Keyspace::Disable,
         };
-        Ok(Client { pd, keyspace })
+        Ok(Client {
+            pd,
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+        })
     }
 
     /// Create a transactional [`Client`] that uses API V2 without adding or removing any API V2
@@ -150,6 +156,7 @@ impl Client {
         Ok(Client {
             pd,
             keyspace: Keyspace::ApiV2NoPrefix,
+            resolve_locks_ctx: ResolveLocksContext::default(),
         })
     }
 
@@ -337,6 +344,7 @@ impl Client {
         let mut live_locks = locks;
         loop {
             let resolve_result = resolve_locks_with_options(
+                self.resolve_locks_ctx.clone(),
                 live_locks.encode_keyspace(self.keyspace, KeyMode::Txn),
                 timestamp.clone(),
                 self.pd.clone(),
@@ -382,6 +390,12 @@ impl Client {
     }
 
     fn new_transaction(&self, timestamp: Timestamp, options: TransactionOptions) -> Transaction {
-        Transaction::new(timestamp, self.pd.clone(), options, self.keyspace)
+        Transaction::new_with_resolve_locks_ctx(
+            timestamp,
+            self.pd.clone(),
+            options,
+            self.keyspace,
+            self.resolve_locks_ctx.clone(),
+        )
     }
 }

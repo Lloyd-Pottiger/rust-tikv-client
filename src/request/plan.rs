@@ -127,6 +127,12 @@ impl<P: Plan + HasKvContext, PdC: PdClient> HasKvContext for ResolveLock<P, PdC>
     }
 }
 
+impl<P: Plan + HasKvContext, PdC: PdClient> HasKvContext for ResolveLockInContext<P, PdC> {
+    fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.inner.kv_context_mut()
+    }
+}
+
 impl<P: Plan + HasKvContext, PdC: PdClient> HasKvContext for ResolveLockForRead<P, PdC> {
     fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         self.inner.kv_context_mut()
@@ -1051,6 +1057,7 @@ where
         let mut plan = self.inner.clone();
         let mut result = plan.execute().await?;
         let mut backoff = self.backoff.clone();
+        let ctx = ResolveLocksContext::default();
         let mut forced_leader = false;
         loop {
             let locks = result.take_locks();
@@ -1075,6 +1082,96 @@ where
 
             let resolve_result: crate::transaction::ResolveLocksResult =
                 resolve_locks_with_options(
+                    ctx.clone(),
+                    locks,
+                    self.timestamp.clone(),
+                    self.pd_client.clone(),
+                    self.keyspace,
+                    self.pessimistic_region_resolve,
+                )
+                .await?;
+            let ms_before_txn_expired = resolve_result.ms_before_txn_expired;
+            let live_locks = resolve_result.live_locks;
+            if live_locks.is_empty() {
+                result = plan.execute().await?;
+            } else {
+                match backoff.next_delay_duration() {
+                    None => return Err(Error::ResolveLockError(live_locks)),
+                    Some(delay_duration) => {
+                        let delay_duration = if ms_before_txn_expired > 0 {
+                            delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64))
+                        } else {
+                            delay_duration
+                        };
+                        sleep(delay_duration).await;
+                        result = plan.execute().await?;
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) struct ResolveLockInContext<P: Plan, PdC: PdClient> {
+    pub(crate) inner: P,
+    pub(crate) ctx: ResolveLocksContext,
+    pub(crate) timestamp: Timestamp,
+    pub(crate) pd_client: Arc<PdC>,
+    pub(crate) backoff: Backoff,
+    pub(crate) keyspace: Keyspace,
+    pub(crate) pessimistic_region_resolve: bool,
+}
+
+impl<P: Plan, PdC: PdClient> Clone for ResolveLockInContext<P, PdC> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            ctx: self.ctx.clone(),
+            timestamp: self.timestamp.clone(),
+            pd_client: self.pd_client.clone(),
+            backoff: self.backoff.clone(),
+            keyspace: self.keyspace,
+            pessimistic_region_resolve: self.pessimistic_region_resolve,
+        }
+    }
+}
+
+#[async_trait]
+impl<P: Plan + Shardable, PdC: PdClient> Plan for ResolveLockInContext<P, PdC>
+where
+    P::Result: HasLocks,
+{
+    type Result = P::Result;
+
+    async fn execute(&self) -> Result<Self::Result> {
+        let mut plan = self.inner.clone();
+        let mut result = plan.execute().await?;
+        let mut backoff = self.backoff.clone();
+        let mut forced_leader = false;
+        loop {
+            let locks = result.take_locks();
+            if locks.is_empty() {
+                return Ok(result);
+            }
+
+            if backoff.is_none() {
+                return Err(Error::ResolveLockError(locks));
+            }
+
+            if !forced_leader {
+                if let Some(lock_key) = locks.first().map(|lock| lock.key.clone()) {
+                    // Once we meet a lock, retrying against a follower/learner can keep seeing stale
+                    // state. Align with client-go behavior by retrying on the region leader.
+                    let region = self.pd_client.region_for_key(&Key::from(lock_key)).await?;
+                    let region_store = self.pd_client.clone().map_region_to_store(region).await?;
+                    plan.apply_store(&region_store)?;
+                    forced_leader = true;
+                }
+            }
+
+            let resolve_result: crate::transaction::ResolveLocksResult =
+                resolve_locks_with_options(
+                    self.ctx.clone(),
                     locks,
                     self.timestamp.clone(),
                     self.pd_client.clone(),
@@ -1106,6 +1203,7 @@ where
 
 pub(crate) struct ResolveLockForRead<P: Plan, PdC: PdClient> {
     pub(crate) inner: P,
+    pub(crate) ctx: ResolveLocksContext,
     pub(crate) timestamp: Timestamp,
     pub(crate) pd_client: Arc<PdC>,
     pub(crate) backoff: Backoff,
@@ -1117,6 +1215,7 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLockForRead<P, PdC> {
     fn clone(&self) -> Self {
         ResolveLockForRead {
             inner: self.inner.clone(),
+            ctx: self.ctx.clone(),
             timestamp: self.timestamp.clone(),
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
@@ -1176,6 +1275,7 @@ where
 
             let resolve_result: crate::transaction::ResolveLocksForReadResult =
                 resolve_locks_for_read(
+                    self.ctx.clone(),
                     locks,
                     self.timestamp.clone(),
                     self.pd_client.clone(),

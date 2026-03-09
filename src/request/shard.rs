@@ -8,6 +8,7 @@ use super::plan::PreserveShard;
 use crate::pd::PdClient;
 use crate::region::RegionWithLeader;
 use crate::request::plan::CleanupLocks;
+use crate::request::plan::ResolveLockInContext;
 use crate::request::Dispatch;
 use crate::request::KvRequest;
 use crate::request::Plan;
@@ -162,6 +163,10 @@ impl<P: Plan + Shardable> Shardable for PreserveShard<P> {
 }
 
 impl<P: Plan + Shardable, PdC: PdClient> Shardable for ResolveLock<P, PdC> {
+    impl_inner_shardable!();
+}
+
+impl<P: Plan + Shardable, PdC: PdClient> Shardable for ResolveLockInContext<P, PdC> {
     impl_inner_shardable!();
 }
 

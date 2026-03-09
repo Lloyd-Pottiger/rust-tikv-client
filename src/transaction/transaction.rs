@@ -14,6 +14,7 @@ use tokio::time::Duration;
 
 use super::requests::CollectPessimisticLock;
 use super::ReadLockTracker;
+use super::ResolveLocksContext;
 use crate::backoff::Backoff;
 use crate::backoff::DEFAULT_REGION_BACKOFF;
 use crate::kv::HexRepr;
@@ -102,6 +103,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     buffer: Buffer,
     read_lock_tracker: ReadLockTracker,
     rpc: Arc<PdC>,
+    resolve_locks_ctx: ResolveLocksContext,
     options: TransactionOptions,
     replica_read_adjuster: Option<ReplicaReadAdjuster>,
     schema_ver: Option<i64>,
@@ -143,6 +145,22 @@ impl<PdC: PdClient> Transaction<PdC> {
         options: TransactionOptions,
         keyspace: Keyspace,
     ) -> Transaction<PdC> {
+        Self::new_with_resolve_locks_ctx(
+            timestamp,
+            rpc,
+            options,
+            keyspace,
+            ResolveLocksContext::default(),
+        )
+    }
+
+    pub(crate) fn new_with_resolve_locks_ctx(
+        timestamp: Timestamp,
+        rpc: Arc<PdC>,
+        options: TransactionOptions,
+        keyspace: Keyspace,
+        resolve_locks_ctx: ResolveLocksContext,
+    ) -> Transaction<PdC> {
         let status = if options.read_only {
             TransactionStatus::ReadOnly
         } else {
@@ -154,6 +172,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             buffer: Buffer::new(options.is_pessimistic()),
             read_lock_tracker: ReadLockTracker::default(),
             rpc,
+            resolve_locks_ctx,
             options,
             replica_read_adjuster: None,
             schema_ver: None,
@@ -313,6 +332,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
         let replica_read = snapshot_ctx.replica_read;
         let lock_tracker = self.read_lock_tracker.clone();
+        let resolve_locks_ctx = self.resolve_locks_ctx.clone();
 
         self.buffer
             .get_or_else(key, |key| async move {
@@ -320,6 +340,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
 
                 let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock_for_read(
+                    resolve_locks_ctx,
                     timestamp,
                     retry_options.lock_backoff,
                     keyspace,
@@ -465,6 +486,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let snapshot_ctx = self.snapshot_read_context();
         let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
         let lock_tracker = self.read_lock_tracker.clone();
+        let resolve_locks_ctx = self.resolve_locks_ctx.clone();
 
         self.buffer
             .batch_get_or_else(keys, move |keys| {
@@ -487,6 +509,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
                     let plan_builder = PlanBuilder::new(rpc, keyspace, request)
                         .resolve_lock_for_read(
+                            resolve_locks_ctx,
                             timestamp,
                             retry_options.lock_backoff,
                             keyspace,
@@ -901,6 +924,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.buffer.get_write_size() as u64,
             self.start_instant,
         );
+        committer.resolve_locks_ctx = self.resolve_locks_ctx.clone();
         committer.schema_ver = self.schema_ver;
         committer.schema_lease_checker = self.schema_lease_checker.clone();
         let res = committer.commit().await;
@@ -955,6 +979,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.buffer.get_write_size() as u64,
             self.start_instant,
         );
+        committer.resolve_locks_ctx = self.resolve_locks_ctx.clone();
         committer.schema_ver = self.schema_ver;
         committer.schema_lease_checker = self.schema_lease_checker.clone();
         let res = committer.rollback().await;
@@ -987,7 +1012,8 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.start_instant.elapsed().as_millis() as u64 + MAX_TTL,
         );
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .resolve_lock(
+            .resolve_lock_in_context(
+                self.resolve_locks_ctx.clone(),
                 self.timestamp.clone(),
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
@@ -1017,6 +1043,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
         let replica_read = snapshot_ctx.replica_read;
         let lock_tracker = self.read_lock_tracker.clone();
+        let resolve_locks_ctx = self.resolve_locks_ctx.clone();
 
         self.buffer
             .scan_and_fetch(
@@ -1036,6 +1063,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
                     let plan_builder = PlanBuilder::new(rpc, keyspace, request)
                         .resolve_lock_for_read(
+                            resolve_locks_ctx,
                             timestamp,
                             retry_options.lock_backoff,
                             keyspace,
@@ -1322,6 +1350,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
 
             let resolve_result = super::resolve_locks_with_options(
+                self.resolve_locks_ctx.clone(),
                 locks,
                 Timestamp::default(),
                 self.rpc.clone(),
@@ -1365,7 +1394,8 @@ impl<PdC: PdClient> Transaction<PdC> {
             for_update_ts,
         );
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
-            .resolve_lock(
+            .resolve_lock_in_context(
+                self.resolve_locks_ctx.clone(),
                 start_version,
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
@@ -2033,6 +2063,8 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     mutations: Vec<kvrpcpb::Mutation>,
     start_version: Timestamp,
     rpc: Arc<PdC>,
+    #[new(default)]
+    resolve_locks_ctx: ResolveLocksContext,
     options: TransactionOptions,
     keyspace: Keyspace,
     #[new(default)]
@@ -2169,7 +2201,8 @@ impl<PdC: PdClient> Committer<PdC> {
         }
 
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .resolve_lock_with_pessimistic_region(
+            .resolve_lock_with_pessimistic_region_in_context(
+                self.resolve_locks_ctx.clone(),
                 self.start_version.clone(),
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
@@ -2237,7 +2270,8 @@ impl<PdC: PdClient> Committer<PdC> {
         );
         self.options.apply_write_context(&mut req.context);
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
-            .resolve_lock(
+            .resolve_lock_in_context(
+                self.resolve_locks_ctx.clone(),
                 self.start_version.clone(),
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
@@ -2379,7 +2413,8 @@ impl<PdC: PdClient> Committer<PdC> {
         };
         self.options.apply_write_context(&mut req.context);
         let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
-            .resolve_lock(
+            .resolve_lock_in_context(
+                self.resolve_locks_ctx.clone(),
                 start_version,
                 self.options.retry_options.lock_backoff,
                 self.keyspace,
@@ -2405,7 +2440,8 @@ impl<PdC: PdClient> Committer<PdC> {
             TransactionKind::Optimistic => {
                 let req = new_batch_rollback_request(keys, start_version.clone());
                 let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
-                    .resolve_lock(
+                    .resolve_lock_in_context(
+                        self.resolve_locks_ctx.clone(),
                         start_version.clone(),
                         self.options.retry_options.lock_backoff,
                         self.keyspace,
@@ -2419,7 +2455,8 @@ impl<PdC: PdClient> Committer<PdC> {
                 let req =
                     new_pessimistic_rollback_request(keys, start_version.clone(), for_update_ts);
                 let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
-                    .resolve_lock(
+                    .resolve_lock_in_context(
+                        self.resolve_locks_ctx.clone(),
                         start_version.clone(),
                         self.options.retry_options.lock_backoff,
                         self.keyspace,
@@ -2640,6 +2677,126 @@ mod tests {
         let value = snapshot.get(b"k".to_vec()).await.unwrap();
         assert_eq!(value, Some(b"v".to_vec()));
         assert_eq!(get_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_lock_for_read_reuses_resolved_txn_cache_across_calls() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_calls = Arc::new(AtomicUsize::new(0));
+        let pessimistic_rollback_calls = Arc::new(AtomicUsize::new(0));
+
+        let get_calls_captured = get_calls.clone();
+        let check_txn_status_calls_captured = check_txn_status_calls.clone();
+        let pessimistic_rollback_calls_captured = pessimistic_rollback_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
+                    let attempt = get_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    let ctx = req.context.as_ref().expect("context");
+
+                    match attempt {
+                        0 => {
+                            assert!(ctx.committed_locks.is_empty());
+                            assert!(ctx.resolved_locks.is_empty());
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            let mut key_err = kvrpcpb::KeyError::default();
+                            let mut lock = kvrpcpb::LockInfo::default();
+                            lock.key = b"k1".to_vec();
+                            lock.primary_lock = b"k1".to_vec();
+                            lock.lock_version = 1;
+                            lock.lock_ttl = 100;
+                            lock.txn_size = 1;
+                            lock.lock_type = kvrpcpb::Op::Put as i32;
+                            key_err.locked = Some(lock);
+                            resp.error = Some(key_err);
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        1 => {
+                            assert!(ctx.committed_locks.is_empty());
+                            assert_eq!(ctx.resolved_locks, vec![1]);
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            resp.value = b"v1".to_vec();
+                            resp.not_found = false;
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        2 => {
+                            // Ensure the read lock tracker state persists across calls, and the
+                            // lock resolver can reuse the resolved-txn cache for later reads.
+                            assert!(ctx.committed_locks.is_empty());
+                            assert_eq!(ctx.resolved_locks, vec![1]);
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            let mut key_err = kvrpcpb::KeyError::default();
+                            let mut lock = kvrpcpb::LockInfo::default();
+                            lock.key = b"k2".to_vec();
+                            lock.primary_lock = b"k1".to_vec();
+                            lock.lock_version = 1;
+                            lock.lock_for_update_ts = 11;
+                            lock.lock_ttl = 100;
+                            lock.txn_size = 1;
+                            lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+                            key_err.locked = Some(lock);
+                            resp.error = Some(key_err);
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        3 => {
+                            assert!(ctx.committed_locks.is_empty());
+                            assert_eq!(ctx.resolved_locks, vec![1]);
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            resp.value = b"v2".to_vec();
+                            resp.not_found = false;
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        _ => panic!("unexpected get attempt: {attempt}"),
+                    }
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    check_txn_status_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    let mut resp = kvrpcpb::CheckTxnStatusResponse::default();
+                    resp.action = kvrpcpb::Action::NoAction as i32;
+                    resp.commit_version = 20;
+                    resp.lock_ttl = 0;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    pessimistic_rollback_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.keys, vec![b"k2".to_vec()]);
+                    assert_eq!(req.start_version, 1);
+                    assert_eq!(req.for_update_ts, 11);
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+
+                panic!("unexpected request type in resolve-lock-for-read cache reuse test");
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+        );
+
+        let value1 = snapshot.get(b"k1".to_vec()).await.unwrap();
+        assert_eq!(value1, Some(b"v1".to_vec()));
+
+        let value2 = snapshot.get(b"k2".to_vec()).await.unwrap();
+        assert_eq!(value2, Some(b"v2".to_vec()));
+
+        assert_eq!(get_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(check_txn_status_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(pessimistic_rollback_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

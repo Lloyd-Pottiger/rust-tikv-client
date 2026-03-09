@@ -170,14 +170,20 @@ pub async fn resolve_locks(
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
 ) -> Result<Vec<kvrpcpb::LockInfo> /* live_locks */> {
-    Ok(
-        resolve_locks_with_options(locks, timestamp, pd_client, keyspace, false)
-            .await?
-            .live_locks,
+    Ok(resolve_locks_with_options(
+        ResolveLocksContext::default(),
+        locks,
+        timestamp,
+        pd_client,
+        keyspace,
+        false,
     )
+    .await?
+    .live_locks)
 }
 
 pub(crate) async fn resolve_locks_with_options(
+    ctx: ResolveLocksContext,
     locks: Vec<kvrpcpb::LockInfo>,
     timestamp: Timestamp,
     pd_client: Arc<impl PdClient>,
@@ -193,7 +199,7 @@ pub(crate) async fn resolve_locks_with_options(
 
     let mut live_locks = Vec::new();
     let mut ms_before_txn_expired: Option<i64> = None;
-    let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+    let mut lock_resolver = LockResolver::new(ctx);
 
     // records the commit version of each primary lock (representing the status of the transaction)
     let mut commit_versions: HashMap<u64, u64> = HashMap::new();
@@ -356,6 +362,7 @@ pub(crate) async fn resolve_locks_with_options(
 }
 
 pub(crate) async fn resolve_locks_for_read(
+    ctx: ResolveLocksContext,
     locks: Vec<kvrpcpb::LockInfo>,
     timestamp: Timestamp,
     pd_client: Arc<impl PdClient>,
@@ -373,7 +380,7 @@ pub(crate) async fn resolve_locks_for_read(
     let mut live_locks = Vec::new();
     let mut resolved_locks = Vec::new();
     let mut committed_locks = Vec::new();
-    let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+    let mut lock_resolver = LockResolver::new(ctx);
 
     for lock in locks {
         if is_shared_lock(lock.lock_type) {
@@ -1576,6 +1583,7 @@ mod tests {
         lock.lock_type = kvrpcpb::Op::Put as i32;
 
         let resolve_result = resolve_locks_with_options(
+            ResolveLocksContext::default(),
             vec![lock],
             Timestamp::default(),
             client,
@@ -2003,6 +2011,7 @@ mod tests {
         lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
 
         let resolve_result = resolve_locks_with_options(
+            ResolveLocksContext::default(),
             vec![lock],
             Timestamp::default(),
             client,
@@ -2397,6 +2406,7 @@ mod tests {
         lock_2.txn_size = 16;
 
         let resolve_result = resolve_locks_with_options(
+            ResolveLocksContext::default(),
             vec![lock_1, lock_2],
             Timestamp::default(),
             client,
@@ -2469,6 +2479,7 @@ mod tests {
         prewrite_lock.txn_size = 16;
 
         let resolve_result = resolve_locks_with_options(
+            ResolveLocksContext::default(),
             vec![pessimistic_lock, prewrite_lock],
             Timestamp::default(),
             client,
@@ -2537,6 +2548,7 @@ mod tests {
         lock.txn_size = 16;
 
         let resolve_result = resolve_locks_with_options(
+            ResolveLocksContext::default(),
             vec![lock],
             Timestamp::default(),
             client,
@@ -2693,6 +2705,7 @@ mod tests {
         lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
 
         let resolve_result = resolve_locks_with_options(
+            ResolveLocksContext::default(),
             vec![lock],
             Timestamp::default(),
             client,

@@ -7,6 +7,7 @@ use super::plan::PreserveShard;
 use super::Keyspace;
 use crate::backoff::Backoff;
 use crate::pd::PdClient;
+use crate::request::plan::ResolveLockInContext;
 use crate::request::plan::{CleanupLocks, HasKvContext, RetryableAllStores};
 use crate::request::shard::HasNextBatch;
 use crate::request::Dispatch;
@@ -91,6 +92,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
     /// `kvrpcpb::Context.{resolved_locks, committed_locks}` and retrying the request.
     pub(crate) fn resolve_lock_for_read(
         self,
+        ctx: ResolveLocksContext,
         timestamp: Timestamp,
         backoff: Backoff,
         keyspace: Keyspace,
@@ -104,11 +106,55 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
             pd_client: self.pd_client.clone(),
             plan: ResolveLockForRead {
                 inner: self.plan,
+                ctx,
                 timestamp,
                 backoff,
                 pd_client: self.pd_client,
                 keyspace,
                 lock_tracker,
+            },
+            phantom: PhantomData,
+        }
+    }
+
+    pub(crate) fn resolve_lock_in_context(
+        self,
+        ctx: ResolveLocksContext,
+        timestamp: Timestamp,
+        backoff: Backoff,
+        keyspace: Keyspace,
+    ) -> PlanBuilder<PdC, ResolveLockInContext<P, PdC>, Ph>
+    where
+        P: Shardable,
+        P::Result: HasLocks,
+    {
+        self.resolve_lock_with_pessimistic_region_in_context(
+            ctx, timestamp, backoff, keyspace, false,
+        )
+    }
+
+    pub(crate) fn resolve_lock_with_pessimistic_region_in_context(
+        self,
+        ctx: ResolveLocksContext,
+        timestamp: Timestamp,
+        backoff: Backoff,
+        keyspace: Keyspace,
+        pessimistic_region_resolve: bool,
+    ) -> PlanBuilder<PdC, ResolveLockInContext<P, PdC>, Ph>
+    where
+        P: Shardable,
+        P::Result: HasLocks,
+    {
+        PlanBuilder {
+            pd_client: self.pd_client.clone(),
+            plan: ResolveLockInContext {
+                inner: self.plan,
+                ctx,
+                timestamp,
+                backoff,
+                pd_client: self.pd_client,
+                keyspace,
+                pessimistic_region_resolve,
             },
             phantom: PhantomData,
         }
