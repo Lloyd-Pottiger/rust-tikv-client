@@ -96,6 +96,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         timestamp: Timestamp,
         backoff: Backoff,
         keyspace: Keyspace,
+        force_resolve_lock_lite: bool,
         lock_tracker: ReadLockTracker,
     ) -> PlanBuilder<PdC, ResolveLockForRead<P, PdC>, Ph>
     where
@@ -111,6 +112,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 backoff,
                 pd_client: self.pd_client,
                 keyspace,
+                force_resolve_lock_lite,
                 lock_tracker,
             },
             phantom: PhantomData,

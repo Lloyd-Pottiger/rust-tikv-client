@@ -1208,6 +1208,7 @@ pub(crate) struct ResolveLockForRead<P: Plan, PdC: PdClient> {
     pub(crate) pd_client: Arc<PdC>,
     pub(crate) backoff: Backoff,
     pub(crate) keyspace: Keyspace,
+    pub(crate) force_resolve_lock_lite: bool,
     pub(crate) lock_tracker: ReadLockTracker,
 }
 
@@ -1220,6 +1221,7 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLockForRead<P, PdC> {
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
             keyspace: self.keyspace,
+            force_resolve_lock_lite: self.force_resolve_lock_lite,
             lock_tracker: self.lock_tracker.clone(),
         }
     }
@@ -1280,6 +1282,7 @@ where
                     self.timestamp.clone(),
                     self.pd_client.clone(),
                     self.keyspace,
+                    self.force_resolve_lock_lite,
                     self.lock_tracker.clone(),
                 )
                 .await?;

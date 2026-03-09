@@ -345,6 +345,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     timestamp,
                     retry_options.lock_backoff,
                     keyspace,
+                    true,
                     lock_tracker,
                 );
                 let plan_builder = if replica_read.is_follower_read()
@@ -514,6 +515,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                             timestamp,
                             retry_options.lock_backoff,
                             keyspace,
+                            false,
                             lock_tracker,
                         );
                     let plan_builder =
@@ -1068,6 +1070,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                             timestamp,
                             retry_options.lock_backoff,
                             keyspace,
+                            false,
                             lock_tracker,
                         );
                     let plan_builder =

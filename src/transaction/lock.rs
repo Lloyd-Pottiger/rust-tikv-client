@@ -365,6 +365,7 @@ pub(crate) async fn resolve_locks_for_read(
     timestamp: Timestamp,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
+    force_resolve_lock_lite: bool,
     lock_tracker: ReadLockTracker,
 ) -> Result<ResolveLocksForReadResult> {
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
@@ -466,7 +467,9 @@ pub(crate) async fn resolve_locks_for_read(
             continue;
         }
 
-        let resolve_lite = lock.txn_size < resolve_lock_lite_threshold;
+        // Match client-go point-read behavior: callers can force ResolveLock lite regardless of
+        // `txn_size`/threshold to reduce cleanup overhead.
+        let resolve_lite = force_resolve_lock_lite || lock.txn_size < resolve_lock_lite_threshold;
         if resolve_lite && lock.key == lock.primary_lock {
             continue;
         }
@@ -1316,6 +1319,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     use async_trait::async_trait;
     use fail::FailScenario;
@@ -1910,6 +1914,69 @@ mod tests {
             .await
             .unwrap();
         assert!(live_locks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_for_read_force_resolve_lock_lite_sends_keys_even_when_threshold_disabled(
+    ) {
+        let (resolve_lock_keys_tx, resolve_lock_keys_rx) =
+            tokio::sync::oneshot::channel::<Vec<Vec<u8>>>();
+        let resolve_lock_keys_tx = Arc::new(Mutex::new(Some(resolve_lock_keys_tx)));
+
+        let base_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook({
+            let resolve_lock_keys_tx = resolve_lock_keys_tx.clone();
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 2,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    if let Some(tx) = resolve_lock_keys_tx.lock().unwrap().take() {
+                        let _ = tx.send(req.keys.clone());
+                    }
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            }
+        })));
+
+        let client = Arc::new(TimestampedPdClient::new_with_resolve_lock_lite_threshold(
+            base_client,
+            Timestamp::default(),
+            0,
+        ));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 1;
+        lock.lock_ttl = 100;
+        lock.txn_size = 256;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let lock_tracker = ReadLockTracker::default();
+
+        let _result = resolve_locks_for_read(
+            ResolveLocksContext::default(),
+            vec![lock],
+            Timestamp::default(),
+            client,
+            Keyspace::Disable,
+            true,
+            lock_tracker.clone(),
+        )
+        .await
+        .unwrap();
+
+        let keys = tokio::time::timeout(std::time::Duration::from_secs(1), resolve_lock_keys_rx)
+            .await
+            .expect("resolve_lock_for_read should issue resolve-lock cleanup request")
+            .expect("resolve-lock request should report the `keys` field");
+        assert_eq!(keys, vec![vec![1]]);
     }
 
     #[tokio::test]
