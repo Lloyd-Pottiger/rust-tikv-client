@@ -412,8 +412,20 @@ where
                     if !region_error_resolved {
                         sleep(duration).await;
                     }
+                    let busy_threshold_ms = plan
+                        .kv_context_mut()
+                        .map(|ctx| ctx.busy_threshold_ms)
+                        .unwrap_or(0);
                     let replica_read = match (is_server_busy, replica_read) {
                         (true, Some(state)) if state.read_type == ReplicaReadType::PreferLeader => {
+                            Some(
+                                state.switch_to(ReplicaReadType::Mixed, backoff.current_attempts()),
+                            )
+                        }
+                        (true, Some(state))
+                            if state.read_type == ReplicaReadType::Leader
+                                && busy_threshold_ms > 0 =>
+                        {
                             Some(
                                 state.switch_to(ReplicaReadType::Mixed, backoff.current_attempts()),
                             )

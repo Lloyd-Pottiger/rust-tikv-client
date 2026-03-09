@@ -310,6 +310,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 snapshot_ctx.replica_read = (adjuster)(1);
             }
         }
+        let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
         let replica_read = snapshot_ctx.replica_read;
         let lock_tracker = self.read_lock_tracker.clone();
 
@@ -324,7 +325,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                     keyspace,
                     lock_tracker,
                 );
-                let plan_builder = if replica_read.is_follower_read() {
+                let plan_builder = if replica_read.is_follower_read()
+                    || enable_load_based_replica_read
+                {
                     plan_builder
                         .retry_multi_region_with_replica_read(DEFAULT_REGION_BACKOFF, replica_read)
                 } else {
@@ -460,6 +463,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             .map(move |k| k.into().encode_keyspace(keyspace, KeyMode::Txn));
         let retry_options = self.options.retry_options.clone();
         let snapshot_ctx = self.snapshot_read_context();
+        let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
         let lock_tracker = self.read_lock_tracker.clone();
 
         self.buffer
@@ -488,14 +492,15 @@ impl<PdC: PdClient> Transaction<PdC> {
                             keyspace,
                             lock_tracker,
                         );
-                    let plan_builder = if replica_read.is_follower_read() {
-                        plan_builder.retry_multi_region_with_replica_read(
-                            retry_options.region_backoff,
-                            replica_read,
-                        )
-                    } else {
-                        plan_builder.retry_multi_region(retry_options.region_backoff)
-                    };
+                    let plan_builder =
+                        if replica_read.is_follower_read() || enable_load_based_replica_read {
+                            plan_builder.retry_multi_region_with_replica_read(
+                                retry_options.region_backoff,
+                                replica_read,
+                            )
+                        } else {
+                            plan_builder.retry_multi_region(retry_options.region_backoff)
+                        };
                     let plan = plan_builder.merge(Collect).plan();
                     plan.execute()
                         .await
@@ -1009,6 +1014,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let keyspace = self.keyspace;
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let snapshot_ctx = self.snapshot_read_context();
+        let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
         let replica_read = snapshot_ctx.replica_read;
         let lock_tracker = self.read_lock_tracker.clone();
 
@@ -1035,14 +1041,15 @@ impl<PdC: PdClient> Transaction<PdC> {
                             keyspace,
                             lock_tracker,
                         );
-                    let plan_builder = if replica_read.is_follower_read() {
-                        plan_builder.retry_multi_region_with_replica_read(
-                            retry_options.region_backoff,
-                            replica_read,
-                        )
-                    } else {
-                        plan_builder.retry_multi_region(retry_options.region_backoff)
-                    };
+                    let plan_builder =
+                        if replica_read.is_follower_read() || enable_load_based_replica_read {
+                            plan_builder.retry_multi_region_with_replica_read(
+                                retry_options.region_backoff,
+                                replica_read,
+                            )
+                        } else {
+                            plan_builder.retry_multi_region(retry_options.region_backoff)
+                        };
                     let plan = plan_builder.merge(Collect).plan();
                     plan.execute()
                         .await
@@ -3390,6 +3397,109 @@ mod tests {
         assert_eq!(get_count.load(Ordering::SeqCst), 2);
         assert_eq!(first_store_id.load(Ordering::SeqCst), 51);
         assert_eq!(second_store_id.load(Ordering::SeqCst), 51);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_replica_read_leader_server_is_busy_with_threshold_fallbacks_to_mixed() {
+        let get_count = Arc::new(AtomicUsize::new(0));
+        let first_store_id = Arc::new(AtomicU64::new(0));
+        let second_store_id = Arc::new(AtomicU64::new(0));
+
+        let get_count_captured = get_count.clone();
+        let first_store_id_captured = first_store_id.clone();
+        let second_store_id_captured = second_store_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+
+                let attempt = get_count_captured.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    first_store_id_captured.store(peer.store_id, Ordering::SeqCst);
+                    let resp = kvrpcpb::GetResponse {
+                        region_error: Some(crate::proto::errorpb::Error {
+                            server_is_busy: Some(crate::proto::errorpb::ServerIsBusy::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                second_store_id_captured.store(peer.store_id, Ordering::SeqCst);
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Leader),
+            Keyspace::Disable,
+        );
+        snapshot.set_load_based_replica_read_threshold(Duration::from_millis(1));
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(get_count.load(Ordering::SeqCst), 2);
+        assert_eq!(first_store_id.load(Ordering::SeqCst), 41);
+        assert_eq!(second_store_id.load(Ordering::SeqCst), 51);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_replica_read_leader_server_is_busy_without_threshold_retries_leader() {
+        let get_count = Arc::new(AtomicUsize::new(0));
+        let first_store_id = Arc::new(AtomicU64::new(0));
+        let second_store_id = Arc::new(AtomicU64::new(0));
+
+        let get_count_captured = get_count.clone();
+        let first_store_id_captured = first_store_id.clone();
+        let second_store_id_captured = second_store_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+
+                let attempt = get_count_captured.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    first_store_id_captured.store(peer.store_id, Ordering::SeqCst);
+                    let resp = kvrpcpb::GetResponse {
+                        region_error: Some(crate::proto::errorpb::Error {
+                            server_is_busy: Some(crate::proto::errorpb::ServerIsBusy::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                second_store_id_captured.store(peer.store_id, Ordering::SeqCst);
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Leader),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(get_count.load(Ordering::SeqCst), 2);
+        assert_eq!(first_store_id.load(Ordering::SeqCst), 41);
+        assert_eq!(second_store_id.load(Ordering::SeqCst), 41);
     }
 
     #[tokio::test]
