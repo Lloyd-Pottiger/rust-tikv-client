@@ -262,7 +262,7 @@ const ENGINE_LABEL_TIFLASH: &str = "tiflash";
 const ENGINE_LABEL_TIFLASH_COMPUTE: &str = "tiflash_compute";
 
 fn is_valid_tikv_store(store: &metapb::Store) -> bool {
-    if store.state == metapb::StoreState::Tombstone.into() {
+    if store.state == metapb::StoreState::Tombstone as i32 {
         return false;
     }
     let is_tiflash = store.labels.iter().any(|label| {

@@ -1075,19 +1075,21 @@ impl<PdC: PdClient> Transaction<PdC> {
         let first_key = keys[0].clone().key();
         // we do not set the primary key here, because pessimistic lock request
         // can fail, in which case the keys may not be part of the transaction.
-        let primary_lock = self
-            .buffer
-            .get_primary_key()
-            .unwrap_or_else(|| first_key.clone());
+        let existing_primary_key = self.buffer.get_primary_key();
+        let is_first_lock = existing_primary_key.is_none() && keys.len() == 1;
+        let primary_lock = existing_primary_key.unwrap_or_else(|| first_key.clone());
         let for_update_ts = self.rpc.clone().get_timestamp().await?;
         self.options.push_for_update_ts(for_update_ts.clone());
+        let elapsed = self.start_instant.elapsed().as_millis() as u64;
+        let lock_ttl = elapsed.saturating_add(MAX_TTL);
         let request = new_pessimistic_lock_request(
             keys.clone().into_iter(),
             primary_lock,
             self.timestamp.clone(),
-            MAX_TTL,
+            lock_ttl,
             for_update_ts.clone(),
             need_value,
+            is_first_lock,
         );
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .resolve_lock_with_pessimistic_region(
@@ -4650,6 +4652,69 @@ mod tests {
             .await
             .expect("expected async commit request to be dispatched");
         assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_request_fields_match_client_go() {
+        const ELAPSED_LOWER_BOUND: Duration = Duration::from_secs(5);
+        const FOR_UPDATE_TS_VERSION: u64 = 42;
+        const EXPECTED_MIN_COMMIT_TS: u64 = FOR_UPDATE_TS_VERSION + 1;
+
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let lock_requests_captured = lock_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                let attempt = lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.for_update_ts, FOR_UPDATE_TS_VERSION);
+                assert_eq!(req.min_commit_ts, EXPECTED_MIN_COMMIT_TS);
+                assert!(req.lock_ttl >= super::MAX_TTL + ELAPSED_LOWER_BOUND.as_millis() as u64);
+
+                match attempt {
+                    0 => assert!(req.is_first_lock),
+                    1 => assert!(!req.is_first_lock),
+                    2 => {
+                        assert!(!req.is_first_lock);
+                        assert_eq!(req.mutations.len(), 2);
+                    }
+                    _ => panic!("unexpected pessimistic lock request count {attempt}"),
+                }
+
+                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(FOR_UPDATE_TS_VERSION),
+            timestamp_calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let options = TransactionOptions::new_pessimistic()
+            .heartbeat_option(HeartbeatOption::NoHeartbeat)
+            .drop_check(CheckLevel::None);
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client.clone(),
+            options.clone(),
+            Keyspace::Disable,
+        );
+        txn.start_instant = Instant::now() - ELAPSED_LOWER_BOUND;
+        txn.lock_keys(vec!["k1".to_owned()]).await.unwrap();
+        txn.lock_keys(vec!["k2".to_owned()]).await.unwrap();
+
+        let mut multi_key_txn =
+            Transaction::new(Timestamp::default(), pd_client, options, Keyspace::Disable);
+        multi_key_txn.start_instant = Instant::now() - ELAPSED_LOWER_BOUND;
+        multi_key_txn
+            .lock_keys(vec!["k3".to_owned(), "k4".to_owned()])
+            .await
+            .unwrap();
+
+        assert_eq!(lock_requests.load(Ordering::SeqCst), 3);
     }
 
     #[rstest::rstest]

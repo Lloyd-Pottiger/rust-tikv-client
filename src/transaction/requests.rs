@@ -522,6 +522,7 @@ pub fn new_pessimistic_lock_request(
     lock_ttl: u64,
     for_update_ts: u64,
     need_value: bool,
+    is_first_lock: bool,
 ) -> kvrpcpb::PessimisticLockRequest {
     let mut req = kvrpcpb::PessimisticLockRequest::default();
     req.mutations = mutations;
@@ -529,12 +530,11 @@ pub fn new_pessimistic_lock_request(
     req.start_version = start_version;
     req.lock_ttl = lock_ttl;
     req.for_update_ts = for_update_ts;
+    req.is_first_lock = is_first_lock;
     // FIXME: make them configurable
-    req.is_first_lock = false;
     req.wait_timeout = 0;
     req.return_values = need_value;
-    // FIXME: support large transaction
-    req.min_commit_ts = 0;
+    req.min_commit_ts = for_update_ts.saturating_add(1);
 
     req
 }

@@ -144,6 +144,7 @@ pub fn new_pessimistic_lock_request(
     lock_ttl: u64,
     for_update_ts: Timestamp,
     need_value: bool,
+    is_first_lock: bool,
 ) -> kvrpcpb::PessimisticLockRequest {
     requests::new_pessimistic_lock_request(
         locks
@@ -160,6 +161,7 @@ pub fn new_pessimistic_lock_request(
         lock_ttl,
         for_update_ts.version(),
         need_value,
+        is_first_lock,
     )
 }
 
