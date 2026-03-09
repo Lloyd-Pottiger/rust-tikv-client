@@ -1072,12 +1072,23 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Ok(vec![]);
         }
 
-        let first_key = keys[0].clone().key();
         // we do not set the primary key here, because pessimistic lock request
         // can fail, in which case the keys may not be part of the transaction.
         let existing_primary_key = self.buffer.get_primary_key();
         let is_first_lock = existing_primary_key.is_none() && keys.len() == 1;
-        let primary_lock = existing_primary_key.unwrap_or_else(|| first_key.clone());
+        let primary_lock = match existing_primary_key {
+            Some(primary_key) => primary_key,
+            None => {
+                let mut primary_key = keys[0].clone().key();
+                for lock in keys.iter().skip(1) {
+                    let key = lock.clone().key();
+                    if key < primary_key {
+                        primary_key = key;
+                    }
+                }
+                primary_key
+            }
+        };
         let for_update_ts = self.rpc.clone().get_timestamp().await?;
         self.options.push_for_update_ts(for_update_ts.clone());
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
@@ -1100,7 +1111,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             if primary_locks.is_empty() || secondary_locks.is_empty() {
                 let request = new_pessimistic_lock_request(
                     keys.clone().into_iter(),
-                    primary_lock,
+                    primary_lock.clone(),
                     self.timestamp.clone(),
                     lock_ttl,
                     for_update_ts.clone(),
@@ -1134,7 +1145,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
                 let secondary_request = new_pessimistic_lock_request(
                     secondary_locks.into_iter(),
-                    primary_lock,
+                    primary_lock.clone(),
                     self.timestamp.clone(),
                     lock_ttl,
                     for_update_ts.clone(),
@@ -1168,7 +1179,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         } else {
             let request = new_pessimistic_lock_request(
                 keys.clone().into_iter(),
-                primary_lock,
+                primary_lock.clone(),
                 self.timestamp.clone(),
                 lock_ttl,
                 for_update_ts.clone(),
@@ -1179,7 +1190,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 .await?
         };
 
-        self.buffer.primary_key_or(&first_key);
+        self.buffer.primary_key_or(&primary_lock);
         self.start_auto_heartbeat().await;
         for key in keys {
             self.buffer.lock(key.key());
@@ -4804,6 +4815,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(lock_requests.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_selects_smallest_key_as_primary() {
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                assert_eq!(req.primary_lock, vec![1]);
+                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.lock_keys(vec![vec![5u8], vec![1u8]]).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
