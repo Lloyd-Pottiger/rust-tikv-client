@@ -1872,6 +1872,18 @@ impl<PdC: PdClient> Committer<PdC> {
     async fn commit(mut self) -> Result<Option<Timestamp>> {
         debug!("committing");
 
+        if self.primary_key.is_none() {
+            let primary_key = self
+                .mutations
+                .iter()
+                .min_by(|a, b| a.key.cmp(&b.key))
+                .map(|m| Key::from(m.key.clone()));
+            self.primary_key = match primary_key {
+                Some(primary_key) => Some(primary_key),
+                None => return Ok(None),
+            };
+        }
+
         let min_commit_ts = self.prewrite().await?;
 
         fail_point!("after-prewrite", |_| {
@@ -4479,6 +4491,87 @@ mod tests {
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
         assert_eq!(commit_count.load(Ordering::SeqCst), 0);
         assert_eq!(timestamp_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_committer_derives_primary_key_from_mutations_when_missing() {
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+
+        let start_ts = Timestamp {
+            physical: 1,
+            logical: 0,
+            ..Default::default()
+        };
+        let pd_ts = Timestamp {
+            physical: 2,
+            logical: 0,
+            ..Default::default()
+        };
+        let one_pc_commit_ts = Timestamp {
+            physical: 3,
+            logical: 0,
+            ..Default::default()
+        };
+
+        let one_pc_commit_ts_version = one_pc_commit_ts.version();
+
+        let prewrite_count_captured = prewrite_count.clone();
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert!(req.try_one_pc);
+                assert_eq!(req.primary_lock, vec![1]);
+                assert_eq!(req.secondaries, vec![vec![2]]);
+                let resp = kvrpcpb::PrewriteResponse {
+                    one_pc_commit_ts: one_pc_commit_ts_version,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: pd_ts,
+            timestamp_calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let mutations = vec![
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: vec![2],
+                value: vec![42],
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: vec![1],
+                value: vec![43],
+                ..Default::default()
+            },
+        ];
+
+        let options = TransactionOptions::new_optimistic().try_one_pc();
+        let committer = super::Committer::new(
+            None,
+            mutations,
+            start_ts,
+            pd_client,
+            options,
+            Keyspace::Disable,
+            0,
+            Instant::now(),
+        );
+
+        let commit_result = committer
+            .commit()
+            .await
+            .unwrap()
+            .expect("expected commit_ts");
+        assert_eq!(commit_result.version(), one_pc_commit_ts_version);
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
