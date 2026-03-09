@@ -297,7 +297,7 @@ impl Client {
     ) -> Result<CleanupLocksResult> {
         debug!("invoking cleanup async commit locks");
         // scan all locks with ts <= safepoint
-        let ctx = ResolveLocksContext::default();
+        let ctx = self.resolve_locks_ctx.clone();
         let backoff = Backoff::equal_jitter_backoff(100, 10000, 50);
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let req = new_scan_lock_request(range, safepoint, options.batch_size);
