@@ -45,10 +45,8 @@ fn format_key_for_log(key: &[u8]) -> String {
 }
 
 // `client-go` treats both `PessimisticLock` and `SharedPessimisticLock` as pessimistic.
-// The generated Rust proto in this repo currently lacks `SharedPessimisticLock`, so keep
-// the numeric value for forward-compatible lock-type handling.
-const SHARED_LOCK_TYPE: i32 = 7;
-const SHARED_PESSIMISTIC_LOCK_TYPE: i32 = 8;
+const SHARED_LOCK_TYPE: i32 = kvrpcpb::Op::SharedLock as i32;
+const SHARED_PESSIMISTIC_LOCK_TYPE: i32 = kvrpcpb::Op::SharedPessimisticLock as i32;
 
 fn is_pessimistic_lock(lock_type: i32) -> bool {
     lock_type == kvrpcpb::Op::PessimisticLock as i32 || lock_type == SHARED_PESSIMISTIC_LOCK_TYPE

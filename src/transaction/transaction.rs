@@ -139,6 +139,7 @@ fn normalize_busy_threshold_ms(threshold: Duration) -> u32 {
 }
 
 impl<PdC: PdClient> Transaction<PdC> {
+    #[cfg(test)]
     pub(crate) fn new(
         timestamp: Timestamp,
         rpc: Arc<PdC>,

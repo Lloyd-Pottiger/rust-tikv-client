@@ -165,7 +165,7 @@ impl TruncateKeyspace for Vec<crate::proto::kvrpcpb::LockInfo> {
         if !matches!(keyspace, Keyspace::Enable { .. }) {
             return self;
         }
-        for lock in &mut self {
+        fn truncate_lock_info(lock: &mut crate::proto::kvrpcpb::LockInfo, keyspace: Keyspace) {
             take_mut::take(&mut lock.key, |key| {
                 Key::from(key).truncate_keyspace(keyspace).into()
             });
@@ -177,6 +177,12 @@ impl TruncateKeyspace for Vec<crate::proto::kvrpcpb::LockInfo> {
                     Key::from(secondary).truncate_keyspace(keyspace).into()
                 });
             }
+            for shared in lock.shared_lock_infos.iter_mut() {
+                truncate_lock_info(shared, keyspace);
+            }
+        }
+        for lock in &mut self {
+            truncate_lock_info(lock, keyspace);
         }
         self
     }
@@ -187,7 +193,11 @@ impl EncodeKeyspace for Vec<crate::proto::kvrpcpb::LockInfo> {
         if !matches!(keyspace, Keyspace::Enable { .. }) {
             return self;
         }
-        for lock in &mut self {
+        fn encode_lock_info(
+            lock: &mut crate::proto::kvrpcpb::LockInfo,
+            keyspace: Keyspace,
+            key_mode: KeyMode,
+        ) {
             take_mut::take(&mut lock.key, |key| {
                 Key::from(key).encode_keyspace(keyspace, key_mode).into()
             });
@@ -203,6 +213,12 @@ impl EncodeKeyspace for Vec<crate::proto::kvrpcpb::LockInfo> {
                         .into()
                 });
             }
+            for shared in lock.shared_lock_infos.iter_mut() {
+                encode_lock_info(shared, keyspace, key_mode);
+            }
+        }
+        for lock in &mut self {
+            encode_lock_info(lock, keyspace, key_mode);
         }
         self
     }
@@ -318,6 +334,53 @@ mod tests {
                 vec![b'x', 0, 0xDE, 0xAD, b's', b'2']
             ]
         );
+    }
+
+    #[test]
+    fn test_encode_and_truncate_lock_info_with_shared_lock_infos() {
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xDEAD,
+        };
+        let key_mode = KeyMode::Txn;
+
+        let inner = crate::proto::kvrpcpb::LockInfo {
+            key: vec![b'i'],
+            primary_lock: vec![b'j'],
+            secondaries: vec![vec![b'k']],
+            ..Default::default()
+        };
+        let outer = crate::proto::kvrpcpb::LockInfo {
+            key: vec![b'a'],
+            primary_lock: vec![b'b'],
+            secondaries: vec![vec![b'c']],
+            shared_lock_infos: vec![inner],
+            ..Default::default()
+        };
+        let locks = vec![outer];
+
+        let encoded = locks.clone().encode_keyspace(keyspace, key_mode);
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0].key, vec![b'x', 0, 0xDE, 0xAD, b'a']);
+        assert_eq!(encoded[0].primary_lock, vec![b'x', 0, 0xDE, 0xAD, b'b']);
+        assert_eq!(
+            encoded[0].secondaries,
+            vec![vec![b'x', 0, 0xDE, 0xAD, b'c']]
+        );
+        assert_eq!(encoded[0].shared_lock_infos.len(), 1);
+        assert_eq!(
+            encoded[0].shared_lock_infos[0].key,
+            vec![b'x', 0, 0xDE, 0xAD, b'i']
+        );
+        assert_eq!(
+            encoded[0].shared_lock_infos[0].primary_lock,
+            vec![b'x', 0, 0xDE, 0xAD, b'j']
+        );
+        assert_eq!(
+            encoded[0].shared_lock_infos[0].secondaries,
+            vec![vec![b'x', 0, 0xDE, 0xAD, b'k']]
+        );
+
+        assert_eq!(encoded.truncate_keyspace(keyspace), locks);
     }
 
     #[test]

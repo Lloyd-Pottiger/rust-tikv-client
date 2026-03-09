@@ -50,6 +50,14 @@ use crate::Value;
 
 // implement HasLocks for a response type that has a `pairs` field,
 // where locks can be extracted from both the `pairs` and `error` fields
+fn flatten_lock_info(lock: LockInfo) -> Vec<LockInfo> {
+    if lock.shared_lock_infos.is_empty() {
+        vec![lock]
+    } else {
+        lock.shared_lock_infos
+    }
+}
+
 macro_rules! pair_locks {
     ($response_type:ty) => {
         impl HasLocks for $response_type {
@@ -59,6 +67,7 @@ macro_rules! pair_locks {
                         .as_mut()
                         .and_then(|error| error.locked.take())
                         .into_iter()
+                        .flat_map(flatten_lock_info)
                         .collect()
                 } else {
                     self.pairs
@@ -66,6 +75,7 @@ macro_rules! pair_locks {
                         .filter_map(|pair| {
                             pair.error.as_mut().and_then(|error| error.locked.take())
                         })
+                        .flat_map(flatten_lock_info)
                         .collect()
                 }
             }
@@ -83,6 +93,7 @@ macro_rules! error_locks {
                     .as_mut()
                     .and_then(|error| error.locked.take())
                     .into_iter()
+                    .flat_map(flatten_lock_info)
                     .collect()
             }
         }
@@ -1045,6 +1056,9 @@ error_locks!(kvrpcpb::CheckSecondaryLocksResponse);
 impl HasLocks for kvrpcpb::ScanLockResponse {
     fn take_locks(&mut self) -> Vec<LockInfo> {
         std::mem::take(&mut self.locks)
+            .into_iter()
+            .flat_map(flatten_lock_info)
+            .collect()
     }
 }
 
@@ -1053,6 +1067,7 @@ impl HasLocks for kvrpcpb::PessimisticRollbackResponse {
         self.errors
             .iter_mut()
             .filter_map(|error| error.locked.take())
+            .flat_map(flatten_lock_info)
             .collect()
     }
 }
@@ -1062,6 +1077,7 @@ impl HasLocks for kvrpcpb::PessimisticLockResponse {
         self.errors
             .iter_mut()
             .filter_map(|error| error.locked.take())
+            .flat_map(flatten_lock_info)
             .collect()
     }
 }
@@ -1071,6 +1087,7 @@ impl HasLocks for kvrpcpb::PrewriteResponse {
         self.errors
             .iter_mut()
             .filter_map(|error| error.locked.take())
+            .flat_map(flatten_lock_info)
             .collect()
     }
 }
@@ -1618,5 +1635,68 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_take_locks_flattens_shared_lock_infos_from_error() {
+        let embedded_1 = kvrpcpb::LockInfo {
+            key: vec![1],
+            primary_lock: vec![9],
+            lock_version: 10,
+            lock_ttl: 50,
+            lock_type: kvrpcpb::Op::Put as i32,
+            ..Default::default()
+        };
+        let embedded_2 = kvrpcpb::LockInfo {
+            key: vec![2],
+            primary_lock: vec![9],
+            lock_version: 11,
+            lock_ttl: 60,
+            lock_type: kvrpcpb::Op::PessimisticLock as i32,
+            ..Default::default()
+        };
+
+        let wrapper = kvrpcpb::LockInfo {
+            lock_type: kvrpcpb::Op::SharedLock as i32,
+            shared_lock_infos: vec![embedded_1.clone(), embedded_2.clone()],
+            ..Default::default()
+        };
+
+        let mut resp = kvrpcpb::GetResponse {
+            error: Some(kvrpcpb::KeyError {
+                locked: Some(wrapper),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let locks = crate::transaction::HasLocks::take_locks(&mut resp);
+        assert_eq!(locks, vec![embedded_1, embedded_2]);
+    }
+
+    #[test]
+    fn test_take_locks_flattens_shared_lock_infos_from_scan_lock() {
+        let embedded = kvrpcpb::LockInfo {
+            key: vec![42],
+            primary_lock: vec![7],
+            lock_version: 99,
+            lock_ttl: 123,
+            lock_type: kvrpcpb::Op::Put as i32,
+            ..Default::default()
+        };
+
+        let wrapper = kvrpcpb::LockInfo {
+            lock_type: kvrpcpb::Op::SharedLock as i32,
+            shared_lock_infos: vec![embedded.clone()],
+            ..Default::default()
+        };
+
+        let mut resp = kvrpcpb::ScanLockResponse {
+            locks: vec![wrapper],
+            ..Default::default()
+        };
+
+        let locks = crate::transaction::HasLocks::take_locks(&mut resp);
+        assert_eq!(locks, vec![embedded]);
     }
 }

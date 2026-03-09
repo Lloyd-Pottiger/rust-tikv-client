@@ -989,6 +989,10 @@ message LockInfo {
     // It's used in timeout errors. 0 means unknown or not applicable. 
     // It can be used to help the client decide whether to try resolving the lock.
     uint64 duration_to_last_update_ms = 11;
+    // When lock_type is SharedLock, this describes transactions holding the shared lock.
+    // Important: when lock_type is SharedLock, all shared locks must use shared_lock_infos;
+    // DO NOT read from the wrapper LockInfo.
+    repeated LockInfo shared_lock_infos = 12;
 
     // Reserved for file based transaction.
     bool is_txn_file = 100;
@@ -1274,8 +1278,13 @@ enum Op {
     Rollback = 3;
     // insert operation has a constraint that key should not exist before.
     Insert = 4;
+    // PessimisticLock is exclusive lock acquired in pessimistic transaction.
     PessimisticLock = 5;
     CheckNotExists = 6;
+    // SharedLock likes Lock but in shared mode.
+    SharedLock = 7;
+    // SharedPessimisticLock is shared lock acquired in pessimistic transaction.
+    SharedPessimisticLock = 8;
 }
 
 enum Assertion {

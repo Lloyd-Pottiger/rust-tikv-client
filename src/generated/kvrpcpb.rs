@@ -1326,6 +1326,11 @@ pub struct LockInfo {
     /// It can be used to help the client decide whether to try resolving the lock.
     #[prost(uint64, tag = "11")]
     pub duration_to_last_update_ms: u64,
+    /// When lock_type is SharedLock, this describes transactions holding the shared lock.
+    /// Important: when lock_type is SharedLock, all shared locks must use shared_lock_infos;
+    /// DO NOT read from the wrapper LockInfo.
+    #[prost(message, repeated, tag = "12")]
+    pub shared_lock_infos: ::prost::alloc::vec::Vec<LockInfo>,
     /// Reserved for file based transaction.
     #[prost(bool, tag = "100")]
     pub is_txn_file: bool,
@@ -2344,8 +2349,13 @@ pub enum Op {
     Rollback = 3,
     /// insert operation has a constraint that key should not exist before.
     Insert = 4,
+    /// PessimisticLock is exclusive lock acquired in pessimistic transaction.
     PessimisticLock = 5,
     CheckNotExists = 6,
+    /// SharedLock likes Lock but in shared mode.
+    SharedLock = 7,
+    /// SharedPessimisticLock is shared lock acquired in pessimistic transaction.
+    SharedPessimisticLock = 8,
 }
 impl Op {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2361,6 +2371,8 @@ impl Op {
             Op::Insert => "Insert",
             Op::PessimisticLock => "PessimisticLock",
             Op::CheckNotExists => "CheckNotExists",
+            Op::SharedLock => "SharedLock",
+            Op::SharedPessimisticLock => "SharedPessimisticLock",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -2373,6 +2385,8 @@ impl Op {
             "Insert" => Some(Self::Insert),
             "PessimisticLock" => Some(Self::PessimisticLock),
             "CheckNotExists" => Some(Self::CheckNotExists),
+            "SharedLock" => Some(Self::SharedLock),
+            "SharedPessimisticLock" => Some(Self::SharedPessimisticLock),
             _ => None,
         }
     }
