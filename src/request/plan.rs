@@ -151,6 +151,7 @@ fn select_replica_read_peer(
     replica_read: ReplicaReadType,
     attempt: u32,
     unavailable_store_ids: &[StoreId],
+    busy_store_ids: &[StoreId],
 ) -> Option<metapb::Peer> {
     let leader_store_id = region.leader.as_ref().map(|p| p.store_id);
     let peers = &region.region.peers;
@@ -162,33 +163,46 @@ fn select_replica_read_peer(
     fn select_peer_with_attempt<F>(
         peers: &[metapb::Peer],
         attempt: u32,
+        busy_store_ids: &[StoreId],
         predicate: F,
     ) -> Option<metapb::Peer>
     where
         F: Copy + Fn(&metapb::Peer) -> bool,
     {
-        let candidates = peers.iter().filter(|peer| predicate(peer)).count();
-        if candidates == 0 {
-            return None;
-        }
-        let target = (attempt as usize) % candidates;
-        peers
+        let mut candidates = peers
             .iter()
             .filter(|peer| predicate(peer))
-            .nth(target)
             .cloned()
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return None;
+        }
+        let preferred = candidates
+            .iter()
+            .filter(|peer| !busy_store_ids.contains(&peer.store_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !preferred.is_empty() {
+            candidates = preferred;
+        }
+        let target = (attempt as usize) % candidates.len();
+        candidates.get(target).cloned()
     }
 
     let peer = match replica_read {
-        ReplicaReadType::Follower => select_peer_with_attempt(peers, attempt, |peer| {
-            Some(peer.store_id) != leader_store_id
-                && peer.role != metapb::PeerRole::Learner as i32
-                && is_store_available(unavailable_store_ids, peer.store_id)
-        }),
-        ReplicaReadType::Learner => select_peer_with_attempt(peers, attempt, |peer| {
-            peer.role == metapb::PeerRole::Learner as i32
-                && is_store_available(unavailable_store_ids, peer.store_id)
-        }),
+        ReplicaReadType::Follower => {
+            select_peer_with_attempt(peers, attempt, busy_store_ids, |peer| {
+                Some(peer.store_id) != leader_store_id
+                    && peer.role != metapb::PeerRole::Learner as i32
+                    && is_store_available(unavailable_store_ids, peer.store_id)
+            })
+        }
+        ReplicaReadType::Learner => {
+            select_peer_with_attempt(peers, attempt, busy_store_ids, |peer| {
+                peer.role == metapb::PeerRole::Learner as i32
+                    && is_store_available(unavailable_store_ids, peer.store_id)
+            })
+        }
         ReplicaReadType::Mixed => {
             let leader = region.leader.as_ref();
             let non_leader_candidates = peers
@@ -206,6 +220,7 @@ fn select_replica_read_peer(
                 // Keep the rotation stable when some replicas become unreachable by skipping
                 // unreachable entries in the rotation instead of compressing the candidate set.
                 let start = (attempt as usize) % total_candidates;
+                let mut busy_fallback = None;
                 let mut selected = None;
                 for offset in 0..total_candidates {
                     let index = (start + offset) % total_candidates;
@@ -222,17 +237,27 @@ fn select_replica_read_peer(
                         continue;
                     };
                     if is_store_available(unavailable_store_ids, peer.store_id) {
-                        selected = Some(peer);
-                        break;
+                        if !busy_store_ids.contains(&peer.store_id) {
+                            selected = Some(peer);
+                            break;
+                        }
+                        if busy_fallback.is_none() {
+                            busy_fallback = Some(peer);
+                        }
                     }
                 }
-                selected
+                selected.or(busy_fallback)
             }
         }
         ReplicaReadType::Leader => None,
         ReplicaReadType::PreferLeader => match leader_store_id {
-            Some(store_id) if is_store_available(unavailable_store_ids, store_id) => None,
-            _ => select_peer_with_attempt(peers, attempt, |peer| {
+            Some(store_id)
+                if is_store_available(unavailable_store_ids, store_id)
+                    && !busy_store_ids.contains(&store_id) =>
+            {
+                None
+            }
+            _ => select_peer_with_attempt(peers, attempt, busy_store_ids, |peer| {
                 Some(peer.store_id) != leader_store_id
                     && is_store_available(unavailable_store_ids, peer.store_id)
             }),
@@ -490,20 +515,25 @@ where
 
             let is_stale_read_leader_fallback = stale_read_enabled && attempt == 1;
             if !is_stale_read_leader_fallback && read_type.is_follower_read() {
+                let busy_store_ids = replica_read.server_is_busy_store_ids().await;
                 let mut unavailable_store_ids = unreachable_store_ids.clone();
                 if busy_threshold_ms > 0
                     && read_type == ReplicaReadType::Mixed
                     && !stale_read_enabled
                 {
-                    unavailable_store_ids.extend(replica_read.server_is_busy_store_ids().await);
+                    unavailable_store_ids.extend(busy_store_ids.iter().copied());
                     if let Some(leader_store_id) = leader_store_id {
                         unavailable_store_ids.push(leader_store_id);
                     }
                 }
 
-                if let Some(peer) =
-                    select_replica_read_peer(&region, read_type, attempt, &unavailable_store_ids)
-                {
+                if let Some(peer) = select_replica_read_peer(
+                    &region,
+                    read_type,
+                    attempt,
+                    &unavailable_store_ids,
+                    &busy_store_ids,
+                ) {
                     region.leader = Some(peer);
                 }
             }
@@ -1770,7 +1800,7 @@ mod test {
     #[test]
     fn test_select_replica_read_peer_mixed_skips_unreachable_store() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[51])
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[51], &[])
             .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 61);
     }
@@ -1778,15 +1808,15 @@ mod test {
     #[test]
     fn test_select_replica_read_peer_mixed_includes_leader() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[])
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[], &[])
             .expect("expected a replica");
         assert_eq!(peer.store_id, 51);
 
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 1, &[])
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 1, &[], &[])
             .expect("expected a replica");
         assert_eq!(peer.store_id, 61);
 
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 2, &[])
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 2, &[], &[])
             .expect("expected a replica");
         assert_eq!(peer.store_id, 41);
     }
@@ -1794,7 +1824,23 @@ mod test {
     #[test]
     fn test_select_replica_read_peer_prefer_leader_skips_unreachable_leader() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[41])
+        let peer = select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[41], &[])
+            .expect("expected a reachable replica");
+        assert_eq!(peer.store_id, 51);
+    }
+
+    #[test]
+    fn test_select_replica_read_peer_mixed_prefers_non_busy_replica() {
+        let region = MockPdClient::region1();
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[], &[51])
+            .expect("expected a replica");
+        assert_eq!(peer.store_id, 61);
+    }
+
+    #[test]
+    fn test_select_replica_read_peer_prefer_leader_avoids_busy_leader() {
+        let region = MockPdClient::region1();
+        let peer = select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[], &[41])
             .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 51);
     }
