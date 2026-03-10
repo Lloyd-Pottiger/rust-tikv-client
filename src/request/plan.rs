@@ -189,10 +189,38 @@ fn select_replica_read_peer(
             peer.role == metapb::PeerRole::Learner as i32
                 && is_store_reachable(unreachable_store_ids, peer.store_id)
         }),
-        ReplicaReadType::Mixed => select_peer_with_attempt(peers, attempt, |peer| {
-            Some(peer.store_id) != leader_store_id
-                && is_store_reachable(unreachable_store_ids, peer.store_id)
-        }),
+        ReplicaReadType::Mixed => {
+            let leader = region
+                .leader
+                .as_ref()
+                .filter(|peer| is_store_reachable(unreachable_store_ids, peer.store_id))
+                .cloned();
+            let non_leader_candidates = peers
+                .iter()
+                .filter(|peer| {
+                    Some(peer.store_id) != leader_store_id
+                        && is_store_reachable(unreachable_store_ids, peer.store_id)
+                })
+                .count();
+            let total_candidates = non_leader_candidates + usize::from(leader.is_some());
+            if total_candidates == 0 {
+                None
+            } else {
+                // Client-go's mixed replica selector chooses between leader and followers based on
+                // a score. Without store health/label signals, we approximate this by cycling
+                // through all reachable replicas and including the leader at the end of the
+                // rotation.
+                let target = (attempt as usize) % total_candidates;
+                if target < non_leader_candidates {
+                    select_peer_with_attempt(peers, target as u32, |peer| {
+                        Some(peer.store_id) != leader_store_id
+                            && is_store_reachable(unreachable_store_ids, peer.store_id)
+                    })
+                } else {
+                    leader
+                }
+            }
+        }
         ReplicaReadType::Leader => None,
         ReplicaReadType::PreferLeader => match leader_store_id {
             Some(store_id) if is_store_reachable(unreachable_store_ids, store_id) => None,
@@ -1691,6 +1719,22 @@ mod test {
         let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[51])
             .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 61);
+    }
+
+    #[test]
+    fn test_select_replica_read_peer_mixed_includes_leader() {
+        let region = MockPdClient::region1();
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[])
+            .expect("expected a replica");
+        assert_eq!(peer.store_id, 51);
+
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 1, &[])
+            .expect("expected a replica");
+        assert_eq!(peer.store_id, 61);
+
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 2, &[])
+            .expect("expected a replica");
+        assert_eq!(peer.store_id, 41);
     }
 
     #[test]
