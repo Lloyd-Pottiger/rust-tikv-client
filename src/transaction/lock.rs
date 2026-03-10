@@ -889,7 +889,18 @@ impl ResolveLocksContext {
         self.resolved.read().await.get(txn_id)
     }
 
+    /// Save a transaction status for `txn_id` in the resolved-status cache.
+    ///
+    /// Only cacheable, determined statuses (`Committed` or cacheable `RolledBack`) are stored.
+    /// Non-cacheable statuses (for example `Locked` or `LockNotExistDoNothing`) are ignored.
     pub async fn save_resolved(&mut self, txn_id: u64, txn_status: Arc<TransactionStatus>) {
+        if !txn_status.is_cacheable() {
+            warn!(
+                "ignored non-cacheable txn status saved to resolved cache for txn_id={}: {:?}",
+                txn_id, txn_status
+            );
+            return;
+        }
         self.resolved.write().await.insert(txn_id, txn_status);
     }
 
@@ -1602,6 +1613,60 @@ mod tests {
         assert!(
             ctx.get_resolved(7).await.is_none(),
             "conflicting determined statuses should invalidate the cache entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_context_save_resolved_ignores_non_cacheable_statuses() {
+        let mut ctx = ResolveLocksContext::default();
+
+        let mut lock_info = kvrpcpb::LockInfo::default();
+        lock_info.key = vec![1];
+        lock_info.primary_lock = vec![1];
+        lock_info.lock_version = 7;
+        lock_info.lock_ttl = 100;
+        lock_info.lock_type = kvrpcpb::Op::Put as i32;
+
+        ctx.save_resolved(
+            7,
+            Arc::new(TransactionStatus {
+                kind: TransactionStatusKind::Locked(100, lock_info),
+                action: kvrpcpb::Action::NoAction,
+                is_expired: false,
+            }),
+        )
+        .await;
+        assert!(
+            ctx.get_resolved(7).await.is_none(),
+            "locked status should not be stored in resolved cache"
+        );
+
+        ctx.save_resolved(
+            8,
+            Arc::new(TransactionStatus {
+                kind: TransactionStatusKind::RolledBack,
+                action: kvrpcpb::Action::LockNotExistDoNothing,
+                is_expired: false,
+            }),
+        )
+        .await;
+        assert!(
+            ctx.get_resolved(8).await.is_none(),
+            "LockNotExistDoNothing should not be stored in resolved cache"
+        );
+
+        ctx.save_resolved(
+            9,
+            Arc::new(TransactionStatus {
+                kind: TransactionStatusKind::Committed(Timestamp::from_version(10)),
+                action: kvrpcpb::Action::NoAction,
+                is_expired: false,
+            }),
+        )
+        .await;
+        assert!(
+            ctx.get_resolved(9).await.is_some(),
+            "cacheable committed status should be stored in resolved cache"
         );
     }
 
