@@ -410,11 +410,30 @@ fn select_replica_read_peer(
         }
         ReplicaReadType::Leader => None,
         ReplicaReadType::PreferLeader => match leader_store_id {
-            Some(store_id)
-                if is_store_available(unavailable_store_ids, store_id)
-                    && !busy_store_ids.contains(&store_id) =>
-            {
-                None
+            Some(store_id) if is_store_available(unavailable_store_ids, store_id) => {
+                if !busy_store_ids.contains(&store_id) {
+                    None
+                } else {
+                    let has_idle_non_leader = peers.iter().any(|peer| {
+                        Some(peer.store_id) != leader_store_id
+                            && is_store_available(unavailable_store_ids, peer.store_id)
+                            && !busy_store_ids.contains(&peer.store_id)
+                    });
+                    if !has_idle_non_leader {
+                        None
+                    } else {
+                        select_peer_with_attempt(
+                            peers,
+                            attempt,
+                            busy_store_ids,
+                            attempted_store_ids,
+                            |peer| {
+                                Some(peer.store_id) != leader_store_id
+                                    && is_store_available(unavailable_store_ids, peer.store_id)
+                            },
+                        )
+                    }
+                }
             }
             _ => select_peer_with_attempt(
                 peers,
@@ -761,12 +780,13 @@ where
             }
 
             if !stale_read_leader_fallback && read_type.is_follower_read() {
-                let mut busy_store_ids = if replica_read.retry_same_replica {
+                let server_is_busy_store_ids = if replica_read.retry_same_replica {
                     Vec::new()
                 } else {
                     replica_read.server_is_busy_store_ids().await
                 };
-                if labels_configured && !replica_read.retry_same_replica {
+                let mut busy_store_ids = server_is_busy_store_ids.clone();
+                if !replica_read.retry_same_replica {
                     for peer in region.region.peers.iter() {
                         if pd_client.is_store_slow(peer.store_id)
                             && !busy_store_ids.contains(&peer.store_id)
@@ -775,6 +795,10 @@ where
                         }
                     }
                 }
+                // When busy-threshold is enabled, we exclude stores that are explicitly busy
+                // (`ServerIsBusy` or high estimated wait) from selection. Slow-store TTL is only a
+                // best-effort signal and should not hard-exclude replicas under busy-threshold.
+                let mut unavailable_busy_store_ids = server_is_busy_store_ids;
                 if busy_threshold_ms > 0
                     && read_type == ReplicaReadType::Mixed
                     && !stale_read_enabled
@@ -782,10 +806,13 @@ where
                 {
                     let busy_threshold = Duration::from_millis(u64::from(busy_threshold_ms));
                     for peer in region.region.peers.iter() {
-                        if pd_client.store_estimated_wait_time(peer.store_id) > busy_threshold
-                            && !busy_store_ids.contains(&peer.store_id)
-                        {
-                            busy_store_ids.push(peer.store_id);
+                        if pd_client.store_estimated_wait_time(peer.store_id) > busy_threshold {
+                            if !unavailable_busy_store_ids.contains(&peer.store_id) {
+                                unavailable_busy_store_ids.push(peer.store_id);
+                            }
+                            if !busy_store_ids.contains(&peer.store_id) {
+                                busy_store_ids.push(peer.store_id);
+                            }
                         }
                     }
                 }
@@ -799,7 +826,7 @@ where
                     && read_type == ReplicaReadType::Mixed
                     && !stale_read_enabled
                 {
-                    unavailable_store_ids.extend(busy_store_ids.iter().copied());
+                    unavailable_store_ids.extend(unavailable_busy_store_ids.iter().copied());
                     if let Some(leader_store_id) = leader_store_id {
                         unavailable_store_ids.push(leader_store_id);
                     }
@@ -2249,6 +2276,23 @@ mod test {
         assert_eq!(peer.store_id, 51);
     }
 
+    #[test]
+    fn test_select_replica_read_peer_prefer_leader_keeps_busy_leader_when_all_followers_busy() {
+        let region = MockPdClient::region1();
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::PreferLeader,
+            0,
+            &[],
+            &[41, 51, 61],
+            &[],
+            false,
+            &[],
+        )
+        .expect("expected a replica");
+        assert_eq!(peer.store_id, 41);
+    }
+
     #[tokio::test]
     async fn test_replica_read_mixed_with_match_store_labels_prefers_matching_store() {
         let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
@@ -2443,7 +2487,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_replica_read_mixed_without_match_store_labels_ignores_slow_store_cache() {
+    async fn test_replica_read_mixed_without_match_store_labels_avoids_slow_store_cache() {
         let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
         let seen_captured = seen.clone();
 
@@ -2479,8 +2523,8 @@ mod test {
         let seen = seen.lock().unwrap().clone();
         assert_eq!(
             seen,
-            vec![51],
-            "slow store cache should not affect default replica-read rotation"
+            vec![61],
+            "slow store cache should affect default replica-read selection"
         );
     }
 
