@@ -1472,6 +1472,17 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         }
 
+        self.options.apply_write_context(&mut request.context);
+        if self.options.resource_group_tag.is_none() {
+            if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                let tag = (tagger)(request.label());
+                let ctx = request
+                    .context
+                    .get_or_insert_with(kvrpcpb::Context::default);
+                ctx.resource_group_tag = tag;
+            }
+        }
+
         let lock_wait_timeout = self.options.lock_wait_timeout;
 
         loop {
@@ -1575,6 +1586,15 @@ impl<PdC: PdClient> Transaction<PdC> {
             start_version.clone(),
             for_update_ts,
         );
+        let mut req = req;
+        self.options.apply_write_context(&mut req.context);
+        if self.options.resource_group_tag.is_none() {
+            if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                let tag = (tagger)(req.label());
+                let ctx = req.context.get_or_insert_with(kvrpcpb::Context::default);
+                ctx.resource_group_tag = tag;
+            }
+        }
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
@@ -5412,6 +5432,144 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(rollback_txn_source.load(Ordering::SeqCst), 7);
+        assert_eq!(
+            rollback_priority.load(Ordering::SeqCst),
+            CommandPriority::High as i32
+        );
+        assert_eq!(*rollback_request_source.lock().unwrap(), request_source);
+        assert_eq!(*rollback_resource_group_tag.lock().unwrap(), tag);
+    }
+
+    #[tokio::test]
+    async fn test_txn_resource_group_tagger_applies_to_pessimistic_lock_requests() {
+        let lock_txn_source = Arc::new(AtomicU64::new(0));
+        let lock_priority = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let lock_request_source = Arc::new(Mutex::new(String::new()));
+        let lock_resource_group_tag = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let request_source = "txn-pessimistic-lock".to_string();
+        let tag = b"rg-lock".to_vec();
+
+        let lock_txn_source_cloned = lock_txn_source.clone();
+        let lock_priority_cloned = lock_priority.clone();
+        let lock_request_source_cloned = lock_request_source.clone();
+        let lock_resource_group_tag_cloned = lock_resource_group_tag.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    lock_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
+                    lock_priority_cloned.store(ctx.priority, Ordering::SeqCst);
+                    *lock_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
+                    *lock_resource_group_tag_cloned.lock().unwrap() =
+                        ctx.resource_group_tag.clone();
+                    let resp = kvrpcpb::PessimisticLockResponse {
+                        values: vec![b"v".to_vec(); req.mutations.len()],
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let calls_cloned = calls.clone();
+        let tag_cloned = tag.clone();
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .disk_full_opt(DiskFullOpt::AllowedOnAlmostFull)
+                .txn_source(9)
+                .request_source(request_source.clone())
+                .priority(CommandPriority::High)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_resource_group_tagger(move |label| {
+            assert_eq!(label, "kv_pessimistic_lock");
+            calls_cloned.fetch_add(1, Ordering::SeqCst);
+            tag_cloned.clone()
+        });
+
+        let key: Key = vec![0].into();
+        let _ = txn.get_for_update(key).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(lock_txn_source.load(Ordering::SeqCst), 9);
+        assert_eq!(
+            lock_priority.load(Ordering::SeqCst),
+            CommandPriority::High as i32
+        );
+        assert_eq!(*lock_request_source.lock().unwrap(), request_source);
+        assert_eq!(*lock_resource_group_tag.lock().unwrap(), tag);
+    }
+
+    #[tokio::test]
+    async fn test_txn_resource_group_tagger_applies_to_pessimistic_lock_rollback_requests() {
+        let rollback_txn_source = Arc::new(AtomicU64::new(0));
+        let rollback_priority = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let rollback_request_source = Arc::new(Mutex::new(String::new()));
+        let rollback_resource_group_tag = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let request_source = "txn-lock-rollback".to_string();
+        let tag = b"rg-lock-rollback".to_vec();
+
+        let rollback_txn_source_cloned = rollback_txn_source.clone();
+        let rollback_priority_cloned = rollback_priority.clone();
+        let rollback_request_source_cloned = rollback_request_source.clone();
+        let rollback_resource_group_tag_cloned = rollback_resource_group_tag.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    rollback_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
+                    rollback_priority_cloned.store(ctx.priority, Ordering::SeqCst);
+                    *rollback_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
+                    *rollback_resource_group_tag_cloned.lock().unwrap() =
+                        ctx.resource_group_tag.clone();
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let calls_cloned = calls.clone();
+        let tag_cloned = tag.clone();
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .disk_full_opt(DiskFullOpt::AllowedOnAlmostFull)
+                .txn_source(11)
+                .request_source(request_source.clone())
+                .priority(CommandPriority::High)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_resource_group_tagger(move |label| {
+            assert_eq!(label, "kv_pessimistic_rollback");
+            calls_cloned.fetch_add(1, Ordering::SeqCst);
+            tag_cloned.clone()
+        });
+
+        let key: Key = vec![0].into();
+        txn.pessimistic_lock_rollback(
+            std::iter::once(key),
+            Timestamp::default(),
+            Timestamp::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(rollback_txn_source.load(Ordering::SeqCst), 11);
         assert_eq!(
             rollback_priority.load(Ordering::SeqCst),
             CommandPriority::High as i32
