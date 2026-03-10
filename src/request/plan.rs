@@ -1962,6 +1962,56 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_replica_read_mixed_server_is_busy_retries_same_replica() {
+        let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let seen_captured = seen.clone();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_captured = call_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push(peer.store_id);
+
+                let call = call_count_captured.fetch_add(1, Ordering::SeqCst);
+                let mut resp = kvrpcpb::GetResponse::default();
+                if call == 0 {
+                    let mut region_error = errorpb::Error::default();
+                    region_error.server_is_busy = Some(errorpb::ServerIsBusy::default());
+                    resp.region_error = Some(region_error);
+                }
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Mixed,
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![51, 51],
+            "mixed replica-read should retry the same replica for ServerIsBusy when busy_threshold_ms is unset"
+        );
+    }
+
+    #[tokio::test]
     async fn test_load_based_replica_read_server_busy_rotates_and_disables_threshold() {
         let seen = Arc::new(Mutex::new(Vec::<(u64, u32)>::new()));
         let seen_captured = seen.clone();
