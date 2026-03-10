@@ -126,6 +126,9 @@ impl Snapshot {
     /// Set request source for requests.
     ///
     /// This option writes to `kvrpcpb::Context.request_source`.
+    ///
+    /// For client-go compatible formatting (internal/external prefixes and optional explicit type),
+    /// use [`RequestSource`](crate::RequestSource).
     pub fn set_request_source(&mut self, source: impl Into<String>) {
         self.transaction.set_request_source(source);
     }

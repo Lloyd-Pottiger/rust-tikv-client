@@ -359,6 +359,9 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Set request source for requests.
     ///
     /// This option writes to `kvrpcpb::Context.request_source`.
+    ///
+    /// For client-go compatible formatting (internal/external prefixes and optional explicit type),
+    /// use [`RequestSource`](crate::RequestSource).
     pub fn set_request_source(&mut self, source: impl Into<String>) {
         self.options.request_source = Some(source.into());
     }
@@ -1905,6 +1908,11 @@ impl TransactionOptions {
     }
 
     /// Set the request source label for TiKV metrics.
+    ///
+    /// This option writes to `kvrpcpb::Context.request_source`.
+    ///
+    /// For client-go compatible formatting (internal/external prefixes and optional explicit type),
+    /// use [`RequestSource`](crate::RequestSource).
     #[must_use]
     pub fn request_source(mut self, source: impl Into<String>) -> TransactionOptions {
         self.request_source = Some(source.into());
