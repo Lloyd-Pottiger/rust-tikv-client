@@ -213,6 +213,25 @@ impl Client<PdRpcClient> {
 }
 
 impl<PdC: PdClient> Client<PdC> {
+    /// Get the cluster-wide minimum `safe_ts` across all TiKV stores.
+    ///
+    /// This value is a best-effort signal used by stale reads: if it is non-zero, reads at
+    /// timestamps less than or equal to the returned `safe_ts` can be served from replicas (subject
+    /// to per-region `safe_ts`).
+    ///
+    /// Returns `0` when the minimum safe-ts cannot be determined (for example, if any store is
+    /// unreachable).
+    pub async fn min_safe_ts(&self) -> Result<u64> {
+        let request = crate::proto::kvrpcpb::StoreSafeTsRequest {
+            key_range: Some(crate::proto::kvrpcpb::KeyRange::default()),
+        };
+        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .all_stores(DEFAULT_STORE_BACKOFF)
+            .merge(Collect)
+            .plan();
+        plan.execute().await
+    }
+
     /// Create a new 'get' request.
     ///
     /// Once resolved this request will result in the fetching of the value associated with the
@@ -919,6 +938,33 @@ mod tests {
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb;
     use crate::Result;
+
+    #[tokio::test]
+    async fn test_min_safe_ts_uses_store_safe_ts_request() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::StoreSafeTsRequest>()
+                    .expect("expected store safe-ts request");
+                let range = req.key_range.as_ref().expect("expected key_range");
+                assert!(range.start_key.is_empty());
+                assert!(range.end_key.is_empty());
+
+                let resp = kvrpcpb::StoreSafeTsResponse { safe_ts: 42 };
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+        let client = Client {
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        };
+
+        assert_eq!(client.min_safe_ts().await?, 42);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_batch_put_with_ttl() -> Result<()> {
