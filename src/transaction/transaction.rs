@@ -2588,6 +2588,7 @@ mod tests {
     use crate::mock::MockPdClient;
     use crate::pd::PdClient;
     use crate::proto::kvrpcpb;
+    use crate::proto::metapb;
     use crate::proto::pdpb::Timestamp;
     use crate::request::Keyspace;
     use crate::timestamp::TimestampExt;
@@ -2599,6 +2600,7 @@ mod tests {
     use crate::IsolationLevel;
     use crate::Key;
     use crate::ReplicaReadType;
+    use crate::StoreLabel;
     use crate::Transaction;
     use crate::TransactionOptions;
 
@@ -3235,6 +3237,73 @@ mod tests {
         assert_eq!(store_id.load(Ordering::SeqCst), 51);
         assert!(replica_read.load(Ordering::SeqCst));
         assert!(!stale_read.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_replica_read_mixed_match_store_labels_routes_to_label_matched_store() {
+        let store_id = Arc::new(AtomicU64::new(0));
+
+        let store_id_cloned = store_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+                store_id_cloned.store(peer.store_id, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 41,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-west".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 51,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-west".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 61,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Mixed)
+                .match_store_labels(vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }]),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(store_id.load(Ordering::SeqCst), 61);
     }
 
     #[tokio::test]
