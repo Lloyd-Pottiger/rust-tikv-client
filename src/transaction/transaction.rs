@@ -33,6 +33,7 @@ use crate::request::Plan;
 use crate::request::PlanBuilder;
 use crate::request::RetryOptions;
 use crate::request::TruncateKeyspace;
+use crate::store::Request;
 use crate::timestamp::TimestampExt;
 use crate::transaction::buffer::Buffer;
 use crate::transaction::lowering::*;
@@ -48,6 +49,11 @@ use crate::ReplicaReadType;
 use crate::Result;
 use crate::StoreLabel;
 use crate::Value;
+
+/// A callback used to fill `kvrpcpb::Context.resource_group_tag` when no explicit tag is configured.
+///
+/// The input is the request label (for example, `"kv_get"` or `"kv_commit"`).
+type ResourceGroupTagger = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
 
 /// Hook for validating schema versions during commit.
 ///
@@ -106,6 +112,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     rpc: Arc<PdC>,
     resolve_locks_ctx: ResolveLocksContext,
     options: TransactionOptions,
+    resource_group_tagger: Option<ResourceGroupTagger>,
     replica_read_adjuster: Option<ReplicaReadAdjuster>,
     schema_ver: Option<i64>,
     schema_lease_checker: Option<Arc<dyn SchemaLeaseChecker>>,
@@ -176,6 +183,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             rpc,
             resolve_locks_ctx,
             options,
+            resource_group_tagger: None,
             replica_read_adjuster: None,
             schema_ver: None,
             schema_lease_checker: None,
@@ -349,6 +357,27 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.resource_group_tag = Some(tag);
     }
 
+    /// Set a resource group tagger used to fill `kvrpcpb::Context.resource_group_tag`.
+    ///
+    /// The tagger is invoked only when no explicit resource group tag is configured via
+    /// [`Transaction::set_resource_group_tag`] / [`TransactionOptions::resource_group_tag`], matching
+    /// client-go behavior.
+    ///
+    /// The tagger input is the request label (for example, `"kv_get"` or `"kv_commit"`).
+    ///
+    /// This maps to client-go `KVSnapshot.SetResourceGroupTagger` / `KVTxn.SetResourceGroupTagger`.
+    pub fn set_resource_group_tagger<F>(&mut self, tagger: F)
+    where
+        F: Fn(&str) -> Vec<u8> + Send + Sync + 'static,
+    {
+        self.resource_group_tagger = Some(Arc::new(tagger));
+    }
+
+    /// Clear the configured resource group tagger.
+    pub fn clear_resource_group_tagger(&mut self) {
+        self.resource_group_tagger = None;
+    }
+
     /// Set resource group name for requests.
     ///
     /// This maps to client-go `KVSnapshot.SetResourceGroupName`.
@@ -429,11 +458,22 @@ impl<PdC: PdClient> Transaction<PdC> {
         let lock_tracker = self.read_lock_tracker.clone();
         let resolve_locks_ctx = self.resolve_locks_ctx.clone();
         let match_store_labels = self.options.match_store_labels.clone();
+        let resource_group_tag_set = self.options.resource_group_tag.is_some();
+        let resource_group_tagger = self.resource_group_tagger.clone();
 
         self.buffer
             .get_or_else(key, |key| async move {
                 let mut request = new_get_request(key, timestamp.clone());
                 Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
+                if !resource_group_tag_set {
+                    if let Some(tagger) = resource_group_tagger.as_ref() {
+                        let tag = (tagger)(request.label());
+                        let ctx = request
+                            .context
+                            .get_or_insert_with(kvrpcpb::Context::default);
+                        ctx.resource_group_tag = tag;
+                    }
+                }
 
                 let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock_for_read(
                     resolve_locks_ctx,
@@ -587,6 +627,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         let lock_tracker = self.read_lock_tracker.clone();
         let resolve_locks_ctx = self.resolve_locks_ctx.clone();
         let match_store_labels = self.options.match_store_labels.clone();
+        let resource_group_tag_set = self.options.resource_group_tag.is_some();
+        let resource_group_tagger = self.resource_group_tagger.clone();
 
         self.buffer
             .batch_get_or_else(keys, move |keys| {
@@ -607,6 +649,15 @@ impl<PdC: PdClient> Transaction<PdC> {
                         timestamp.version(),
                     );
                     Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
+                    if !resource_group_tag_set {
+                        if let Some(tagger) = resource_group_tagger.as_ref() {
+                            let tag = (tagger)(request.label());
+                            let ctx = request
+                                .context
+                                .get_or_insert_with(kvrpcpb::Context::default);
+                            ctx.resource_group_tag = tag;
+                        }
+                    }
 
                     let plan_builder = PlanBuilder::new(rpc, keyspace, request)
                         .resolve_lock_for_read(
@@ -1029,6 +1080,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.start_instant,
         );
         committer.resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        committer.resource_group_tagger = self.resource_group_tagger.clone();
         committer.schema_ver = self.schema_ver;
         committer.schema_lease_checker = self.schema_lease_checker.clone();
         let res = committer.commit().await;
@@ -1149,6 +1201,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         let lock_tracker = self.read_lock_tracker.clone();
         let resolve_locks_ctx = self.resolve_locks_ctx.clone();
         let match_store_labels = self.options.match_store_labels.clone();
+        let resource_group_tag_set = self.options.resource_group_tag.is_some();
+        let resource_group_tagger = self.resource_group_tagger.clone();
 
         self.buffer
             .scan_and_fetch(
@@ -1165,6 +1219,15 @@ impl<PdC: PdClient> Transaction<PdC> {
                         reverse,
                     );
                     Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
+                    if !resource_group_tag_set {
+                        if let Some(tagger) = resource_group_tagger.as_ref() {
+                            let tag = (tagger)(request.label());
+                            let ctx = request
+                                .context
+                                .get_or_insert_with(kvrpcpb::Context::default);
+                            ctx.resource_group_tag = tag;
+                        }
+                    }
 
                     let plan_builder = PlanBuilder::new(rpc, keyspace, request)
                         .resolve_lock_for_read(
@@ -2208,6 +2271,8 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     #[new(default)]
     resolve_locks_ctx: ResolveLocksContext,
     options: TransactionOptions,
+    #[new(default)]
+    resource_group_tagger: Option<ResourceGroupTagger>,
     keyspace: Keyspace,
     #[new(default)]
     undetermined: bool,
@@ -2309,6 +2374,15 @@ impl<PdC: PdClient> Committer<PdC> {
             .map(|m| m.key.clone())
             .collect();
         self.options.apply_write_context(&mut request.context);
+        if self.options.resource_group_tag.is_none() {
+            if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                let tag = (tagger)(request.label());
+                let ctx = request
+                    .context
+                    .get_or_insert_with(kvrpcpb::Context::default);
+                ctx.resource_group_tag = tag;
+            }
+        }
 
         let commit_ts_may_be_calculated = self.options.async_commit || self.options.try_one_pc;
         if commit_ts_may_be_calculated {
@@ -2411,6 +2485,13 @@ impl<PdC: PdClient> Committer<PdC> {
             commit_version.clone(),
         );
         self.options.apply_write_context(&mut req.context);
+        if self.options.resource_group_tag.is_none() {
+            if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                let tag = (tagger)(req.label());
+                let ctx = req.context.get_or_insert_with(kvrpcpb::Context::default);
+                ctx.resource_group_tag = tag;
+            }
+        }
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
@@ -2554,6 +2635,13 @@ impl<PdC: PdClient> Committer<PdC> {
             new_commit_request(keys, start_version.clone(), commit_version)
         };
         self.options.apply_write_context(&mut req.context);
+        if self.options.resource_group_tag.is_none() {
+            if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                let tag = (tagger)(req.label());
+                let ctx = req.context.get_or_insert_with(kvrpcpb::Context::default);
+                ctx.resource_group_tag = tag;
+            }
+        }
         let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
@@ -4782,6 +4870,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_resource_group_tagger_applies_when_tag_unset() {
+        let seen_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let tag = b"rg-tagger".to_vec();
+
+        let seen_tag_cloned = seen_tag.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                *seen_tag_cloned.lock().unwrap() = ctx.resource_group_tag.clone();
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let calls_cloned = calls.clone();
+        let tag_cloned = tag.clone();
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+        );
+        snapshot.set_resource_group_tagger(move |_label| {
+            calls_cloned.fetch_add(1, Ordering::SeqCst);
+            tag_cloned.clone()
+        });
+
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*seen_tag.lock().unwrap(), tag);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_resource_group_tagger_skipped_when_tag_set() {
+        let seen_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let tag = b"rg-tag".to_vec();
+
+        let seen_tag_cloned = seen_tag.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                *seen_tag_cloned.lock().unwrap() = ctx.resource_group_tag.clone();
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let calls_cloned = calls.clone();
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+        );
+        snapshot.set_resource_group_tagger(move |_label| {
+            calls_cloned.fetch_add(1, Ordering::SeqCst);
+            b"tagger".to_vec()
+        });
+        snapshot.set_resource_group_tag(tag.clone());
+
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(*seen_tag.lock().unwrap(), tag);
+    }
+
+    #[tokio::test]
     async fn test_snapshot_resource_group_name_propagates_to_context() {
         let seen_name = Arc::new(std::sync::Mutex::new(String::new()));
         let name = "rg-name".to_string();
@@ -5123,6 +5289,56 @@ mod tests {
             *commit_resource_group_name.lock().unwrap(),
             resource_group_name
         );
+    }
+
+    #[tokio::test]
+    async fn test_txn_resource_group_tagger_applies_to_commit_requests() {
+        let prewrite_resource_group_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let commit_resource_group_tag = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let tag = b"rg-tagger".to_vec();
+
+        let prewrite_resource_group_tag_cloned = prewrite_resource_group_tag.clone();
+        let commit_resource_group_tag_cloned = commit_resource_group_tag.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    *prewrite_resource_group_tag_cloned.lock().unwrap() =
+                        ctx.resource_group_tag.clone();
+                    return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    *commit_resource_group_tag_cloned.lock().unwrap() =
+                        ctx.resource_group_tag.clone();
+                    return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let calls_cloned = calls.clone();
+        let tag_cloned = tag.clone();
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_resource_group_tagger(move |_label| {
+            calls_cloned.fetch_add(1, Ordering::SeqCst);
+            tag_cloned.clone()
+        });
+        txn.put("key".to_owned(), "value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(*prewrite_resource_group_tag.lock().unwrap(), tag);
+        assert_eq!(*commit_resource_group_tag.lock().unwrap(), tag);
     }
 
     #[rstest::rstest]

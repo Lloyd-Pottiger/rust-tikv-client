@@ -116,6 +116,27 @@ impl Snapshot {
         self.transaction.set_resource_group_tag(tag);
     }
 
+    /// Set a resource group tagger used to fill `kvrpcpb::Context.resource_group_tag`.
+    ///
+    /// The tagger is invoked only when no explicit resource group tag is configured via
+    /// [`Snapshot::set_resource_group_tag`] / [`crate::TransactionOptions::resource_group_tag`],
+    /// matching client-go behavior.
+    ///
+    /// The tagger input is the request label (for example, `"kv_get"` or `"kv_commit"`).
+    ///
+    /// This maps to client-go `KVSnapshot.SetResourceGroupTagger`.
+    pub fn set_resource_group_tagger<F>(&mut self, tagger: F)
+    where
+        F: Fn(&str) -> Vec<u8> + Send + Sync + 'static,
+    {
+        self.transaction.set_resource_group_tagger(tagger);
+    }
+
+    /// Clear the configured resource group tagger.
+    pub fn clear_resource_group_tagger(&mut self) {
+        self.transaction.clear_resource_group_tagger();
+    }
+
     /// Set resource group name for requests.
     ///
     /// This maps to client-go `KVSnapshot.SetResourceGroupName`.
