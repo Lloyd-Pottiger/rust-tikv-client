@@ -190,35 +190,43 @@ fn select_replica_read_peer(
                 && is_store_reachable(unreachable_store_ids, peer.store_id)
         }),
         ReplicaReadType::Mixed => {
-            let leader = region
-                .leader
-                .as_ref()
-                .filter(|peer| is_store_reachable(unreachable_store_ids, peer.store_id))
-                .cloned();
+            let leader = region.leader.as_ref();
             let non_leader_candidates = peers
                 .iter()
-                .filter(|peer| {
-                    Some(peer.store_id) != leader_store_id
-                        && is_store_reachable(unreachable_store_ids, peer.store_id)
-                })
+                .filter(|peer| Some(peer.store_id) != leader_store_id)
                 .count();
             let total_candidates = non_leader_candidates + usize::from(leader.is_some());
             if total_candidates == 0 {
                 None
             } else {
                 // Client-go's mixed replica selector chooses between leader and followers based on
-                // a score. Without store health/label signals, we approximate this by cycling
-                // through all reachable replicas and including the leader at the end of the
-                // rotation.
-                let target = (attempt as usize) % total_candidates;
-                if target < non_leader_candidates {
-                    select_peer_with_attempt(peers, target as u32, |peer| {
-                        Some(peer.store_id) != leader_store_id
-                            && is_store_reachable(unreachable_store_ids, peer.store_id)
-                    })
-                } else {
-                    leader
+                // a score. Without Rust-side store health/label signals, we approximate this with
+                // a stable rotation across all replicas (non-leaders first, then leader).
+                //
+                // Keep the rotation stable when some replicas become unreachable by skipping
+                // unreachable entries in the rotation instead of compressing the candidate set.
+                let start = (attempt as usize) % total_candidates;
+                let mut selected = None;
+                for offset in 0..total_candidates {
+                    let index = (start + offset) % total_candidates;
+                    let peer = if index < non_leader_candidates {
+                        peers
+                            .iter()
+                            .filter(|peer| Some(peer.store_id) != leader_store_id)
+                            .nth(index)
+                            .cloned()
+                    } else {
+                        leader.cloned()
+                    };
+                    let Some(peer) = peer else {
+                        continue;
+                    };
+                    if is_store_reachable(unreachable_store_ids, peer.store_id) {
+                        selected = Some(peer);
+                        break;
+                    }
                 }
+                selected
             }
         }
         ReplicaReadType::Leader => None,

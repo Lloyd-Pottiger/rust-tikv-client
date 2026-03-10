@@ -3303,7 +3303,7 @@ mod tests {
         let _ = snapshot.get(key).await.unwrap();
 
         let store_ids = store_ids.lock().expect("mutex poisoned").clone();
-        assert_eq!(store_ids, vec![51, 61, 61]);
+        assert_eq!(store_ids, vec![51, 61, 41]);
     }
 
     #[tokio::test]
