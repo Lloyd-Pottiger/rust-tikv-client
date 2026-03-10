@@ -88,6 +88,8 @@ pub struct MockPdClient {
     store_meta_by_id_calls: Arc<AtomicUsize>,
     #[new(value = "Mutex::new(HashMap::new())")]
     slow_store_until: Mutex<HashMap<StoreId, Instant>>,
+    #[new(value = "Mutex::new(HashMap::new())")]
+    store_estimated_wait_until: Mutex<HashMap<StoreId, Instant>>,
 }
 
 #[async_trait]
@@ -296,6 +298,37 @@ impl PdClient for MockPdClient {
                 false
             }
             None => false,
+        }
+    }
+
+    fn update_store_load_stats(&self, store_id: StoreId, estimated_wait_ms: u32) {
+        if estimated_wait_ms == 0 {
+            return;
+        }
+
+        let estimated_wait = Duration::from_millis(u64::from(estimated_wait_ms));
+        let until = Instant::now() + estimated_wait;
+
+        let mut store_estimated_wait_until = match self.store_estimated_wait_until.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        store_estimated_wait_until.insert(store_id, until);
+    }
+
+    fn store_estimated_wait_time(&self, store_id: StoreId) -> Duration {
+        let now = Instant::now();
+        let mut store_estimated_wait_until = match self.store_estimated_wait_until.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match store_estimated_wait_until.get(&store_id) {
+            Some(until) if *until > now => until.duration_since(now),
+            Some(_) => {
+                store_estimated_wait_until.remove(&store_id);
+                Duration::ZERO
+            }
+            None => Duration::ZERO,
         }
     }
 

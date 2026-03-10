@@ -774,6 +774,20 @@ where
                         }
                     }
                 }
+                if busy_threshold_ms > 0
+                    && read_type == ReplicaReadType::Mixed
+                    && !stale_read_enabled
+                    && !replica_read.retry_same_replica
+                {
+                    let busy_threshold = Duration::from_millis(u64::from(busy_threshold_ms));
+                    for peer in region.region.peers.iter() {
+                        if pd_client.store_estimated_wait_time(peer.store_id) > busy_threshold
+                            && !busy_store_ids.contains(&peer.store_id)
+                        {
+                            busy_store_ids.push(peer.store_id);
+                        }
+                    }
+                }
                 let attempted_store_ids = if replica_read.retry_same_replica {
                     Vec::new()
                 } else {
@@ -918,6 +932,11 @@ where
         } else if let Some(e) = resp.region_error() {
             debug!("single_shard_handler:execute: region error: {:?}", e);
             let is_server_busy = e.server_is_busy.is_some();
+            let server_is_busy_estimated_wait_ms = e
+                .server_is_busy
+                .as_ref()
+                .map(|busy| busy.estimated_wait_ms)
+                .unwrap_or(0);
             let is_stale_read_leader_fallback_attempt = stale_read_leader_fallback;
             let is_stale_read_request = plan
                 .kv_context_mut()
@@ -938,6 +957,10 @@ where
                     let store_id = region_store.region_with_leader.get_store_id().ok();
                     if is_server_busy {
                         if let Some(store_id) = store_id {
+                            pd_client.update_store_load_stats(
+                                store_id,
+                                server_is_busy_estimated_wait_ms,
+                            );
                             pd_client.mark_store_slow(store_id, SLOW_STORE_TTL_ON_SERVER_IS_BUSY);
                         }
                         if let (Some(store_id), Some(replica_read)) =
@@ -2549,6 +2572,53 @@ mod test {
             seen,
             vec![(41, 123), (51, 123), (61, 123), (41, 0)],
             "should rotate replicas for ServerIsBusy when busy_threshold_ms is set, then disable threshold when all replicas are busy"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_based_replica_read_avoids_store_with_high_estimated_wait() {
+        let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let seen_captured = seen.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push(peer.store_id);
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        // Simulate prior ServerIsBusy feedback: store 51 has a large estimated wait.
+        pd_client.update_store_load_stats(51, 10_000);
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context {
+            busy_threshold_ms: 100,
+            ..Default::default()
+        });
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Mixed,
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![61],
+            "load-based replica read should avoid stores whose estimated wait exceeds busy_threshold_ms"
         );
     }
 

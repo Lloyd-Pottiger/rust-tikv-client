@@ -112,6 +112,23 @@ pub trait PdClient: Send + Sync + 'static {
         false
     }
 
+    /// Update the store's estimated wait time from a `ServerIsBusy` response.
+    ///
+    /// This is a best-effort signal used by load-based replica read. The default implementation
+    /// is a no-op.
+    fn update_store_load_stats(&self, store_id: StoreId, estimated_wait_ms: u32) {
+        let _ = (store_id, estimated_wait_ms);
+    }
+
+    /// Returns the current estimated wait time for requests sent to this store.
+    ///
+    /// This is a best-effort signal used by load-based replica read. The default implementation
+    /// returns `Duration::ZERO`.
+    fn store_estimated_wait_time(&self, store_id: StoreId) -> Duration {
+        let _ = store_id;
+        Duration::ZERO
+    }
+
     /// The `txn_size` threshold for ResolveLock "lite" mode.
     ///
     /// When `lock.txn_size < threshold`, lock resolution uses ResolveLock lite (populate
@@ -258,6 +275,7 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     kv_connect: KvC,
     kv_client_cache: Arc<RwLock<HashMap<String, KvC::KvClient>>>,
     slow_store_until: Mutex<HashMap<StoreId, Instant>>,
+    store_estimated_wait_until: Mutex<HashMap<StoreId, Instant>>,
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
     resolve_lock_lite_threshold: u64,
@@ -344,6 +362,37 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         }
     }
 
+    fn update_store_load_stats(&self, store_id: StoreId, estimated_wait_ms: u32) {
+        if estimated_wait_ms == 0 {
+            return;
+        }
+
+        let estimated_wait = Duration::from_millis(u64::from(estimated_wait_ms));
+        let until = Instant::now() + estimated_wait;
+
+        let mut store_estimated_wait_until = match self.store_estimated_wait_until.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        store_estimated_wait_until.insert(store_id, until);
+    }
+
+    fn store_estimated_wait_time(&self, store_id: StoreId) -> Duration {
+        let now = Instant::now();
+        let mut store_estimated_wait_until = match self.store_estimated_wait_until.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match store_estimated_wait_until.get(&store_id) {
+            Some(until) if *until > now => until.duration_since(now),
+            Some(_) => {
+                store_estimated_wait_until.remove(&store_id);
+                Duration::ZERO
+            }
+            None => Duration::ZERO,
+        }
+    }
+
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
         self.pd.clone().get_timestamp().await
     }
@@ -421,6 +470,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             kv_client_cache,
             kv_connect: kv_connect(security_mgr),
             slow_store_until: Mutex::new(HashMap::new()),
+            store_estimated_wait_until: Mutex::new(HashMap::new()),
             enable_codec,
             region_cache: RegionCache::new(pd),
             resolve_lock_lite_threshold,
