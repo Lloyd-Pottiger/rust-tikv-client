@@ -1302,7 +1302,8 @@ impl LockResolver {
         primary_min_commit_ts: u64,
     ) -> Result<SecondaryLocksStatus> {
         let expected_keys = keys.len();
-        let req = new_check_secondary_locks_request(keys, txn_id);
+        let mut req = new_check_secondary_locks_request(keys, txn_id);
+        self.rpc_context.apply_to_request(&mut req);
         let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, req)
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .extract_error()
@@ -1843,6 +1844,97 @@ mod tests {
         .unwrap();
         assert!(result.live_locks.is_empty());
         assert_eq!(tagger_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_rpc_context_applies_to_check_secondary_locks_requests() {
+        let tagger_calls = Arc::new(AtomicUsize::new(0));
+        let tagger_calls_captured = tagger_calls.clone();
+
+        let mut template = kvrpcpb::Context::default();
+        template.disk_full_opt = crate::DiskFullOpt::AllowedOnAlreadyFull as i32;
+        template.txn_source = 123;
+        template.sync_log = true;
+        template.priority = crate::CommandPriority::High as i32;
+        template.max_execution_duration_ms = 456;
+        template.resource_control_context = Some(kvrpcpb::ResourceControlContext {
+            resource_group_name: "rg-check-secondary".to_owned(),
+            ..Default::default()
+        });
+        template.request_source = "src-check-secondary".to_owned();
+
+        let rpc_context = LockResolverRpcContext {
+            context: Some(template),
+            resource_group_tag_set: false,
+            resource_group_tagger: Some(Arc::new(move |label: &str| {
+                tagger_calls_captured.fetch_add(1, Ordering::SeqCst);
+                label.as_bytes().to_vec()
+            })),
+        };
+
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckSecondaryLocksRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(
+                        ctx.disk_full_opt,
+                        crate::DiskFullOpt::AllowedOnAlreadyFull as i32
+                    );
+                    assert_eq!(ctx.txn_source, 123);
+                    assert!(ctx.sync_log);
+                    assert_eq!(ctx.priority, crate::CommandPriority::High as i32);
+                    assert_eq!(ctx.max_execution_duration_ms, 456);
+                    assert_eq!(ctx.request_source, "src-check-secondary");
+                    assert_eq!(
+                        ctx.resource_control_context
+                            .as_ref()
+                            .expect("resource control context")
+                            .resource_group_name,
+                        "rg-check-secondary"
+                    );
+                    assert_eq!(
+                        ctx.resource_group_tag,
+                        b"kv_check_secondary_locks_request".to_vec()
+                    );
+                    assert_eq!(ctx.region_id, 1);
+                    assert_eq!(
+                        ctx.peer.as_ref().expect("peer").store_id,
+                        41,
+                        "region routing fields should not be clobbered by the template context"
+                    );
+
+                    let resp = kvrpcpb::CheckSecondaryLocksResponse {
+                        commit_ts: 200,
+                        locks: vec![kvrpcpb::LockInfo {
+                            use_async_commit: true,
+                            min_commit_ts: 150,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        lock_resolver.set_rpc_context(rpc_context);
+        let status = lock_resolver
+            .check_all_secondaries(client, Keyspace::Disable, vec![vec![3]], 7, 150)
+            .await
+            .unwrap();
+        assert_eq!(
+            status
+                .commit_ts
+                .as_ref()
+                .expect("commit_ts should be present")
+                .version(),
+            200
+        );
+        assert!(!status.missing_lock);
+        assert_eq!(tagger_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
