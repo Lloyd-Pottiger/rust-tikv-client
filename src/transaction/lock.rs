@@ -1605,6 +1605,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_resolve_locks_resolved_cache_committed_async_commit_skips_check_secondary_locks()
+    {
+        let txn_id = 1;
+        let commit_version = 10;
+
+        let mut ctx = ResolveLocksContext::default();
+        ctx.save_resolved(
+            txn_id,
+            Arc::new(TransactionStatus {
+                kind: TransactionStatusKind::Committed(Timestamp::from_version(commit_version)),
+                action: kvrpcpb::Action::NoAction,
+                is_expired: false,
+            }),
+        )
+        .await;
+
+        let resolve_lock_calls = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_calls_captured = resolve_lock_calls.clone();
+
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    panic!("CheckTxnStatus should be skipped when txn status is cached");
+                }
+                if req.is::<kvrpcpb::CheckSecondaryLocksRequest>() {
+                    panic!("CheckSecondaryLocks should be skipped when txn status is cached");
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    assert!(req.txn_infos.is_empty());
+                    assert_eq!(req.start_version, txn_id);
+                    assert_eq!(req.commit_version, commit_version);
+                    assert_eq!(req.keys, vec![vec![2]]);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![2];
+        lock.primary_lock = vec![1];
+        lock.lock_version = txn_id;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+        lock.use_async_commit = true;
+
+        let result = resolve_locks_with_options(
+            ctx,
+            vec![lock],
+            Timestamp::from_version(5),
+            client,
+            Keyspace::Disable,
+            false,
+            LockResolverRpcContext::default(),
+        )
+        .await
+        .unwrap();
+        assert!(result.live_locks.is_empty());
+        assert_eq!(resolve_lock_calls.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn test_lock_resolver_rpc_context_merges_without_clobbering_region_fields() {
         let mut ctx = kvrpcpb::Context::default();
