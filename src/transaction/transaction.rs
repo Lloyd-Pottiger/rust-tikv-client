@@ -3654,6 +3654,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_replica_read_mixed_match_store_ids_and_labels_filters_store_meta_queries(
+    ) {
+        let store_id = Arc::new(AtomicU64::new(0));
+
+        let store_id_cloned = store_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+                store_id_cloned.store(peer.store_id, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 41,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-west".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 51,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 61,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Mixed)
+                .match_store_ids(vec![41, 51])
+                .match_store_labels(vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }]),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(store_id.load(Ordering::SeqCst), 51);
+        assert_eq!(pd_client.store_meta_by_id_call_count(), 2);
+    }
+
+    #[tokio::test]
     async fn test_snapshot_replica_read_mixed_grpc_error_rotates_replicas() {
         let get_count = Arc::new(AtomicUsize::new(0));
         let first_store_id = Arc::new(AtomicU64::new(0));
