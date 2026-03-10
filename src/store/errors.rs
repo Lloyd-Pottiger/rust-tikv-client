@@ -112,6 +112,18 @@ has_str_error!(kvrpcpb::ImportResponse);
 has_str_error!(kvrpcpb::DeleteRangeResponse);
 has_str_error!(kvrpcpb::UnsafeDestroyRangeResponse);
 
+impl HasRegionError for kvrpcpb::StoreSafeTsResponse {
+    fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
+        None
+    }
+}
+
+impl HasKeyErrors for kvrpcpb::StoreSafeTsResponse {
+    fn key_errors(&mut self) -> Option<Vec<Error>> {
+        None
+    }
+}
+
 impl HasKeyErrors for kvrpcpb::ScanResponse {
     fn key_errors(&mut self) -> Option<Vec<Error>> {
         extract_errors(self.pairs.iter_mut().map(|pair| pair.error.take()))

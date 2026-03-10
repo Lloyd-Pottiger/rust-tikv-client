@@ -1127,6 +1127,44 @@ impl Merge<kvrpcpb::UnsafeDestroyRangeResponse> for Collect {
     }
 }
 
+pub fn new_store_safe_ts_request_all() -> kvrpcpb::StoreSafeTsRequest {
+    kvrpcpb::StoreSafeTsRequest {
+        key_range: Some(kvrpcpb::KeyRange::default()),
+    }
+}
+
+impl KvRequest for kvrpcpb::StoreSafeTsRequest {
+    type Response = kvrpcpb::StoreSafeTsResponse;
+}
+
+impl StoreRequest for kvrpcpb::StoreSafeTsRequest {
+    fn apply_store(&mut self, _store: &Store) {}
+}
+
+impl HasLocks for kvrpcpb::StoreSafeTsResponse {}
+
+impl Merge<kvrpcpb::StoreSafeTsResponse> for Collect {
+    type Out = u64;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::StoreSafeTsResponse>>) -> Result<Self::Out> {
+        let mut min_safe_ts = u64::MAX;
+        for resp in input {
+            let resp = match resp {
+                Ok(resp) => resp,
+                Err(_) => return Ok(0),
+            };
+            if resp.safe_ts != 0 && resp.safe_ts < min_safe_ts {
+                min_safe_ts = resp.safe_ts;
+            }
+        }
+        Ok(if min_safe_ts == u64::MAX {
+            0
+        } else {
+            min_safe_ts
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1143,6 +1181,47 @@ mod tests {
     use crate::request::ResponseWithShard;
     use crate::request::Shardable;
     use crate::KvPair;
+
+    #[test]
+    fn test_merge_store_safe_ts_returns_min_non_zero_safe_ts() {
+        let merged = crate::request::Collect
+            .merge(vec![
+                Ok(kvrpcpb::StoreSafeTsResponse { safe_ts: 100 }),
+                Ok(kvrpcpb::StoreSafeTsResponse { safe_ts: 80 }),
+            ])
+            .unwrap();
+        assert_eq!(merged, 80);
+    }
+
+    #[test]
+    fn test_merge_store_safe_ts_ignores_zero_safe_ts() {
+        let merged = crate::request::Collect
+            .merge(vec![
+                Ok(kvrpcpb::StoreSafeTsResponse { safe_ts: 0 }),
+                Ok(kvrpcpb::StoreSafeTsResponse { safe_ts: 12 }),
+            ])
+            .unwrap();
+        assert_eq!(merged, 12);
+    }
+
+    #[test]
+    fn test_merge_store_safe_ts_returns_zero_on_store_error() {
+        let merged = crate::request::Collect
+            .merge(vec![
+                Ok(kvrpcpb::StoreSafeTsResponse { safe_ts: 12 }),
+                Err(Error::Unimplemented),
+            ])
+            .unwrap();
+        assert_eq!(merged, 0);
+    }
+
+    #[test]
+    fn test_merge_store_safe_ts_returns_zero_when_no_store_results() {
+        let merged = crate::request::Collect
+            .merge(Vec::<crate::Result<kvrpcpb::StoreSafeTsResponse>>::new())
+            .unwrap();
+        assert_eq!(merged, 0);
+    }
 
     #[test]
     fn test_scan_lock_request_apply_shard_sets_end_key() {

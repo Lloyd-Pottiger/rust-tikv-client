@@ -20,6 +20,7 @@ use crate::timestamp::TimestampExt;
 use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_scan_lock_request;
 use crate::transaction::lowering::new_unsafe_destroy_range_request;
+use crate::transaction::requests::new_store_safe_ts_request_all;
 use crate::transaction::resolve_locks_with_options;
 use crate::transaction::LockResolverRpcContext;
 use crate::transaction::ResolveLocksContext;
@@ -253,6 +254,23 @@ impl Client {
     /// ```
     pub async fn current_timestamp(&self) -> Result<Timestamp> {
         self.pd.clone().get_timestamp().await
+    }
+
+    /// Get the cluster-wide minimum `safe_ts` across all TiKV stores.
+    ///
+    /// This value is a best-effort signal used by stale reads: if it is non-zero, reads at
+    /// timestamps less than or equal to the returned `safe_ts` can be served from replicas (subject
+    /// to per-region `safe_ts`).
+    ///
+    /// Returns `0` when the minimum safe-ts cannot be determined (for example, if any store is
+    /// unreachable).
+    pub async fn min_safe_ts(&self) -> Result<u64> {
+        let req = new_store_safe_ts_request_all();
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .all_stores(DEFAULT_STORE_BACKOFF)
+            .merge(crate::request::Collect)
+            .plan();
+        plan.execute().await
     }
 
     /// Request garbage collection (GC) of the TiKV cluster.

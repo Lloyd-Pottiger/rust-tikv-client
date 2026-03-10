@@ -132,6 +132,13 @@ impl SyncTransactionClient {
         safe_block_on(&self.runtime, self.client.current_timestamp())
     }
 
+    /// Get the cluster-wide minimum `safe_ts` across all TiKV stores.
+    ///
+    /// This is a synchronous version of [`TransactionClient::min_safe_ts`](crate::TransactionClient::min_safe_ts).
+    pub fn min_safe_ts(&self) -> Result<u64> {
+        safe_block_on(&self.runtime, self.client.min_safe_ts())
+    }
+
     /// Request garbage collection (GC) of the TiKV cluster.
     ///
     /// This is a synchronous version of [`TransactionClient::gc`](crate::TransactionClient::gc).
