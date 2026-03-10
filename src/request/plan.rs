@@ -150,13 +150,13 @@ fn select_replica_read_peer(
     region: &RegionWithLeader,
     replica_read: ReplicaReadType,
     attempt: u32,
-    unreachable_store_ids: &[StoreId],
+    unavailable_store_ids: &[StoreId],
 ) -> Option<metapb::Peer> {
     let leader_store_id = region.leader.as_ref().map(|p| p.store_id);
     let peers = &region.region.peers;
 
-    fn is_store_reachable(unreachable_store_ids: &[StoreId], store_id: StoreId) -> bool {
-        !unreachable_store_ids.contains(&store_id)
+    fn is_store_available(unavailable_store_ids: &[StoreId], store_id: StoreId) -> bool {
+        !unavailable_store_ids.contains(&store_id)
     }
 
     fn select_peer_with_attempt<F>(
@@ -183,11 +183,11 @@ fn select_replica_read_peer(
         ReplicaReadType::Follower => select_peer_with_attempt(peers, attempt, |peer| {
             Some(peer.store_id) != leader_store_id
                 && peer.role != metapb::PeerRole::Learner as i32
-                && is_store_reachable(unreachable_store_ids, peer.store_id)
+                && is_store_available(unavailable_store_ids, peer.store_id)
         }),
         ReplicaReadType::Learner => select_peer_with_attempt(peers, attempt, |peer| {
             peer.role == metapb::PeerRole::Learner as i32
-                && is_store_reachable(unreachable_store_ids, peer.store_id)
+                && is_store_available(unavailable_store_ids, peer.store_id)
         }),
         ReplicaReadType::Mixed => {
             let leader = region.leader.as_ref();
@@ -221,7 +221,7 @@ fn select_replica_read_peer(
                     let Some(peer) = peer else {
                         continue;
                     };
-                    if is_store_reachable(unreachable_store_ids, peer.store_id) {
+                    if is_store_available(unavailable_store_ids, peer.store_id) {
                         selected = Some(peer);
                         break;
                     }
@@ -231,10 +231,10 @@ fn select_replica_read_peer(
         }
         ReplicaReadType::Leader => None,
         ReplicaReadType::PreferLeader => match leader_store_id {
-            Some(store_id) if is_store_reachable(unreachable_store_ids, store_id) => None,
+            Some(store_id) if is_store_available(unavailable_store_ids, store_id) => None,
             _ => select_peer_with_attempt(peers, attempt, |peer| {
                 Some(peer.store_id) != leader_store_id
-                    && is_store_reachable(unreachable_store_ids, peer.store_id)
+                    && is_store_available(unavailable_store_ids, peer.store_id)
             }),
         },
     };
@@ -266,6 +266,10 @@ impl StoreLiveness {
 
     async fn unreachable_store_ids(&self) -> Vec<StoreId> {
         self.unreachable_store_ids.read().await.clone()
+    }
+
+    async fn server_is_busy_store_ids(&self) -> Vec<StoreId> {
+        self.server_is_busy_store_ids.read().await.clone()
     }
 
     async fn is_server_is_busy(&self, store_id: StoreId) -> bool {
@@ -318,6 +322,10 @@ impl ReplicaReadState {
 
     async fn is_store_server_is_busy(&self, store_id: StoreId) -> bool {
         self.store_liveness.is_server_is_busy(store_id).await
+    }
+
+    async fn server_is_busy_store_ids(&self) -> Vec<StoreId> {
+        self.store_liveness.server_is_busy_store_ids().await
     }
 
     fn attempt(&self, current_attempts: u32) -> u32 {
@@ -427,14 +435,20 @@ where
         replica_read: Option<ReplicaReadState>,
     ) -> Result<<Self as Plan>::Result> {
         debug!("single_shard_handler");
+        let mut replica_read = replica_read;
         let region_leader = region.leader.clone();
         let leader_store_id = region_leader.as_ref().map(|peer| peer.store_id);
+        let busy_threshold_ms = plan
+            .kv_context_mut()
+            .map(|ctx| ctx.busy_threshold_ms)
+            .unwrap_or(0);
         let current_attempts = backoff.current_attempts();
         let unreachable_store_ids = match replica_read.as_ref() {
             Some(replica_read) => replica_read.unreachable_store_ids().await,
             None => Vec::new(),
         };
         let mut patched_stale_read = false;
+        let mut fallback_to_leader_under_busy_threshold = false;
         if let Some(replica_read) = replica_read.as_ref() {
             let attempt = replica_read.attempt(current_attempts);
             let read_type = replica_read.read_type;
@@ -476,12 +490,40 @@ where
 
             let is_stale_read_leader_fallback = stale_read_enabled && attempt == 1;
             if !is_stale_read_leader_fallback && read_type.is_follower_read() {
+                let mut unavailable_store_ids = unreachable_store_ids.clone();
+                if busy_threshold_ms > 0
+                    && read_type == ReplicaReadType::Mixed
+                    && !stale_read_enabled
+                {
+                    unavailable_store_ids.extend(replica_read.server_is_busy_store_ids().await);
+                    if let Some(leader_store_id) = leader_store_id {
+                        unavailable_store_ids.push(leader_store_id);
+                    }
+                }
+
                 if let Some(peer) =
-                    select_replica_read_peer(&region, read_type, attempt, &unreachable_store_ids)
+                    select_replica_read_peer(&region, read_type, attempt, &unavailable_store_ids)
                 {
                     region.leader = Some(peer);
                 }
             }
+
+            if busy_threshold_ms > 0
+                && read_type == ReplicaReadType::Mixed
+                && !stale_read_enabled
+                && region.leader.as_ref().map(|peer| peer.store_id) == leader_store_id
+            {
+                fallback_to_leader_under_busy_threshold = true;
+            }
+        }
+        if fallback_to_leader_under_busy_threshold {
+            // Match client-go behavior for load-based replica read: when all replicas are too busy,
+            // remove `busy_threshold_ms` and fall back to leader reads.
+            if let Some(ctx) = plan.kv_context_mut() {
+                ctx.busy_threshold_ms = 0;
+            }
+            replica_read = replica_read
+                .map(|state| state.switch_to(ReplicaReadType::Leader, backoff.current_attempts()));
         }
         let replica_read_type = replica_read.as_ref().map(|state| state.read_type);
         let region_store = match pd_client
@@ -574,12 +616,17 @@ where
                 }
                 None => false,
             };
-            let retry_same_replica = !plan
+            let is_stale_read_request = plan
                 .kv_context_mut()
                 .map(|ctx| ctx.stale_read)
-                .unwrap_or(false)
+                .unwrap_or(false);
+            let busy_threshold_ms = plan
+                .kv_context_mut()
+                .map(|ctx| ctx.busy_threshold_ms)
+                .unwrap_or(0);
+            let retry_same_replica = !is_stale_read_request
                 && !is_stale_read_leader_fallback_attempt
-                && (is_server_busy
+                && ((is_server_busy && busy_threshold_ms == 0)
                     || e.max_timestamp_not_synced.is_some()
                     || e.read_index_not_ready.is_some()
                     || e.proposal_in_merging_mode.is_some());
@@ -599,10 +646,6 @@ where
                     if !region_error_resolved {
                         sleep(duration).await;
                     }
-                    let busy_threshold_ms = plan
-                        .kv_context_mut()
-                        .map(|ctx| ctx.busy_threshold_ms)
-                        .unwrap_or(0);
                     let replica_read = match (is_server_busy, replica_read) {
                         (true, Some(state)) if state.read_type == ReplicaReadType::PreferLeader => {
                             Some(
@@ -1712,6 +1755,9 @@ impl HasNextBatch for ResponseWithShard<kvrpcpb::ScanLockResponse, (Vec<u8>, Vec
 
 #[cfg(test)]
 mod test {
+    use std::any::Any;
+    use std::sync::Mutex;
+
     use futures::stream::BoxStream;
     use futures::stream::{self};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1751,6 +1797,63 @@ mod test {
         let peer = select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[41])
             .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 51);
+    }
+
+    #[tokio::test]
+    async fn test_load_based_replica_read_server_busy_rotates_and_disables_threshold() {
+        let seen = Arc::new(Mutex::new(Vec::<(u64, u32)>::new()));
+        let seen_captured = seen.clone();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_captured = call_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured
+                    .lock()
+                    .unwrap()
+                    .push((peer.store_id, ctx.busy_threshold_ms));
+
+                let call = call_count_captured.fetch_add(1, Ordering::SeqCst);
+                let mut resp = kvrpcpb::GetResponse::default();
+                if call < 3 {
+                    let mut region_error = errorpb::Error::default();
+                    region_error.server_is_busy = Some(errorpb::ServerIsBusy::default());
+                    resp.region_error = Some(region_error);
+                }
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context {
+            busy_threshold_ms: 123,
+            ..Default::default()
+        });
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Leader,
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![(41, 123), (51, 123), (61, 123), (41, 0)],
+            "should rotate replicas for ServerIsBusy when busy_threshold_ms is set, then disable threshold when all replicas are busy"
+        );
     }
 
     #[derive(Clone)]
