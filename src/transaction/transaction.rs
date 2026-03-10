@@ -246,6 +246,22 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.replica_read = read_type;
     }
 
+    /// Enable or disable stale reads for read-only snapshots.
+    ///
+    /// When enabled, read requests will set `kvrpcpb::Context.stale_read = true`.
+    /// If replica read routing is still set to `ReplicaReadType::Leader`, this also switches it to
+    /// `ReplicaReadType::Mixed`, matching client-go's `EnableStaleWithMixedReplicaRead` behavior.
+    ///
+    /// This maps to client-go `KVSnapshot.SetIsStalenessReadOnly`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_stale_read(&mut self, stale_read: bool) {
+        self.options.stale_read = stale_read;
+        if stale_read && self.options.replica_read == ReplicaReadType::Leader {
+            self.options.replica_read = ReplicaReadType::Mixed;
+        }
+    }
+
     /// Set labels to filter target stores for replica reads.
     ///
     /// This maps to client-go `KVSnapshot.SetMatchStoreLabels`.
@@ -4580,6 +4596,45 @@ mod tests {
             resource_group_name
         );
         assert_eq!(ctx.request_source, request_source);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_set_stale_read_toggles_context_flag() {
+        let seen_flags = Arc::new(Mutex::new(Vec::<(bool, bool)>::new()));
+
+        let seen_flags_cloned = seen_flags.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                seen_flags_cloned
+                    .lock()
+                    .unwrap()
+                    .push((ctx.stale_read, ctx.replica_read));
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+        );
+
+        snapshot.set_stale_read(true);
+        let _ = snapshot.get(vec![0]).await.unwrap();
+
+        snapshot.set_stale_read(false);
+        let _ = snapshot.get(vec![1]).await.unwrap();
+
+        assert_eq!(
+            *seen_flags.lock().unwrap(),
+            vec![(true, false), (false, true)]
+        );
     }
 
     #[tokio::test]

@@ -101,6 +101,15 @@ impl SyncSnapshot {
         self.inner.set_match_store_labels(labels);
     }
 
+    /// Enable or disable stale reads for this snapshot.
+    ///
+    /// When enabled, read requests will set `kvrpcpb::Context.stale_read = true`.
+    ///
+    /// This maps to client-go `KVSnapshot.SetIsStalenessReadOnly`.
+    pub fn set_stale_read(&mut self, stale_read: bool) {
+        self.inner.set_stale_read(stale_read);
+    }
+
     /// Set whether read requests should fill TiKV block cache.
     ///
     /// This maps to client-go `KVSnapshot.SetNotFillCache`.
