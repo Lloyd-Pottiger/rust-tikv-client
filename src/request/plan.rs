@@ -474,6 +474,7 @@ where
         };
         let mut patched_stale_read = false;
         let mut fallback_to_leader_under_busy_threshold = false;
+        let mut force_replica_read = false;
         if let Some(replica_read) = replica_read.as_ref() {
             let attempt = replica_read.attempt(current_attempts);
             let read_type = replica_read.read_type;
@@ -506,6 +507,7 @@ where
                         ctx.stale_read = false;
                         ctx.replica_read = false;
                     }
+                    force_replica_read = true;
                 } else if let Some(ctx) = plan.kv_context_mut() {
                     ctx.stale_read = true;
                     ctx.replica_read = false;
@@ -522,6 +524,11 @@ where
                     && !stale_read_enabled
                 {
                     unavailable_store_ids.extend(busy_store_ids.iter().copied());
+                    if let Some(leader_store_id) = leader_store_id {
+                        unavailable_store_ids.push(leader_store_id);
+                    }
+                }
+                if force_replica_read && read_type == ReplicaReadType::Mixed {
                     if let Some(leader_store_id) = leader_store_id {
                         unavailable_store_ids.push(leader_store_id);
                     }
@@ -1899,6 +1906,69 @@ mod test {
             seen,
             vec![(41, 123), (51, 123), (61, 123), (41, 0)],
             "should rotate replicas for ServerIsBusy when busy_threshold_ms is set, then disable threshold when all replicas are busy"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_read_retry_switches_to_replica_read_when_leader_can_serve() {
+        let seen = Arc::new(Mutex::new(Vec::<(u64, bool, bool)>::new()));
+        let seen_captured = seen.clone();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_captured = call_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push((
+                    peer.store_id,
+                    ctx.stale_read,
+                    ctx.replica_read,
+                ));
+
+                let call = call_count_captured.fetch_add(1, Ordering::SeqCst);
+                let mut resp = kvrpcpb::GetResponse::default();
+                if call < 2 {
+                    let mut region_error = errorpb::Error::default();
+                    region_error.data_is_not_ready = Some(errorpb::DataIsNotReady {
+                        region_id: 1,
+                        peer_id: peer.id,
+                        safe_ts: 0,
+                    });
+                    resp.region_error = Some(region_error);
+                }
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context {
+            stale_read: true,
+            replica_read: false,
+            ..Default::default()
+        });
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Mixed,
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![(51, true, false), (41, false, false), (51, false, true)],
+            "stale read retries should fall back to leader read once, then switch to replica read when the leader is healthy"
         );
     }
 
