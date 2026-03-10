@@ -152,6 +152,7 @@ fn select_replica_read_peer(
     attempt: u32,
     unavailable_store_ids: &[StoreId],
     busy_store_ids: &[StoreId],
+    attempted_store_ids: &[StoreId],
 ) -> Option<metapb::Peer> {
     let leader_store_id = region.leader.as_ref().map(|p| p.store_id);
     let peers = &region.region.peers;
@@ -164,6 +165,7 @@ fn select_replica_read_peer(
         peers: &[metapb::Peer],
         attempt: u32,
         busy_store_ids: &[StoreId],
+        attempted_store_ids: &[StoreId],
         predicate: F,
     ) -> Option<metapb::Peer>
     where
@@ -185,68 +187,97 @@ fn select_replica_read_peer(
         if !preferred.is_empty() {
             candidates = preferred;
         }
+        let unattempted = candidates
+            .iter()
+            .filter(|peer| !attempted_store_ids.contains(&peer.store_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unattempted.is_empty() {
+            candidates = unattempted;
+        }
         let target = (attempt as usize) % candidates.len();
         candidates.get(target).cloned()
     }
 
     let peer = match replica_read {
-        ReplicaReadType::Follower => {
-            select_peer_with_attempt(peers, attempt, busy_store_ids, |peer| {
+        ReplicaReadType::Follower => select_peer_with_attempt(
+            peers,
+            attempt,
+            busy_store_ids,
+            attempted_store_ids,
+            |peer| {
                 Some(peer.store_id) != leader_store_id
                     && peer.role != metapb::PeerRole::Learner as i32
                     && is_store_available(unavailable_store_ids, peer.store_id)
-            })
-        }
-        ReplicaReadType::Learner => {
-            select_peer_with_attempt(peers, attempt, busy_store_ids, |peer| {
+            },
+        ),
+        ReplicaReadType::Learner => select_peer_with_attempt(
+            peers,
+            attempt,
+            busy_store_ids,
+            attempted_store_ids,
+            |peer| {
                 peer.role == metapb::PeerRole::Learner as i32
                     && is_store_available(unavailable_store_ids, peer.store_id)
-            })
-        }
+            },
+        ),
         ReplicaReadType::Mixed => {
-            let leader = region.leader.as_ref();
-            let non_leader_candidates = peers
+            let mut rotation = peers
                 .iter()
                 .filter(|peer| Some(peer.store_id) != leader_store_id)
-                .count();
-            let total_candidates = non_leader_candidates + usize::from(leader.is_some());
-            if total_candidates == 0 {
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(leader) = region.leader.clone() {
+                rotation.push(leader);
+            }
+            if rotation.is_empty() {
                 None
             } else {
                 // Client-go's mixed replica selector chooses between leader and followers based on
                 // a score. Without Rust-side store health/label signals, we approximate this with
-                // a stable rotation across all replicas (non-leaders first, then leader).
+                // a stable rotation across all replicas (non-leaders first, then leader) while
+                // preferring replicas that haven't been attempted yet.
                 //
                 // Keep the rotation stable when some replicas become unreachable by skipping
                 // unreachable entries in the rotation instead of compressing the candidate set.
+                let total_candidates = rotation.len();
                 let start = (attempt as usize) % total_candidates;
-                let mut busy_fallback = None;
-                let mut selected = None;
+
                 for offset in 0..total_candidates {
-                    let index = (start + offset) % total_candidates;
-                    let peer = if index < non_leader_candidates {
-                        peers
-                            .iter()
-                            .filter(|peer| Some(peer.store_id) != leader_store_id)
-                            .nth(index)
-                            .cloned()
-                    } else {
-                        leader.cloned()
-                    };
-                    let Some(peer) = peer else {
-                        continue;
-                    };
-                    if is_store_available(unavailable_store_ids, peer.store_id) {
-                        if !busy_store_ids.contains(&peer.store_id) {
-                            selected = Some(peer);
-                            break;
-                        }
-                        if busy_fallback.is_none() {
-                            busy_fallback = Some(peer);
-                        }
+                    let peer = &rotation[(start + offset) % total_candidates];
+                    if is_store_available(unavailable_store_ids, peer.store_id)
+                        && !busy_store_ids.contains(&peer.store_id)
+                        && !attempted_store_ids.contains(&peer.store_id)
+                    {
+                        return Some(peer.clone());
                     }
                 }
-                selected.or(busy_fallback)
+                for offset in 0..total_candidates {
+                    let peer = &rotation[(start + offset) % total_candidates];
+                    if is_store_available(unavailable_store_ids, peer.store_id)
+                        && !busy_store_ids.contains(&peer.store_id)
+                    {
+                        return Some(peer.clone());
+                    }
+                }
+                for offset in 0..total_candidates {
+                    let peer = &rotation[(start + offset) % total_candidates];
+                    if is_store_available(unavailable_store_ids, peer.store_id)
+                        && busy_store_ids.contains(&peer.store_id)
+                        && !attempted_store_ids.contains(&peer.store_id)
+                    {
+                        return Some(peer.clone());
+                    }
+                }
+                for offset in 0..total_candidates {
+                    let peer = &rotation[(start + offset) % total_candidates];
+                    if is_store_available(unavailable_store_ids, peer.store_id)
+                        && busy_store_ids.contains(&peer.store_id)
+                    {
+                        return Some(peer.clone());
+                    }
+                }
+                None
             }
         }
         ReplicaReadType::Leader => None,
@@ -257,10 +288,16 @@ fn select_replica_read_peer(
             {
                 None
             }
-            _ => select_peer_with_attempt(peers, attempt, busy_store_ids, |peer| {
-                Some(peer.store_id) != leader_store_id
-                    && is_store_available(unavailable_store_ids, peer.store_id)
-            }),
+            _ => select_peer_with_attempt(
+                peers,
+                attempt,
+                busy_store_ids,
+                attempted_store_ids,
+                |peer| {
+                    Some(peer.store_id) != leader_store_id
+                        && is_store_available(unavailable_store_ids, peer.store_id)
+                },
+            ),
         },
     };
 
@@ -272,6 +309,7 @@ fn select_replica_read_peer(
 struct StoreLiveness {
     unreachable_store_ids: RwLock<Vec<StoreId>>,
     server_is_busy_store_ids: RwLock<Vec<StoreId>>,
+    attempted_store_ids: RwLock<Vec<StoreId>>,
 }
 
 impl StoreLiveness {
@@ -289,6 +327,13 @@ impl StoreLiveness {
         }
     }
 
+    async fn mark_attempted(&self, store_id: StoreId) {
+        let mut attempted_store_ids = self.attempted_store_ids.write().await;
+        if !attempted_store_ids.contains(&store_id) {
+            attempted_store_ids.push(store_id);
+        }
+    }
+
     async fn unreachable_store_ids(&self) -> Vec<StoreId> {
         self.unreachable_store_ids.read().await.clone()
     }
@@ -297,11 +342,19 @@ impl StoreLiveness {
         self.server_is_busy_store_ids.read().await.clone()
     }
 
+    async fn attempted_store_ids(&self) -> Vec<StoreId> {
+        self.attempted_store_ids.read().await.clone()
+    }
+
     async fn is_server_is_busy(&self, store_id: StoreId) -> bool {
         self.server_is_busy_store_ids
             .read()
             .await
             .contains(&store_id)
+    }
+
+    async fn has_attempted(&self, store_id: StoreId) -> bool {
+        self.attempted_store_ids.read().await.contains(&store_id)
     }
 }
 
@@ -309,6 +362,7 @@ impl StoreLiveness {
 struct ReplicaReadState {
     read_type: ReplicaReadType,
     attempt_base: u32,
+    retry_same_replica: bool,
     stale_read: bool,
     stale_read_disabled: Arc<AtomicBool>,
     store_liveness: Arc<StoreLiveness>,
@@ -319,6 +373,7 @@ impl ReplicaReadState {
         Self {
             read_type,
             attempt_base: 0,
+            retry_same_replica: false,
             stale_read,
             stale_read_disabled: Arc::new(AtomicBool::new(false)),
             store_liveness: Arc::new(StoreLiveness::default()),
@@ -341,6 +396,10 @@ impl ReplicaReadState {
         self.store_liveness.mark_server_is_busy(store_id).await;
     }
 
+    async fn mark_store_attempted(&self, store_id: StoreId) {
+        self.store_liveness.mark_attempted(store_id).await;
+    }
+
     async fn unreachable_store_ids(&self) -> Vec<StoreId> {
         self.store_liveness.unreachable_store_ids().await
     }
@@ -353,6 +412,14 @@ impl ReplicaReadState {
         self.store_liveness.server_is_busy_store_ids().await
     }
 
+    async fn attempted_store_ids(&self) -> Vec<StoreId> {
+        self.store_liveness.attempted_store_ids().await
+    }
+
+    async fn has_attempted_store(&self, store_id: StoreId) -> bool {
+        self.store_liveness.has_attempted(store_id).await
+    }
+
     fn attempt(&self, current_attempts: u32) -> u32 {
         current_attempts.saturating_sub(self.attempt_base)
     }
@@ -361,6 +428,7 @@ impl ReplicaReadState {
         Self {
             read_type,
             attempt_base: current_attempts,
+            retry_same_replica: false,
             stale_read: self.stale_read,
             stale_read_disabled: self.stale_read_disabled,
             store_liveness: self.store_liveness,
@@ -371,9 +439,17 @@ impl ReplicaReadState {
         Self {
             read_type: self.read_type,
             attempt_base: self.attempt_base.saturating_add(1),
+            retry_same_replica: true,
             stale_read: self.stale_read,
             stale_read_disabled: self.stale_read_disabled,
             store_liveness: self.store_liveness,
+        }
+    }
+
+    fn clear_retry_same_replica(self) -> Self {
+        Self {
+            retry_same_replica: false,
+            ..self
         }
     }
 }
@@ -475,15 +551,23 @@ where
         let mut patched_stale_read = false;
         let mut fallback_to_leader_under_busy_threshold = false;
         let mut force_replica_read = false;
+        let mut stale_read_leader_fallback = false;
         if let Some(replica_read) = replica_read.as_ref() {
             let attempt = replica_read.attempt(current_attempts);
             let read_type = replica_read.read_type;
 
             let stale_read_enabled = replica_read.stale_read_enabled();
             if stale_read_enabled {
+                let leader_attempted = match leader_store_id {
+                    Some(leader_store_id) => {
+                        replica_read.has_attempted_store(leader_store_id).await
+                    }
+                    None => false,
+                };
                 let leader_can_send_replica_read = if attempt >= 2 {
                     if let Some(leader_store_id) = leader_store_id {
-                        !unreachable_store_ids.contains(&leader_store_id)
+                        leader_attempted
+                            && !unreachable_store_ids.contains(&leader_store_id)
                             && !replica_read.is_store_server_is_busy(leader_store_id).await
                     } else {
                         false
@@ -492,15 +576,20 @@ where
                     false
                 };
 
-                if attempt == 1 {
+                if attempt == 1 && !leader_attempted {
                     // Align with client-go replica selector behavior:
                     // stale-read retries should fall back to normal snapshot reads on the leader.
-                    if let Some(ctx) = plan.kv_context_mut() {
-                        ctx.stale_read = false;
-                        ctx.replica_read = false;
-                    }
                     if let Some(region_leader) = region_leader {
+                        if let Some(ctx) = plan.kv_context_mut() {
+                            ctx.stale_read = false;
+                            ctx.replica_read = false;
+                        }
                         region.leader = Some(region_leader);
+                        stale_read_leader_fallback = true;
+                    } else if let Some(ctx) = plan.kv_context_mut() {
+                        ctx.stale_read = true;
+                        ctx.replica_read = false;
+                        patched_stale_read = true;
                     }
                 } else if leader_can_send_replica_read {
                     if let Some(ctx) = plan.kv_context_mut() {
@@ -515,9 +604,17 @@ where
                 }
             }
 
-            let is_stale_read_leader_fallback = stale_read_enabled && attempt == 1;
-            if !is_stale_read_leader_fallback && read_type.is_follower_read() {
-                let busy_store_ids = replica_read.server_is_busy_store_ids().await;
+            if !stale_read_leader_fallback && read_type.is_follower_read() {
+                let busy_store_ids = if replica_read.retry_same_replica {
+                    Vec::new()
+                } else {
+                    replica_read.server_is_busy_store_ids().await
+                };
+                let attempted_store_ids = if replica_read.retry_same_replica {
+                    Vec::new()
+                } else {
+                    replica_read.attempted_store_ids().await
+                };
                 let mut unavailable_store_ids = unreachable_store_ids.clone();
                 if busy_threshold_ms > 0
                     && read_type == ReplicaReadType::Mixed
@@ -540,6 +637,7 @@ where
                     attempt,
                     &unavailable_store_ids,
                     &busy_store_ids,
+                    &attempted_store_ids,
                 ) {
                     region.leader = Some(peer);
                 }
@@ -601,6 +699,12 @@ where
             }
         };
 
+        if let Some(replica_read) = replica_read.as_ref() {
+            if let Ok(store_id) = region_store.region_with_leader.get_store_id() {
+                replica_read.mark_store_attempted(store_id).await;
+            }
+        }
+
         // limit concurrent requests
         let permit = permits.acquire().await.map_err(|_| Error::InternalError {
             message: "request concurrency semaphore closed".to_owned(),
@@ -646,13 +750,7 @@ where
         } else if let Some(e) = resp.region_error() {
             debug!("single_shard_handler:execute: region error: {:?}", e);
             let is_server_busy = e.server_is_busy.is_some();
-            let is_stale_read_leader_fallback_attempt = match replica_read.as_ref() {
-                Some(replica_read) => {
-                    replica_read.stale_read_enabled()
-                        && replica_read.attempt(backoff.current_attempts()) == 1
-                }
-                None => false,
-            };
+            let is_stale_read_leader_fallback_attempt = stale_read_leader_fallback;
             let is_stale_read_request = plan
                 .kv_context_mut()
                 .map(|ctx| ctx.stale_read)
@@ -702,7 +800,7 @@ where
                     let replica_read = if retry_same_replica {
                         replica_read.map(ReplicaReadState::keep_current_attempt_on_retry)
                     } else {
-                        replica_read
+                        replica_read.map(ReplicaReadState::clear_retry_same_replica)
                     };
                     Self::single_plan_handler(
                         pd_client,
@@ -736,6 +834,7 @@ where
         debug!("handle_other_error: {:?}", e);
         let is_grpc_error = is_grpc_error(&e);
         let mut replica_read = replica_read;
+        replica_read = replica_read.map(ReplicaReadState::clear_retry_same_replica);
         if is_grpc_error {
             if let (Some(store_id), Some(replica_read)) = (store, replica_read.as_ref()) {
                 replica_read.mark_store_unreachable(store_id).await;
@@ -1807,7 +1906,7 @@ mod test {
     #[test]
     fn test_select_replica_read_peer_mixed_skips_unreachable_store() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[51], &[])
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[51], &[], &[])
             .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 61);
     }
@@ -1815,15 +1914,23 @@ mod test {
     #[test]
     fn test_select_replica_read_peer_mixed_includes_leader() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[], &[])
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[], &[], &[])
             .expect("expected a replica");
         assert_eq!(peer.store_id, 51);
 
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 1, &[], &[])
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 1, &[], &[], &[])
             .expect("expected a replica");
         assert_eq!(peer.store_id, 61);
 
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 2, &[], &[])
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 2, &[], &[], &[])
+            .expect("expected a replica");
+        assert_eq!(peer.store_id, 41);
+    }
+
+    #[test]
+    fn test_select_replica_read_peer_mixed_prefers_unattempted_replica() {
+        let region = MockPdClient::region1();
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 1, &[51], &[], &[61])
             .expect("expected a replica");
         assert_eq!(peer.store_id, 41);
     }
@@ -1831,15 +1938,16 @@ mod test {
     #[test]
     fn test_select_replica_read_peer_prefer_leader_skips_unreachable_leader() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[41], &[])
-            .expect("expected a reachable replica");
+        let peer =
+            select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[41], &[], &[])
+                .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 51);
     }
 
     #[test]
     fn test_select_replica_read_peer_mixed_prefers_non_busy_replica() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[], &[51])
+        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[], &[51], &[])
             .expect("expected a replica");
         assert_eq!(peer.store_id, 61);
     }
@@ -1847,8 +1955,9 @@ mod test {
     #[test]
     fn test_select_replica_read_peer_prefer_leader_avoids_busy_leader() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[], &[41])
-            .expect("expected a reachable replica");
+        let peer =
+            select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[], &[41], &[])
+                .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 51);
     }
 
@@ -1967,7 +2076,7 @@ mod test {
         let seen = seen.lock().unwrap().clone();
         assert_eq!(
             seen,
-            vec![(51, true, false), (41, false, false), (51, false, true)],
+            vec![(51, true, false), (41, false, false), (61, false, true)],
             "stale read retries should fall back to leader read once, then switch to replica read when the leader is healthy"
         );
     }
