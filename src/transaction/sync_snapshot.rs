@@ -1,5 +1,8 @@
 use crate::transaction::sync_client::safe_block_on;
-use crate::{BoundRange, Key, KvPair, ReplicaReadType, Result, Snapshot, StoreLabel, Value};
+use crate::{
+    BoundRange, CommandPriority, IsolationLevel, Key, KvPair, ReplicaReadType, Result, Snapshot,
+    StoreLabel, Value,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -96,5 +99,61 @@ impl SyncSnapshot {
     /// This option is only effective for read-only snapshots.
     pub fn set_match_store_labels(&mut self, labels: impl IntoIterator<Item = StoreLabel>) {
         self.inner.set_match_store_labels(labels);
+    }
+
+    /// Set whether read requests should fill TiKV block cache.
+    ///
+    /// This maps to client-go `KVSnapshot.SetNotFillCache`.
+    pub fn set_not_fill_cache(&mut self, not_fill_cache: bool) {
+        self.inner.set_not_fill_cache(not_fill_cache);
+    }
+
+    /// Set task ID hint for TiKV.
+    ///
+    /// This maps to client-go `KVSnapshot.SetTaskID`.
+    pub fn set_task_id(&mut self, task_id: u64) {
+        self.inner.set_task_id(task_id);
+    }
+
+    /// Set server-side maximum execution duration for read requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.max_execution_duration_ms`.
+    pub fn set_max_execution_duration(&mut self, duration: Duration) {
+        self.inner.set_max_execution_duration(duration);
+    }
+
+    /// Set the priority for requests.
+    ///
+    /// This maps to client-go `KVSnapshot.SetPriority`.
+    pub fn set_priority(&mut self, priority: CommandPriority) {
+        self.inner.set_priority(priority);
+    }
+
+    /// Set the isolation level for read requests.
+    ///
+    /// This maps to client-go `KVSnapshot.SetIsolationLevel`.
+    pub fn set_isolation_level(&mut self, isolation_level: IsolationLevel) {
+        self.inner.set_isolation_level(isolation_level);
+    }
+
+    /// Set resource group tag for requests.
+    ///
+    /// This maps to client-go `KVSnapshot.SetResourceGroupTag`.
+    pub fn set_resource_group_tag(&mut self, tag: Vec<u8>) {
+        self.inner.set_resource_group_tag(tag);
+    }
+
+    /// Set resource group name for requests.
+    ///
+    /// This maps to client-go `KVSnapshot.SetResourceGroupName`.
+    pub fn set_resource_group_name(&mut self, name: impl Into<String>) {
+        self.inner.set_resource_group_name(name);
+    }
+
+    /// Set request source for requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.request_source`.
+    pub fn set_request_source(&mut self, source: impl Into<String>) {
+        self.inner.set_request_source(source);
     }
 }

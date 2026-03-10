@@ -282,6 +282,71 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.busy_threshold_ms = normalize_busy_threshold_ms(threshold);
     }
 
+    /// Set whether read requests should fill TiKV block cache.
+    ///
+    /// This maps to client-go `KVSnapshot.SetNotFillCache`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_not_fill_cache(&mut self, not_fill_cache: bool) {
+        self.options.not_fill_cache = not_fill_cache;
+    }
+
+    /// Set task ID hint for TiKV.
+    ///
+    /// This maps to client-go `KVSnapshot.SetTaskID`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_task_id(&mut self, task_id: u64) {
+        self.options.task_id = task_id;
+    }
+
+    /// Set server-side maximum execution duration for read requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.max_execution_duration_ms`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_max_execution_duration(&mut self, duration: Duration) {
+        self.options.max_execution_duration_ms =
+            duration.as_millis().min(u128::from(u64::MAX)) as u64;
+    }
+
+    /// Set the priority for requests.
+    ///
+    /// This maps to client-go `KVSnapshot.SetPriority`.
+    pub fn set_priority(&mut self, priority: CommandPriority) {
+        self.options.priority = priority;
+    }
+
+    /// Set the isolation level for read requests.
+    ///
+    /// This maps to client-go `KVSnapshot.SetIsolationLevel`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_isolation_level(&mut self, isolation_level: IsolationLevel) {
+        self.options.isolation_level = isolation_level;
+    }
+
+    /// Set resource group tag for requests.
+    ///
+    /// This maps to client-go `KVSnapshot.SetResourceGroupTag`.
+    pub fn set_resource_group_tag(&mut self, tag: Vec<u8>) {
+        self.options.resource_group_tag = Some(tag);
+    }
+
+    /// Set resource group name for requests.
+    ///
+    /// This maps to client-go `KVSnapshot.SetResourceGroupName`.
+    pub fn set_resource_group_name(&mut self, name: impl Into<String>) {
+        self.options.resource_group_name = Some(name.into());
+    }
+
+    /// Set request source for requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.request_source`.
+    pub fn set_request_source(&mut self, source: impl Into<String>) {
+        self.options.request_source = Some(source.into());
+    }
+
     /// Set the schema version used for schema validity checks during commit.
     ///
     /// The schema validity check is only performed when a schema lease checker is also configured
@@ -4453,6 +4518,68 @@ mod tests {
         let _ = snapshot.get(key).await.unwrap();
 
         assert_eq!(task_id.load(Ordering::SeqCst), 42);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_setters_propagate_to_context() {
+        let seen_ctx = Arc::new(Mutex::new(None::<kvrpcpb::Context>));
+
+        let seen_ctx_cloned = seen_ctx.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                *seen_ctx_cloned.lock().unwrap() = Some(ctx.clone());
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+        );
+
+        let tag = b"rg-tag".to_vec();
+        let resource_group_name = "rg-name".to_string();
+        let request_source = "request-source".to_string();
+
+        snapshot.set_not_fill_cache(true);
+        snapshot.set_task_id(42);
+        snapshot.set_max_execution_duration(Duration::from_millis(987));
+        snapshot.set_priority(CommandPriority::High);
+        snapshot.set_isolation_level(IsolationLevel::RcCheckTs);
+        snapshot.set_resource_group_tag(tag.clone());
+        snapshot.set_resource_group_name(resource_group_name.clone());
+        snapshot.set_request_source(request_source.clone());
+
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        let ctx = seen_ctx
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("expected context to be captured");
+        assert!(ctx.not_fill_cache);
+        assert_eq!(ctx.task_id, 42);
+        assert_eq!(ctx.max_execution_duration_ms, 987);
+        assert_eq!(ctx.priority, CommandPriority::High as i32);
+        assert_eq!(ctx.isolation_level, IsolationLevel::RcCheckTs as i32);
+        assert_eq!(ctx.resource_group_tag, tag);
+        let resource_control_context = ctx
+            .resource_control_context
+            .as_ref()
+            .expect("resource_control_context");
+        assert_eq!(
+            resource_control_context.resource_group_name,
+            resource_group_name
+        );
+        assert_eq!(ctx.request_source, request_source);
     }
 
     #[tokio::test]
