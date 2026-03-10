@@ -1163,11 +1163,21 @@ impl<PdC: PdClient> Transaction<PdC> {
             Some(k) => k,
             None => return Err(Error::NoPrimaryKey),
         };
-        let request = new_heart_beat_request(
+        let mut request = new_heart_beat_request(
             self.timestamp.clone(),
             primary_key,
             self.start_instant.elapsed().as_millis() as u64 + MAX_TTL,
         );
+        self.options.apply_write_context(&mut request.context);
+        if self.options.resource_group_tag.is_none() {
+            if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                let tag = (tagger)(request.label());
+                let ctx = request
+                    .context
+                    .get_or_insert_with(kvrpcpb::Context::default);
+                ctx.resource_group_tag = tag;
+            }
+        }
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
@@ -5576,6 +5586,72 @@ mod tests {
         );
         assert_eq!(*rollback_request_source.lock().unwrap(), request_source);
         assert_eq!(*rollback_resource_group_tag.lock().unwrap(), tag);
+    }
+
+    #[tokio::test]
+    async fn test_txn_resource_group_tagger_applies_to_txn_heart_beat_requests() {
+        let heart_beat_txn_source = Arc::new(AtomicU64::new(0));
+        let heart_beat_priority = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let heart_beat_request_source = Arc::new(Mutex::new(String::new()));
+        let heart_beat_resource_group_tag = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let request_source = "txn-heartbeat".to_string();
+        let tag = b"rg-heartbeat".to_vec();
+
+        let heart_beat_txn_source_cloned = heart_beat_txn_source.clone();
+        let heart_beat_priority_cloned = heart_beat_priority.clone();
+        let heart_beat_request_source_cloned = heart_beat_request_source.clone();
+        let heart_beat_resource_group_tag_cloned = heart_beat_resource_group_tag.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::TxnHeartBeatRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    heart_beat_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
+                    heart_beat_priority_cloned.store(ctx.priority, Ordering::SeqCst);
+                    *heart_beat_request_source_cloned.lock().unwrap() = ctx.request_source.clone();
+                    *heart_beat_resource_group_tag_cloned.lock().unwrap() =
+                        ctx.resource_group_tag.clone();
+                    let resp = kvrpcpb::TxnHeartBeatResponse {
+                        lock_ttl: 99,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let calls_cloned = calls.clone();
+        let tag_cloned = tag.clone();
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .txn_source(13)
+                .request_source(request_source.clone())
+                .priority(CommandPriority::High)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_resource_group_tagger(move |label| {
+            assert_eq!(label, "kv_txn_heart_beat");
+            calls_cloned.fetch_add(1, Ordering::SeqCst);
+            tag_cloned.clone()
+        });
+        txn.put("key".to_owned(), "value").await.unwrap();
+        let ttl = txn.send_heart_beat().await.unwrap();
+
+        assert_eq!(ttl, 99);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(heart_beat_txn_source.load(Ordering::SeqCst), 13);
+        assert_eq!(
+            heart_beat_priority.load(Ordering::SeqCst),
+            CommandPriority::High as i32
+        );
+        assert_eq!(*heart_beat_request_source.lock().unwrap(), request_source);
+        assert_eq!(*heart_beat_resource_group_tag.lock().unwrap(), tag);
     }
 
     #[rstest::rstest]
