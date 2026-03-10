@@ -2842,6 +2842,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_locks_for_read_min_commit_ts_pushed_marks_resolved_without_cleanup() {
+        let txn_id = 7;
+
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let mut lock_info = kvrpcpb::LockInfo::default();
+                    lock_info.lock_version = txn_id;
+                    lock_info.use_async_commit = false;
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        lock_ttl: 100,
+                        action: kvrpcpb::Action::MinCommitTsPushed as i32,
+                        lock_info: Some(lock_info),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if req.is::<kvrpcpb::ResolveLockRequest>() {
+                    panic!("MinCommitTsPushed should not trigger resolve-lock cleanup");
+                }
+                if req.is::<kvrpcpb::CheckSecondaryLocksRequest>() {
+                    panic!("MinCommitTsPushed should not trigger secondary checks");
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![2];
+        lock.primary_lock = vec![1];
+        lock.lock_version = txn_id;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let ctx = ResolveLocksContext::default();
+        let lock_tracker = ReadLockTracker::default();
+
+        let result = resolve_locks_for_read(
+            ctx.clone(),
+            vec![lock],
+            Timestamp::from_version(5),
+            client,
+            Keyspace::Disable,
+            false,
+            lock_tracker,
+            LockResolverRpcContext::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.ms_before_txn_expired, 0);
+        assert!(result.live_locks.is_empty());
+        assert_eq!(result.resolved_locks, vec![txn_id]);
+        assert!(result.committed_locks.is_empty());
+        assert!(ctx.get_resolved(txn_id).await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_resolve_locks_resolve_lock_lite_skips_primary() {
         let resolve_lock_count = Arc::new(AtomicUsize::new(0));
         let resolve_lock_count_captured = resolve_lock_count.clone();
