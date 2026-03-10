@@ -101,6 +101,15 @@ impl SyncSnapshot {
         self.inner.set_match_store_labels(labels);
     }
 
+    /// Set store ids to filter target stores for replica reads.
+    ///
+    /// This maps to client-go `tikv.WithMatchStores` / `locate.WithMatchStores`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_match_store_ids(&mut self, store_ids: impl IntoIterator<Item = u64>) {
+        self.inner.set_match_store_ids(store_ids);
+    }
+
     /// Enable or disable stale reads for this snapshot.
     ///
     /// When enabled, read requests will set `kvrpcpb::Context.stale_read = true`.

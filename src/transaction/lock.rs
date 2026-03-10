@@ -377,6 +377,7 @@ pub(crate) async fn resolve_locks_with_options(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_locks_for_read(
     ctx: ResolveLocksContext,
     locks: Vec<kvrpcpb::LockInfo>,

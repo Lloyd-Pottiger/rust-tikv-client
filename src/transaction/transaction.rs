@@ -280,6 +280,15 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.match_store_labels = Arc::new(labels.into_iter().collect());
     }
 
+    /// Set store ids to filter target stores for replica reads.
+    ///
+    /// This maps to client-go `tikv.WithMatchStores` / `locate.WithMatchStores`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_match_store_ids(&mut self, store_ids: impl IntoIterator<Item = u64>) {
+        self.options.match_store_ids = Arc::new(store_ids.into_iter().collect());
+    }
+
     /// Set a replica read adjuster for point/batch gets.
     ///
     /// This option is only effective for read-only snapshots.
@@ -458,6 +467,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let replica_read = snapshot_ctx.replica_read;
         let lock_tracker = self.read_lock_tracker.clone();
         let resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        let match_store_ids = self.options.match_store_ids.clone();
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
@@ -490,9 +500,10 @@ impl<PdC: PdClient> Transaction<PdC> {
                 );
                 let plan_builder =
                     if replica_read.is_follower_read() || enable_load_based_replica_read {
-                        plan_builder.retry_multi_region_with_replica_read_and_match_store_labels(
+                        plan_builder.retry_multi_region_with_replica_read_and_match_stores(
                             DEFAULT_REGION_BACKOFF,
                             replica_read,
+                            match_store_ids,
                             match_store_labels,
                         )
                     } else {
@@ -631,6 +642,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
         let lock_tracker = self.read_lock_tracker.clone();
         let resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        let match_store_ids = self.options.match_store_ids.clone();
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
@@ -649,6 +661,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     }
                 }
                 let replica_read = snapshot_ctx.replica_read;
+                let match_store_ids = match_store_ids.clone();
                 let match_store_labels = match_store_labels.clone();
 
                 async move {
@@ -677,17 +690,17 @@ impl<PdC: PdClient> Transaction<PdC> {
                             lock_tracker,
                             lock_resolver_rpc_context,
                         );
-                    let plan_builder = if replica_read.is_follower_read()
-                        || enable_load_based_replica_read
-                    {
-                        plan_builder.retry_multi_region_with_replica_read_and_match_store_labels(
-                            retry_options.region_backoff,
-                            replica_read,
-                            match_store_labels,
-                        )
-                    } else {
-                        plan_builder.retry_multi_region(retry_options.region_backoff)
-                    };
+                    let plan_builder =
+                        if replica_read.is_follower_read() || enable_load_based_replica_read {
+                            plan_builder.retry_multi_region_with_replica_read_and_match_stores(
+                                retry_options.region_backoff,
+                                replica_read,
+                                match_store_ids,
+                                match_store_labels,
+                            )
+                        } else {
+                            plan_builder.retry_multi_region(retry_options.region_backoff)
+                        };
                     let plan = plan_builder.merge(Collect).plan();
                     plan.execute()
                         .await
@@ -1224,6 +1237,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let replica_read = snapshot_ctx.replica_read;
         let lock_tracker = self.read_lock_tracker.clone();
         let resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        let match_store_ids = self.options.match_store_ids.clone();
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
@@ -1266,17 +1280,17 @@ impl<PdC: PdClient> Transaction<PdC> {
                             lock_tracker,
                             lock_resolver_rpc_context,
                         );
-                    let plan_builder = if replica_read.is_follower_read()
-                        || enable_load_based_replica_read
-                    {
-                        plan_builder.retry_multi_region_with_replica_read_and_match_store_labels(
-                            retry_options.region_backoff,
-                            replica_read,
-                            match_store_labels,
-                        )
-                    } else {
-                        plan_builder.retry_multi_region(retry_options.region_backoff)
-                    };
+                    let plan_builder =
+                        if replica_read.is_follower_read() || enable_load_based_replica_read {
+                            plan_builder.retry_multi_region_with_replica_read_and_match_stores(
+                                retry_options.region_backoff,
+                                replica_read,
+                                match_store_ids,
+                                match_store_labels,
+                            )
+                        } else {
+                            plan_builder.retry_multi_region(retry_options.region_backoff)
+                        };
                     let plan = plan_builder.merge(Collect).plan();
                     plan.execute()
                         .await
@@ -1807,6 +1821,8 @@ pub struct TransactionOptions {
     kind: TransactionKind,
     /// Read from replicas other than the leader (read-only snapshots only).
     replica_read: ReplicaReadType,
+    /// Filter replica reads to stores with the given ids (read-only snapshots only).
+    match_store_ids: Arc<Vec<u64>>,
     /// Filter replica reads to stores matching the given labels (read-only snapshots only).
     match_store_labels: Arc<Vec<StoreLabel>>,
     /// Mark reads as stale read (read-only snapshots only).
@@ -1931,6 +1947,7 @@ impl TransactionOptions {
         TransactionOptions {
             kind: TransactionKind::Optimistic,
             replica_read: ReplicaReadType::Leader,
+            match_store_ids: Arc::new(Vec::new()),
             match_store_labels: Arc::new(Vec::new()),
             stale_read: false,
             not_fill_cache: false,
@@ -1962,6 +1979,7 @@ impl TransactionOptions {
         TransactionOptions {
             kind: TransactionKind::Pessimistic(Timestamp::from_version(0)),
             replica_read: ReplicaReadType::Leader,
+            match_store_ids: Arc::new(Vec::new()),
             match_store_labels: Arc::new(Vec::new()),
             stale_read: false,
             not_fill_cache: false,
@@ -2097,6 +2115,21 @@ impl TransactionOptions {
         labels: impl IntoIterator<Item = StoreLabel>,
     ) -> TransactionOptions {
         self.match_store_labels = Arc::new(labels.into_iter().collect());
+        self
+    }
+
+    /// Set store ids to filter target stores for replica reads.
+    ///
+    /// This maps to client-go `tikv.WithMatchStores` / `locate.WithMatchStores`.
+    ///
+    /// This option is only effective for read-only snapshots created via
+    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    #[must_use]
+    pub fn match_store_ids(
+        mut self,
+        store_ids: impl IntoIterator<Item = u64>,
+    ) -> TransactionOptions {
+        self.match_store_ids = Arc::new(store_ids.into_iter().collect());
         self
     }
 
@@ -3584,6 +3617,40 @@ mod tests {
         let _ = snapshot.get(key).await.unwrap();
 
         assert_eq!(store_id.load(Ordering::SeqCst), 61);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_replica_read_mixed_match_store_ids_routes_to_store() {
+        let store_id = Arc::new(AtomicU64::new(0));
+
+        let store_id_cloned = store_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                let peer = ctx.peer.as_ref().expect("peer");
+                store_id_cloned.store(peer.store_id, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .replica_read(ReplicaReadType::Mixed)
+                .match_store_ids(vec![41]),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(store_id.load(Ordering::SeqCst), 41);
+        assert_eq!(pd_client.store_meta_by_id_call_count(), 0);
     }
 
     #[tokio::test]
