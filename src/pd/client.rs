@@ -2,6 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::prelude::*;
@@ -91,6 +94,22 @@ pub trait PdClient: Send + Sync + 'static {
     async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
         let _ = store_id;
         Err(Error::Unimplemented)
+    }
+
+    /// Mark a store as "slow" for replica selection purposes.
+    ///
+    /// This is a best-effort signal used by replica selection scoring. The default implementation
+    /// is a no-op.
+    fn mark_store_slow(&self, store_id: StoreId, duration: Duration) {
+        let _ = (store_id, duration);
+    }
+
+    /// Returns true if the store is currently considered "slow".
+    ///
+    /// The default implementation always returns false.
+    fn is_store_slow(&self, store_id: StoreId) -> bool {
+        let _ = store_id;
+        false
     }
 
     /// The `txn_size` threshold for ResolveLock "lite" mode.
@@ -238,6 +257,7 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     pd: Arc<RetryClient<Cl>>,
     kv_connect: KvC,
     kv_client_cache: Arc<RwLock<HashMap<String, KvC::KvClient>>>,
+    slow_store_until: Mutex<HashMap<StoreId, Instant>>,
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
     resolve_lock_lite_threshold: u64,
@@ -287,6 +307,41 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
         self.region_cache.get_store_by_id(store_id).await
+    }
+
+    fn mark_store_slow(&self, store_id: StoreId, duration: Duration) {
+        if duration.is_zero() {
+            return;
+        }
+
+        let until = Instant::now() + duration;
+        let mut slow_store_until = match self.slow_store_until.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if matches!(
+            slow_store_until.get(&store_id),
+            Some(existing) if *existing >= until
+        ) {
+            return;
+        }
+        slow_store_until.insert(store_id, until);
+    }
+
+    fn is_store_slow(&self, store_id: StoreId) -> bool {
+        let now = Instant::now();
+        let mut slow_store_until = match self.slow_store_until.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match slow_store_until.get(&store_id) {
+            Some(until) if *until > now => true,
+            Some(_) => {
+                slow_store_until.remove(&store_id);
+                false
+            }
+            None => false,
+        }
     }
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
@@ -365,6 +420,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             pd: pd.clone(),
             kv_client_cache,
             kv_connect: kv_connect(security_mgr),
+            slow_store_until: Mutex::new(HashMap::new()),
             enable_codec,
             region_cache: RegionCache::new(pd),
             resolve_lock_lite_threshold,

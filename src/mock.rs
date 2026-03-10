@@ -9,6 +9,9 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use derive_new::new;
@@ -83,6 +86,8 @@ pub struct MockPdClient {
     store_metas: RwLock<HashMap<StoreId, metapb::Store>>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
     store_meta_by_id_calls: Arc<AtomicUsize>,
+    #[new(value = "Mutex::new(HashMap::new())")]
+    slow_store_until: Mutex<HashMap<StoreId, Instant>>,
 }
 
 #[async_trait]
@@ -257,6 +262,41 @@ impl PdClient for MockPdClient {
             .get(&store_id)
             .cloned()
             .ok_or(Error::Unimplemented)
+    }
+
+    fn mark_store_slow(&self, store_id: StoreId, duration: Duration) {
+        if duration.is_zero() {
+            return;
+        }
+
+        let until = Instant::now() + duration;
+        let mut slow_store_until = match self.slow_store_until.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if matches!(
+            slow_store_until.get(&store_id),
+            Some(existing) if *existing >= until
+        ) {
+            return;
+        }
+        slow_store_until.insert(store_id, until);
+    }
+
+    fn is_store_slow(&self, store_id: StoreId) -> bool {
+        let now = Instant::now();
+        let mut slow_store_until = match self.slow_store_until.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match slow_store_until.get(&store_id) {
+            Some(until) if *until > now => true,
+            Some(_) => {
+                slow_store_until.remove(&store_id);
+                false
+            }
+            None => false,
+        }
     }
 
     async fn region_for_key(&self, key: &Key) -> Result<RegionWithLeader> {

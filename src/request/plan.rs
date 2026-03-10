@@ -106,6 +106,16 @@ pub(crate) fn is_grpc_error(e: &Error) -> bool {
     matches!(e, Error::GrpcAPI(_) | Error::Grpc(_))
 }
 
+const SLOW_STORE_TTL_ON_SERVER_IS_BUSY: Duration = Duration::from_secs(10);
+const SLOW_STORE_TTL_ON_GRPC_DEADLINE_EXCEEDED: Duration = Duration::from_secs(10);
+
+fn is_grpc_deadline_exceeded(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::GrpcAPI(status) if status.code() == tonic::Code::DeadlineExceeded
+    )
+}
+
 #[doc(hidden)]
 pub trait HasKvContext {
     fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context>;
@@ -750,11 +760,20 @@ where
             }
 
             if !stale_read_leader_fallback && read_type.is_follower_read() {
-                let busy_store_ids = if replica_read.retry_same_replica {
+                let mut busy_store_ids = if replica_read.retry_same_replica {
                     Vec::new()
                 } else {
                     replica_read.server_is_busy_store_ids().await
                 };
+                if labels_configured && !replica_read.retry_same_replica {
+                    for peer in region.region.peers.iter() {
+                        if pd_client.is_store_slow(peer.store_id)
+                            && !busy_store_ids.contains(&peer.store_id)
+                        {
+                            busy_store_ids.push(peer.store_id);
+                        }
+                    }
+                }
                 let attempted_store_ids = if replica_read.retry_same_replica {
                     Vec::new()
                 } else {
@@ -918,6 +937,9 @@ where
                 Some(duration) => {
                     let store_id = region_store.region_with_leader.get_store_id().ok();
                     if is_server_busy {
+                        if let Some(store_id) = store_id {
+                            pd_client.mark_store_slow(store_id, SLOW_STORE_TTL_ON_SERVER_IS_BUSY);
+                        }
                         if let (Some(store_id), Some(replica_read)) =
                             (store_id, replica_read.as_ref())
                         {
@@ -987,6 +1009,9 @@ where
         let mut replica_read = replica_read;
         replica_read = replica_read.map(ReplicaReadState::clear_retry_same_replica);
         if is_grpc_error {
+            if let (Some(store_id), true) = (store, is_grpc_deadline_exceeded(&e)) {
+                pd_client.mark_store_slow(store_id, SLOW_STORE_TTL_ON_GRPC_DEADLINE_EXCEEDED);
+            }
             if let (Some(store_id), Some(replica_read)) = (store, replica_read.as_ref()) {
                 replica_read.mark_store_unreachable(store_id).await;
             }
@@ -2284,6 +2309,139 @@ mod test {
             pd_client.store_meta_by_id_call_count(),
             0,
             "default replica-read path should not consult PD store metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_replica_read_mixed_with_match_store_labels_avoids_slow_store() {
+        let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let seen_captured = seen.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push(peer.store_id);
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 41,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-west".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 51,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 61,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-west".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+
+        let labels = Arc::new(vec![StoreLabel {
+            key: "zone".to_owned(),
+            value: "us-east".to_owned(),
+        }]);
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        let plan = crate::request::PlanBuilder::new(pd_client.clone(), Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read_and_match_store_labels(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Mixed,
+                labels.clone(),
+            )
+            .plan();
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        pd_client.mark_store_slow(51, Duration::from_secs(60));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        let plan = crate::request::PlanBuilder::new(pd_client.clone(), Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read_and_match_store_labels(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Mixed,
+                labels,
+            )
+            .plan();
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![51, 41],
+            "slow store cache should override label-matching preference"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_replica_read_mixed_without_match_store_labels_ignores_slow_store_cache() {
+        let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let seen_captured = seen.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push(peer.store_id);
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        pd_client.mark_store_slow(51, Duration::from_secs(60));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Mixed,
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![51],
+            "slow store cache should not affect default replica-read rotation"
         );
     }
 
