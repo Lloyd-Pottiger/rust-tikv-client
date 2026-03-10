@@ -999,9 +999,12 @@ impl Merge<kvrpcpb::CheckSecondaryLocksResponse> for Collect {
             commit_ts: None,
             min_commit_ts: 0,
             fallback_2pc: false,
+            locked_keys: 0,
+            missing_lock: false,
         };
         for resp in input {
             let resp = resp?;
+            out.locked_keys = out.locked_keys.saturating_add(resp.locks.len());
             for lock in resp.locks.into_iter() {
                 if !lock.use_async_commit {
                     out.fallback_2pc = true;
@@ -1041,6 +1044,8 @@ pub struct SecondaryLocksStatus {
     pub commit_ts: Option<Timestamp>,
     pub min_commit_ts: u64,
     pub fallback_2pc: bool,
+    pub locked_keys: usize,
+    pub missing_lock: bool,
 }
 
 pair_locks!(kvrpcpb::BatchGetResponse);
