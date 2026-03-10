@@ -13,6 +13,7 @@ use log::{debug, error, info, trace, warn};
 use tokio::time::Duration;
 
 use super::requests::CollectPessimisticLock;
+use super::LockResolverRpcContext;
 use super::ReadLockTracker;
 use super::ResolveLocksContext;
 use crate::backoff::Backoff;
@@ -460,6 +461,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
 
         self.buffer
             .get_or_else(key, |key| async move {
@@ -482,6 +486,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     keyspace,
                     true,
                     lock_tracker,
+                    lock_resolver_rpc_context,
                 );
                 let plan_builder =
                     if replica_read.is_follower_read() || enable_load_based_replica_read {
@@ -629,6 +634,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
 
         self.buffer
             .batch_get_or_else(keys, move |keys| {
@@ -667,6 +675,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                             keyspace,
                             false,
                             lock_tracker,
+                            lock_resolver_rpc_context,
                         );
                     let plan_builder = if replica_read.is_follower_read()
                         || enable_load_based_replica_read
@@ -1178,12 +1187,16 @@ impl<PdC: PdClient> Transaction<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
                 self.timestamp.clone(),
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
+                lock_resolver_rpc_context,
             )
             .retry_multi_region(self.options.retry_options.region_backoff.clone())
             .extract_error()
@@ -1214,6 +1227,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
 
         self.buffer
             .scan_and_fetch(
@@ -1248,6 +1264,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                             keyspace,
                             false,
                             lock_tracker,
+                            lock_resolver_rpc_context,
                         );
                     let plan_builder = if replica_read.is_follower_read()
                         || enable_load_based_replica_read
@@ -1552,6 +1569,10 @@ impl<PdC: PdClient> Transaction<PdC> {
                 return Err(errors.swap_remove(0));
             }
 
+            let lock_resolver_rpc_context = self
+                .options
+                .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+
             let resolve_result = super::resolve_locks_with_options(
                 self.resolve_locks_ctx.clone(),
                 locks,
@@ -1559,6 +1580,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 self.rpc.clone(),
                 self.keyspace,
                 true,
+                lock_resolver_rpc_context,
             )
             .await?;
 
@@ -1605,12 +1627,16 @@ impl<PdC: PdClient> Transaction<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
                 start_version,
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
+                lock_resolver_rpc_context,
             )
             .retry_multi_region(self.options.retry_options.region_backoff.clone())
             .extract_error()
@@ -2221,6 +2247,19 @@ impl TransactionOptions {
         }
     }
 
+    fn lock_resolver_rpc_context(
+        &self,
+        resource_group_tagger: Option<ResourceGroupTagger>,
+    ) -> LockResolverRpcContext {
+        let mut context = None;
+        self.apply_write_context(&mut context);
+        LockResolverRpcContext {
+            context,
+            resource_group_tag_set: self.resource_group_tag.is_some(),
+            resource_group_tagger,
+        }
+    }
+
     fn push_for_update_ts(&mut self, for_update_ts: Timestamp) {
         match &mut self.kind {
             TransactionKind::Optimistic => unreachable!(),
@@ -2447,6 +2486,9 @@ impl<PdC: PdClient> Committer<PdC> {
                 current_ts.saturating_add(safe_window_ms.saturating_mul(1_u64 << 18));
         }
 
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .resolve_lock_with_pessimistic_region_in_context(
                 self.resolve_locks_ctx.clone(),
@@ -2454,6 +2496,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
                 true,
+                lock_resolver_rpc_context,
             )
             .retry_multi_region(self.options.retry_options.region_backoff.clone())
             .merge(CollectError)
@@ -2523,12 +2566,16 @@ impl<PdC: PdClient> Committer<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
                 self.start_version.clone(),
                 self.options.retry_options.lock_backoff.clone(),
                 self.keyspace,
+                lock_resolver_rpc_context,
             )
             .retry_multi_region(self.options.retry_options.region_backoff.clone())
             .extract_error()
@@ -2673,12 +2720,16 @@ impl<PdC: PdClient> Committer<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
                 start_version,
                 self.options.retry_options.lock_backoff,
                 self.keyspace,
+                lock_resolver_rpc_context,
             )
             .retry_multi_region(self.options.retry_options.region_backoff)
             .extract_error()
@@ -2697,6 +2748,9 @@ impl<PdC: PdClient> Committer<PdC> {
             .into_iter()
             .map(|mutation| mutation.key.into());
         let start_version = self.start_version.clone();
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         match self.options.kind.clone() {
             TransactionKind::Optimistic => {
                 let mut req = new_batch_rollback_request(keys, start_version.clone());
@@ -2714,6 +2768,7 @@ impl<PdC: PdClient> Committer<PdC> {
                         start_version.clone(),
                         self.options.retry_options.lock_backoff,
                         self.keyspace,
+                        lock_resolver_rpc_context.clone(),
                     )
                     .retry_multi_region(self.options.retry_options.region_backoff)
                     .extract_error()
@@ -2737,6 +2792,7 @@ impl<PdC: PdClient> Committer<PdC> {
                         start_version.clone(),
                         self.options.retry_options.lock_backoff,
                         self.keyspace,
+                        lock_resolver_rpc_context.clone(),
                     )
                     .retry_multi_region(self.options.retry_options.region_backoff)
                     .extract_error()
@@ -6672,6 +6728,14 @@ mod tests {
         let resolve_lock_requests = Arc::new(AtomicUsize::new(0));
         let timestamp_calls = Arc::new(AtomicUsize::new(0));
 
+        let expected_disk_full_opt = DiskFullOpt::AllowedOnAlmostFull as i32;
+        let expected_txn_source = 42_u64;
+        let expected_priority = CommandPriority::High as i32;
+        let expected_max_execution_duration_ms = 321_u64;
+        let expected_resource_group_tag = b"rg-tag".to_vec();
+        let expected_resource_group_name = "rg-name".to_owned();
+        let expected_request_source = "request-source".to_owned();
+
         let embedded_lock_key = vec![1_u8];
         let embedded_lock_key_hook = embedded_lock_key.clone();
         let embedded_primary_lock = vec![99_u8];
@@ -6680,6 +6744,9 @@ mod tests {
         let lock_requests_captured = lock_requests.clone();
         let check_txn_status_requests_captured = check_txn_status_requests.clone();
         let resolve_lock_requests_captured = resolve_lock_requests.clone();
+        let expected_resource_group_tag_hook = expected_resource_group_tag.clone();
+        let expected_resource_group_name_hook = expected_resource_group_name.clone();
+        let expected_request_source_hook = expected_request_source.clone();
 
         let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
             if req
@@ -6718,6 +6785,26 @@ mod tests {
             if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
                 check_txn_status_requests_captured.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(req.primary_key, embedded_primary_lock_hook);
+                let ctx = req.context.as_ref().expect("context");
+                assert_eq!(ctx.disk_full_opt, expected_disk_full_opt);
+                assert_eq!(ctx.txn_source, expected_txn_source);
+                assert!(ctx.sync_log);
+                assert_eq!(ctx.priority, expected_priority);
+                assert_eq!(
+                    ctx.max_execution_duration_ms,
+                    expected_max_execution_duration_ms
+                );
+                assert_eq!(ctx.resource_group_tag, expected_resource_group_tag_hook);
+                assert_eq!(ctx.request_source, expected_request_source_hook);
+                assert_eq!(
+                    ctx.resource_control_context
+                        .as_ref()
+                        .expect("resource control context")
+                        .resource_group_name,
+                    expected_resource_group_name_hook
+                );
+                assert_eq!(ctx.region_id, 2);
+                assert_eq!(ctx.peer.as_ref().expect("peer").store_id, 42);
                 let resp = kvrpcpb::CheckTxnStatusResponse {
                     commit_version: 5,
                     action: kvrpcpb::Action::NoAction as i32,
@@ -6731,6 +6818,26 @@ mod tests {
                 assert_eq!(req.start_version, 7);
                 assert_eq!(req.commit_version, 5);
                 assert_eq!(req.keys, vec![embedded_lock_key_hook.clone()]);
+                let ctx = req.context.as_ref().expect("context");
+                assert_eq!(ctx.disk_full_opt, expected_disk_full_opt);
+                assert_eq!(ctx.txn_source, expected_txn_source);
+                assert!(ctx.sync_log);
+                assert_eq!(ctx.priority, expected_priority);
+                assert_eq!(
+                    ctx.max_execution_duration_ms,
+                    expected_max_execution_duration_ms
+                );
+                assert_eq!(ctx.resource_group_tag, expected_resource_group_tag_hook);
+                assert_eq!(ctx.request_source, expected_request_source_hook);
+                assert_eq!(
+                    ctx.resource_control_context
+                        .as_ref()
+                        .expect("resource control context")
+                        .resource_group_name,
+                    expected_resource_group_name_hook
+                );
+                assert_eq!(ctx.region_id, 1);
+                assert_eq!(ctx.peer.as_ref().expect("peer").store_id, 41);
                 return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
             }
 
@@ -6747,6 +6854,16 @@ mod tests {
             Timestamp::default(),
             pd_client,
             TransactionOptions::new_pessimistic()
+                .disk_full_opt(DiskFullOpt::AllowedOnAlmostFull)
+                .txn_source(expected_txn_source)
+                .sync_log(true)
+                .priority(CommandPriority::High)
+                .max_write_execution_duration(Duration::from_millis(
+                    expected_max_execution_duration_ms,
+                ))
+                .resource_group_tag(expected_resource_group_tag.clone())
+                .resource_group_name(expected_resource_group_name.clone())
+                .request_source(expected_request_source.clone())
                 .heartbeat_option(HeartbeatOption::NoHeartbeat)
                 .drop_check(CheckLevel::None),
             Keyspace::Disable,

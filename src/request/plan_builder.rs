@@ -29,6 +29,7 @@ use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
 use crate::store::RegionStore;
 use crate::transaction::HasLocks;
+use crate::transaction::LockResolverRpcContext;
 use crate::transaction::ReadLockTracker;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
@@ -99,6 +100,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         keyspace: Keyspace,
         force_resolve_lock_lite: bool,
         lock_tracker: ReadLockTracker,
+        rpc_context: LockResolverRpcContext,
     ) -> PlanBuilder<PdC, ResolveLockForRead<P, PdC>, Ph>
     where
         P: Shardable + HasKvContext,
@@ -115,6 +117,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 keyspace,
                 force_resolve_lock_lite,
                 lock_tracker,
+                rpc_context,
             },
             phantom: PhantomData,
         }
@@ -126,13 +129,19 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         timestamp: Timestamp,
         backoff: Backoff,
         keyspace: Keyspace,
+        rpc_context: LockResolverRpcContext,
     ) -> PlanBuilder<PdC, ResolveLockInContext<P, PdC>, Ph>
     where
         P: Shardable,
         P::Result: HasLocks,
     {
         self.resolve_lock_with_pessimistic_region_in_context(
-            ctx, timestamp, backoff, keyspace, false,
+            ctx,
+            timestamp,
+            backoff,
+            keyspace,
+            false,
+            rpc_context,
         )
     }
 
@@ -143,6 +152,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         backoff: Backoff,
         keyspace: Keyspace,
         pessimistic_region_resolve: bool,
+        rpc_context: LockResolverRpcContext,
     ) -> PlanBuilder<PdC, ResolveLockInContext<P, PdC>, Ph>
     where
         P: Shardable,
@@ -158,6 +168,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 pd_client: self.pd_client,
                 keyspace,
                 pessimistic_region_resolve,
+                rpc_context,
             },
             phantom: PhantomData,
         }
@@ -196,7 +207,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         keyspace: Keyspace,
     ) -> PlanBuilder<PdC, CleanupLocks<P, PdC>, Ph>
     where
-        P: Shardable + NextBatch,
+        P: Shardable + NextBatch + HasKvContext,
         P::Result: HasLocks + HasNextBatch + HasRegionError + HasKeyErrors,
     {
         PlanBuilder {

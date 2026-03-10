@@ -37,6 +37,7 @@ use crate::timestamp::TimestampExt;
 use crate::transaction::resolve_locks_for_read;
 use crate::transaction::resolve_locks_with_options;
 use crate::transaction::HasLocks;
+use crate::transaction::LockResolverRpcContext;
 use crate::transaction::ReadLockTracker;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
@@ -1506,6 +1507,7 @@ where
                     self.pd_client.clone(),
                     self.keyspace,
                     self.pessimistic_region_resolve,
+                    LockResolverRpcContext::default(),
                 )
                 .await?;
             let ms_before_txn_expired = resolve_result.ms_before_txn_expired;
@@ -1538,6 +1540,7 @@ pub(crate) struct ResolveLockInContext<P: Plan, PdC: PdClient> {
     pub(crate) backoff: Backoff,
     pub(crate) keyspace: Keyspace,
     pub(crate) pessimistic_region_resolve: bool,
+    pub(crate) rpc_context: LockResolverRpcContext,
 }
 
 impl<P: Plan, PdC: PdClient> Clone for ResolveLockInContext<P, PdC> {
@@ -1550,6 +1553,7 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLockInContext<P, PdC> {
             backoff: self.backoff.clone(),
             keyspace: self.keyspace,
             pessimistic_region_resolve: self.pessimistic_region_resolve,
+            rpc_context: self.rpc_context.clone(),
         }
     }
 }
@@ -1595,6 +1599,7 @@ where
                     self.pd_client.clone(),
                     self.keyspace,
                     self.pessimistic_region_resolve,
+                    self.rpc_context.clone(),
                 )
                 .await?;
             let ms_before_txn_expired = resolve_result.ms_before_txn_expired;
@@ -1628,6 +1633,7 @@ pub(crate) struct ResolveLockForRead<P: Plan, PdC: PdClient> {
     pub(crate) keyspace: Keyspace,
     pub(crate) force_resolve_lock_lite: bool,
     pub(crate) lock_tracker: ReadLockTracker,
+    pub(crate) rpc_context: LockResolverRpcContext,
 }
 
 impl<P: Plan, PdC: PdClient> Clone for ResolveLockForRead<P, PdC> {
@@ -1641,6 +1647,7 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLockForRead<P, PdC> {
             keyspace: self.keyspace,
             force_resolve_lock_lite: self.force_resolve_lock_lite,
             lock_tracker: self.lock_tracker.clone(),
+            rpc_context: self.rpc_context.clone(),
         }
     }
 }
@@ -1731,6 +1738,7 @@ where
                     self.keyspace,
                     self.force_resolve_lock_lite,
                     self.lock_tracker.clone(),
+                    self.rpc_context.clone(),
                 )
                 .await
                 {
@@ -1890,7 +1898,7 @@ fn classify_cleanup_extracted_errors(result: &mut CleanupLocksResult, mut errors
 }
 
 #[async_trait]
-impl<P: Plan + Shardable + NextBatch, PdC: PdClient> Plan for CleanupLocks<P, PdC>
+impl<P: Plan + Shardable + NextBatch + HasKvContext, PdC: PdClient> Plan for CleanupLocks<P, PdC>
 where
     P::Result: HasLocks + HasNextBatch + HasKeyErrors + HasRegionError,
 {
@@ -1899,7 +1907,15 @@ where
     async fn execute(&self) -> Result<Self::Result> {
         let mut result = CleanupLocksResult::default();
         let mut inner = self.inner.clone();
+
+        let mut lock_resolver_rpc_context = LockResolverRpcContext::default();
+        if let Some(ctx) = inner.kv_context_mut() {
+            lock_resolver_rpc_context.context = Some(ctx.clone());
+            lock_resolver_rpc_context.resource_group_tag_set = !ctx.resource_group_tag.is_empty();
+        }
+
         let mut lock_resolver = crate::transaction::LockResolver::new(self.ctx.clone());
+        lock_resolver.set_rpc_context(lock_resolver_rpc_context);
         let store = self.store.as_ref().ok_or_else(|| Error::InternalError {
             message: "cleanup locks executed without store".to_owned(),
         })?;
@@ -2843,6 +2859,12 @@ mod test {
             fn next_batch(&mut self, _: (Vec<u8>, Vec<u8>)) {}
         }
 
+        impl HasKvContext for PanicPlan {
+            fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+                None
+            }
+        }
+
         let plan = CleanupLocks {
             inner: PanicPlan,
             ctx: ResolveLocksContext::default(),
@@ -3137,6 +3159,12 @@ mod test {
             }
         }
 
+        impl HasKvContext for CountingScanLockPlan {
+            fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+                None
+            }
+        }
+
         let execute_calls = Arc::new(AtomicUsize::new(0));
         let next_batch_calls = Arc::new(AtomicUsize::new(0));
         let inner = PreserveShard {
@@ -3167,6 +3195,178 @@ mod test {
         assert_eq!(result.resolved_locks, 0);
         assert_eq!(execute_calls.load(Ordering::SeqCst), 1);
         assert_eq!(next_batch_calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_propagates_inner_kv_context_to_lock_resolver_requests() -> Result<()>
+    {
+        #[derive(Clone)]
+        struct ContextScanLockPlan {
+            context: kvrpcpb::Context,
+            execute_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl Plan for ContextScanLockPlan {
+            type Result = kvrpcpb::ScanLockResponse;
+
+            async fn execute(&self) -> Result<Self::Result> {
+                let call = self.execute_calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    Ok(kvrpcpb::ScanLockResponse {
+                        locks: vec![kvrpcpb::LockInfo {
+                            key: vec![1],
+                            primary_lock: vec![1],
+                            lock_version: 7,
+                            lock_ttl: 100,
+                            txn_size: 1,
+                            lock_type: kvrpcpb::Op::Put as i32,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })
+                } else {
+                    Ok(kvrpcpb::ScanLockResponse::default())
+                }
+            }
+        }
+
+        impl Shardable for ContextScanLockPlan {
+            type Shard = ();
+
+            fn shards(
+                &self,
+                _: &Arc<impl crate::pd::PdClient>,
+            ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+                Box::pin(stream::empty()).boxed()
+            }
+
+            fn apply_shard(&mut self, _: Self::Shard) {}
+
+            fn apply_store(&mut self, _: &RegionStore) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        impl NextBatch for ContextScanLockPlan {
+            fn next_batch(&mut self, _: (Vec<u8>, Vec<u8>)) {}
+        }
+
+        impl HasKvContext for ContextScanLockPlan {
+            fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+                Some(&mut self.context)
+            }
+        }
+
+        let mut template_context = kvrpcpb::Context::default();
+        template_context.region_id = 999;
+        template_context.disk_full_opt = 2;
+        template_context.txn_source = 7;
+        template_context.sync_log = true;
+        template_context.priority = 2;
+        template_context.max_execution_duration_ms = 321;
+        template_context.resource_group_tag = b"rg-tag".to_vec();
+        template_context.resource_control_context = Some(kvrpcpb::ResourceControlContext {
+            resource_group_name: "rg-name".to_owned(),
+            ..Default::default()
+        });
+        template_context.request_source = "request-source".to_owned();
+
+        let expected_tag = template_context.resource_group_tag.clone();
+        let expected_request_source = template_context.request_source.clone();
+        let expected_resource_group_name = template_context
+            .resource_control_context
+            .as_ref()
+            .expect("resource control context")
+            .resource_group_name
+            .clone();
+
+        let kv_client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                let ctx = req.context.as_ref().expect("context");
+                assert_eq!(ctx.disk_full_opt, 2);
+                assert_eq!(ctx.txn_source, 7);
+                assert!(ctx.sync_log);
+                assert_eq!(ctx.priority, 2);
+                assert_eq!(ctx.max_execution_duration_ms, 321);
+                assert_eq!(ctx.request_source, expected_request_source);
+                assert_eq!(ctx.resource_group_tag, expected_tag);
+                assert_eq!(
+                    ctx.resource_control_context
+                        .as_ref()
+                        .expect("resource control context")
+                        .resource_group_name,
+                    expected_resource_group_name
+                );
+
+                assert_eq!(
+                    ctx.region_id, 1,
+                    "region routing fields should come from set_leader"
+                );
+                assert_eq!(ctx.peer.as_ref().expect("peer").store_id, 41);
+
+                let resp = kvrpcpb::CheckTxnStatusResponse {
+                    commit_version: 5,
+                    action: kvrpcpb::Action::NoAction as i32,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if req.is::<kvrpcpb::ResolveLockRequest>() {
+                let req = req
+                    .downcast_ref::<kvrpcpb::ResolveLockRequest>()
+                    .expect("resolve lock request");
+                let ctx = req.context.as_ref().expect("context");
+                assert_eq!(ctx.disk_full_opt, 2);
+                assert_eq!(ctx.txn_source, 7);
+                assert!(ctx.sync_log);
+                assert_eq!(ctx.priority, 2);
+                assert_eq!(ctx.max_execution_duration_ms, 321);
+                assert_eq!(ctx.request_source, expected_request_source);
+                assert_eq!(ctx.resource_group_tag, expected_tag);
+                assert_eq!(
+                    ctx.resource_control_context
+                        .as_ref()
+                        .expect("resource control context")
+                        .resource_group_name,
+                    expected_resource_group_name
+                );
+
+                assert_eq!(
+                    ctx.region_id, 1,
+                    "region routing fields should come from set_leader"
+                );
+                assert_eq!(ctx.peer.as_ref().expect("peer").store_id, 41);
+
+                return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(kv_client.clone()));
+        let store = RegionStore::new(MockPdClient::region1(), Arc::new(kv_client.clone()));
+
+        let plan = CleanupLocks {
+            inner: ContextScanLockPlan {
+                context: template_context,
+                execute_calls: Arc::new(AtomicUsize::new(0)),
+            },
+            ctx: ResolveLocksContext::default(),
+            options: ResolveLocksOptions {
+                async_commit_only: false,
+                batch_size: 1024,
+            },
+            store: Some(store),
+            pd_client,
+            keyspace: Keyspace::Disable,
+            backoff: Backoff::no_backoff(),
+        };
+
+        let result = plan.execute().await?;
+        assert_eq!(result.resolved_locks, 1);
         Ok(())
     }
 }

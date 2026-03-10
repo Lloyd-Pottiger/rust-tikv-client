@@ -28,6 +28,7 @@ use crate::request::CollectSingle;
 use crate::request::Keyspace;
 use crate::request::Plan;
 use crate::store::RegionStore;
+use crate::store::Request;
 use crate::timestamp::TimestampExt;
 use crate::transaction::requests;
 use crate::transaction::requests::new_check_secondary_locks_request;
@@ -174,6 +175,7 @@ pub async fn resolve_locks(
         pd_client,
         keyspace,
         false,
+        LockResolverRpcContext::default(),
     )
     .await?
     .live_locks)
@@ -186,6 +188,7 @@ pub(crate) async fn resolve_locks_with_options(
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
     pessimistic_region_resolve: bool,
+    rpc_context: LockResolverRpcContext,
 ) -> Result<ResolveLocksResult> {
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
 
@@ -197,6 +200,7 @@ pub(crate) async fn resolve_locks_with_options(
     let mut live_locks = Vec::new();
     let mut ms_before_txn_expired: Option<i64> = None;
     let mut lock_resolver = LockResolver::new(ctx);
+    lock_resolver.rpc_context = rpc_context;
 
     // records the commit version of each primary lock (representing the status of the transaction)
     let mut commit_versions: HashMap<u64, u64> = HashMap::new();
@@ -260,6 +264,7 @@ pub(crate) async fn resolve_locks_with_options(
                         if pessimistic_region_resolve {
                             if let Some(cleaned_region) = rollback_pessimistic_lock_with_retry(
                                 &lock,
+                                &lock_resolver.rpc_context,
                                 pd_client.clone(),
                                 keyspace,
                                 OPTIMISTIC_BACKOFF,
@@ -272,7 +277,13 @@ pub(crate) async fn resolve_locks_with_options(
                                     .insert(cleaned_region);
                             }
                         } else {
-                            rollback_pessimistic_lock(&lock, pd_client.clone(), keyspace).await?;
+                            rollback_pessimistic_lock(
+                                &lock,
+                                &lock_resolver.rpc_context,
+                                pd_client.clone(),
+                                keyspace,
+                            )
+                            .await?;
                         }
                         continue;
                     }
@@ -311,6 +322,7 @@ pub(crate) async fn resolve_locks_with_options(
                 if pessimistic_region_resolve {
                     if let Some(cleaned_region) = rollback_pessimistic_lock_with_retry(
                         &lock,
+                        &lock_resolver.rpc_context,
                         pd_client.clone(),
                         keyspace,
                         OPTIMISTIC_BACKOFF,
@@ -323,7 +335,13 @@ pub(crate) async fn resolve_locks_with_options(
                             .insert(cleaned_region);
                     }
                 } else {
-                    rollback_pessimistic_lock(&lock, pd_client.clone(), keyspace).await?;
+                    rollback_pessimistic_lock(
+                        &lock,
+                        &lock_resolver.rpc_context,
+                        pd_client.clone(),
+                        keyspace,
+                    )
+                    .await?;
                 }
                 continue;
             }
@@ -339,6 +357,7 @@ pub(crate) async fn resolve_locks_with_options(
                 commit_version,
                 lock.is_txn_file,
                 resolve_lite,
+                &lock_resolver.rpc_context,
                 pd_client.clone(),
                 keyspace,
                 OPTIMISTIC_BACKOFF,
@@ -366,6 +385,7 @@ pub(crate) async fn resolve_locks_for_read(
     keyspace: Keyspace,
     force_resolve_lock_lite: bool,
     lock_tracker: ReadLockTracker,
+    rpc_context: LockResolverRpcContext,
 ) -> Result<ResolveLocksForReadResult> {
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
 
@@ -379,6 +399,7 @@ pub(crate) async fn resolve_locks_for_read(
     let mut resolved_locks = Vec::new();
     let mut committed_locks = Vec::new();
     let mut lock_resolver = LockResolver::new(ctx);
+    lock_resolver.rpc_context = rpc_context;
 
     for lock in locks {
         if is_shared_lock(lock.lock_type) {
@@ -403,7 +424,13 @@ pub(crate) async fn resolve_locks_for_read(
         let status = match status {
             TxnStatusFromLock::Status(status) => status,
             TxnStatusFromLock::PessimisticRollbackRequired => {
-                rollback_pessimistic_lock(&lock, pd_client.clone(), keyspace).await?;
+                rollback_pessimistic_lock(
+                    &lock,
+                    &lock_resolver.rpc_context,
+                    pd_client.clone(),
+                    keyspace,
+                )
+                .await?;
                 resolved_locks.push(lock.lock_version);
                 continue;
             }
@@ -462,7 +489,13 @@ pub(crate) async fn resolve_locks_for_read(
         // The `committed_locks` / `resolved_locks` context allows read retry to proceed without
         // waiting for the cleanup to finish.
         if is_pessimistic_lock(lock.lock_type) {
-            rollback_pessimistic_lock(&lock, pd_client.clone(), keyspace).await?;
+            rollback_pessimistic_lock(
+                &lock,
+                &lock_resolver.rpc_context,
+                pd_client.clone(),
+                keyspace,
+            )
+            .await?;
             continue;
         }
 
@@ -476,6 +509,7 @@ pub(crate) async fn resolve_locks_for_read(
         let key = lock.key.clone();
         let start_version = lock.lock_version;
         let is_txn_file = lock.is_txn_file;
+        let rpc_context = lock_resolver.rpc_context.clone();
         let pd_client = pd_client.clone();
         let task = tokio::spawn(async move {
             if let Err(err) = resolve_lock_with_retry(
@@ -484,6 +518,7 @@ pub(crate) async fn resolve_locks_for_read(
                 commit_version,
                 is_txn_file,
                 resolve_lite,
+                &rpc_context,
                 pd_client,
                 keyspace,
                 OPTIMISTIC_BACKOFF,
@@ -511,6 +546,7 @@ async fn resolve_lock_with_retry(
     commit_version: u64,
     is_txn_file: bool,
     resolve_lite: bool,
+    rpc_context: &LockResolverRpcContext,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
     mut backoff: Backoff,
@@ -524,6 +560,7 @@ async fn resolve_lock_with_retry(
         let ver_id = store.region_with_leader.ver_id();
         let mut request =
             requests::new_resolve_lock_request(start_version, commit_version, is_txn_file);
+        rpc_context.apply_to_request(&mut request);
         if resolve_lite {
             request.keys = vec![key.clone()];
         }
@@ -599,6 +636,7 @@ async fn resolve_lock_with_retry(
 
 async fn rollback_pessimistic_lock(
     lock: &kvrpcpb::LockInfo,
+    rpc_context: &LockResolverRpcContext,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
 ) -> Result<()> {
@@ -609,11 +647,12 @@ async fn rollback_pessimistic_lock(
     }
 
     let for_update_ts = pessimistic_rollback_for_update_ts(lock);
-    let request = requests::new_pessimistic_rollback_request(
+    let mut request = requests::new_pessimistic_rollback_request(
         vec![lock.key.clone()],
         lock.lock_version,
         for_update_ts,
     );
+    rpc_context.apply_to_request(&mut request);
     let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
         .retry_multi_region(DEFAULT_REGION_BACKOFF)
         .extract_error()
@@ -624,6 +663,7 @@ async fn rollback_pessimistic_lock(
 
 async fn rollback_pessimistic_lock_with_retry(
     lock: &kvrpcpb::LockInfo,
+    rpc_context: &LockResolverRpcContext,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
     mut backoff: Backoff,
@@ -638,11 +678,12 @@ async fn rollback_pessimistic_lock_with_retry(
     loop {
         let store = pd_client.clone().store_for_key((&lock.key).into()).await?;
         let ver_id = store.region_with_leader.ver_id();
-        let request = requests::new_pessimistic_rollback_request(
+        let mut request = requests::new_pessimistic_rollback_request(
             Vec::new(),
             lock.lock_version,
             for_update_ts,
         );
+        rpc_context.apply_to_request(&mut request);
         let plan_builder =
             match crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
                 .single_region_with_store(store.clone())
@@ -793,6 +834,47 @@ pub struct ResolveLocksOptions {
     pub batch_size: u32,
 }
 
+type ResourceGroupTagger = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub(crate) struct LockResolverRpcContext {
+    pub(crate) context: Option<kvrpcpb::Context>,
+    pub(crate) resource_group_tag_set: bool,
+    pub(crate) resource_group_tagger: Option<ResourceGroupTagger>,
+}
+
+impl LockResolverRpcContext {
+    pub(crate) fn apply_to_kv_context(&self, label: &str, ctx: &mut kvrpcpb::Context) {
+        if let Some(template) = self.context.as_ref() {
+            ctx.disk_full_opt = template.disk_full_opt;
+            ctx.txn_source = template.txn_source;
+            ctx.sync_log = template.sync_log;
+            ctx.priority = template.priority;
+            ctx.max_execution_duration_ms = template.max_execution_duration_ms;
+            ctx.resource_control_context = template.resource_control_context.clone();
+            if self.resource_group_tag_set {
+                ctx.resource_group_tag = template.resource_group_tag.clone();
+            }
+            if !template.request_source.is_empty() {
+                ctx.request_source = template.request_source.clone();
+            }
+        }
+
+        if !self.resource_group_tag_set {
+            if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                ctx.resource_group_tag = (tagger)(label);
+            }
+        }
+    }
+
+    pub(crate) fn apply_to_request<R: Request>(&self, request: &mut R) {
+        let label = request.label();
+        if let Some(ctx) = request.context_mut() {
+            self.apply_to_kv_context(label, ctx);
+        }
+    }
+}
+
 impl Default for ResolveLocksOptions {
     fn default() -> Self {
         Self {
@@ -832,11 +914,19 @@ impl ResolveLocksContext {
 
 pub struct LockResolver {
     ctx: ResolveLocksContext,
+    rpc_context: LockResolverRpcContext,
 }
 
 impl LockResolver {
     pub fn new(ctx: ResolveLocksContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            rpc_context: LockResolverRpcContext::default(),
+        }
+    }
+
+    pub(crate) fn set_rpc_context(&mut self, rpc_context: LockResolverRpcContext) {
+        self.rpc_context = rpc_context;
     }
 
     /// Records the locks being resolved for a given `caller_start_ts` and returns a token.
@@ -1014,7 +1104,8 @@ impl LockResolver {
                         "cleanup_locks got primary_mismatch on pessimistic lock, rollback directly; lock: {}",
                         format_key_for_log(&l.key)
                     );
-                    rollback_pessimistic_lock(&l, pd_client.clone(), keyspace).await?;
+                    rollback_pessimistic_lock(&l, &self.rpc_context, pd_client.clone(), keyspace)
+                        .await?;
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -1024,7 +1115,8 @@ impl LockResolver {
                 // Match client-go `BatchResolveLocks`: pessimistic locks are cleaned by
                 // `PessimisticRollback` instead of being packed into `TxnInfo` for
                 // `BatchResolveLock`.
-                rollback_pessimistic_lock(&l, pd_client.clone(), keyspace).await?;
+                rollback_pessimistic_lock(&l, &self.rpc_context, pd_client.clone(), keyspace)
+                    .await?;
                 continue;
             }
 
@@ -1157,7 +1249,7 @@ impl LockResolver {
         // 2.1 Txn Committed
         // 2.2 Txn Rollbacked -- rollback itself, rollback by others, GC tomb etc.
         // 2.3 No lock -- pessimistic lock rollback, concurrence prewrite.
-        let req = new_check_txn_status_request(
+        let mut req = new_check_txn_status_request(
             primary,
             txn_id,
             caller_start_ts,
@@ -1167,6 +1259,7 @@ impl LockResolver {
             resolving_pessimistic_lock,
             is_txn_file,
         );
+        self.rpc_context.apply_to_request(&mut req);
         let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, req)
             .retry_multi_region(DEFAULT_REGION_BACKOFF)
             .merge(CollectSingle)
@@ -1240,7 +1333,8 @@ impl LockResolver {
         let mut backoff = DEFAULT_REGION_BACKOFF;
         loop {
             let ver_id = store.region_with_leader.ver_id();
-            let request = requests::new_batch_resolve_lock_request(txn_infos.clone());
+            let mut request = requests::new_batch_resolve_lock_request(txn_infos.clone());
+            self.rpc_context.apply_to_request(&mut request);
             let plan_builder =
                 match crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
                     .single_region_with_store(store.clone())
@@ -1510,6 +1604,247 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_lock_resolver_rpc_context_merges_without_clobbering_region_fields() {
+        let mut ctx = kvrpcpb::Context::default();
+        ctx.region_id = 123;
+        ctx.peer = Some(crate::proto::metapb::Peer {
+            store_id: 456,
+            ..Default::default()
+        });
+
+        let mut template = kvrpcpb::Context::default();
+        template.disk_full_opt = crate::DiskFullOpt::AllowedOnAlmostFull as i32;
+        template.txn_source = 42;
+        template.sync_log = true;
+        template.priority = crate::CommandPriority::High as i32;
+        template.max_execution_duration_ms = 321;
+        template.resource_control_context = Some(kvrpcpb::ResourceControlContext {
+            resource_group_name: "rg-name".to_owned(),
+            ..Default::default()
+        });
+        template.resource_group_tag = b"explicit-tag".to_vec();
+        template.request_source = "request-source".to_owned();
+
+        let rpc_context = LockResolverRpcContext {
+            context: Some(template),
+            resource_group_tag_set: true,
+            resource_group_tagger: None,
+        };
+        rpc_context.apply_to_kv_context("kv_check_txn_status", &mut ctx);
+
+        assert_eq!(
+            ctx.disk_full_opt,
+            crate::DiskFullOpt::AllowedOnAlmostFull as i32
+        );
+        assert_eq!(ctx.txn_source, 42);
+        assert!(ctx.sync_log);
+        assert_eq!(ctx.priority, crate::CommandPriority::High as i32);
+        assert_eq!(ctx.max_execution_duration_ms, 321);
+        assert_eq!(
+            ctx.resource_control_context
+                .as_ref()
+                .expect("resource control context")
+                .resource_group_name,
+            "rg-name"
+        );
+        assert_eq!(ctx.resource_group_tag, b"explicit-tag".to_vec());
+        assert_eq!(ctx.request_source, "request-source");
+
+        assert_eq!(ctx.region_id, 123);
+        assert_eq!(
+            ctx.peer.as_ref().expect("peer").store_id,
+            456,
+            "region routing fields should not be clobbered by the template context"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_rpc_context_resource_group_tagger_applies_when_tag_unset() {
+        let tagger_calls = Arc::new(AtomicUsize::new(0));
+        let tagger_calls_captured = tagger_calls.clone();
+
+        let mut template = kvrpcpb::Context::default();
+        template.disk_full_opt = crate::DiskFullOpt::AllowedOnAlreadyFull as i32;
+        template.txn_source = 7;
+        template.sync_log = true;
+        template.priority = crate::CommandPriority::High as i32;
+        template.max_execution_duration_ms = 999;
+        template.resource_control_context = Some(kvrpcpb::ResourceControlContext {
+            resource_group_name: "rg-lock-resolver".to_owned(),
+            ..Default::default()
+        });
+        template.request_source = "src-lock-resolver".to_owned();
+
+        let rpc_context = LockResolverRpcContext {
+            context: Some(template),
+            resource_group_tag_set: false,
+            resource_group_tagger: Some(Arc::new(move |label: &str| {
+                tagger_calls_captured.fetch_add(1, Ordering::SeqCst);
+                label.as_bytes().to_vec()
+            })),
+        };
+
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(
+                        ctx.disk_full_opt,
+                        crate::DiskFullOpt::AllowedOnAlreadyFull as i32
+                    );
+                    assert_eq!(ctx.txn_source, 7);
+                    assert!(ctx.sync_log);
+                    assert_eq!(ctx.priority, crate::CommandPriority::High as i32);
+                    assert_eq!(ctx.max_execution_duration_ms, 999);
+                    assert_eq!(ctx.request_source, "src-lock-resolver");
+                    assert_eq!(
+                        ctx.resource_control_context
+                            .as_ref()
+                            .expect("resource control context")
+                            .resource_group_name,
+                        "rg-lock-resolver"
+                    );
+                    assert_eq!(ctx.resource_group_tag, b"kv_check_txn_status".to_vec());
+                    assert_eq!(ctx.region_id, 1);
+                    assert_eq!(
+                        ctx.peer.as_ref().expect("peer").store_id,
+                        41,
+                        "region routing fields should not be clobbered by the template context"
+                    );
+
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 2,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(
+                        ctx.disk_full_opt,
+                        crate::DiskFullOpt::AllowedOnAlreadyFull as i32
+                    );
+                    assert_eq!(ctx.txn_source, 7);
+                    assert!(ctx.sync_log);
+                    assert_eq!(ctx.priority, crate::CommandPriority::High as i32);
+                    assert_eq!(ctx.max_execution_duration_ms, 999);
+                    assert_eq!(ctx.request_source, "src-lock-resolver");
+                    assert_eq!(
+                        ctx.resource_control_context
+                            .as_ref()
+                            .expect("resource control context")
+                            .resource_group_name,
+                        "rg-lock-resolver"
+                    );
+                    assert_eq!(ctx.resource_group_tag, b"kv_resolve_lock".to_vec());
+                    assert_eq!(ctx.region_id, 1);
+                    assert_eq!(
+                        ctx.peer.as_ref().expect("peer").store_id,
+                        41,
+                        "region routing fields should not be clobbered by the template context"
+                    );
+
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 1;
+        lock.lock_ttl = 100;
+        lock.txn_size = 1;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let result = resolve_locks_with_options(
+            ResolveLocksContext::default(),
+            vec![lock],
+            Timestamp::default(),
+            client,
+            Keyspace::Disable,
+            false,
+            rpc_context,
+        )
+        .await
+        .unwrap();
+        assert!(result.live_locks.is_empty());
+        assert_eq!(tagger_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_rpc_context_resource_group_tagger_skipped_when_tag_set() {
+        let tagger_calls = Arc::new(AtomicUsize::new(0));
+        let tagger_calls_captured = tagger_calls.clone();
+
+        let mut template = kvrpcpb::Context::default();
+        template.disk_full_opt = crate::DiskFullOpt::AllowedOnAlmostFull as i32;
+        template.txn_source = 8;
+        template.sync_log = true;
+        template.priority = crate::CommandPriority::High as i32;
+        template.max_execution_duration_ms = 123;
+        template.resource_group_tag = b"explicit-tag".to_vec();
+
+        let rpc_context = LockResolverRpcContext {
+            context: Some(template),
+            resource_group_tag_set: true,
+            resource_group_tagger: Some(Arc::new(move |_label: &str| {
+                tagger_calls_captured.fetch_add(1, Ordering::SeqCst);
+                b"tagger".to_vec()
+            })),
+        };
+
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(ctx.resource_group_tag, b"explicit-tag".to_vec());
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 2,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(ctx.resource_group_tag, b"explicit-tag".to_vec());
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 1;
+        lock.lock_ttl = 100;
+        lock.txn_size = 1;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let result = resolve_locks_with_options(
+            ResolveLocksContext::default(),
+            vec![lock],
+            Timestamp::default(),
+            client,
+            Keyspace::Disable,
+            false,
+            rpc_context,
+        )
+        .await
+        .unwrap();
+        assert!(result.live_locks.is_empty());
+        assert_eq!(tagger_calls.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test]
     async fn test_lock_resolver_get_txn_status_wires_defaults_and_uses_cache() {
         let check_txn_status_count = Arc::new(AtomicUsize::new(0));
@@ -1771,6 +2106,7 @@ mod tests {
         )));
 
         let key = vec![1];
+        let rpc_context = LockResolverRpcContext::default();
         let region1 = MockPdClient::region1();
         let resolved_region = resolve_lock_with_retry(
             &key,
@@ -1778,6 +2114,7 @@ mod tests {
             2,
             false,
             false,
+            &rpc_context,
             client.clone(),
             keyspace,
             backoff.clone(),
@@ -1793,9 +2130,19 @@ mod tests {
         )
         .unwrap();
         let key = vec![100];
-        resolve_lock_with_retry(&key, 3, 4, false, false, client, keyspace, backoff)
-            .await
-            .expect_err("should return error");
+        resolve_lock_with_retry(
+            &key,
+            3,
+            4,
+            false,
+            false,
+            &rpc_context,
+            client,
+            keyspace,
+            backoff,
+        )
+        .await
+        .expect_err("should return error");
     }
 
     #[tokio::test]
@@ -1886,6 +2233,7 @@ mod tests {
             client,
             Keyspace::Disable,
             false,
+            LockResolverRpcContext::default(),
         )
         .await
         .unwrap();
@@ -2260,6 +2608,7 @@ mod tests {
             Keyspace::Disable,
             true,
             lock_tracker.clone(),
+            LockResolverRpcContext::default(),
         )
         .await
         .unwrap();
@@ -2453,6 +2802,7 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
+            LockResolverRpcContext::default(),
         )
         .await
         .unwrap();
@@ -2848,6 +3198,7 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
+            LockResolverRpcContext::default(),
         )
         .await
         .unwrap();
@@ -2921,6 +3272,7 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
+            LockResolverRpcContext::default(),
         )
         .await
         .unwrap();
@@ -2990,6 +3342,7 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
+            LockResolverRpcContext::default(),
         )
         .await
         .unwrap();
@@ -3147,6 +3500,7 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
+            LockResolverRpcContext::default(),
         )
         .await
         .unwrap();

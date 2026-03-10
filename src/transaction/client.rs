@@ -21,6 +21,7 @@ use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_scan_lock_request;
 use crate::transaction::lowering::new_unsafe_destroy_range_request;
 use crate::transaction::resolve_locks_with_options;
+use crate::transaction::LockResolverRpcContext;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::Snapshot;
 use crate::transaction::Transaction;
@@ -351,6 +352,7 @@ impl Client {
                 self.pd.clone(),
                 self.keyspace,
                 false,
+                LockResolverRpcContext::default(),
             )
             .await?;
             let ms_before_txn_expired = resolve_result.ms_before_txn_expired;
