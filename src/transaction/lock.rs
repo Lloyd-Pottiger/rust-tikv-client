@@ -1,6 +1,5 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -728,8 +727,24 @@ impl ResolvedTxnStatusCache {
 
     fn insert(&mut self, txn_id: u64, txn_status: Arc<TransactionStatus>) {
         // Preserve insertion order (FIFO), matching client-go `ResolvedCacheSize` behavior.
-        if let Entry::Occupied(mut entry) = self.map.entry(txn_id) {
-            entry.insert(txn_status);
+        if let Some(existing) = self.map.get(&txn_id).cloned() {
+            let has_same_determined_status = existing.is_cacheable()
+                && txn_status.is_cacheable()
+                && match (&existing.kind, &txn_status.kind) {
+                    (
+                        TransactionStatusKind::Committed(existing),
+                        TransactionStatusKind::Committed(new),
+                    ) => existing.version() == new.version(),
+                    (TransactionStatusKind::RolledBack, TransactionStatusKind::RolledBack) => true,
+                    _ => false,
+                };
+
+            if !has_same_determined_status {
+                error!(
+                    "resolved txn status cache conflict for txn_id={txn_id}, existing={existing:?}, new={txn_status:?}"
+                );
+                self.remove(txn_id);
+            }
             return;
         }
 
@@ -1465,6 +1480,34 @@ mod tests {
         );
         assert!(ctx.get_resolved(1).await.is_some());
         assert!(ctx.get_resolved(RESOLVED_CACHE_SIZE as u64).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_context_resolved_cache_rejects_conflicting_determined_status() {
+        let mut ctx = ResolveLocksContext::default();
+
+        let committed = Arc::new(TransactionStatus {
+            kind: TransactionStatusKind::Committed(Timestamp::from_version(10)),
+            action: kvrpcpb::Action::NoAction,
+            is_expired: false,
+        });
+        let rolled_back = Arc::new(TransactionStatus {
+            kind: TransactionStatusKind::RolledBack,
+            action: kvrpcpb::Action::NoAction,
+            is_expired: false,
+        });
+
+        ctx.save_resolved(7, committed.clone()).await;
+        assert!(matches!(
+            &ctx.get_resolved(7).await.unwrap().kind,
+            TransactionStatusKind::Committed(ts) if ts.version() == 10
+        ));
+
+        ctx.save_resolved(7, rolled_back).await;
+        assert!(
+            ctx.get_resolved(7).await.is_none(),
+            "conflicting determined statuses should invalidate the cache entry"
+        );
     }
 
     #[tokio::test]
