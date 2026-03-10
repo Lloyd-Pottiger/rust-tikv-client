@@ -8,6 +8,7 @@ use crate::Key;
 use crate::KvPair;
 use crate::ReplicaReadType;
 use crate::Result;
+use crate::StoreLabel;
 use crate::Transaction;
 use crate::Value;
 
@@ -51,6 +52,15 @@ impl Snapshot {
     pub fn set_load_based_replica_read_threshold(&mut self, threshold: Duration) {
         self.transaction
             .set_load_based_replica_read_threshold(threshold);
+    }
+
+    /// Set labels to filter target stores for replica reads.
+    ///
+    /// This maps to client-go `KVSnapshot.SetMatchStoreLabels`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_match_store_labels(&mut self, labels: impl IntoIterator<Item = StoreLabel>) {
+        self.transaction.set_match_store_labels(labels);
     }
 
     /// Get the value associated with the given key.

@@ -1,5 +1,5 @@
 use crate::transaction::sync_client::safe_block_on;
-use crate::{BoundRange, Key, KvPair, ReplicaReadType, Result, Snapshot, Value};
+use crate::{BoundRange, Key, KvPair, ReplicaReadType, Result, Snapshot, StoreLabel, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -87,5 +87,14 @@ impl SyncSnapshot {
     /// Set the busy threshold for read requests.
     pub fn set_load_based_replica_read_threshold(&mut self, threshold: Duration) {
         self.inner.set_load_based_replica_read_threshold(threshold);
+    }
+
+    /// Set labels to filter target stores for replica reads.
+    ///
+    /// This maps to client-go `KVSnapshot.SetMatchStoreLabels`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_match_store_labels(&mut self, labels: impl IntoIterator<Item = StoreLabel>) {
+        self.inner.set_match_store_labels(labels);
     }
 }

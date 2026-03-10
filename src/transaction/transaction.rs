@@ -46,6 +46,7 @@ use crate::KvPair;
 use crate::ReplicaReadAdjuster;
 use crate::ReplicaReadType;
 use crate::Result;
+use crate::StoreLabel;
 use crate::Value;
 
 /// Hook for validating schema versions during commit.
@@ -243,6 +244,15 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// This option is only effective for read-only snapshots.
     pub fn set_replica_read(&mut self, read_type: ReplicaReadType) {
         self.options.replica_read = read_type;
+    }
+
+    /// Set labels to filter target stores for replica reads.
+    ///
+    /// This maps to client-go `KVSnapshot.SetMatchStoreLabels`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_match_store_labels(&mut self, labels: impl IntoIterator<Item = StoreLabel>) {
+        self.options.match_store_labels = Arc::new(labels.into_iter().collect());
     }
 
     /// Set a replica read adjuster for point/batch gets.
@@ -1583,6 +1593,8 @@ pub struct TransactionOptions {
     kind: TransactionKind,
     /// Read from replicas other than the leader (read-only snapshots only).
     replica_read: ReplicaReadType,
+    /// Filter replica reads to stores matching the given labels (read-only snapshots only).
+    match_store_labels: Arc<Vec<StoreLabel>>,
     /// Mark reads as stale read (read-only snapshots only).
     stale_read: bool,
     /// Read requests should not fill block cache (read-only snapshots only).
@@ -1705,6 +1717,7 @@ impl TransactionOptions {
         TransactionOptions {
             kind: TransactionKind::Optimistic,
             replica_read: ReplicaReadType::Leader,
+            match_store_labels: Arc::new(Vec::new()),
             stale_read: false,
             not_fill_cache: false,
             task_id: 0,
@@ -1735,6 +1748,7 @@ impl TransactionOptions {
         TransactionOptions {
             kind: TransactionKind::Pessimistic(Timestamp::from_version(0)),
             replica_read: ReplicaReadType::Leader,
+            match_store_labels: Arc::new(Vec::new()),
             stale_read: false,
             not_fill_cache: false,
             task_id: 0,
@@ -1849,6 +1863,21 @@ impl TransactionOptions {
     #[must_use]
     pub fn replica_read(mut self, read_type: ReplicaReadType) -> TransactionOptions {
         self.replica_read = read_type;
+        self
+    }
+
+    /// Set labels to filter target stores for replica reads.
+    ///
+    /// This maps to client-go `KVSnapshot.SetMatchStoreLabels`.
+    ///
+    /// This option is only effective for read-only snapshots created via
+    /// [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).
+    #[must_use]
+    pub fn match_store_labels(
+        mut self,
+        labels: impl IntoIterator<Item = StoreLabel>,
+    ) -> TransactionOptions {
+        self.match_store_labels = Arc::new(labels.into_iter().collect());
         self
     }
 
