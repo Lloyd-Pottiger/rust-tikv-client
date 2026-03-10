@@ -6,10 +6,13 @@
 //! the system, in particular without requiring a TiKV or PD server, or RPC layer.
 
 use std::any::Any;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use derive_new::new;
+use tokio::sync::RwLock;
 
 use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
@@ -19,6 +22,7 @@ use crate::proto::metapb::RegionEpoch;
 use crate::proto::metapb::{self};
 use crate::region::RegionId;
 use crate::region::RegionWithLeader;
+use crate::region::StoreId;
 use crate::store::KvConnect;
 use crate::store::RegionStore;
 use crate::store::Request;
@@ -75,6 +79,10 @@ pub struct MockCluster;
 #[derive(new)]
 pub struct MockPdClient {
     client: MockKvClient,
+    #[new(value = "RwLock::new(HashMap::new())")]
+    store_metas: RwLock<HashMap<StoreId, metapb::Store>>,
+    #[new(value = "Arc::new(AtomicUsize::new(0))")]
+    store_meta_by_id_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -101,9 +109,15 @@ impl KvConnect for MockKvConnect {
 
 impl MockPdClient {
     pub fn default() -> MockPdClient {
-        MockPdClient {
-            client: MockKvClient::default(),
-        }
+        MockPdClient::new(MockKvClient::default())
+    }
+
+    pub async fn insert_store_meta(&self, store: metapb::Store) {
+        self.store_metas.write().await.insert(store.id, store);
+    }
+
+    pub fn store_meta_by_id_call_count(&self) -> usize {
+        self.store_meta_by_id_calls.load(Ordering::SeqCst)
     }
 
     pub fn region1() -> RegionWithLeader {
@@ -233,6 +247,16 @@ impl PdClient for MockPdClient {
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
         Ok(RegionStore::new(region, Arc::new(self.client.clone())))
+    }
+
+    async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
+        self.store_meta_by_id_calls.fetch_add(1, Ordering::SeqCst);
+        self.store_metas
+            .read()
+            .await
+            .get(&store_id)
+            .cloned()
+            .ok_or(Error::Unimplemented)
     }
 
     async fn region_for_key(&self, key: &Key) -> Result<RegionWithLeader> {

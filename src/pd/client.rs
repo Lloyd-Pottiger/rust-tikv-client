@@ -28,6 +28,7 @@ use crate::store::TikvConnect;
 use crate::store::{KvClient, Store};
 use crate::BoundRange;
 use crate::Config;
+use crate::Error;
 use crate::Key;
 use crate::Result;
 use crate::SecurityManager;
@@ -81,6 +82,16 @@ pub trait PdClient: Send + Sync + 'static {
     }
 
     async fn all_stores(&self) -> Result<Vec<Store>>;
+
+    /// Fetch PD store metadata by store id.
+    ///
+    /// This is used for replica selection when matching store labels.
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
+        let _ = store_id;
+        Err(Error::Unimplemented)
+    }
 
     /// The `txn_size` threshold for ResolveLock "lite" mode.
     ///
@@ -272,6 +283,10 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
             stores.push(Store::new(Arc::new(client)));
         }
         Ok(stores)
+    }
+
+    async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
+        self.region_cache.get_store_by_id(store_id).await
     }
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {

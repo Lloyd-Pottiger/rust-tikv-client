@@ -34,6 +34,7 @@ use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
 use crate::ReplicaReadType;
 use crate::Result;
+use crate::StoreLabel;
 use crate::Timestamp;
 
 /// Builder type for plans (see that module for more).
@@ -259,7 +260,7 @@ where
         self,
         backoff: Backoff,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
-        self.make_retry_multi_region(backoff, false, None)
+        self.make_retry_multi_region(backoff, false, None, Arc::new(Vec::new()))
     }
 
     /// Preserve all results, even some of them are Err.
@@ -268,7 +269,7 @@ where
         self,
         backoff: Backoff,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
-        self.make_retry_multi_region(backoff, true, None)
+        self.make_retry_multi_region(backoff, true, None, Arc::new(Vec::new()))
     }
 
     /// Split the request into shards, routing to non-leader replicas when requested.
@@ -279,7 +280,20 @@ where
         backoff: Backoff,
         replica_read: ReplicaReadType,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
-        self.make_retry_multi_region(backoff, false, Some(replica_read))
+        self.make_retry_multi_region(backoff, false, Some(replica_read), Arc::new(Vec::new()))
+    }
+
+    /// Split the request into shards, routing to non-leader replicas when requested and filtering
+    /// target stores by matching labels.
+    ///
+    /// This is primarily useful for read-only snapshots.
+    pub fn retry_multi_region_with_replica_read_and_match_store_labels(
+        self,
+        backoff: Backoff,
+        replica_read: ReplicaReadType,
+        match_store_labels: Arc<Vec<StoreLabel>>,
+    ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
+        self.make_retry_multi_region(backoff, false, Some(replica_read), match_store_labels)
     }
 
     fn make_retry_multi_region(
@@ -287,6 +301,7 @@ where
         backoff: Backoff,
         preserve_region_results: bool,
         replica_read: Option<ReplicaReadType>,
+        match_store_labels: Arc<Vec<StoreLabel>>,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
         PlanBuilder {
             pd_client: self.pd_client.clone(),
@@ -296,6 +311,7 @@ where
                 backoff,
                 preserve_region_results,
                 replica_read,
+                match_store_labels,
             },
             phantom: PhantomData,
         }

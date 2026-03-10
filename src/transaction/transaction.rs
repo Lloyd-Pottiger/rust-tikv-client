@@ -344,6 +344,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let replica_read = snapshot_ctx.replica_read;
         let lock_tracker = self.read_lock_tracker.clone();
         let resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        let match_store_labels = self.options.match_store_labels.clone();
 
         self.buffer
             .get_or_else(key, |key| async move {
@@ -358,14 +359,16 @@ impl<PdC: PdClient> Transaction<PdC> {
                     true,
                     lock_tracker,
                 );
-                let plan_builder = if replica_read.is_follower_read()
-                    || enable_load_based_replica_read
-                {
-                    plan_builder
-                        .retry_multi_region_with_replica_read(DEFAULT_REGION_BACKOFF, replica_read)
-                } else {
-                    plan_builder.retry_multi_region(DEFAULT_REGION_BACKOFF)
-                };
+                let plan_builder =
+                    if replica_read.is_follower_read() || enable_load_based_replica_read {
+                        plan_builder.retry_multi_region_with_replica_read_and_match_store_labels(
+                            DEFAULT_REGION_BACKOFF,
+                            replica_read,
+                            match_store_labels,
+                        )
+                    } else {
+                        plan_builder.retry_multi_region(DEFAULT_REGION_BACKOFF)
+                    };
                 let plan = plan_builder
                     .merge(CollectSingle)
                     .post_process_default()
@@ -499,6 +502,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
         let lock_tracker = self.read_lock_tracker.clone();
         let resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        let match_store_labels = self.options.match_store_labels.clone();
 
         self.buffer
             .batch_get_or_else(keys, move |keys| {
@@ -511,6 +515,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     }
                 }
                 let replica_read = snapshot_ctx.replica_read;
+                let match_store_labels = match_store_labels.clone();
 
                 async move {
                     let mut request = crate::transaction::requests::new_batch_get_request(
@@ -528,15 +533,17 @@ impl<PdC: PdClient> Transaction<PdC> {
                             false,
                             lock_tracker,
                         );
-                    let plan_builder =
-                        if replica_read.is_follower_read() || enable_load_based_replica_read {
-                            plan_builder.retry_multi_region_with_replica_read(
-                                retry_options.region_backoff,
-                                replica_read,
-                            )
-                        } else {
-                            plan_builder.retry_multi_region(retry_options.region_backoff)
-                        };
+                    let plan_builder = if replica_read.is_follower_read()
+                        || enable_load_based_replica_read
+                    {
+                        plan_builder.retry_multi_region_with_replica_read_and_match_store_labels(
+                            retry_options.region_backoff,
+                            replica_read,
+                            match_store_labels,
+                        )
+                    } else {
+                        plan_builder.retry_multi_region(retry_options.region_backoff)
+                    };
                     let plan = plan_builder.merge(Collect).plan();
                     plan.execute()
                         .await
@@ -1057,6 +1064,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let replica_read = snapshot_ctx.replica_read;
         let lock_tracker = self.read_lock_tracker.clone();
         let resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        let match_store_labels = self.options.match_store_labels.clone();
 
         self.buffer
             .scan_and_fetch(
@@ -1083,15 +1091,17 @@ impl<PdC: PdClient> Transaction<PdC> {
                             false,
                             lock_tracker,
                         );
-                    let plan_builder =
-                        if replica_read.is_follower_read() || enable_load_based_replica_read {
-                            plan_builder.retry_multi_region_with_replica_read(
-                                retry_options.region_backoff,
-                                replica_read,
-                            )
-                        } else {
-                            plan_builder.retry_multi_region(retry_options.region_backoff)
-                        };
+                    let plan_builder = if replica_read.is_follower_read()
+                        || enable_load_based_replica_read
+                    {
+                        plan_builder.retry_multi_region_with_replica_read_and_match_store_labels(
+                            retry_options.region_backoff,
+                            replica_read,
+                            match_store_labels,
+                        )
+                    } else {
+                        plan_builder.retry_multi_region(retry_options.region_backoff)
+                    };
                     let plan = plan_builder.merge(Collect).plan();
                     plan.execute()
                         .await

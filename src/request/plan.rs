@@ -45,6 +45,7 @@ use crate::Error;
 use crate::Key;
 use crate::ReplicaReadType;
 use crate::Result;
+use crate::StoreLabel;
 
 use super::keyspace::Keyspace;
 
@@ -146,6 +147,20 @@ impl<P: Plan + HasKvContext, PdC: PdClient> HasKvContext for CleanupLocks<P, PdC
     }
 }
 
+fn store_labels_match(store: &metapb::Store, labels: &[StoreLabel]) -> bool {
+    if labels.is_empty() {
+        return true;
+    }
+
+    labels.iter().all(|target| {
+        store
+            .labels
+            .iter()
+            .any(|label| label.key == target.key && label.value == target.value)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn select_replica_read_peer(
     region: &RegionWithLeader,
     replica_read: ReplicaReadType,
@@ -153,12 +168,114 @@ fn select_replica_read_peer(
     unavailable_store_ids: &[StoreId],
     busy_store_ids: &[StoreId],
     attempted_store_ids: &[StoreId],
+    labels_configured: bool,
+    label_matched_store_ids: &[StoreId],
 ) -> Option<metapb::Peer> {
     let leader_store_id = region.leader.as_ref().map(|p| p.store_id);
     let peers = &region.region.peers;
 
     fn is_store_available(unavailable_store_ids: &[StoreId], store_id: StoreId) -> bool {
         !unavailable_store_ids.contains(&store_id)
+    }
+
+    if labels_configured {
+        const FLAG_NOT_ATTEMPTED: i64 = 1 << 0;
+        const FLAG_NORMAL_PEER: i64 = 1 << 1;
+        const FLAG_PREFER_LEADER: i64 = 1 << 2;
+        const FLAG_LABEL_MATCHES: i64 = 1 << 3;
+        const FLAG_NOT_SLOW: i64 = 1 << 4;
+
+        let is_candidate = |peer: &metapb::Peer| -> bool {
+            if !is_store_available(unavailable_store_ids, peer.store_id) {
+                return false;
+            }
+            match replica_read {
+                ReplicaReadType::Follower => {
+                    Some(peer.store_id) != leader_store_id
+                        && peer.role != metapb::PeerRole::Learner as i32
+                }
+                ReplicaReadType::Learner => peer.role == metapb::PeerRole::Learner as i32,
+                ReplicaReadType::Mixed | ReplicaReadType::PreferLeader => true,
+                ReplicaReadType::Leader => false,
+            }
+        };
+
+        let mut candidates = peers
+            .iter()
+            .filter(|peer| is_candidate(peer))
+            .cloned()
+            .collect::<Vec<_>>();
+        if matches!(
+            replica_read,
+            ReplicaReadType::Mixed | ReplicaReadType::PreferLeader
+        ) {
+            if let Some(leader) = region.leader.clone() {
+                if is_store_available(unavailable_store_ids, leader.store_id)
+                    && !candidates
+                        .iter()
+                        .any(|peer| peer.store_id == leader.store_id)
+                {
+                    candidates.push(leader);
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let mut scores = Vec::with_capacity(candidates.len());
+        let mut max_score = i64::MIN;
+        for peer in candidates.iter() {
+            let is_leader = Some(peer.store_id) == leader_store_id;
+            let not_slow = !busy_store_ids.contains(&peer.store_id);
+            let label_matches = label_matched_store_ids.contains(&peer.store_id);
+            let not_attempted = !attempted_store_ids.contains(&peer.store_id);
+
+            let mut score = 0;
+            if not_slow {
+                score |= FLAG_NOT_SLOW;
+            }
+            if label_matches {
+                score |= FLAG_LABEL_MATCHES;
+            }
+            if is_leader {
+                match replica_read {
+                    ReplicaReadType::PreferLeader => {
+                        if not_slow {
+                            score |= FLAG_PREFER_LEADER;
+                        } else {
+                            score |= FLAG_NORMAL_PEER;
+                        }
+                    }
+                    ReplicaReadType::Mixed => {
+                        score |= FLAG_PREFER_LEADER;
+                    }
+                    _ => {}
+                }
+            } else {
+                score |= FLAG_NORMAL_PEER;
+            }
+            if not_attempted {
+                score |= FLAG_NOT_ATTEMPTED;
+            }
+
+            if score > max_score {
+                max_score = score;
+            }
+            scores.push(score);
+        }
+
+        let best_indices = scores
+            .iter()
+            .enumerate()
+            .filter(|(_, score)| **score == max_score)
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+        let start = (attempt as usize) % best_indices.len();
+        return best_indices
+            .get(start)
+            .and_then(|idx| candidates.get(*idx))
+            .cloned();
     }
 
     fn select_peer_with_attempt<F>(
@@ -465,6 +582,7 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     pub preserve_region_results: bool,
 
     pub(super) replica_read: Option<ReplicaReadType>,
+    pub(super) match_store_labels: Arc<Vec<StoreLabel>>,
 }
 
 impl<P: Plan + Shardable + HasKvContext, PdC: PdClient> RetryableMultiRegion<P, PdC>
@@ -480,6 +598,7 @@ where
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
         replica_read: Option<ReplicaReadState>,
+        match_store_labels: Arc<Vec<StoreLabel>>,
     ) -> Result<<Self as Plan>::Result> {
         if backoff.current_attempts() > 0 {
             if let Some(ctx) = current_plan.kv_context_mut() {
@@ -493,6 +612,7 @@ where
             let (shard, region) = shard?;
             let clone = current_plan.clone_then_apply_shard(shard);
             let replica_read = replica_read.clone();
+            let match_store_labels = match_store_labels.clone();
             let handle = tokio::spawn(Self::single_shard_handler(
                 pd_client.clone(),
                 clone,
@@ -501,6 +621,7 @@ where
                 permits.clone(),
                 preserve_region_results,
                 replica_read,
+                match_store_labels,
             ));
             handles.push(handle);
         }
@@ -525,6 +646,7 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[async_recursion]
     async fn single_shard_handler(
         pd_client: Arc<PdC>,
@@ -534,6 +656,7 @@ where
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
         replica_read: Option<ReplicaReadState>,
+        match_store_labels: Arc<Vec<StoreLabel>>,
     ) -> Result<<Self as Plan>::Result> {
         debug!("single_shard_handler");
         let mut replica_read = replica_read;
@@ -555,6 +678,28 @@ where
         if let Some(replica_read) = replica_read.as_ref() {
             let attempt = replica_read.attempt(current_attempts);
             let read_type = replica_read.read_type;
+            let labels_configured = !match_store_labels.is_empty();
+            let label_matched_store_ids = if labels_configured && read_type.is_follower_read() {
+                let mut matched_store_ids = Vec::new();
+                for peer in region.region.peers.iter() {
+                    match pd_client.store_meta_by_id(peer.store_id).await {
+                        Ok(store) => {
+                            if store_labels_match(&store, match_store_labels.as_slice()) {
+                                matched_store_ids.push(peer.store_id);
+                            }
+                        }
+                        Err(err) => {
+                            debug!(
+                                "store_meta_by_id failed for store {}: {:?}",
+                                peer.store_id, err
+                            );
+                        }
+                    }
+                }
+                matched_store_ids
+            } else {
+                Vec::new()
+            };
 
             let stale_read_enabled = replica_read.stale_read_enabled();
             if stale_read_enabled {
@@ -638,6 +783,8 @@ where
                     &unavailable_store_ids,
                     &busy_store_ids,
                     &attempted_store_ids,
+                    labels_configured,
+                    &label_matched_store_ids,
                 ) {
                     region.leader = Some(peer);
                 }
@@ -689,6 +836,7 @@ where
                     permits,
                     preserve_region_results,
                     replica_read,
+                    match_store_labels,
                     Error::LeaderNotFound { region },
                 )
                 .await;
@@ -734,6 +882,7 @@ where
                     permits,
                     preserve_region_results,
                     replica_read,
+                    match_store_labels,
                     e,
                 )
                 .await;
@@ -809,6 +958,7 @@ where
                         permits,
                         preserve_region_results,
                         replica_read,
+                        match_store_labels,
                     )
                     .await
                 }
@@ -829,6 +979,7 @@ where
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
         replica_read: Option<ReplicaReadState>,
+        match_store_labels: Arc<Vec<StoreLabel>>,
         e: Error,
     ) -> Result<<Self as Plan>::Result> {
         debug!("handle_other_error: {:?}", e);
@@ -863,6 +1014,7 @@ where
                     permits,
                     preserve_region_results,
                     replica_read,
+                    match_store_labels,
                 )
                 .await
             }
@@ -1020,6 +1172,7 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
             backoff: self.backoff.clone(),
             preserve_region_results: self.preserve_region_results,
             replica_read: self.replica_read,
+            match_store_labels: self.match_store_labels.clone(),
         }
     }
 }
@@ -1049,6 +1202,7 @@ where
             self.preserve_region_results,
             self.replica_read
                 .map(|read_type| ReplicaReadState::new(read_type, stale_read)),
+            self.match_store_labels.clone(),
         )
         .await
     }
@@ -1906,59 +2060,231 @@ mod test {
     #[test]
     fn test_select_replica_read_peer_mixed_skips_unreachable_store() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[51], &[], &[])
-            .expect("expected a reachable replica");
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::Mixed,
+            0,
+            &[51],
+            &[],
+            &[],
+            false,
+            &[],
+        )
+        .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 61);
     }
 
     #[test]
     fn test_select_replica_read_peer_mixed_includes_leader() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[], &[], &[])
-            .expect("expected a replica");
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::Mixed,
+            0,
+            &[],
+            &[],
+            &[],
+            false,
+            &[],
+        )
+        .expect("expected a replica");
         assert_eq!(peer.store_id, 51);
 
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 1, &[], &[], &[])
-            .expect("expected a replica");
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::Mixed,
+            1,
+            &[],
+            &[],
+            &[],
+            false,
+            &[],
+        )
+        .expect("expected a replica");
         assert_eq!(peer.store_id, 61);
 
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 2, &[], &[], &[])
-            .expect("expected a replica");
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::Mixed,
+            2,
+            &[],
+            &[],
+            &[],
+            false,
+            &[],
+        )
+        .expect("expected a replica");
         assert_eq!(peer.store_id, 41);
     }
 
     #[test]
     fn test_select_replica_read_peer_mixed_prefers_unattempted_replica() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 1, &[51], &[], &[61])
-            .expect("expected a replica");
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::Mixed,
+            1,
+            &[51],
+            &[],
+            &[61],
+            false,
+            &[],
+        )
+        .expect("expected a replica");
         assert_eq!(peer.store_id, 41);
     }
 
     #[test]
     fn test_select_replica_read_peer_prefer_leader_skips_unreachable_leader() {
         let region = MockPdClient::region1();
-        let peer =
-            select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[41], &[], &[])
-                .expect("expected a reachable replica");
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::PreferLeader,
+            0,
+            &[41],
+            &[],
+            &[],
+            false,
+            &[],
+        )
+        .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 51);
     }
 
     #[test]
     fn test_select_replica_read_peer_mixed_prefers_non_busy_replica() {
         let region = MockPdClient::region1();
-        let peer = select_replica_read_peer(&region, ReplicaReadType::Mixed, 0, &[], &[51], &[])
-            .expect("expected a replica");
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::Mixed,
+            0,
+            &[],
+            &[51],
+            &[],
+            false,
+            &[],
+        )
+        .expect("expected a replica");
         assert_eq!(peer.store_id, 61);
     }
 
     #[test]
     fn test_select_replica_read_peer_prefer_leader_avoids_busy_leader() {
         let region = MockPdClient::region1();
-        let peer =
-            select_replica_read_peer(&region, ReplicaReadType::PreferLeader, 0, &[], &[41], &[])
-                .expect("expected a reachable replica");
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::PreferLeader,
+            0,
+            &[],
+            &[41],
+            &[],
+            false,
+            &[],
+        )
+        .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 51);
+    }
+
+    #[tokio::test]
+    async fn test_replica_read_mixed_with_match_store_labels_prefers_matching_store() {
+        let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let seen_captured = seen.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push(peer.store_id);
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 41,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 51,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-west".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 61,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-west".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read_and_match_store_labels(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Mixed,
+                Arc::new(vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }]),
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![41],
+            "match-store-labels should override mixed replica-read rotation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_replica_read_mixed_without_match_store_labels_does_not_query_store_meta() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+        })));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+
+        let plan = crate::request::PlanBuilder::new(pd_client.clone(), Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Mixed,
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        assert_eq!(
+            pd_client.store_meta_by_id_call_count(),
+            0,
+            "default replica-read path should not consult PD store metadata"
+        );
     }
 
     #[tokio::test]
@@ -2181,6 +2507,7 @@ mod test {
             backoff: Backoff::no_backoff(),
             preserve_region_results: false,
             replica_read: None,
+            match_store_labels: Arc::new(Vec::new()),
         };
         assert!(plan.execute().await.is_err())
     }
