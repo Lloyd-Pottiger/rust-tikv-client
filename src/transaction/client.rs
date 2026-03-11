@@ -167,6 +167,12 @@ impl Client {
         self.pd.cluster_id()
     }
 
+    /// Returns a handle to the underlying PD RPC client.
+    #[must_use]
+    pub fn pd_client(&self) -> Arc<PdRpcClient> {
+        self.pd.clone()
+    }
+
     /// Creates a new optimistic [`Transaction`].
     ///
     /// Use the transaction to issue requests like [`get`](Transaction::get) or

@@ -97,6 +97,14 @@ impl SyncTransactionClient {
         self.client.cluster_id()
     }
 
+    /// Returns a handle to the underlying PD RPC client.
+    ///
+    /// This is a synchronous version of [`TransactionClient::pd_client`](crate::TransactionClient::pd_client).
+    #[must_use]
+    pub fn pd_client(&self) -> Arc<crate::pd::PdRpcClient> {
+        self.client.pd_client()
+    }
+
     /// Creates a new optimistic [`SyncTransaction`].
     ///
     /// Use the transaction to issue requests like [`get`](SyncTransaction::get) or

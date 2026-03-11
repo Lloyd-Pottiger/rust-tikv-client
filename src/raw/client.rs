@@ -218,6 +218,12 @@ impl Client<PdRpcClient> {
 }
 
 impl<PdC: PdClient> Client<PdC> {
+    /// Returns a handle to the underlying PD client.
+    #[must_use]
+    pub fn pd_client(&self) -> Arc<PdC> {
+        self.rpc.clone()
+    }
+
     /// Get the cluster-wide minimum `safe_ts` across all TiKV stores.
     ///
     /// This value is a best-effort signal used by stale reads: if it is non-zero, reads at
@@ -1067,5 +1073,18 @@ mod tests {
             ),]
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_pd_client_getter_returns_handle() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::default()));
+        let client = Client {
+            rpc: pd_client.clone(),
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        };
+        assert!(Arc::ptr_eq(&client.pd_client(), &pd_client));
     }
 }
