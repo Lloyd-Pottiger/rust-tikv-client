@@ -1,6 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
-    transaction::Mutation, BoundRange, Key, KvPair, Result, Timestamp, Transaction, Value,
+    transaction::Mutation, BoundRange, DiskFullOpt, Key, KvPair, Result, Timestamp, Transaction,
+    Value,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,6 +65,31 @@ impl SyncTransaction {
     /// Clear the configured commit-ts upper bound checker.
     pub fn clear_commit_ts_upper_bound_check(&mut self) {
         self.inner.clear_commit_ts_upper_bound_check();
+    }
+
+    /// Set whether current operation is allowed in each TiKV disk usage level.
+    pub fn set_disk_full_opt(&mut self, opt: DiskFullOpt) {
+        self.inner.set_disk_full_opt(opt);
+    }
+
+    /// Set the source of the transaction.
+    pub fn set_txn_source(&mut self, txn_source: u64) {
+        self.inner.set_txn_source(txn_source);
+    }
+
+    /// Enable forcing TiKV to always sync logs for transactional write requests.
+    pub fn enable_force_sync_log(&mut self) {
+        self.inner.enable_force_sync_log();
+    }
+
+    /// Set whether TiKV should sync logs for transactional write requests.
+    pub fn set_sync_log(&mut self, enabled: bool) {
+        self.inner.set_sync_log(enabled);
+    }
+
+    /// Set the server-side maximum execution duration for transactional write requests.
+    pub fn set_max_write_execution_duration(&mut self, duration: Duration) {
+        self.inner.set_max_write_execution_duration(duration);
     }
 
     /// Get the value associated with the given key.

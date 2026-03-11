@@ -476,6 +476,42 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.request_source = Some(source.into());
     }
 
+    /// Set whether current operation is allowed in each TiKV disk usage level.
+    ///
+    /// This maps to client-go `KVTxn.SetDiskFullOpt` and writes to `kvrpcpb::Context.disk_full_opt`.
+    pub fn set_disk_full_opt(&mut self, opt: DiskFullOpt) {
+        self.options.disk_full_opt = opt;
+    }
+
+    /// Set the source of the transaction.
+    ///
+    /// This maps to client-go `KVTxn.SetTxnSource` and writes to `kvrpcpb::Context.txn_source`.
+    pub fn set_txn_source(&mut self, txn_source: u64) {
+        self.options.txn_source = txn_source;
+    }
+
+    /// Enable forcing TiKV to always sync logs for transactional write requests.
+    ///
+    /// This maps to client-go `KVTxn.EnableForceSyncLog` and writes to `kvrpcpb::Context.sync_log`.
+    pub fn enable_force_sync_log(&mut self) {
+        self.options.sync_log = true;
+    }
+
+    /// Set whether TiKV should sync logs for transactional write requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.sync_log`.
+    pub fn set_sync_log(&mut self, enabled: bool) {
+        self.options.sync_log = enabled;
+    }
+
+    /// Set the server-side maximum execution duration for transactional write requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.max_execution_duration_ms`.
+    pub fn set_max_write_execution_duration(&mut self, duration: Duration) {
+        self.options.max_write_execution_duration_ms =
+            duration.as_millis().min(u128::from(u64::MAX)) as u64;
+    }
+
     /// Set the schema version used for schema validity checks during commit.
     ///
     /// The schema validity check is only performed when a schema lease checker is also configured
@@ -7438,6 +7474,94 @@ mod tests {
             *commit_resource_group_name.lock().unwrap(),
             resource_group_name
         );
+    }
+
+    #[tokio::test]
+    async fn test_transaction_write_context_setters_propagate_to_commit_requests() {
+        let prewrite_txn_source = Arc::new(AtomicU64::new(0));
+        let commit_txn_source = Arc::new(AtomicU64::new(0));
+        let prewrite_disk_full_opt = Arc::new(std::sync::atomic::AtomicI32::new(-1));
+        let commit_disk_full_opt = Arc::new(std::sync::atomic::AtomicI32::new(-1));
+        let prewrite_sync_log = Arc::new(AtomicBool::new(false));
+        let commit_sync_log = Arc::new(AtomicBool::new(false));
+        let prewrite_max_execution_duration_ms = Arc::new(AtomicU64::new(0));
+        let commit_max_execution_duration_ms = Arc::new(AtomicU64::new(0));
+
+        let prewrite_txn_source_cloned = prewrite_txn_source.clone();
+        let commit_txn_source_cloned = commit_txn_source.clone();
+        let prewrite_disk_full_opt_cloned = prewrite_disk_full_opt.clone();
+        let commit_disk_full_opt_cloned = commit_disk_full_opt.clone();
+        let prewrite_sync_log_cloned = prewrite_sync_log.clone();
+        let commit_sync_log_cloned = commit_sync_log.clone();
+        let prewrite_max_execution_duration_ms_cloned = prewrite_max_execution_duration_ms.clone();
+        let commit_max_execution_duration_ms_cloned = commit_max_execution_duration_ms.clone();
+
+        let start_version = 7;
+        let commit_version = 8;
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    prewrite_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
+                    prewrite_disk_full_opt_cloned.store(ctx.disk_full_opt, Ordering::SeqCst);
+                    prewrite_sync_log_cloned.store(ctx.sync_log, Ordering::SeqCst);
+                    prewrite_max_execution_duration_ms_cloned
+                        .store(ctx.max_execution_duration_ms, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    assert_eq!(req.start_version, start_version);
+                    assert_eq!(req.commit_version, commit_version);
+
+                    let ctx = req.context.as_ref().expect("context");
+                    commit_txn_source_cloned.store(ctx.txn_source, Ordering::SeqCst);
+                    commit_disk_full_opt_cloned.store(ctx.disk_full_opt, Ordering::SeqCst);
+                    commit_sync_log_cloned.store(ctx.sync_log, Ordering::SeqCst);
+                    commit_max_execution_duration_ms_cloned
+                        .store(ctx.max_execution_duration_ms, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            }))
+            .with_tso_sequence(commit_version),
+        );
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_txn_source(42);
+        txn.set_disk_full_opt(DiskFullOpt::AllowedOnAlmostFull);
+        txn.enable_force_sync_log();
+        txn.set_max_write_execution_duration(Duration::from_millis(987));
+
+        txn.put("key".to_owned(), "value".to_owned()).await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert_eq!(prewrite_txn_source.load(Ordering::SeqCst), 42);
+        assert_eq!(commit_txn_source.load(Ordering::SeqCst), 42);
+        assert_eq!(
+            prewrite_disk_full_opt.load(Ordering::SeqCst),
+            DiskFullOpt::AllowedOnAlmostFull as i32
+        );
+        assert_eq!(
+            commit_disk_full_opt.load(Ordering::SeqCst),
+            DiskFullOpt::AllowedOnAlmostFull as i32
+        );
+        assert!(prewrite_sync_log.load(Ordering::SeqCst));
+        assert!(commit_sync_log.load(Ordering::SeqCst));
+        assert_eq!(
+            prewrite_max_execution_duration_ms.load(Ordering::SeqCst),
+            987
+        );
+        assert_eq!(commit_max_execution_duration_ms.load(Ordering::SeqCst), 987);
     }
 
     #[tokio::test]
