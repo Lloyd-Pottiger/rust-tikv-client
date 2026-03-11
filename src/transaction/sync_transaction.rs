@@ -1,7 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
-    transaction::Mutation, BoundRange, CommandPriority, DiskFullOpt, Key, KvPair, Result,
-    SchemaLeaseChecker, Timestamp, Transaction, Value,
+    transaction::Mutation, AssertionLevel, BoundRange, CommandPriority, DiskFullOpt, Key, KvPair,
+    Result, SchemaLeaseChecker, Timestamp, Transaction, Value,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,6 +52,13 @@ impl SyncTransaction {
     /// This maps to client-go `KVTxn.SetCausalConsistency`.
     pub fn set_causal_consistency(&mut self, enabled: bool) {
         self.inner.set_causal_consistency(enabled);
+    }
+
+    /// Set how strict to enforce mutation assertions during prewrite/flush.
+    ///
+    /// This maps to client-go `KVTxn.SetAssertionLevel`.
+    pub fn set_assertion_level(&mut self, assertion_level: AssertionLevel) {
+        self.inner.set_assertion_level(assertion_level);
     }
 
     /// Set the minimum commit timestamp constraint for the transaction.

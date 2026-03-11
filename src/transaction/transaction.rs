@@ -74,6 +74,31 @@ pub trait SchemaLeaseChecker: Send + Sync {
     fn check_by_schema_ver(&self, txn_ts: Timestamp, start_schema_ver: i64) -> Result<()>;
 }
 
+/// How strict to enforce mutation assertions during prewrite/flush.
+///
+/// This maps to client-go `KVTxn.SetAssertionLevel`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum AssertionLevel {
+    /// No assertion.
+    #[default]
+    Off = 0,
+    /// Assertion is enabled, but not enforced when it might affect performance.
+    Fast = 1,
+    /// Assertion is enabled and enforced.
+    Strict = 2,
+}
+
+impl From<AssertionLevel> for kvrpcpb::AssertionLevel {
+    fn from(level: AssertionLevel) -> Self {
+        match level {
+            AssertionLevel::Off => kvrpcpb::AssertionLevel::Off,
+            AssertionLevel::Fast => kvrpcpb::AssertionLevel::Fast,
+            AssertionLevel::Strict => kvrpcpb::AssertionLevel::Strict,
+        }
+    }
+}
+
 /// An undo-able set of actions on the dataset.
 ///
 /// Create a transaction using a [`TransactionClient`](crate::TransactionClient), then run actions
@@ -582,6 +607,13 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// This maps to client-go `KVTxn.SetCausalConsistency`.
     pub fn set_causal_consistency(&mut self, enabled: bool) {
         self.options.causal_consistency = enabled;
+    }
+
+    /// Set how strict to enforce mutation assertions during prewrite/flush.
+    ///
+    /// This maps to client-go `KVTxn.SetAssertionLevel`.
+    pub fn set_assertion_level(&mut self, assertion_level: AssertionLevel) {
+        self.options.assertion_level = assertion_level;
     }
 
     /// Set the minimum commit timestamp constraint for the transaction.
@@ -1682,7 +1714,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.timestamp.version().saturating_add(1),
             generation,
             MAX_TTL,
-            kvrpcpb::AssertionLevel::Off,
+            self.options.assertion_level.into(),
         );
         self.options.apply_write_context(&mut flush_request.context);
         if let Some(ctx) = flush_request.context.as_mut() {
@@ -2883,6 +2915,10 @@ pub struct TransactionOptions {
     sync_log: bool,
     /// Server-side maximum execution duration for transactional write requests (`kvrpcpb::Context.max_execution_duration_ms`).
     max_write_execution_duration_ms: u64,
+    /// How strict to enforce mutation assertions during prewrite/flush requests.
+    ///
+    /// This maps to client-go `KVTxn.SetAssertionLevel`.
+    assertion_level: AssertionLevel,
     /// Try using 1pc rather than 2pc (default is to always use 2pc).
     try_one_pc: bool,
     /// Try to use async commit (default is not to).
@@ -3091,6 +3127,7 @@ impl TransactionOptions {
             disk_full_opt: DiskFullOpt::NotAllowedOnFull,
             sync_log: false,
             max_write_execution_duration_ms: 0,
+            assertion_level: AssertionLevel::Off,
             try_one_pc: false,
             async_commit: false,
             causal_consistency: false,
@@ -3125,6 +3162,7 @@ impl TransactionOptions {
             disk_full_opt: DiskFullOpt::NotAllowedOnFull,
             sync_log: false,
             max_write_execution_duration_ms: 0,
+            assertion_level: AssertionLevel::Off,
             try_one_pc: false,
             async_commit: false,
             causal_consistency: false,
@@ -3202,6 +3240,15 @@ impl TransactionOptions {
     #[must_use]
     pub fn causal_consistency(mut self, enabled: bool) -> TransactionOptions {
         self.causal_consistency = enabled;
+        self
+    }
+
+    /// Set how strict to enforce mutation assertions during prewrite/flush.
+    ///
+    /// This maps to client-go `KVTxn.SetAssertionLevel`.
+    #[must_use]
+    pub fn assertion_level(mut self, assertion_level: AssertionLevel) -> TransactionOptions {
+        self.assertion_level = assertion_level;
         self
     }
 
@@ -3734,7 +3781,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 self.start_version.version().saturating_add(1),
                 generation,
                 MAX_TTL,
-                kvrpcpb::AssertionLevel::Off,
+                self.options.assertion_level.into(),
             );
             self.options.apply_write_context(&mut flush_request.context);
             if let Some(ctx) = flush_request.context.as_mut() {
@@ -3854,6 +3901,7 @@ impl<PdC: PdClient> Committer<PdC> {
 
         request.use_async_commit = self.options.async_commit;
         request.try_one_pc = self.options.try_one_pc;
+        request.assertion_level = self.options.assertion_level as i32;
         request.secondaries = self
             .mutations
             .iter()
@@ -4381,6 +4429,8 @@ mod tests {
     use async_trait::async_trait;
     use fail::FailScenario;
 
+    use super::AssertionLevel;
+
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::pd::PdClient;
@@ -4449,6 +4499,7 @@ mod tests {
                 .drop_check(CheckLevel::None),
             Keyspace::Disable,
         );
+        txn.set_assertion_level(AssertionLevel::Strict);
 
         txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
 
@@ -4483,6 +4534,7 @@ mod tests {
             flushed[0].context.as_ref().unwrap().request_source,
             "pipelined_flush"
         );
+        assert_eq!(flushed[0].assertion_level, AssertionLevel::Strict as i32);
     }
 
     #[tokio::test]
@@ -8409,6 +8461,43 @@ mod tests {
         let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
         assert_eq!(commit_ts.version(), one_pc_commit_version);
         assert_eq!(pd_client.get_timestamp_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_assertion_level_propagates_to_prewrite_request() {
+        let start_version = 7;
+        let commit_version = 8;
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.assertion_level, AssertionLevel::Strict as i32);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, commit_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .assertion_level(AssertionLevel::Strict)
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
     }
 
     #[tokio::test]
