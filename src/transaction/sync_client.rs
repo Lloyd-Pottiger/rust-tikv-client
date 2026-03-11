@@ -163,6 +163,19 @@ impl SyncTransactionClient {
         safe_block_on(&self.runtime, self.client.current_timestamp())
     }
 
+    /// Retrieve the current [`Timestamp`] for the given transaction scope.
+    ///
+    /// This is a synchronous version of [`TransactionClient::current_timestamp_with_txn_scope`](crate::TransactionClient::current_timestamp_with_txn_scope).
+    pub fn current_timestamp_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+    ) -> Result<Timestamp> {
+        safe_block_on(
+            &self.runtime,
+            self.client.current_timestamp_with_txn_scope(txn_scope),
+        )
+    }
+
     /// Get the cluster-wide minimum `safe_ts` across all TiKV stores.
     ///
     /// This is a synchronous version of [`TransactionClient::min_safe_ts`](crate::TransactionClient::min_safe_ts).

@@ -39,7 +39,12 @@ const MAX_BATCH_SIZE: usize = 64;
 /// TODO: This value should be adjustable.
 const MAX_PENDING_COUNT: usize = 1 << 16;
 
-type TimestampRequest = oneshot::Sender<Timestamp>;
+type TimestampResponse = oneshot::Sender<Timestamp>;
+
+struct TimestampRequest {
+    dc_location: String,
+    response: TimestampResponse,
+}
 
 /// The timestamp oracle (TSO) which provides monotonically increasing timestamps.
 #[derive(Clone)]
@@ -64,13 +69,24 @@ impl TimestampOracle {
     }
 
     pub(crate) async fn get_timestamp(self) -> Result<Timestamp> {
-        debug!("getting current timestamp");
-        let (request, response) = oneshot::channel();
+        self.get_timestamp_with_dc_location(String::new()).await
+    }
+
+    pub(crate) async fn get_timestamp_with_dc_location(
+        self,
+        dc_location: String,
+    ) -> Result<Timestamp> {
+        debug!("getting current timestamp, dc_location={}", dc_location);
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = TimestampRequest {
+            dc_location,
+            response: response_tx,
+        };
         self.request_tx
             .send(request)
             .await
             .map_err(|_| internal_err!("TimestampRequest channel is closed"))?;
-        Ok(response.await?)
+        Ok(response_rx.await?)
     }
 }
 
@@ -90,6 +106,7 @@ async fn run_tso(
     let request_stream = TsoRequestStream {
         cluster_id,
         request_rx,
+        buffered_requests: VecDeque::new(),
         pending_requests: pending_requests.clone(),
         self_waker: sending_future_waker.clone(),
     };
@@ -113,14 +130,15 @@ async fn run_tso(
 
 struct RequestGroup {
     tso_request: TsoRequest,
-    requests: Vec<TimestampRequest>,
+    requests: Vec<TimestampResponse>,
 }
 
 #[pin_project]
 struct TsoRequestStream {
     cluster_id: u64,
     #[pin]
-    request_rx: mpsc::Receiver<oneshot::Sender<Timestamp>>,
+    request_rx: mpsc::Receiver<TimestampRequest>,
+    buffered_requests: VecDeque<TimestampRequest>,
     pending_requests: Arc<Mutex<VecDeque<RequestGroup>>>,
     self_waker: Arc<AtomicWaker>,
 }
@@ -140,26 +158,55 @@ impl Stream for TsoRequestStream {
             this.self_waker.register(cx.waker());
             return Poll::Pending;
         };
+        let mut dc_location: Option<String> = None;
         let mut requests = Vec::new();
 
         while requests.len() < MAX_BATCH_SIZE && pending_requests.len() < MAX_PENDING_COUNT {
-            match this.request_rx.poll_recv(cx) {
-                Poll::Ready(Some(sender)) => {
-                    requests.push(sender);
+            let next_request = if let Some(req) = this.buffered_requests.pop_front() {
+                Some(req)
+            } else {
+                match this.request_rx.poll_recv(cx) {
+                    Poll::Ready(Some(req)) => Some(req),
+                    Poll::Ready(None) if requests.is_empty() => return Poll::Ready(None),
+                    Poll::Ready(None) => break,
+                    Poll::Pending if requests.is_empty() => {
+                        // Set the waker to the context, then the stream can be waked up after the pending queue
+                        // is no longer full.
+                        this.self_waker.register(cx.waker());
+                        return Poll::Pending;
+                    }
+                    Poll::Pending => break,
                 }
-                Poll::Ready(None) if requests.is_empty() => return Poll::Ready(None),
-                _ => break,
+            };
+
+            let Some(req) = next_request else {
+                break;
+            };
+
+            match dc_location.as_deref() {
+                None => {
+                    dc_location = Some(req.dc_location);
+                    requests.push(req.response);
+                }
+                Some(current) if current == req.dc_location.as_str() => {
+                    requests.push(req.response);
+                }
+                Some(_) => {
+                    // Preserve request order across txn scopes.
+                    this.buffered_requests.push_front(req);
+                    break;
+                }
             }
         }
 
-        if !requests.is_empty() {
+        if let Some(dc_location) = dc_location {
             let req = TsoRequest {
                 header: Some(RequestHeader {
                     cluster_id: *this.cluster_id,
                     sender_id: 0,
                 }),
                 count: requests.len() as u32,
-                dc_location: String::new(),
+                dc_location,
             };
 
             let request_group = RequestGroup {
@@ -215,4 +262,69 @@ fn allocate_timestamps(
         return Err(internal_err!("PD gives more TsoResponse than expected"));
     };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::stream::StreamExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_tso_request_stream_batches_requests_by_dc_location() {
+        let (request_tx, request_rx) = mpsc::channel(MAX_BATCH_SIZE);
+        let pending_requests = Arc::new(Mutex::new(VecDeque::new()));
+        let self_waker = Arc::new(AtomicWaker::new());
+
+        let stream = TsoRequestStream {
+            cluster_id: 42,
+            request_rx,
+            buffered_requests: VecDeque::new(),
+            pending_requests: pending_requests.clone(),
+            self_waker,
+        };
+        futures::pin_mut!(stream);
+
+        let (r1, _recv1) = oneshot::channel();
+        let (r2, _recv2) = oneshot::channel();
+        let (r3, _recv3) = oneshot::channel();
+
+        request_tx
+            .send(TimestampRequest {
+                dc_location: "dc1".to_owned(),
+                response: r1,
+            })
+            .await
+            .unwrap();
+        request_tx
+            .send(TimestampRequest {
+                dc_location: "dc1".to_owned(),
+                response: r2,
+            })
+            .await
+            .unwrap();
+        request_tx
+            .send(TimestampRequest {
+                dc_location: "dc2".to_owned(),
+                response: r3,
+            })
+            .await
+            .unwrap();
+
+        let req1 = stream.next().await.expect("tso request 1");
+        assert_eq!(req1.header.as_ref().expect("header").cluster_id, 42);
+        assert_eq!(req1.dc_location, "dc1");
+        assert_eq!(req1.count, 2);
+
+        let req2 = stream.next().await.expect("tso request 2");
+        assert_eq!(req2.dc_location, "dc2");
+        assert_eq!(req2.count, 1);
+
+        let pending = pending_requests.lock().await;
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].tso_request.dc_location, "dc1");
+        assert_eq!(pending[0].requests.len(), 2);
+        assert_eq!(pending[1].tso_request.dc_location, "dc2");
+        assert_eq!(pending[1].requests.len(), 1);
+    }
 }

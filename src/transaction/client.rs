@@ -290,6 +290,27 @@ impl Client {
         self.pd.clone().get_timestamp().await
     }
 
+    /// Retrieve the current [`Timestamp`] for the given transaction scope.
+    ///
+    /// When `txn_scope` is `"global"` (or empty), this uses the global TSO allocator
+    /// (`dc_location=""`). Otherwise `txn_scope` is passed through as PD `dc_location` to
+    /// request a local TSO, matching client-go `CurrentTimestamp(txnScope)` behavior.
+    pub async fn current_timestamp_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+    ) -> Result<Timestamp> {
+        let txn_scope = txn_scope.as_ref();
+        let dc_location = if txn_scope.is_empty() || txn_scope == "global" {
+            String::new()
+        } else {
+            txn_scope.to_owned()
+        };
+        self.pd
+            .clone()
+            .get_timestamp_with_dc_location(dc_location)
+            .await
+    }
+
     /// Get the cluster-wide minimum `safe_ts` across all TiKV stores.
     ///
     /// This value is a best-effort signal used by stale reads: if it is non-zero, reads at

@@ -499,6 +499,18 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
     }
 }
 
+impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC> {
+    pub async fn get_timestamp_with_dc_location(
+        self: Arc<Self>,
+        dc_location: impl Into<String>,
+    ) -> Result<Timestamp> {
+        self.pd
+            .clone()
+            .get_timestamp_with_dc_location(dc_location.into())
+            .await
+    }
+}
+
 fn make_key_range(start_key: Vec<u8>, end_key: Vec<u8>) -> kvrpcpb::KeyRange {
     let mut key_range = kvrpcpb::KeyRange::default();
     key_range.start_key = start_key;

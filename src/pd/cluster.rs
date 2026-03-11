@@ -89,6 +89,13 @@ impl Cluster {
         self.tso.clone().get_timestamp().await
     }
 
+    pub async fn get_timestamp_with_dc_location(&self, dc_location: String) -> Result<Timestamp> {
+        self.tso
+            .clone()
+            .get_timestamp_with_dc_location(dc_location)
+            .await
+    }
+
     pub async fn update_safepoint(
         &mut self,
         safepoint: u64,
