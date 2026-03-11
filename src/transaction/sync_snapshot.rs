@@ -25,6 +25,11 @@ impl SyncSnapshot {
         safe_block_on(&self.runtime, self.inner.get(key))
     }
 
+    /// Get the value associated with the given key and its commit timestamp.
+    pub fn get_with_commit_ts(&mut self, key: impl Into<Key>) -> Result<Option<(Value, u64)>> {
+        safe_block_on(&self.runtime, self.inner.get_with_commit_ts(key))
+    }
+
     /// Check whether the key exists.
     pub fn key_exists(&mut self, key: impl Into<Key>) -> Result<bool> {
         safe_block_on(&self.runtime, self.inner.key_exists(key))

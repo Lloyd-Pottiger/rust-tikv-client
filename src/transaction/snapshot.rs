@@ -169,6 +169,17 @@ impl Snapshot {
         self.transaction.get(key).await
     }
 
+    /// Get the value associated with the given key and its commit timestamp.
+    ///
+    /// `commit_ts == 0` means the commit timestamp is unknown.
+    pub async fn get_with_commit_ts(
+        &mut self,
+        key: impl Into<Key>,
+    ) -> Result<Option<(Value, u64)>> {
+        trace!("invoking get_with_commit_ts request on snapshot");
+        self.transaction.get_with_commit_ts(key).await
+    }
+
     /// Check whether the key exists.
     pub async fn key_exists(&mut self, key: impl Into<Key>) -> Result<bool> {
         debug!("invoking key_exists request on snapshot");
