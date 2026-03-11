@@ -296,6 +296,7 @@ impl<PdC: PdClient> Client<PdC> {
     ///
     /// This does not contact PD to fetch a timestamp. The provided `timestamp` is used as the
     /// transaction's start timestamp (`start_ts`).
+    #[must_use]
     pub fn begin_with_start_timestamp(
         &self,
         timestamp: Timestamp,
