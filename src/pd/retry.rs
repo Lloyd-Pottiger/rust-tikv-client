@@ -67,6 +67,7 @@ pub struct RetryClient<Cl = Cluster> {
     cluster: RwLock<(Cl, Instant)>,
     connection: Connection,
     timeout: Duration,
+    tso_max_pending_count: usize,
 }
 
 impl<Cl> RetryClient<Cl> {
@@ -89,6 +90,7 @@ impl<Cl> RetryClient<Cl> {
             cluster: RwLock::new((cluster, Instant::now())),
             connection,
             timeout,
+            tso_max_pending_count: crate::config::DEFAULT_TSO_MAX_PENDING_COUNT,
         }
     }
 }
@@ -150,9 +152,12 @@ impl RetryClient<Cluster> {
         endpoints: &[String],
         security_mgr: Arc<SecurityManager>,
         timeout: Duration,
+        tso_max_pending_count: usize,
     ) -> Result<RetryClient> {
         let connection = Connection::new(security_mgr);
-        let cluster = connection.connect_cluster(endpoints, timeout).await?;
+        let cluster = connection
+            .connect_cluster(endpoints, timeout, tso_max_pending_count)
+            .await?;
         let cluster_id = cluster.cluster_id();
         let cluster = RwLock::new((cluster, Instant::now()));
         Ok(RetryClient {
@@ -160,6 +165,7 @@ impl RetryClient<Cluster> {
             cluster,
             connection,
             timeout,
+            tso_max_pending_count,
         })
     }
 }
@@ -290,7 +296,9 @@ impl Reconnect for RetryClient<Cluster> {
         // a concurrent reconnect is just succeed when this thread trying to get write lock
         let should_connect = reconnect_begin > *last_connected + Duration::from_secs(interval_sec);
         if should_connect {
-            self.connection.reconnect(cluster, self.timeout).await?;
+            self.connection
+                .reconnect(cluster, self.timeout, self.tso_max_pending_count)
+                .await?;
             *last_connected = Instant::now();
         }
         Ok(())

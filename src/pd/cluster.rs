@@ -135,6 +135,7 @@ impl Connection {
         &self,
         endpoints: &[String],
         timeout: Duration,
+        tso_max_pending_count: usize,
     ) -> Result<Cluster> {
         let members = self.validate_endpoints(endpoints, timeout).await?;
         let (client, keyspace_client, members) = self.try_connect_leader(&members, timeout).await?;
@@ -143,7 +144,7 @@ impl Connection {
             .as_ref()
             .ok_or_else(|| internal_err!("PD get_members response missing header"))?
             .cluster_id;
-        let tso = TimestampOracle::new(id, &client)?;
+        let tso = TimestampOracle::new(id, &client, tso_max_pending_count)?;
         let cluster = Cluster {
             id,
             client,
@@ -155,12 +156,17 @@ impl Connection {
     }
 
     // Re-establish connection with PD leader in asynchronous fashion.
-    pub async fn reconnect(&self, cluster: &mut Cluster, timeout: Duration) -> Result<()> {
+    pub async fn reconnect(
+        &self,
+        cluster: &mut Cluster,
+        timeout: Duration,
+        tso_max_pending_count: usize,
+    ) -> Result<()> {
         warn!("updating pd client");
         let start = Instant::now();
         let (client, keyspace_client, members) =
             self.try_connect_leader(&cluster.members, timeout).await?;
-        let tso = TimestampOracle::new(cluster.id, &client)?;
+        let tso = TimestampOracle::new(cluster.id, &client, tso_max_pending_count)?;
         *cluster = Cluster {
             id: cluster.id,
             client,

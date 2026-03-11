@@ -24,12 +24,18 @@ pub struct Config {
     pub cert_path: Option<PathBuf>,
     pub key_path: Option<PathBuf>,
     pub timeout: Duration,
+    /// The maximum number of pending batched TSO requests buffered in the timestamp oracle.
+    ///
+    /// When exhausted, new timestamp requests will apply backpressure until pending requests are
+    /// drained.
+    pub tso_max_pending_count: usize,
     pub grpc_max_decoding_message_size: usize,
     pub keyspace: Option<String>,
     pub resolve_lock_lite_threshold: u64,
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
 pub(crate) const DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
 
@@ -40,6 +46,7 @@ impl Default for Config {
             cert_path: None,
             key_path: None,
             timeout: DEFAULT_REQUEST_TIMEOUT,
+            tso_max_pending_count: DEFAULT_TSO_MAX_PENDING_COUNT,
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
             keyspace: None,
             resolve_lock_lite_threshold: DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD,
@@ -94,6 +101,15 @@ impl Config {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the maximum number of pending batched TSO requests buffered in the timestamp oracle.
+    ///
+    /// Values less than 1 are treated as 1.
+    #[must_use]
+    pub fn with_tso_max_pending_count(mut self, max_pending_count: usize) -> Self {
+        self.tso_max_pending_count = max_pending_count.max(1);
         self
     }
 

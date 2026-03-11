@@ -36,9 +36,6 @@ use crate::Result;
 /// It is an empirical value.
 const MAX_BATCH_SIZE: usize = 64;
 
-/// TODO: This value should be adjustable.
-const MAX_PENDING_COUNT: usize = 1 << 16;
-
 type TimestampResponse = oneshot::Sender<Timestamp>;
 
 struct TimestampRequest {
@@ -58,12 +55,22 @@ pub(crate) struct TimestampOracle {
 }
 
 impl TimestampOracle {
-    pub(crate) fn new(cluster_id: u64, pd_client: &PdClient<Channel>) -> Result<TimestampOracle> {
+    pub(crate) fn new(
+        cluster_id: u64,
+        pd_client: &PdClient<Channel>,
+        max_pending_count: usize,
+    ) -> Result<TimestampOracle> {
         let pd_client = pd_client.clone();
         let (request_tx, request_rx) = mpsc::channel(MAX_BATCH_SIZE);
+        let max_pending_count = max_pending_count.max(1);
 
         // Start a background thread to handle TSO requests and responses
-        tokio::spawn(run_tso(cluster_id, pd_client, request_rx));
+        tokio::spawn(run_tso(
+            cluster_id,
+            pd_client,
+            request_rx,
+            max_pending_count,
+        ));
 
         Ok(TimestampOracle { request_tx })
     }
@@ -94,9 +101,11 @@ async fn run_tso(
     cluster_id: u64,
     mut pd_client: PdClient<Channel>,
     request_rx: mpsc::Receiver<TimestampRequest>,
+    max_pending_count: usize,
 ) -> Result<()> {
     // The `TimestampRequest`s which are waiting for the responses from the PD server
-    let pending_requests = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_PENDING_COUNT)));
+    let max_pending_count = max_pending_count.max(1);
+    let pending_requests = Arc::new(Mutex::new(VecDeque::with_capacity(max_pending_count)));
 
     // When there are too many pending requests, the `send_request` future will refuse to fetch
     // more requests from the bounded channel. This waker is used to wake up the sending future
@@ -109,6 +118,7 @@ async fn run_tso(
         buffered_requests: VecDeque::new(),
         pending_requests: pending_requests.clone(),
         self_waker: sending_future_waker.clone(),
+        max_pending_count,
     };
 
     // let send_requests = rpc_sender.send_all(&mut request_stream);
@@ -141,6 +151,7 @@ struct TsoRequestStream {
     buffered_requests: VecDeque<TimestampRequest>,
     pending_requests: Arc<Mutex<VecDeque<RequestGroup>>>,
     self_waker: Arc<AtomicWaker>,
+    max_pending_count: usize,
 }
 
 impl Stream for TsoRequestStream {
@@ -161,7 +172,7 @@ impl Stream for TsoRequestStream {
         let mut dc_location: Option<String> = None;
         let mut requests = Vec::new();
 
-        while requests.len() < MAX_BATCH_SIZE && pending_requests.len() < MAX_PENDING_COUNT {
+        while requests.len() < MAX_BATCH_SIZE && pending_requests.len() < *this.max_pending_count {
             let next_request = if let Some(req) = this.buffered_requests.pop_front() {
                 Some(req)
             } else {
@@ -302,6 +313,7 @@ mod tests {
             buffered_requests: VecDeque::new(),
             pending_requests: pending_requests.clone(),
             self_waker,
+            max_pending_count: 16,
         };
         futures::pin_mut!(stream);
 
