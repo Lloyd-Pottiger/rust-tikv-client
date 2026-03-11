@@ -1,6 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::iter;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU8;
@@ -461,9 +461,6 @@ impl<PdC: PdClient> Transaction<PdC> {
     pub async fn get(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         trace!("invoking transactional get request");
         self.check_allow_operation().await?;
-        if let Some(state) = self.pipelined.as_mut() {
-            state.flush_wait().await?;
-        }
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
@@ -492,6 +489,10 @@ impl<PdC: PdClient> Transaction<PdC> {
             .pipelined
             .as_ref()
             .map(|state| state.flushed_deletes.clone());
+        let pipelined_flushing_puts = self
+            .pipelined
+            .as_ref()
+            .and_then(|state| state.flushing_puts.clone());
         let lock_resolver_rpc_context = self
             .options
             .lock_resolver_rpc_context(self.resource_group_tagger.clone());
@@ -504,6 +505,11 @@ impl<PdC: PdClient> Transaction<PdC> {
                         .is_some_and(|deleted| deleted.lock().unwrap().contains(&key))
                     {
                         return Ok(None);
+                    }
+                    if let Some(puts) = pipelined_flushing_puts.as_ref() {
+                        if let Some(value) = puts.get(&key) {
+                            return Ok(Some(value.clone()));
+                        }
                     }
 
                     let mut request =
@@ -701,9 +707,6 @@ impl<PdC: PdClient> Transaction<PdC> {
     ) -> Result<impl Iterator<Item = KvPair>> {
         debug!("invoking transactional batch_get request");
         self.check_allow_operation().await?;
-        if let Some(state) = self.pipelined.as_mut() {
-            state.flush_wait().await?;
-        }
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let keyspace = self.keyspace;
@@ -728,6 +731,10 @@ impl<PdC: PdClient> Transaction<PdC> {
             .pipelined
             .as_ref()
             .map(|state| state.flushed_deletes.clone());
+        let pipelined_flushing_puts = self
+            .pipelined
+            .as_ref()
+            .and_then(|state| state.flushing_puts.clone());
         let lock_resolver_rpc_context = self
             .options
             .lock_resolver_rpc_context(self.resource_group_tagger.clone());
@@ -748,6 +755,18 @@ impl<PdC: PdClient> Transaction<PdC> {
 
                 async move {
                     let mut keys = keys;
+                    let mut buffer_pairs = Vec::new();
+                    if let Some(puts) = pipelined_flushing_puts.as_ref() {
+                        let mut remaining = Vec::new();
+                        for key in keys {
+                            if let Some(value) = puts.get(&key) {
+                                buffer_pairs.push(KvPair(key, value.clone()));
+                            } else {
+                                remaining.push(key);
+                            }
+                        }
+                        keys = remaining;
+                    }
 
                     if pipelined_has_flushed {
                         if let Some(deleted) = pipelined_flushed_deletes.as_ref() {
@@ -755,7 +774,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                             keys.retain(|key| !deleted.contains(key));
                         }
                         if keys.is_empty() {
-                            return Ok(Vec::new());
+                            return Ok(buffer_pairs);
                         }
 
                         let mut buffer_request =
@@ -800,8 +819,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                             plan_builder.retry_multi_region(retry_options.region_backoff.clone())
                         };
                         let plan = plan_builder.merge(Collect).plan();
-                        let mut buffer_pairs: Vec<KvPair> =
+                        let mut remote_pairs: Vec<KvPair> =
                             plan.execute().await?.into_iter().map(Into::into).collect();
+                        buffer_pairs.append(&mut remote_pairs);
 
                         let buffer_keys = buffer_pairs
                             .iter()
@@ -1275,6 +1295,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 .expect("pipelined state must exist when pipelined options are set");
             let primary_key = state.primary_key_or_init(&mutations)?;
             state.record_flushed_mutations(&mutations);
+            state.record_flushing_puts(&mutations);
             let generation = state.next_generation();
             let flush_ewma = state.flush_duration_ewma.clone();
             (primary_key, generation, flush_ewma)
@@ -2251,6 +2272,7 @@ struct PipelinedState {
     primary_key: Option<Key>,
     generation: u64,
     flushing: Option<JoinHandle<Result<()>>>,
+    flushing_puts: Option<Arc<HashMap<Key, Value>>>,
     flushed_deletes: Arc<Mutex<HashSet<Key>>>,
     flushed_range_start: Option<Key>,
     flushed_range_end: Option<Key>,
@@ -2263,6 +2285,7 @@ impl PipelinedState {
             primary_key: None,
             generation: 0,
             flushing: None,
+            flushing_puts: None,
             flushed_deletes: Arc::new(Mutex::new(HashSet::new())),
             flushed_range_start: None,
             flushed_range_end: None,
@@ -2325,6 +2348,23 @@ impl PipelinedState {
         self.generation
     }
 
+    fn record_flushing_puts(&mut self, mutations: &[kvrpcpb::Mutation]) {
+        let puts = mutations
+            .iter()
+            .filter_map(|m| match m.op {
+                op if op == kvrpcpb::Op::Put as i32 || op == kvrpcpb::Op::Insert as i32 => {
+                    Some((Key::from(m.key.clone()), m.value.clone()))
+                }
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        self.flushing_puts = if puts.is_empty() {
+            None
+        } else {
+            Some(Arc::new(puts))
+        };
+    }
+
     fn record_flushed_mutations(&mut self, mutations: &[kvrpcpb::Mutation]) {
         let mut flushed_deletes = self.flushed_deletes.lock().unwrap();
         let mut range_start: Option<Key> = None;
@@ -2376,12 +2416,14 @@ impl PipelinedState {
         let Some(handle) = self.flushing.take() else {
             return Ok(());
         };
-        match handle.await {
+        let result = match handle.await {
             Ok(result) => result,
             Err(err) => Err(Error::InternalError {
                 message: format!("pipelined flush task failed: {err}"),
             }),
-        }?;
+        };
+        self.flushing_puts = None;
+        result?;
         Ok(())
     }
 }
@@ -2483,9 +2525,10 @@ pub struct TransactionOptions {
 /// This maps to client-go `TxnOptions.PipelinedTxn`.
 ///
 /// When enabled, buffered mutations can be flushed to TiKV during transaction execution via
-/// [`Transaction::flush`] (asynchronous) and [`Transaction::flush_wait`]. Reads after a flush use
-/// `BufferBatchGet` to read the transaction's flushed locks (client-go `BatchGetBufferTier`) and
-/// fall back to normal snapshot reads for missing keys.
+/// [`Transaction::flush`] (asynchronous) and [`Transaction::flush_wait`]. Reads (`get`/`batch_get`)
+/// remain usable while a flush is in-flight: they first consult the in-memory flushing buffer,
+/// then use `BufferBatchGet` to read the transaction's flushed locks (client-go
+/// `BatchGetBufferTier`), and fall back to normal snapshot reads for missing keys.
 ///
 /// Range scans (`scan*`) are not supported for pipelined transactions (client-go parity:
 /// `PipelinedMemDB` does not support iterators).
@@ -4066,6 +4109,103 @@ mod tests {
 
         assert_eq!(buffer_batch_get_calls.load(Ordering::SeqCst), 1);
         assert_eq!(snapshot_batch_get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_get_does_not_block_on_in_flight_flush() {
+        let flush_calls = Arc::new(AtomicUsize::new(0));
+        let flush_calls_cloned = flush_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined_txn(PipelinedTxnOptions::new(1, 1, 0.5).unwrap())
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        let ewma = txn
+            .pipelined
+            .as_ref()
+            .expect("pipelined state must exist")
+            .flush_duration_ewma
+            .clone();
+        ewma.lock().unwrap().observe(200.0);
+
+        assert!(txn.flush(true).await.unwrap());
+        let value = tokio::time::timeout(Duration::from_millis(100), txn.get(vec![1u8]))
+            .await
+            .expect("get timed out while flush is in-flight")
+            .unwrap();
+        assert_eq!(value, Some(b"v1".to_vec()));
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 0);
+
+        txn.flush_wait().await.unwrap();
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_batch_get_does_not_block_on_in_flight_flush() {
+        let flush_calls = Arc::new(AtomicUsize::new(0));
+        let flush_calls_cloned = flush_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined_txn(PipelinedTxnOptions::new(1, 1, 0.5).unwrap())
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        let ewma = txn
+            .pipelined
+            .as_ref()
+            .expect("pipelined state must exist")
+            .flush_duration_ewma
+            .clone();
+        ewma.lock().unwrap().observe(200.0);
+
+        assert!(txn.flush(true).await.unwrap());
+        let pairs = tokio::time::timeout(Duration::from_millis(100), async {
+            txn.batch_get(vec![vec![1u8]])
+                .await
+                .unwrap()
+                .map(|pair| (pair.0, pair.1))
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .await
+        .expect("batch_get timed out while flush is in-flight");
+        assert_eq!(pairs.get(&Key::from(vec![1u8])), Some(&b"v1".to_vec()));
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 0);
+
+        txn.flush_wait().await.unwrap();
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
