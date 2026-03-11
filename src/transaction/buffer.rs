@@ -2,7 +2,6 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::future::Future;
 
 use crate::proto::kvrpcpb;
@@ -144,7 +143,7 @@ impl Buffer {
             .await?
             .into_iter()
             .map(|pair| pair.into())
-            .collect::<HashMap<Key, Value>>();
+            .collect::<BTreeMap<Key, Value>>();
 
         // override using local data
         for (k, m) in mutation_range {
@@ -166,19 +165,18 @@ impl Buffer {
             }
         }
 
-        let mut res = results
-            .into_iter()
-            .map(|(k, v)| KvPair::new(k, v))
-            .collect::<Vec<_>>();
-
-        // TODO: use `BTreeMap` instead of `HashMap` to avoid sorting.
+        let mut res = Vec::new();
         if reverse {
-            res.sort_unstable_by(|a, b| b.key().cmp(a.key()));
+            for (k, v) in results.into_iter().rev().take(limit as usize) {
+                res.push(KvPair::new(k, v));
+            }
         } else {
-            res.sort_unstable_by(|a, b| a.key().cmp(b.key()));
+            for (k, v) in results.into_iter().take(limit as usize) {
+                res.push(KvPair::new(k, v));
+            }
         }
 
-        Ok(res.into_iter().take(limit as usize))
+        Ok(res.into_iter())
     }
 
     /// Lock the given key if necessary.
@@ -525,6 +523,55 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(res.is_empty());
+    }
+
+    #[test]
+    fn scan_and_fetch_returns_ordered_results() {
+        let mut buffer = Buffer::new(false);
+        buffer.delete(vec![1].into());
+        buffer.put(vec![2].into(), b"local-2".to_vec());
+        buffer.put(vec![4].into(), b"local-4".to_vec());
+
+        let forward_remote = vec![
+            KvPair::new(vec![3], b"remote-3".to_vec()),
+            KvPair::new(vec![1], b"remote-1".to_vec()),
+            KvPair::new(vec![2], b"remote-2".to_vec()),
+        ];
+        let forward = block_on(
+            buffer.scan_and_fetch((..).into(), 10, true, false, move |_, _| {
+                ready(Ok(forward_remote))
+            }),
+        )
+        .unwrap()
+        .collect::<Vec<_>>();
+        assert_eq!(
+            forward,
+            vec![
+                KvPair::new(vec![2], b"local-2".to_vec()),
+                KvPair::new(vec![3], b"remote-3".to_vec()),
+                KvPair::new(vec![4], b"local-4".to_vec()),
+            ]
+        );
+
+        let reverse_remote = vec![
+            KvPair::new(vec![1], b"remote-1".to_vec()),
+            KvPair::new(vec![2], b"remote-2".to_vec()),
+            KvPair::new(vec![3], b"remote-3".to_vec()),
+        ];
+        let reverse = block_on(
+            buffer.scan_and_fetch((..).into(), 2, true, true, move |_, _| {
+                ready(Ok(reverse_remote))
+            }),
+        )
+        .unwrap()
+        .collect::<Vec<_>>();
+        assert_eq!(
+            reverse,
+            vec![
+                KvPair::new(vec![4], b"local-4".to_vec()),
+                KvPair::new(vec![3], b"remote-3".to_vec()),
+            ]
+        );
     }
 
     // Check that multiple writes to the same key combine in the correct way.
