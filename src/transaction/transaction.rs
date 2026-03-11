@@ -966,6 +966,8 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// If the number of eligible key-value pairs are greater than `limit`,
     /// only the first `limit` pairs are returned, ordered by key.
     ///
+    /// Note: this operation is not supported for pipelined transactions.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -1002,6 +1004,8 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// If the number of eligible keys are greater than `limit`,
     /// only the first `limit` keys are returned, ordered by key.
     ///
+    /// Note: this operation is not supported for pipelined transactions.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -1037,6 +1041,8 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Create a 'scan_reverse' request.
     ///
     /// Similar to [`scan`](Transaction::scan), but scans in the reverse direction.
+    ///
+    /// Note: this operation is not supported for pipelined transactions.
     pub async fn scan_reverse(
         &mut self,
         range: impl Into<BoundRange>,
@@ -1049,6 +1055,8 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Create a 'scan_keys_reverse' request.
     ///
     /// Similar to [`scan`](Transaction::scan_keys), but scans in the reverse direction.
+    ///
+    /// Note: this operation is not supported for pipelined transactions.
     pub async fn scan_keys_reverse(
         &mut self,
         range: impl Into<BoundRange>,
@@ -2474,9 +2482,13 @@ pub struct TransactionOptions {
 ///
 /// This maps to client-go `TxnOptions.PipelinedTxn`.
 ///
-/// Note: client-rust currently performs the pipelined flush during commit (and runs a best-effort
-/// background resolve-lock for the touched key range). It does not yet implement client-go’s
-/// unionstore-style `PipelinedMemDB` that flushes while the transaction is still running.
+/// When enabled, buffered mutations can be flushed to TiKV during transaction execution via
+/// [`Transaction::flush`] (asynchronous) and [`Transaction::flush_wait`]. Reads after a flush use
+/// `BufferBatchGet` to read the transaction's flushed locks (client-go `BatchGetBufferTier`) and
+/// fall back to normal snapshot reads for missing keys.
+///
+/// Range scans (`scan*`) are not supported for pipelined transactions (client-go parity:
+/// `PipelinedMemDB` does not support iterators).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PipelinedTxnOptions {
     flush_concurrency: usize,
@@ -2486,8 +2498,8 @@ pub struct PipelinedTxnOptions {
     /// - `0.0` means no throttle.
     /// - Values closer to `1.0` yield more throttling.
     ///
-    /// Currently this value is accepted for API parity, but it is not yet applied by the Rust
-    /// implementation.
+    /// The implementation sleeps before flush requests based on an EWMA of recent flush duration so
+    /// that `T_sleep / (T_sleep + T_flush) ≈ write_throttle_ratio` (client-go parity).
     write_throttle_ratio: f64,
 }
 
