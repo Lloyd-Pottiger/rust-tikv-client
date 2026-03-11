@@ -37,9 +37,6 @@ use crate::Result;
 #[doc(inline)]
 pub use crate::proto::kvrpcpb::LockInfo as ProtoLockInfo;
 
-// FIXME: cargo-culted value
-const SCAN_LOCK_BATCH_SIZE: u32 = 1024;
-
 /// The TiKV transactional `Client` is used to interact with TiKV using transactional requests.
 ///
 /// Transactions support optimistic and pessimistic modes. For more details see the SIG-transaction
@@ -371,10 +368,7 @@ impl<PdC: PdClient> Client<PdC> {
     pub async fn gc(&self, safepoint: Timestamp) -> Result<bool> {
         debug!("invoking transactional gc request");
 
-        let options = ResolveLocksOptions {
-            batch_size: SCAN_LOCK_BATCH_SIZE,
-            ..Default::default()
-        };
+        let options = ResolveLocksOptions::default();
         self.cleanup_locks(.., &safepoint, options).await?;
 
         // update safepoint to PD
