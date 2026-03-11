@@ -3,6 +3,7 @@ use crate::{
     transaction::Mutation, BoundRange, Key, KvPair, Result, Timestamp, Transaction, Value,
 };
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A synchronous transaction.
 ///
@@ -16,6 +17,53 @@ pub struct SyncTransaction {
 impl SyncTransaction {
     pub(crate) fn new(inner: Transaction, runtime: Arc<tokio::runtime::Runtime>) -> Self {
         Self { inner, runtime }
+    }
+
+    /// Set the geographical scope of the transaction.
+    pub fn set_txn_scope(&mut self, txn_scope: impl AsRef<str>) {
+        self.inner.set_txn_scope(txn_scope);
+    }
+
+    /// Returns the geographical scope of the transaction.
+    #[must_use]
+    pub fn txn_scope(&self) -> &str {
+        self.inner.txn_scope()
+    }
+
+    /// Set the minimum commit timestamp constraint for the transaction.
+    pub fn set_commit_wait_until_tso(&mut self, commit_wait_until_tso: u64) {
+        self.inner.set_commit_wait_until_tso(commit_wait_until_tso);
+    }
+
+    /// Returns the commit-wait constraint configured by [`SyncTransaction::set_commit_wait_until_tso`].
+    #[must_use]
+    pub fn commit_wait_until_tso(&self) -> u64 {
+        self.inner.commit_wait_until_tso()
+    }
+
+    /// Set the maximum time allowed for PD TSO to catch up to the commit-wait target timestamp.
+    pub fn set_commit_wait_until_tso_timeout(&mut self, timeout: Duration) {
+        self.inner.set_commit_wait_until_tso_timeout(timeout);
+    }
+
+    /// Returns the commit-wait timeout configured by
+    /// [`SyncTransaction::set_commit_wait_until_tso_timeout`].
+    #[must_use]
+    pub fn commit_wait_until_tso_timeout(&self) -> Duration {
+        self.inner.commit_wait_until_tso_timeout()
+    }
+
+    /// Set a commit-ts upper bound checker for this transaction.
+    pub fn set_commit_ts_upper_bound_check<F>(&mut self, checker: F)
+    where
+        F: Fn(u64) -> bool + Send + Sync + 'static,
+    {
+        self.inner.set_commit_ts_upper_bound_check(checker);
+    }
+
+    /// Clear the configured commit-ts upper bound checker.
+    pub fn clear_commit_ts_upper_bound_check(&mut self) {
+        self.inner.clear_commit_ts_upper_bound_check();
     }
 
     /// Get the value associated with the given key.
