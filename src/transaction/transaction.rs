@@ -194,6 +194,19 @@ fn normalize_busy_threshold_ms(threshold: Duration) -> u32 {
     }
 }
 
+async fn get_timestamp_for_txn_scope<PdC: PdClient>(
+    rpc: Arc<PdC>,
+    txn_scope: Option<&str>,
+) -> Result<Timestamp> {
+    match txn_scope {
+        Some(dc_location) => {
+            rpc.get_timestamp_with_dc_location(dc_location.to_owned())
+                .await
+        }
+        None => rpc.get_timestamp().await,
+    }
+}
+
 impl<PdC: PdClient> Transaction<PdC> {
     #[cfg(test)]
     pub(crate) fn new(
@@ -1973,7 +1986,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let existing_primary_key = self.buffer.get_primary_key();
         let is_first_lock = existing_primary_key.is_none() && locks.len() == 1;
         let primary_lock = existing_primary_key.unwrap_or_else(|| locks[0].0.clone());
-        let for_update_ts = self.rpc.clone().get_timestamp().await?;
+        let for_update_ts =
+            get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
+                .await?;
         self.options.push_for_update_ts(for_update_ts.clone());
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = elapsed.saturating_add(MAX_TTL);
@@ -2677,6 +2692,14 @@ pub enum TransactionKind {
 pub struct TransactionOptions {
     /// Optimistic or pessimistic (default) transaction.
     kind: TransactionKind,
+    /// The geographical scope of the transaction.
+    ///
+    /// When set, PD timestamps used by the transaction (for example, `for_update_ts`, commit-ts,
+    /// and async/1PC `min_commit_ts` seeding) will be requested with this as PD
+    /// `TsoRequest.dc_location` (client-go `txnScope` / "local TSO").
+    ///
+    /// When `None`, the transaction uses the global TSO allocator.
+    txn_scope: Option<String>,
     /// Read from replicas other than the leader (read-only snapshots only).
     replica_read: ReplicaReadType,
     /// Filter replica reads to stores with the given ids (read-only snapshots only).
@@ -2901,6 +2924,7 @@ impl TransactionOptions {
     pub fn new_optimistic() -> TransactionOptions {
         TransactionOptions {
             kind: TransactionKind::Optimistic,
+            txn_scope: None,
             replica_read: ReplicaReadType::Leader,
             match_store_ids: Arc::new(Vec::new()),
             match_store_labels: Arc::new(Vec::new()),
@@ -2934,6 +2958,7 @@ impl TransactionOptions {
     pub fn new_pessimistic() -> TransactionOptions {
         TransactionOptions {
             kind: TransactionKind::Pessimistic(Timestamp::from_version(0)),
+            txn_scope: None,
             replica_read: ReplicaReadType::Leader,
             match_store_ids: Arc::new(Vec::new()),
             match_store_labels: Arc::new(Vec::new()),
@@ -2961,6 +2986,29 @@ impl TransactionOptions {
             check_level: CheckLevel::Panic,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
         }
+    }
+
+    /// Set the geographical scope of the transaction.
+    ///
+    /// When `txn_scope` is `"global"` (or empty), this uses the global TSO allocator.
+    /// Otherwise `txn_scope` is passed through as PD `dc_location` to request a local TSO.
+    #[must_use]
+    pub fn txn_scope(mut self, txn_scope: impl AsRef<str>) -> TransactionOptions {
+        let txn_scope = txn_scope.as_ref();
+        self.txn_scope = if txn_scope.is_empty() || txn_scope == "global" {
+            None
+        } else {
+            Some(txn_scope.to_owned())
+        };
+        self
+    }
+
+    pub(crate) fn is_global_txn_scope(&self) -> bool {
+        self.txn_scope.is_none()
+    }
+
+    pub(crate) fn txn_scope_as_deref(&self) -> Option<&str> {
+        self.txn_scope.as_deref()
     }
 
     /// Enable a pipelined DML transaction with default parameters.
@@ -3398,6 +3446,12 @@ impl<PdC: PdClient> Committer<PdC> {
             return self.commit_pipelined().await;
         }
 
+        // Match client-go: async-commit / 1PC are disabled for local transactions.
+        if !self.options.is_global_txn_scope() {
+            self.options.try_one_pc = false;
+            self.options.async_commit = false;
+        }
+
         let min_commit_ts = self.prewrite().await?;
 
         fail_point!("after-prewrite", |_| {
@@ -3672,7 +3726,11 @@ impl<PdC: PdClient> Committer<PdC> {
                 // Match client-go's default (linearizable) behavior: when using async-commit or
                 // 1PC, seed `min_commit_ts` from a fresh PD TSO so the final commit TS is
                 // guaranteed to be newer than any existing reader snapshot TS.
-                let latest_ts = self.rpc.clone().get_timestamp().await?;
+                let latest_ts = get_timestamp_for_txn_scope(
+                    self.rpc.clone(),
+                    self.options.txn_scope.as_deref(),
+                )
+                .await?;
                 min_commit_ts = min_commit_ts.max(latest_ts.version().saturating_add(1));
             }
 
@@ -3759,7 +3817,9 @@ impl<PdC: PdClient> Committer<PdC> {
     async fn commit_primary(&mut self) -> Result<Timestamp> {
         debug!("committing primary");
         let primary_key = self.primary_key.clone().into_iter();
-        let commit_version = self.rpc.clone().get_timestamp().await?;
+        let commit_version =
+            get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
+                .await?;
         let mut req = new_commit_request(
             primary_key,
             self.start_version.clone(),

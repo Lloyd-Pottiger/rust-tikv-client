@@ -263,7 +263,13 @@ impl<PdC: PdClient> Client<PdC> {
         options: TransactionOptions,
     ) -> Result<Transaction<PdC>> {
         debug!("creating new customized transaction");
-        let timestamp = self.current_timestamp().await?;
+        let txn_scope = options
+            .txn_scope_as_deref()
+            .map(|txn_scope| txn_scope.to_owned());
+        let timestamp = match txn_scope.as_deref() {
+            None => self.current_timestamp().await?,
+            Some(scope) => self.current_timestamp_with_txn_scope(scope).await?,
+        };
         Ok(self.new_transaction(timestamp, options))
     }
 
@@ -283,7 +289,7 @@ impl<PdC: PdClient> Client<PdC> {
             txn_scope
         );
         let timestamp = self.current_timestamp_with_txn_scope(txn_scope).await?;
-        Ok(self.new_transaction(timestamp, options))
+        Ok(self.new_transaction(timestamp, options.txn_scope(txn_scope)))
     }
 
     /// Create a new customized [`Transaction`] with an explicit start timestamp.
@@ -505,6 +511,7 @@ mod tests {
     use crate::proto::kvrpcpb;
     use crate::request::Keyspace;
     use crate::timestamp::TimestampExt;
+    use crate::transaction::HeartbeatOption;
     use crate::transaction::ResolveLocksContext;
     use crate::Backoff;
     use crate::Timestamp;
@@ -626,6 +633,206 @@ mod tests {
         assert_eq!(value, Some(b"v".to_vec()));
 
         assert_eq!(get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_begin_with_options_respects_txn_scope() {
+        let pd_client = Arc::new(MockPdClient::default());
+
+        let client = Client {
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+        };
+
+        let _txn = client
+            .begin_with_options(
+                TransactionOptions::new_optimistic()
+                    .txn_scope("dc1")
+                    .drop_check(crate::CheckLevel::None),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
+        assert_eq!(
+            pd_client.get_timestamp_dc_locations(),
+            vec!["dc1".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_begin_with_txn_scope_propagates_to_commit_tso_requests() {
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
+
+        let prewrite_count_captured = prewrite_count.clone();
+        let commit_count_captured = commit_count.clone();
+
+        let start_version = 7;
+        let commit_version = 8;
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, commit_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(start_version));
+        let client = Client {
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+        };
+
+        let mut txn = client
+            .begin_with_txn_scope(
+                "dc1",
+                TransactionOptions::new_optimistic()
+                    .drop_check(crate::CheckLevel::None)
+                    .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            )
+            .await
+            .unwrap();
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+
+        assert_eq!(pd_client.get_timestamp_call_count(), 2);
+        assert_eq!(
+            pd_client.get_timestamp_dc_locations(),
+            vec!["dc1".to_owned(), "dc1".to_owned()]
+        );
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+        assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_local_txn_scope_disables_async_commit_and_one_pc() {
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
+
+        let prewrite_count_captured = prewrite_count.clone();
+        let commit_count_captured = commit_count.clone();
+
+        let start_version = 7;
+        let commit_version = 8;
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                assert!(
+                    !req.use_async_commit,
+                    "local scope must not use async-commit"
+                );
+                assert!(!req.try_one_pc, "local scope must not use 1pc");
+                assert_eq!(
+                    req.min_commit_ts, 0,
+                    "local scope must not seed min_commit_ts"
+                );
+                assert_eq!(
+                    req.max_commit_ts, 0,
+                    "local scope must not set max_commit_ts"
+                );
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, commit_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(start_version));
+        let client = Client {
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+        };
+
+        let mut txn = client
+            .begin_with_txn_scope(
+                "dc1",
+                TransactionOptions::new_optimistic()
+                    .use_async_commit()
+                    .try_one_pc()
+                    .drop_check(crate::CheckLevel::None)
+                    .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            )
+            .await
+            .unwrap();
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+
+        assert_eq!(
+            pd_client.get_timestamp_call_count(),
+            2,
+            "local scope must not fetch extra PD TSO during prewrite"
+        );
+        assert_eq!(
+            pd_client.get_timestamp_dc_locations(),
+            vec!["dc1".to_owned(), "dc1".to_owned()]
+        );
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+        assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_local_txn_scope_uses_dc_location_for_pessimistic_for_update_ts() {
+        let start_version = 7;
+        let expected_for_update_ts = 8;
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                assert_eq!(req.for_update_ts, expected_for_update_ts);
+                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(start_version));
+        let client = Client {
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+        };
+
+        let mut txn = client
+            .begin_with_txn_scope(
+                "dc1",
+                TransactionOptions::new_pessimistic()
+                    .drop_check(crate::CheckLevel::None)
+                    .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            )
+            .await
+            .unwrap();
+        txn.lock_keys(vec!["k".to_owned()]).await.unwrap();
+
+        assert_eq!(pd_client.get_timestamp_call_count(), 2);
+        assert_eq!(
+            pd_client.get_timestamp_dc_locations(),
+            vec!["dc1".to_owned(), "dc1".to_owned()]
+        );
     }
 
     #[tokio::test]
