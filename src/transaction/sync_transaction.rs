@@ -31,6 +31,29 @@ impl SyncTransaction {
         self.inner.txn_scope()
     }
 
+    /// Enable or disable async commit.
+    ///
+    /// This maps to client-go `KVTxn.SetEnableAsyncCommit`.
+    pub fn set_enable_async_commit(&mut self, enabled: bool) {
+        self.inner.set_enable_async_commit(enabled);
+    }
+
+    /// Enable or disable 1PC.
+    ///
+    /// This maps to client-go `KVTxn.SetEnable1PC`.
+    pub fn set_enable_one_pc(&mut self, enabled: bool) {
+        self.inner.set_enable_one_pc(enabled);
+    }
+
+    /// Set whether the transaction uses causal consistency instead of linearizability.
+    ///
+    /// When enabled, async-commit/1PC does not fetch a fresh PD TSO to seed `min_commit_ts`.
+    ///
+    /// This maps to client-go `KVTxn.SetCausalConsistency`.
+    pub fn set_causal_consistency(&mut self, enabled: bool) {
+        self.inner.set_causal_consistency(enabled);
+    }
+
     /// Set the minimum commit timestamp constraint for the transaction.
     pub fn set_commit_wait_until_tso(&mut self, commit_wait_until_tso: u64) {
         self.inner.set_commit_wait_until_tso(commit_wait_until_tso);

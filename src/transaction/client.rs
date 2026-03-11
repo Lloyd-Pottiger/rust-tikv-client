@@ -771,13 +771,13 @@ mod tests {
             .begin_with_txn_scope(
                 "dc1",
                 TransactionOptions::new_optimistic()
-                    .use_async_commit()
-                    .try_one_pc()
                     .drop_check(crate::CheckLevel::None)
                     .heartbeat_option(HeartbeatOption::NoHeartbeat),
             )
             .await
             .unwrap();
+        txn.set_enable_async_commit(true);
+        txn.set_enable_one_pc(true);
         txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
 
         let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");

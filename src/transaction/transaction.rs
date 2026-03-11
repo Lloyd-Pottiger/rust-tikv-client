@@ -561,6 +561,29 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.txn_scope.as_deref().unwrap_or("global")
     }
 
+    /// Enable or disable async commit.
+    ///
+    /// This maps to client-go `KVTxn.SetEnableAsyncCommit`.
+    pub fn set_enable_async_commit(&mut self, enabled: bool) {
+        self.options.async_commit = enabled;
+    }
+
+    /// Enable or disable 1PC.
+    ///
+    /// This maps to client-go `KVTxn.SetEnable1PC`.
+    pub fn set_enable_one_pc(&mut self, enabled: bool) {
+        self.options.try_one_pc = enabled;
+    }
+
+    /// Set whether the transaction uses causal consistency instead of linearizability.
+    ///
+    /// When enabled, async-commit/1PC does not fetch a fresh PD TSO to seed `min_commit_ts`.
+    ///
+    /// This maps to client-go `KVTxn.SetCausalConsistency`.
+    pub fn set_causal_consistency(&mut self, enabled: bool) {
+        self.options.causal_consistency = enabled;
+    }
+
     /// Set the minimum commit timestamp constraint for the transaction.
     ///
     /// When set, the commit timestamp returned by PD must be strictly greater than
@@ -8282,14 +8305,14 @@ mod tests {
             Timestamp::from_version(start_version),
             pd_client.clone(),
             TransactionOptions::new_optimistic()
-                .use_async_commit()
-                .try_one_pc()
                 .drop_check(CheckLevel::None)
                 .heartbeat_option(HeartbeatOption::NoHeartbeat),
             Keyspace::Disable,
         );
-        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
         txn.set_commit_ts_upper_bound_check(|_| true);
+        txn.set_enable_async_commit(true);
+        txn.set_enable_one_pc(true);
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
 
         let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
         assert_eq!(commit_ts.version(), first_commit_version);
@@ -8343,6 +8366,49 @@ mod tests {
             pd_client.get_timestamp_dc_locations(),
             vec!["dc1".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn test_transaction_set_enable_async_commit_one_pc_and_causal_consistency() {
+        let start_version = 7;
+        let one_pc_commit_version = 9;
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert_eq!(req.start_version, start_version);
+                assert!(req.use_async_commit);
+                assert!(req.try_one_pc);
+                assert_eq!(req.min_commit_ts, start_version.saturating_add(1));
+                assert!(req.max_commit_ts > 0);
+
+                let resp = kvrpcpb::PrewriteResponse {
+                    one_pc_commit_ts: one_pc_commit_version,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_enable_async_commit(true);
+        txn.set_enable_one_pc(true);
+        txn.set_causal_consistency(true);
+
+        txn.put(vec![1u8], vec![42u8]).await.unwrap();
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), one_pc_commit_version);
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
     }
 
     #[tokio::test]
