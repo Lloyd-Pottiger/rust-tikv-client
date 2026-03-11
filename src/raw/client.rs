@@ -653,11 +653,11 @@ impl<PdC: PdClient> Client<PdC> {
     ///
     /// Once resolved this request will result in a set of scanners over the given keys.
     ///
-    /// **Warning**: This method is experimental. The `each_limit` parameter does not work as expected.
-    /// It does not limit the number of results returned of each range,
-    /// instead it limits the number of results in each region of each range.
-    /// As a result, you may get **more than** `each_limit` key-value pairs for each range.
-    /// But you should not miss any entries.
+    /// **Warning**: This method is experimental.
+    ///
+    /// `each_limit` limits the maximum number of returned key-value pairs for **each input range**
+    /// (including when a range spans multiple regions). Results are concatenated in the same order
+    /// as the input ranges.
     ///
     /// # Examples
     /// ```rust,no_run
@@ -686,10 +686,10 @@ impl<PdC: PdClient> Client<PdC> {
     /// Once resolved this request will result in a set of scanners over the given keys.
     ///
     /// **Warning**: This method is experimental.
-    /// The `each_limit` parameter does not limit the number of results returned of each range,
-    /// instead it limits the number of results in each region of each range.
-    /// As a result, you may get **more than** `each_limit` key-value pairs for each range,
-    /// but you should not miss any entries.
+    ///
+    /// `each_limit` limits the maximum number of returned keys for **each input range** (including
+    /// when a range spans multiple regions). Results are concatenated in the same order as the
+    /// input ranges.
     ///
     /// # Examples
     /// ```rust,no_run
@@ -700,7 +700,7 @@ impl<PdC: PdClient> Client<PdC> {
     /// let inclusive_range1 = "TiDB"..="TiKV";
     /// let inclusive_range2 = "TiKV"..="TiSpark";
     /// let iterable = vec![inclusive_range1.into_owned(), inclusive_range2.into_owned()];
-    /// let req = client.batch_scan(iterable, 2);
+    /// let req = client.batch_scan_keys(iterable, 2);
     /// let result = req.await;
     /// # });
     /// ```
@@ -812,6 +812,9 @@ impl<PdC: PdClient> Client<PdC> {
         let mut result = Vec::new();
         let mut current_limit = limit;
         let (start_key, end_key) = range.clone().into_keys();
+        // An empty end key means "unbounded" in TiKV APIs, so normalize it to `None` to avoid
+        // prematurely terminating multi-region scans.
+        let end_key = end_key.filter(|key| !key.is_empty());
         let mut current_key: Key = start_key;
 
         while current_limit > 0 {
@@ -833,7 +836,8 @@ impl<PdC: PdClient> Client<PdC> {
                 current_limit -= kvs.len() as u32;
                 result.append(&mut kvs);
             }
-            if end_key.clone().is_some_and(|ek| ek <= next_key) {
+            if (!reverse && next_key.is_empty()) || end_key.clone().is_some_and(|ek| ek <= next_key)
+            {
                 break;
             } else {
                 current_key = next_key;
@@ -915,20 +919,16 @@ impl<PdC: PdClient> Client<PdC> {
             });
         }
 
-        let ranges = ranges
-            .into_iter()
-            .map(|range| range.into().encode_keyspace(self.keyspace, KeyMode::Raw));
+        if each_limit == 0 {
+            return Ok(Vec::new());
+        }
 
-        let request = new_raw_batch_scan_request(ranges, each_limit, key_only, self.cf.clone());
-        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .retry_multi_region(self.backoff.clone())
-            .merge(Collect)
-            .plan();
-        plan.execute().await.map(|r| {
-            r.into_iter()
-                .map(|pair| pair.truncate_keyspace(self.keyspace))
-                .collect()
-        })
+        let mut result = Vec::new();
+        for range in ranges {
+            let mut scanned = self.scan_inner(range, each_limit, key_only, false).await?;
+            result.append(&mut scanned);
+        }
+        Ok(result)
     }
 
     fn assert_non_atomic(&self) -> Result<()> {
@@ -962,12 +962,127 @@ struct ScanInnerArgs {
 mod tests {
     use std::any::Any;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb;
     use crate::Result;
+
+    fn new_mock_raw_client_with_scan_data(
+        data: Arc<Vec<(Vec<u8>, Vec<u8>)>>,
+    ) -> Client<MockPdClient> {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook({
+            let data = data.clone();
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::RawBatchScanRequest>().is_some() {
+                    panic!("unexpected raw batch scan request");
+                }
+
+                let req = req
+                    .downcast_ref::<kvrpcpb::RawScanRequest>()
+                    .expect("expected raw scan request");
+
+                let region_id = req.context.as_ref().map(|ctx| ctx.region_id);
+                let (region_start, region_end) = match region_id {
+                    Some(1) => (Vec::new(), vec![10]),
+                    Some(2) => (vec![10], vec![250, 250]),
+                    Some(3) => (vec![250, 250], Vec::new()),
+                    Some(other) => panic!("unexpected region id: {other}"),
+                    None => (Vec::new(), Vec::new()),
+                };
+
+                let effective_start = std::cmp::max(req.start_key.clone(), region_start);
+                let effective_end = match (req.end_key.is_empty(), region_end.is_empty()) {
+                    (true, true) => Vec::new(),
+                    (true, false) => region_end,
+                    (false, true) => req.end_key.clone(),
+                    (false, false) => std::cmp::min(req.end_key.clone(), region_end),
+                };
+
+                let kvs = data
+                    .iter()
+                    .filter(|(key, _)| key.as_slice() >= effective_start.as_slice())
+                    .filter(|(key, _)| {
+                        effective_end.is_empty() || key.as_slice() < effective_end.as_slice()
+                    })
+                    .take(req.limit as usize)
+                    .map(|(key, value)| kvrpcpb::KvPair {
+                        error: None,
+                        key: key.clone(),
+                        value: if req.key_only {
+                            Vec::new()
+                        } else {
+                            value.clone()
+                        },
+                        commit_ts: 0,
+                    })
+                    .collect();
+
+                let resp = kvrpcpb::RawScanResponse {
+                    region_error: None,
+                    kvs,
+                };
+                Ok(Box::new(resp) as Box<dyn Any>)
+            }
+        })));
+
+        Client {
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_scan_each_limit_is_per_range_across_regions() -> Result<()> {
+        let data: Arc<Vec<(Vec<u8>, Vec<u8>)>> = Arc::new(vec![
+            (vec![1], b"v1".to_vec()),
+            (vec![2], b"v2".to_vec()),
+            (vec![10], b"v10".to_vec()),
+            (vec![11], b"v11".to_vec()),
+            (vec![12], b"v12".to_vec()),
+        ]);
+        let client = new_mock_raw_client_with_scan_data(data);
+
+        let res = client.batch_scan(vec![.., ..], 3).await?;
+        let keys: Vec<Vec<u8>> = res.into_iter().map(|pair| pair.0.into()).collect();
+        assert_eq!(
+            keys,
+            vec![vec![1], vec![2], vec![10], vec![1], vec![2], vec![10]]
+        );
+
+        let keys = client.batch_scan_keys(vec![.., ..], 3).await?;
+        let keys: Vec<Vec<u8>> = keys.into_iter().map(Into::into).collect();
+        assert_eq!(
+            keys,
+            vec![vec![1], vec![2], vec![10], vec![1], vec![2], vec![10]]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_unbounded_range_terminates_at_last_region() -> Result<()> {
+        let client = new_mock_raw_client_with_scan_data(Arc::new(vec![
+            (vec![1], b"v1".to_vec()),
+            (vec![2], b"v2".to_vec()),
+            (vec![10], b"v10".to_vec()),
+            (vec![11], b"v11".to_vec()),
+            (vec![12], b"v12".to_vec()),
+        ]));
+
+        let res = tokio::time::timeout(Duration::from_secs(1), client.scan(.., 10))
+            .await
+            .expect("scan should not hang")?;
+        let keys: Vec<Vec<u8>> = res.into_iter().map(|pair| pair.0.into()).collect();
+        assert_eq!(keys, vec![vec![1], vec![2], vec![10], vec![11], vec![12]]);
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_min_safe_ts_uses_store_safe_ts_request() -> Result<()> {

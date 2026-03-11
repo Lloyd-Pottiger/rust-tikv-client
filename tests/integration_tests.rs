@@ -877,13 +877,12 @@ async fn raw_write_million() -> Result<()> {
     assert_eq!(r.len(), limit as usize);
 
     // test batch_scan
+    limit = 3;
     for batch_num in 1..4 {
-        let _ = client
+        let res = client
             .batch_scan(iter::repeat(vec![]..).take(batch_num), limit)
             .await?;
-        // FIXME: `each_limit` parameter does no work as expected. It limits the
-        // entries on each region of each rangqe, instead of each range.
-        // assert_eq!(res.len(), limit as usize * batch_num);
+        assert_eq!(res.len(), limit as usize * batch_num);
     }
 
     Ok(())
