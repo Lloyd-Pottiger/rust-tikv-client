@@ -111,6 +111,16 @@ impl SyncTransactionClient {
         self.client.lock_resolver()
     }
 
+    /// Returns a [`BoundLockResolver`](crate::transaction::BoundLockResolver) handle associated with this client.
+    ///
+    /// This is a synchronous version of [`TransactionClient::bound_lock_resolver`](crate::TransactionClient::bound_lock_resolver).
+    #[must_use]
+    pub fn bound_lock_resolver(
+        &self,
+    ) -> crate::transaction::BoundLockResolver<crate::pd::PdRpcClient> {
+        self.client.bound_lock_resolver()
+    }
+
     /// Creates a new optimistic [`SyncTransaction`].
     ///
     /// Use the transaction to issue requests like [`get`](SyncTransaction::get) or

@@ -35,6 +35,7 @@ mod client;
 mod lock;
 pub mod lowering;
 mod requests;
+pub use lock::BoundLockResolver;
 pub use lock::LockResolver;
 pub use lock::ResolveLocksContext;
 pub use lock::ResolveLocksOptions;

@@ -929,6 +929,138 @@ pub struct LockResolver {
     rpc_context: LockResolverRpcContext,
 }
 
+/// A [`LockResolver`] with a bound PD client and keyspace.
+///
+/// This is an ergonomic wrapper that avoids repeatedly passing `pd_client` and `keyspace` to each
+/// lock-resolver call (similar to client-go store-level lock resolver usage).
+pub struct BoundLockResolver<PdC: PdClient> {
+    pd_client: Arc<PdC>,
+    keyspace: Keyspace,
+    inner: LockResolver,
+}
+
+impl<PdC: PdClient> BoundLockResolver<PdC> {
+    /// Creates a bound lock resolver using the provided PD client and keyspace.
+    ///
+    /// The provided [`ResolveLocksContext`] is used for resolved-status caching and resolving-lock
+    /// bookkeeping.
+    pub fn new(pd_client: Arc<PdC>, keyspace: Keyspace, ctx: ResolveLocksContext) -> Self {
+        Self {
+            pd_client,
+            keyspace,
+            inner: LockResolver::new(ctx),
+        }
+    }
+
+    /// Returns the bound PD client.
+    #[must_use]
+    pub fn pd_client(&self) -> Arc<PdC> {
+        self.pd_client.clone()
+    }
+
+    /// Returns the bound keyspace.
+    #[must_use]
+    pub fn keyspace(&self) -> Keyspace {
+        self.keyspace
+    }
+
+    /// Returns the underlying [`LockResolver`].
+    #[must_use]
+    pub fn into_inner(self) -> LockResolver {
+        self.inner
+    }
+
+    /// Records the locks being resolved for a given `caller_start_ts` and returns a token.
+    pub async fn record_resolving_locks(
+        &mut self,
+        locks: &[kvrpcpb::LockInfo],
+        caller_start_ts: u64,
+    ) -> usize {
+        self.inner
+            .record_resolving_locks(locks, caller_start_ts)
+            .await
+    }
+
+    /// Updates the recorded resolving-lock information for `caller_start_ts` and `token`.
+    pub async fn update_resolving_locks(
+        &mut self,
+        locks: &[kvrpcpb::LockInfo],
+        caller_start_ts: u64,
+        token: usize,
+    ) {
+        self.inner
+            .update_resolving_locks(locks, caller_start_ts, token)
+            .await
+    }
+
+    /// Removes the recorded resolving-lock information for `caller_start_ts` and `token`.
+    pub async fn resolve_locks_done(&mut self, caller_start_ts: u64, token: usize) {
+        self.inner.resolve_locks_done(caller_start_ts, token).await
+    }
+
+    /// Returns the locks currently being resolved.
+    pub async fn resolving(&mut self) -> Vec<ResolvingLock> {
+        self.inner.resolving().await
+    }
+
+    /// Get the transaction status for `txn_id` (start TS) and `primary` key.
+    pub async fn get_txn_status(
+        &mut self,
+        txn_id: u64,
+        primary: Vec<u8>,
+        caller_start_ts: u64,
+    ) -> Result<Arc<TransactionStatus>> {
+        self.inner
+            .get_txn_status(
+                self.pd_client.clone(),
+                self.keyspace,
+                txn_id,
+                primary,
+                caller_start_ts,
+            )
+            .await
+    }
+
+    /// _Cleanup_ the given locks. Returns whether all the given locks are resolved.
+    pub async fn cleanup_locks(
+        &mut self,
+        store: RegionStore,
+        locks: Vec<kvrpcpb::LockInfo>,
+    ) -> Result<()> {
+        self.inner
+            .cleanup_locks(store, locks, self.pd_client.clone(), self.keyspace)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn check_txn_status(
+        &mut self,
+        txn_id: u64,
+        primary: Vec<u8>,
+        caller_start_ts: u64,
+        current_ts: u64,
+        rollback_if_not_exist: bool,
+        force_sync_commit: bool,
+        resolving_pessimistic_lock: bool,
+        is_txn_file: bool,
+    ) -> Result<Arc<TransactionStatus>> {
+        self.inner
+            .check_txn_status(
+                self.pd_client.clone(),
+                self.keyspace,
+                txn_id,
+                primary,
+                caller_start_ts,
+                current_ts,
+                rollback_if_not_exist,
+                force_sync_commit,
+                resolving_pessimistic_lock,
+                is_txn_file,
+            )
+            .await
+    }
+}
+
 impl LockResolver {
     pub fn new(ctx: ResolveLocksContext) -> Self {
         Self {
@@ -2114,6 +2246,62 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_bound_lock_resolver_get_txn_status_binds_pd_and_keyspace() {
+        let keyspace = Keyspace::ApiV2NoPrefix;
+        let expected_api_version = keyspace.api_version() as i32;
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let base_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.primary_key, b"p".to_vec());
+                    assert_eq!(req.lock_ts, 7);
+                    assert_eq!(req.caller_start_ts, 9);
+                    assert_eq!(req.current_ts, 42);
+                    assert!(req.rollback_if_not_exist);
+                    assert!(!req.force_sync_commit);
+                    assert!(!req.resolving_pessimistic_lock);
+                    assert!(req.verify_is_primary);
+                    assert!(!req.is_txn_file);
+                    assert_eq!(
+                        req.context.as_ref().expect("context").api_version,
+                        expected_api_version
+                    );
+
+                    let mut resp = kvrpcpb::CheckTxnStatusResponse::default();
+                    resp.action = kvrpcpb::Action::NoAction as i32;
+                    resp.commit_version = 50;
+                    resp.lock_ttl = 0;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+        let pd_client = Arc::new(TimestampedPdClient::new(
+            base_client,
+            Timestamp::from_version(42),
+        ));
+
+        let mut lock_resolver =
+            BoundLockResolver::new(pd_client, keyspace, ResolveLocksContext::default());
+        let status = lock_resolver
+            .get_txn_status(7, b"p".to_vec(), 9)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &status.kind,
+            TransactionStatusKind::Committed(ts) if ts.version() == 50
+        ));
+
+        let _ = lock_resolver
+            .get_txn_status(7, b"p".to_vec(), 9)
+            .await
+            .unwrap();
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
     }
 

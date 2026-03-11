@@ -22,6 +22,7 @@ use crate::transaction::lowering::new_scan_lock_request;
 use crate::transaction::lowering::new_unsafe_destroy_range_request;
 use crate::transaction::requests::new_store_safe_ts_request_all;
 use crate::transaction::resolve_locks_with_options;
+use crate::transaction::BoundLockResolver;
 use crate::transaction::LockResolver;
 use crate::transaction::LockResolverRpcContext;
 use crate::transaction::ResolveLocksContext;
@@ -180,6 +181,19 @@ impl Client {
     #[must_use]
     pub fn lock_resolver(&self) -> LockResolver {
         LockResolver::new(self.resolve_locks_ctx.clone())
+    }
+
+    /// Returns a [`BoundLockResolver`] handle associated with this client.
+    ///
+    /// The returned resolver binds this client's PD client and keyspace. It also shares the
+    /// resolve-lock caches with this client.
+    #[must_use]
+    pub fn bound_lock_resolver(&self) -> BoundLockResolver<PdRpcClient> {
+        BoundLockResolver::new(
+            self.pd.clone(),
+            self.keyspace,
+            self.resolve_locks_ctx.clone(),
+        )
     }
 
     /// Creates a new optimistic [`Transaction`].
