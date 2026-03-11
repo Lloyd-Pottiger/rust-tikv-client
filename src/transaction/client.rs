@@ -273,6 +273,25 @@ impl<PdC: PdClient> Client<PdC> {
         Ok(self.new_transaction(timestamp, options))
     }
 
+    /// Create a new customized [`Transaction`] in the given transaction scope.
+    ///
+    /// When `txn_scope` is `"global"` (or empty), this uses the global TSO allocator
+    /// (`dc_location=""`). Otherwise `txn_scope` is passed through as PD `dc_location` to request
+    /// a local TSO.
+    pub async fn begin_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+        options: TransactionOptions,
+    ) -> Result<Transaction<PdC>> {
+        let txn_scope = txn_scope.as_ref();
+        debug!(
+            "creating new customized transaction with txn_scope={}",
+            txn_scope
+        );
+        let timestamp = self.current_timestamp_with_txn_scope(txn_scope).await?;
+        Ok(self.new_transaction(timestamp, options))
+    }
+
     /// Create a new customized [`Transaction`] with an explicit start timestamp.
     ///
     /// This does not contact PD to fetch a timestamp. The provided `timestamp` is used as the
@@ -300,6 +319,24 @@ impl<PdC: PdClient> Client<PdC> {
     /// ```
     pub async fn current_timestamp(&self) -> Result<Timestamp> {
         self.pd.clone().get_timestamp().await
+    }
+
+    /// Retrieve the current [`Timestamp`] for the given transaction scope.
+    ///
+    /// When `txn_scope` is `"global"` (or empty), this uses the global TSO allocator
+    /// (`dc_location=""`). Otherwise `txn_scope` is passed through as PD `dc_location` to request
+    /// a local TSO, matching client-go `CurrentTimestamp(txnScope)` behavior.
+    pub async fn current_timestamp_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+    ) -> Result<Timestamp> {
+        let txn_scope = txn_scope.as_ref();
+        let dc_location = if txn_scope.is_empty() || txn_scope == "global" {
+            String::new()
+        } else {
+            txn_scope.to_owned()
+        };
+        PdClient::get_timestamp_with_dc_location(self.pd.clone(), dc_location).await
     }
 
     /// Get the cluster-wide minimum `safe_ts` across all TiKV stores.
@@ -477,27 +514,6 @@ impl Client {
         debug!("creating new snapshot");
         Snapshot::new(self.new_transaction(timestamp, options.read_only()))
     }
-
-    /// Retrieve the current [`Timestamp`] for the given transaction scope.
-    ///
-    /// When `txn_scope` is `"global"` (or empty), this uses the global TSO allocator
-    /// (`dc_location=""`). Otherwise `txn_scope` is passed through as PD `dc_location` to
-    /// request a local TSO, matching client-go `CurrentTimestamp(txnScope)` behavior.
-    pub async fn current_timestamp_with_txn_scope(
-        &self,
-        txn_scope: impl AsRef<str>,
-    ) -> Result<Timestamp> {
-        let txn_scope = txn_scope.as_ref();
-        let dc_location = if txn_scope.is_empty() || txn_scope == "global" {
-            String::new()
-        } else {
-            txn_scope.to_owned()
-        };
-        self.pd
-            .clone()
-            .get_timestamp_with_dc_location(dc_location)
-            .await
-    }
 }
 
 #[cfg(test)]
@@ -560,6 +576,75 @@ mod tests {
         assert_eq!(value, Some(b"v".to_vec()));
 
         assert_eq!(pd_client.get_timestamp_call_count(), 0);
+        assert_eq!(get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_current_timestamp_with_txn_scope_maps_global_and_empty_to_global_dc_location() {
+        let pd_client = Arc::new(MockPdClient::default());
+
+        let client = Client {
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+        };
+
+        let _ts = client.current_timestamp_with_txn_scope("").await.unwrap();
+        let _ts = client
+            .current_timestamp_with_txn_scope("global")
+            .await
+            .unwrap();
+
+        assert_eq!(pd_client.get_timestamp_call_count(), 2);
+        assert_eq!(
+            pd_client.get_timestamp_dc_locations(),
+            vec!["".to_owned(), "".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_begin_with_txn_scope_uses_pd_dc_location() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls_cloned = get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
+                    get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.version, 0);
+
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    resp.value = b"v".to_vec();
+                    resp.not_found = false;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        let client = Client {
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+        };
+
+        let mut transaction = client
+            .begin_with_txn_scope(
+                "dc1",
+                TransactionOptions::new_optimistic().drop_check(crate::CheckLevel::None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
+        assert_eq!(
+            pd_client.get_timestamp_dc_locations(),
+            vec!["dc1".to_owned()]
+        );
+
+        let value = transaction.get("k".to_owned()).await.unwrap();
+        assert_eq!(value, Some(b"v".to_vec()));
+
         assert_eq!(get_calls.load(Ordering::SeqCst), 1);
     }
 }

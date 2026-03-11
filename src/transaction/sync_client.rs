@@ -148,6 +148,21 @@ impl SyncTransactionClient {
         Ok(SyncTransaction::new(inner, Arc::clone(&self.runtime)))
     }
 
+    /// Create a new customized [`SyncTransaction`] in the given transaction scope.
+    ///
+    /// This is a synchronous version of [`TransactionClient::begin_with_txn_scope`](crate::TransactionClient::begin_with_txn_scope).
+    pub fn begin_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+        options: TransactionOptions,
+    ) -> Result<SyncTransaction> {
+        let inner = safe_block_on(
+            &self.runtime,
+            self.client.begin_with_txn_scope(txn_scope, options),
+        )?;
+        Ok(SyncTransaction::new(inner, Arc::clone(&self.runtime)))
+    }
+
     /// Create a new customized [`SyncTransaction`] with an explicit start timestamp.
     ///
     /// This does not contact PD to fetch a timestamp. The provided `timestamp` is used as the
