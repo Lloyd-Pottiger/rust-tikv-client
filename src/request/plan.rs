@@ -200,7 +200,19 @@ fn select_replica_read_peer(
         !unavailable_store_ids.contains(&store_id)
     }
 
-    if match_configured {
+    fn select_replica_read_peer_by_score(
+        region: &RegionWithLeader,
+        peers: &[metapb::Peer],
+        replica_read: ReplicaReadType,
+        _attempt: u32,
+        unavailable_store_ids: &[StoreId],
+        busy_store_ids: &[StoreId],
+        attempted_store_ids: &[StoreId],
+        leader_store_id: Option<StoreId>,
+        labels_configured: bool,
+        label_matched_store_ids: &[StoreId],
+        non_leader_first: bool,
+    ) -> Option<metapb::Peer> {
         const FLAG_NOT_ATTEMPTED: i64 = 1 << 0;
         const FLAG_NORMAL_PEER: i64 = 1 << 1;
         const FLAG_PREFER_LEADER: i64 = 1 << 2;
@@ -222,25 +234,43 @@ fn select_replica_read_peer(
             }
         };
 
-        let mut candidates = peers
-            .iter()
-            .filter(|peer| is_candidate(peer))
-            .cloned()
-            .collect::<Vec<_>>();
-        if matches!(
-            replica_read,
-            ReplicaReadType::Mixed | ReplicaReadType::PreferLeader
-        ) {
+        let candidates = if non_leader_first && replica_read == ReplicaReadType::Mixed {
+            let mut rotation = peers
+                .iter()
+                .filter(|peer| Some(peer.store_id) != leader_store_id)
+                .filter(|peer| is_candidate(peer))
+                .cloned()
+                .collect::<Vec<_>>();
             if let Some(leader) = region.leader.clone() {
                 if is_store_available(unavailable_store_ids, leader.store_id)
-                    && !candidates
-                        .iter()
-                        .any(|peer| peer.store_id == leader.store_id)
+                    && !rotation.iter().any(|peer| peer.store_id == leader.store_id)
                 {
-                    candidates.push(leader);
+                    rotation.push(leader);
                 }
             }
-        }
+            rotation
+        } else {
+            let mut candidates = peers
+                .iter()
+                .filter(|peer| is_candidate(peer))
+                .cloned()
+                .collect::<Vec<_>>();
+            if matches!(
+                replica_read,
+                ReplicaReadType::Mixed | ReplicaReadType::PreferLeader
+            ) {
+                if let Some(leader) = region.leader.clone() {
+                    if is_store_available(unavailable_store_ids, leader.store_id)
+                        && !candidates
+                            .iter()
+                            .any(|peer| peer.store_id == leader.store_id)
+                    {
+                        candidates.push(leader);
+                    }
+                }
+            }
+            candidates
+        };
         if candidates.is_empty() {
             return None;
         }
@@ -303,7 +333,7 @@ fn select_replica_read_peer(
         let selected = {
             #[cfg(test)]
             {
-                let start = (attempt as usize) % best_indices.len();
+                let start = (_attempt as usize) % best_indices.len();
                 best_indices[start]
             }
             #[cfg(not(test))]
@@ -317,7 +347,23 @@ fn select_replica_read_peer(
                 }
             }
         };
-        return candidates.get(selected).cloned();
+        candidates.get(selected).cloned()
+    }
+
+    if match_configured {
+        return select_replica_read_peer_by_score(
+            region,
+            peers,
+            replica_read,
+            attempt,
+            unavailable_store_ids,
+            busy_store_ids,
+            attempted_store_ids,
+            leader_store_id,
+            labels_configured,
+            label_matched_store_ids,
+            false,
+        );
     }
 
     fn select_peer_with_attempt<F>(
@@ -380,65 +426,19 @@ fn select_replica_read_peer(
                     && is_store_available(unavailable_store_ids, peer.store_id)
             },
         ),
-        ReplicaReadType::Mixed => {
-            let mut rotation = peers
-                .iter()
-                .filter(|peer| Some(peer.store_id) != leader_store_id)
-                .cloned()
-                .collect::<Vec<_>>();
-            if let Some(leader) = region.leader.clone() {
-                rotation.push(leader);
-            }
-            if rotation.is_empty() {
-                None
-            } else {
-                // Client-go's mixed replica selector chooses between leader and followers based on
-                // a score. Without Rust-side store health/label signals, we approximate this with
-                // a stable rotation across all replicas (non-leaders first, then leader) while
-                // preferring replicas that haven't been attempted yet.
-                //
-                // Keep the rotation stable when some replicas become unreachable by skipping
-                // unreachable entries in the rotation instead of compressing the candidate set.
-                let total_candidates = rotation.len();
-                let start = (attempt as usize) % total_candidates;
-
-                for offset in 0..total_candidates {
-                    let peer = &rotation[(start + offset) % total_candidates];
-                    if is_store_available(unavailable_store_ids, peer.store_id)
-                        && !busy_store_ids.contains(&peer.store_id)
-                        && !attempted_store_ids.contains(&peer.store_id)
-                    {
-                        return Some(peer.clone());
-                    }
-                }
-                for offset in 0..total_candidates {
-                    let peer = &rotation[(start + offset) % total_candidates];
-                    if is_store_available(unavailable_store_ids, peer.store_id)
-                        && !busy_store_ids.contains(&peer.store_id)
-                    {
-                        return Some(peer.clone());
-                    }
-                }
-                for offset in 0..total_candidates {
-                    let peer = &rotation[(start + offset) % total_candidates];
-                    if is_store_available(unavailable_store_ids, peer.store_id)
-                        && busy_store_ids.contains(&peer.store_id)
-                        && !attempted_store_ids.contains(&peer.store_id)
-                    {
-                        return Some(peer.clone());
-                    }
-                }
-                for offset in 0..total_candidates {
-                    let peer = &rotation[(start + offset) % total_candidates];
-                    if is_store_available(unavailable_store_ids, peer.store_id)
-                        && busy_store_ids.contains(&peer.store_id)
-                    {
-                        return Some(peer.clone());
-                    }
-                }
-                None
-            }
-        }
+        ReplicaReadType::Mixed => select_replica_read_peer_by_score(
+            region,
+            peers,
+            replica_read,
+            attempt,
+            unavailable_store_ids,
+            busy_store_ids,
+            attempted_store_ids,
+            leader_store_id,
+            labels_configured,
+            label_matched_store_ids,
+            true,
+        ),
         ReplicaReadType::Leader => None,
         ReplicaReadType::PreferLeader => match leader_store_id {
             Some(store_id) if is_store_available(unavailable_store_ids, store_id) => {
