@@ -119,6 +119,12 @@ pub enum Error {
     InternalError { message: String },
     #[error("{0}")]
     StringError(String),
+    /// Failed to acquire a pessimistic lock when no-wait is configured.
+    #[error("lock acquire failed and no wait is set")]
+    LockAcquireFailAndNoWaitSet,
+    /// Failed to acquire a pessimistic lock within the configured wait timeout.
+    #[error("lock wait timeout")]
+    LockWaitTimeout,
     #[error("PessimisticLock error: {:?}", inner)]
     PessimisticLockError {
         inner: Box<Error>,

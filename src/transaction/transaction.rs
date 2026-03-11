@@ -2009,12 +2009,10 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
 
             if lock_wait_timeout.is_no_wait() {
-                return Err(Error::StringError(
-                    "lock acquire failed and no wait is set".to_owned(),
-                ));
+                return Err(Error::LockAcquireFailAndNoWaitSet);
             }
             if lock_wait_timeout.is_timed_out(lock_wait_start) {
-                return Err(Error::StringError("lock wait timeout".to_owned()));
+                return Err(Error::LockWaitTimeout);
             }
         }
     }
@@ -8325,12 +8323,98 @@ mod tests {
             .lock_keys(vec![vec![1u8]])
             .await
             .expect_err("expected no-wait lock error");
-        match err {
-            Error::StringError(message) => {
-                assert_eq!(message, "lock acquire failed and no wait is set");
+        assert!(matches!(err, Error::LockAcquireFailAndNoWaitSet));
+
+        assert_eq!(lock_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(check_txn_status_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_wait_timeout_returns_error() {
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_requests = Arc::new(AtomicUsize::new(0));
+        let timestamp_calls = Arc::new(AtomicUsize::new(0));
+
+        let lock_requests_captured = lock_requests.clone();
+        let check_txn_status_requests_captured = check_txn_status_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req
+                .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
+                .is_some()
+            {
+                lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                let resp = kvrpcpb::PessimisticLockResponse {
+                    errors: vec![kvrpcpb::KeyError {
+                        locked: Some(kvrpcpb::LockInfo {
+                            key: vec![1],
+                            primary_lock: vec![1],
+                            lock_version: 7,
+                            lock_ttl: 100,
+                            lock_type: kvrpcpb::Op::Put as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
             }
-            err => panic!("unexpected error: {err:?}"),
-        }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                check_txn_status_requests_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.caller_start_ts, 0);
+                let resp = kvrpcpb::CheckTxnStatusResponse {
+                    lock_ttl: 100,
+                    lock_info: Some(kvrpcpb::LockInfo {
+                        key: vec![1],
+                        primary_lock: vec![1],
+                        lock_version: 7,
+                        lock_ttl: 100,
+                        lock_type: kvrpcpb::Op::Put as i32,
+                        ..Default::default()
+                    }),
+                    action: kvrpcpb::Action::NoAction as i32,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls,
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .lock_wait_timeout(crate::LockWaitTimeout::Wait(Duration::from_millis(1)))
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let request = crate::transaction::lowering::new_pessimistic_lock_request(
+            std::iter::once(Key::from(vec![1u8])),
+            Key::from(vec![1u8]),
+            Timestamp::default(),
+            100,
+            Timestamp::default(),
+            false,
+            true,
+        );
+
+        let lock_wait_start = Instant::now() - Duration::from_millis(10);
+        let err = txn
+            .execute_pessimistic_lock_request(request, Timestamp::default(), false, lock_wait_start)
+            .await
+            .expect_err("expected wait-timeout lock error");
+        assert!(matches!(err, Error::LockWaitTimeout));
 
         assert_eq!(lock_requests.load(Ordering::SeqCst), 1);
         assert_eq!(check_txn_status_requests.load(Ordering::SeqCst), 1);
