@@ -10,6 +10,9 @@ pub struct GetRequest {
     pub key: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "3")]
     pub version: u64,
+    /// If true, the response will include the commit ts of the key.
+    #[prost(bool, tag = "4")]
+    pub need_commit_ts: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -30,6 +33,10 @@ pub struct GetResponse {
     /// Time and scan details when processing the request.
     #[prost(message, optional, tag = "6")]
     pub exec_details_v2: ::core::option::Option<ExecDetailsV2>,
+    /// The commit timestamp of the key.
+    /// If it is zero, it means the commit timestamp is unknown.
+    #[prost(uint64, tag = "7")]
+    pub commit_ts: u64,
 }
 /// Scan fetches values for a range of keys; it is part of the transaction with
 /// starting timestamp = `version`.
@@ -579,6 +586,9 @@ pub struct BatchGetRequest {
     pub keys: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
     #[prost(uint64, tag = "3")]
     pub version: u64,
+    /// If true, the response will include the commit ts of the key.
+    #[prost(bool, tag = "4")]
+    pub need_commit_ts: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1719,6 +1729,10 @@ pub struct KvPair {
     pub key: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
     pub value: ::prost::alloc::vec::Vec<u8>,
+    /// The commit timestamp of the key.
+    /// If it is zero, it means the commit timestamp is unknown.
+    #[prost(uint64, tag = "4")]
+    pub commit_ts: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
