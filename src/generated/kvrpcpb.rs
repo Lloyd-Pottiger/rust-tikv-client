@@ -2102,6 +2102,64 @@ pub struct TiFlashSystemTableResponse {
     #[prost(bytes = "vec", tag = "1")]
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
+/// Flush is introduced from the pipelined DML protocol.
+/// A Flush request writes some keys and values to TiKV, storing in LOCK and DEFAULT CF, just like a Prewrite request.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FlushRequest {
+    #[prost(message, optional, tag = "1")]
+    pub context: ::core::option::Option<Context>,
+    #[prost(message, repeated, tag = "2")]
+    pub mutations: ::prost::alloc::vec::Vec<Mutation>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub primary_key: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub start_ts: u64,
+    #[prost(uint64, tag = "5")]
+    pub min_commit_ts: u64,
+    /// generation of the flush request. It is a monotonically increasing number in each transaction.
+    #[prost(uint64, tag = "6")]
+    pub generation: u64,
+    #[prost(uint64, tag = "7")]
+    pub lock_ttl: u64,
+    #[prost(enumeration = "AssertionLevel", tag = "8")]
+    pub assertion_level: i32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FlushResponse {
+    #[prost(message, optional, tag = "1")]
+    pub region_error: ::core::option::Option<super::errorpb::Error>,
+    #[prost(message, repeated, tag = "2")]
+    pub errors: ::prost::alloc::vec::Vec<KeyError>,
+    #[prost(message, optional, tag = "3")]
+    pub exec_details_v2: ::core::option::Option<ExecDetailsV2>,
+}
+/// BufferBatchGet is introduced from the pipelined DML protocol.
+/// It is similar to a BatchGet request, except that it can only read the data that has been flushed by itself.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BufferBatchGetRequest {
+    #[prost(message, optional, tag = "1")]
+    pub context: ::core::option::Option<Context>,
+    #[prost(bytes = "vec", repeated, tag = "2")]
+    pub keys: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    #[prost(uint64, tag = "3")]
+    pub version: u64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BufferBatchGetResponse {
+    #[prost(message, optional, tag = "1")]
+    pub region_error: ::core::option::Option<super::errorpb::Error>,
+    #[prost(message, optional, tag = "2")]
+    pub error: ::core::option::Option<KeyError>,
+    #[prost(message, repeated, tag = "3")]
+    pub pairs: ::prost::alloc::vec::Vec<KvPair>,
+    /// Time and scan details when processing the request.
+    #[prost(message, optional, tag = "4")]
+    pub exec_details_v2: ::core::option::Option<ExecDetailsV2>,
+}
 /// Used to specify the behavior when a pessimistic lock request is woken up after waiting for another
 /// lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]

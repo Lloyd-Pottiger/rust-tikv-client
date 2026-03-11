@@ -326,6 +326,55 @@ pub mod tikv_client {
             req.extensions_mut().insert(GrpcMethod::new("tikvpb.Tikv", "KvGet"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn kv_flush(
+            &mut self,
+            request: impl tonic::IntoRequest<super::super::kvrpcpb::FlushRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::super::kvrpcpb::FlushResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/tikvpb.Tikv/KvFlush");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("tikvpb.Tikv", "KvFlush"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn kv_buffer_batch_get(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                super::super::kvrpcpb::BufferBatchGetRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::super::kvrpcpb::BufferBatchGetResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/tikvpb.Tikv/KvBufferBatchGet",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("tikvpb.Tikv", "KvBufferBatchGet"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn kv_scan(
             &mut self,
             request: impl tonic::IntoRequest<super::super::kvrpcpb::ScanRequest>,
