@@ -750,36 +750,41 @@ where
             let store_ids_configured = !match_store_ids.is_empty();
             let labels_configured = !match_store_labels.is_empty();
             let match_configured = store_ids_configured || labels_configured;
-            let label_matched_store_ids = if match_configured && read_type.is_follower_read() {
-                let mut matched_store_ids = Vec::new();
-                for peer in region.region.peers.iter() {
-                    if store_ids_configured && !match_store_ids.contains(&peer.store_id) {
-                        continue;
-                    }
-                    if !labels_configured {
-                        matched_store_ids.push(peer.store_id);
-                        continue;
-                    }
+            let (labels_matched_store_ids, label_matched_store_ids) =
+                if match_configured && read_type.is_follower_read() {
+                    let mut labels_matched_store_ids = Vec::new();
+                    let mut label_matched_store_ids = Vec::new();
+                    for peer in region.region.peers.iter() {
+                        let store_id = peer.store_id;
+                        let store_id_matches =
+                            !store_ids_configured || match_store_ids.contains(&store_id);
+                        if !labels_configured {
+                            if store_id_matches {
+                                label_matched_store_ids.push(store_id);
+                            }
+                            continue;
+                        }
 
-                    match pd_client.store_meta_by_id(peer.store_id).await {
-                        Ok(store) => {
-                            if store_labels_match(&store, match_store_labels.as_slice()) {
-                                matched_store_ids.push(peer.store_id);
+                        match pd_client.store_meta_by_id(store_id).await {
+                            Ok(store) => {
+                                if store_labels_match(&store, match_store_labels.as_slice()) {
+                                    labels_matched_store_ids.push(store_id);
+                                    if store_id_matches {
+                                        label_matched_store_ids.push(store_id);
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                debug!("store_meta_by_id failed for store {}: {:?}", store_id, err);
                             }
                         }
-                        Err(err) => {
-                            debug!(
-                                "store_meta_by_id failed for store {}: {:?}",
-                                peer.store_id, err
-                            );
-                        }
                     }
-                }
-                matched_store_ids
-            } else {
-                Vec::new()
-            };
+                    (labels_matched_store_ids, label_matched_store_ids)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
 
+            let mut can_send_replica_read = false;
             let stale_read_enabled = replica_read.stale_read_enabled();
             if stale_read_enabled {
                 let leader_attempted = match leader_store_id {
@@ -788,17 +793,14 @@ where
                     }
                     None => false,
                 };
-                let leader_can_send_replica_read = if attempt >= 1 {
-                    if let Some(leader_store_id) = leader_store_id {
-                        leader_attempted
-                            && !unreachable_store_ids.contains(&leader_store_id)
-                            && !replica_read.is_store_server_is_busy(leader_store_id).await
-                    } else {
-                        false
-                    }
+                can_send_replica_read = if let Some(leader_store_id) = leader_store_id {
+                    leader_attempted
+                        && !unreachable_store_ids.contains(&leader_store_id)
+                        && !replica_read.is_store_server_is_busy(leader_store_id).await
                 } else {
                     false
                 };
+                let leader_can_send_replica_read = attempt >= 1 && can_send_replica_read;
 
                 if attempt == 1 && !leader_attempted {
                     // Align with client-go replica selector behavior:
@@ -954,6 +956,25 @@ where
                     &label_matched_store_ids,
                 ) {
                     region.leader = Some(peer);
+                }
+
+                if patched_stale_read && attempt == 0 && labels_configured && can_send_replica_read
+                {
+                    let target_store_id = region.leader.as_ref().map(|peer| peer.store_id);
+                    let is_leader_target = target_store_id == leader_store_id;
+                    let target_labels_match = target_store_id
+                        .map(|store_id| labels_matched_store_ids.contains(&store_id))
+                        .unwrap_or(true);
+                    if !is_leader_target && !target_labels_match {
+                        // Match client-go stale read behavior when label matching is enabled: if
+                        // the chosen target does not match labels (and is not the leader), prefer
+                        // replica-read when the leader is healthy enough to flip.
+                        if let Some(ctx) = plan.kv_context_mut() {
+                            ctx.stale_read = false;
+                            ctx.replica_read = false;
+                        }
+                        patched_stale_read = false;
+                    }
                 }
             }
 
@@ -3329,6 +3350,121 @@ mod test {
         assert_ne!(store_id, 41);
         assert!(!stale_read);
         assert!(replica_read);
+    }
+
+    #[tokio::test]
+    async fn test_stale_read_label_mismatch_first_attempt_flips_to_replica_read_after_switching_to_mixed(
+    ) {
+        let seen = Arc::new(Mutex::new(Vec::<(u64, bool, bool)>::new()));
+        let seen_captured = seen.clone();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_captured = call_count.clone();
+
+        let pd_client_holder: Arc<Mutex<Option<Arc<MockPdClient>>>> = Arc::new(Mutex::new(None));
+        let pd_client_holder_captured = pd_client_holder.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push((
+                    peer.store_id,
+                    ctx.stale_read,
+                    ctx.replica_read,
+                ));
+
+                let call = call_count_captured.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    // Make the leader "slow" so when we switch PreferLeader -> Mixed after a gRPC
+                    // error, replica selection picks a non-leader with mismatched labels.
+                    if let Some(pd_client) = pd_client_holder_captured.lock().unwrap().clone() {
+                        pd_client.mark_store_slow(41, Duration::from_secs(60));
+                    }
+
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    let mut region_error = errorpb::Error::default();
+                    region_error.data_is_not_ready = Some(errorpb::DataIsNotReady {
+                        region_id: 1,
+                        peer_id: peer.id,
+                        safe_ts: 0,
+                    });
+                    resp.region_error = Some(region_error);
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if call == 1 {
+                    return Err(Error::GrpcAPI(tonic::Status::unavailable("boom")));
+                }
+
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+        *pd_client_holder.lock().unwrap() = Some(pd_client.clone());
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 41,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 51,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-west".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 61,
+                labels: vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-west".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context {
+            stale_read: true,
+            replica_read: false,
+            ..Default::default()
+        });
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read_and_match_store_labels(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::PreferLeader,
+                Arc::new(vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }]),
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![(41, true, false), (61, false, true), (51, false, true)],
+            "label-mismatch should flip stale-read to replica-read even when the attempt counter resets after switching to mixed",
+        );
     }
 
     #[derive(Clone)]
