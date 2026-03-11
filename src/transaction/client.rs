@@ -1,7 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use log::debug;
 use log::info;
@@ -21,10 +20,8 @@ use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_scan_lock_request;
 use crate::transaction::lowering::new_unsafe_destroy_range_request;
 use crate::transaction::requests::new_store_safe_ts_request_all;
-use crate::transaction::resolve_locks_with_options;
 use crate::transaction::BoundLockResolver;
 use crate::transaction::LockResolver;
-use crate::transaction::LockResolverRpcContext;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::Snapshot;
 use crate::transaction::Transaction;
@@ -441,40 +438,20 @@ impl<PdC: PdClient> Client<PdC> {
         &self,
         locks: Vec<ProtoLockInfo>,
         timestamp: Timestamp,
-        mut backoff: Backoff,
+        backoff: Backoff,
     ) -> Result<Vec<ProtoLockInfo>> {
         use crate::request::TruncateKeyspace;
 
-        let mut live_locks = locks;
-        loop {
-            let resolve_result = resolve_locks_with_options(
-                self.resolve_locks_ctx.clone(),
-                live_locks.encode_keyspace(self.keyspace, KeyMode::Txn),
-                timestamp.clone(),
-                self.pd.clone(),
-                self.keyspace,
+        let mut lock_resolver = self.bound_lock_resolver();
+        let live_locks = lock_resolver
+            .resolve_locks(
+                locks.encode_keyspace(self.keyspace, KeyMode::Txn),
+                timestamp,
+                backoff,
                 false,
-                LockResolverRpcContext::default(),
             )
             .await?;
-            let ms_before_txn_expired = resolve_result.ms_before_txn_expired;
-            live_locks = resolve_result.live_locks.truncate_keyspace(self.keyspace);
-            if live_locks.is_empty() {
-                return Ok(live_locks);
-            }
-
-            match backoff.next_delay_duration() {
-                None => return Ok(live_locks),
-                Some(delay_duration) => {
-                    let delay_duration = if ms_before_txn_expired > 0 {
-                        delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64))
-                    } else {
-                        delay_duration
-                    };
-                    tokio::time::sleep(delay_duration).await;
-                }
-            }
-        }
+        Ok(live_locks.truncate_keyspace(self.keyspace))
     }
 
     /// Cleans up all keys in a range and quickly reclaim disk space.
@@ -528,6 +505,7 @@ mod tests {
     use crate::request::Keyspace;
     use crate::timestamp::TimestampExt;
     use crate::transaction::ResolveLocksContext;
+    use crate::Backoff;
     use crate::Timestamp;
     use crate::TransactionOptions;
 
@@ -647,5 +625,71 @@ mod tests {
         assert_eq!(value, Some(b"v".to_vec()));
 
         assert_eq!(get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_delegates_to_bound_lock_resolver() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(_req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 50,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.commit_version, 50);
+                    assert!(
+                        req.keys.is_empty(),
+                        "non-lite resolve should not send key list"
+                    );
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()) as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let client = Client {
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+        };
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.txn_size = 20;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let live_locks = client
+            .resolve_locks(
+                vec![lock],
+                Timestamp::from_version(42),
+                Backoff::no_backoff(),
+            )
+            .await
+            .unwrap();
+
+        assert!(live_locks.is_empty());
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
+
+        let mut lock_resolver = client.lock_resolver();
+        assert!(lock_resolver.resolving().await.is_empty());
     }
 }
