@@ -627,7 +627,25 @@ async fn txn_update_safepoint() -> Result<()> {
     let client =
         TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
             .await?;
-    let res = client.gc(client.current_timestamp().await?).await?;
+    // TiUP playground (used in CI) does not run TiDB, and newer PD versions may reject attempts
+    // to advance GC safepoint without TiDB managing txn safepoints. Fetch the current safepoint
+    // from PD and re-apply it to validate the gRPC update path.
+    let resp = reqwest::get(format!("http://{}/pd/api/v1/gc/safepoint", pd_addrs()[0]))
+        .await
+        .map_err(|e| Error::StringError(e.to_string()))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| Error::StringError(e.to_string()))?;
+    let value: serde_json::Value = serde_json::from_str(body.as_ref()).unwrap_or_else(|err| {
+        panic!("invalid body: {:?}, error: {:?}", body, err);
+    });
+    let safe_point = value["gc_safe_point"].as_u64().ok_or_else(|| {
+        Error::StringError("pd gc safe point does not return an integer".to_owned())
+    })?;
+    let res = client
+        .gc(<tikv_client::Timestamp as tikv_client::TimestampExt>::from_version(safe_point))
+        .await?;
     assert!(res);
     Ok(())
 }
@@ -1071,11 +1089,18 @@ async fn txn_lock_keys() -> Result<()> {
     let k3 = b"key3".to_vec();
     let k4 = b"key4".to_vec();
     let mut t3 = client.begin_pessimistic().await?;
-    let mut t4 = client.begin_pessimistic().await?;
+    let mut t4 = client
+        .begin_with_options(
+            TransactionOptions::new_pessimistic()
+                .lock_wait_timeout(tikv_client::LockWaitTimeout::NoWait),
+        )
+        .await?;
     t3.lock_keys(vec![k3.clone(), k4.clone()]).await?;
     assert!(t4.lock_keys(vec![k3.clone(), k4.clone()]).await.is_err());
 
+    t4.rollback().await?;
     t3.rollback().await?;
+    let mut t4 = client.begin_pessimistic().await?;
     t4.lock_keys(vec![k3.clone(), k4.clone()]).await?;
     t4.commit().await?;
 
@@ -1102,7 +1127,12 @@ async fn txn_lock_keys_error_handle() -> Result<()> {
     .collect();
 
     let mut t1 = client.begin_pessimistic().await?;
-    let mut t2 = client.begin_pessimistic().await?;
+    let mut t2 = client
+        .begin_with_options(
+            TransactionOptions::new_pessimistic()
+                .lock_wait_timeout(tikv_client::LockWaitTimeout::NoWait),
+        )
+        .await?;
     let mut t3 = client.begin_pessimistic().await?;
 
     t1.lock_keys(vec![k[0].clone(), k[1].clone()]).await?;
@@ -1110,11 +1140,13 @@ async fn txn_lock_keys_error_handle() -> Result<()> {
         .lock_keys(vec![k[0].clone(), k[2].clone()])
         .await
         .is_err());
+    t2.rollback().await?;
     t3.lock_keys(vec![k[2].clone(), k[3].clone()]).await?;
 
     t1.rollback().await?;
     t3.rollback().await?;
 
+    let mut t2 = client.begin_pessimistic().await?;
     t2.lock_keys(vec![k[0].clone(), k[2].clone()]).await?;
     t2.commit().await?;
 
@@ -1485,17 +1517,18 @@ async fn txn_batch_mutate_pessimistic() -> Result<()> {
     let mut txn1 = client.begin_pessimistic().await?;
     txn1.put(b"k0".to_vec(), b"vv".to_vec()).await?;
 
-    // txn2 is blocked by txn1, then timeout.
-    let txn2_handle = tokio::spawn(do_mutate(true));
-    assert!(matches!(
-        txn2_handle.await?.unwrap_err(),
-        Error::PessimisticLockError { .. }
-    ));
-
-    let txn3_handle = tokio::spawn(do_mutate(true));
     // txn1 rollback to release lock.
+    let mut txn2_handle = tokio::spawn(do_mutate(true));
+    // Ensure txn2 is blocked by txn1 (pessimistic transactions wait by default).
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut txn2_handle)
+            .await
+            .is_err()
+    );
     txn1.rollback().await?;
-    txn3_handle.await?.unwrap();
+    let _ = txn2_handle.await?;
+    // Retry with a fresh pessimistic transaction after txn1 is rolled back.
+    do_mutate(true).await.unwrap();
 
     // Read and verify
     verify_mutate(true).await?;

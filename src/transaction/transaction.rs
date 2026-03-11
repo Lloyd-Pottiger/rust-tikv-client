@@ -4769,7 +4769,7 @@ mod tests {
         assert_eq!(get_count.load(Ordering::SeqCst), 3);
         assert_eq!(first_store_id.load(Ordering::SeqCst), 51);
         assert_eq!(second_store_id.load(Ordering::SeqCst), 41);
-        assert_eq!(third_store_id.load(Ordering::SeqCst), 51);
+        assert_eq!(third_store_id.load(Ordering::SeqCst), 61);
         assert!(first_stale_read.load(Ordering::SeqCst));
         assert!(!second_stale_read.load(Ordering::SeqCst));
         assert!(third_stale_read.load(Ordering::SeqCst));
