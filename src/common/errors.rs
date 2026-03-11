@@ -125,6 +125,9 @@ pub enum Error {
     /// Failed to acquire a pessimistic lock within the configured wait timeout.
     #[error("lock wait timeout")]
     LockWaitTimeout,
+    /// Commit timestamp is required but not returned.
+    #[error("commit timestamp is required but not returned")]
+    CommitTsRequiredButNotReturned,
     #[error("PessimisticLock error: {:?}", inner)]
     PessimisticLockError {
         inner: Box<Error>,

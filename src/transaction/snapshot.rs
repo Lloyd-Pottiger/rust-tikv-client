@@ -171,7 +171,8 @@ impl Snapshot {
 
     /// Get the value associated with the given key and its commit timestamp.
     ///
-    /// `commit_ts == 0` means the commit timestamp is unknown.
+    /// Returns [`crate::Error::CommitTsRequiredButNotReturned`] if TiKV does not return a commit
+    /// timestamp for an existing key.
     pub async fn get_with_commit_ts(
         &mut self,
         key: impl Into<Key>,
@@ -193,6 +194,18 @@ impl Snapshot {
     ) -> Result<impl Iterator<Item = KvPair>> {
         debug!("invoking batch_get request on snapshot");
         self.transaction.batch_get(keys).await
+    }
+
+    /// Get the values associated with the given keys and their commit timestamps.
+    ///
+    /// Returns [`crate::Error::CommitTsRequiredButNotReturned`] if TiKV does not return a commit
+    /// timestamp for an existing key.
+    pub async fn batch_get_with_commit_ts(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+    ) -> Result<impl Iterator<Item = (KvPair, u64)>> {
+        debug!("invoking batch_get_with_commit_ts request on snapshot");
+        self.transaction.batch_get_with_commit_ts(keys).await
     }
 
     /// Scan a range, return at most `limit` key-value pairs that lying in the range.

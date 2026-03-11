@@ -43,6 +43,14 @@ impl SyncSnapshot {
         safe_block_on(&self.runtime, self.inner.batch_get(keys))
     }
 
+    /// Get the values associated with the given keys and their commit timestamps.
+    pub fn batch_get_with_commit_ts(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+    ) -> Result<impl Iterator<Item = (KvPair, u64)>> {
+        safe_block_on(&self.runtime, self.inner.batch_get_with_commit_ts(keys))
+    }
+
     /// Scan a range, return at most `limit` key-value pairs that lie in the range.
     pub fn scan(
         &mut self,

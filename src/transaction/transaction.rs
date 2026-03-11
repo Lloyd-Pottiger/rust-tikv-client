@@ -155,9 +155,33 @@ impl Process<kvrpcpb::GetResponse> for GetWithCommitTsProcessor {
         let input = input?;
         if input.not_found {
             Ok(None)
+        } else if input.commit_ts == 0 {
+            Err(Error::CommitTsRequiredButNotReturned)
         } else {
             Ok(Some((input.value, input.commit_ts)))
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CollectBatchGetWithCommitTs;
+
+impl Merge<kvrpcpb::BatchGetResponse> for CollectBatchGetWithCommitTs {
+    type Out = Vec<(KvPair, u64)>;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::BatchGetResponse>>) -> Result<Self::Out> {
+        let mut out = Vec::new();
+        for resp in input {
+            let resp = resp?;
+            for pair in resp.pairs {
+                let commit_ts = pair.commit_ts;
+                if commit_ts == 0 {
+                    return Err(Error::CommitTsRequiredButNotReturned);
+                }
+                out.push((KvPair::from(pair), commit_ts));
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -617,7 +641,8 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// This is only supported for **read-only snapshots** (`TransactionOptions::read_only()`) and
     /// sets `kvrpcpb::GetRequest.need_commit_ts = true`.
     ///
-    /// `commit_ts == 0` means the commit timestamp is unknown.
+    /// Returns [`Error::CommitTsRequiredButNotReturned`] if TiKV does not return a commit
+    /// timestamp for an existing key.
     pub async fn get_with_commit_ts(
         &mut self,
         key: impl Into<Key>,
@@ -1026,6 +1051,98 @@ impl<PdC: PdClient> Transaction<PdC> {
             })
             .await
             .map(move |pairs| pairs.map(move |pair| pair.truncate_keyspace(keyspace)))
+    }
+
+    /// Get the values associated with the given keys and their commit timestamps.
+    ///
+    /// This is only supported for **read-only snapshots** (`TransactionOptions::read_only()`) and
+    /// sets `kvrpcpb::BatchGetRequest.need_commit_ts = true`.
+    ///
+    /// Returns [`Error::CommitTsRequiredButNotReturned`] if TiKV does not return a commit timestamp
+    /// for an existing key.
+    ///
+    /// Non-existent entries will not appear in the result. The order of the keys is not retained
+    /// in the result.
+    pub async fn batch_get_with_commit_ts(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+    ) -> Result<impl Iterator<Item = (KvPair, u64)>> {
+        debug!("invoking transactional batch_get_with_commit_ts request");
+        self.check_allow_operation().await?;
+        if !self.options.read_only {
+            return Err(Error::StringError(
+                "batch_get_with_commit_ts is only supported for read-only snapshots".to_owned(),
+            ));
+        }
+
+        let timestamp = self.timestamp.clone();
+        let rpc = self.rpc.clone();
+        let keyspace = self.keyspace;
+        let keys = keys
+            .into_iter()
+            .map(|k| k.into().encode_keyspace(keyspace, KeyMode::Txn))
+            .collect::<Vec<_>>();
+        let key_count = keys.len();
+        let retry_options = self.options.retry_options.clone();
+        let mut snapshot_ctx = self.snapshot_read_context();
+        if snapshot_ctx.replica_read.is_follower_read() {
+            if let Some(adjuster) = snapshot_ctx.replica_read_adjuster.as_ref() {
+                snapshot_ctx.replica_read = (adjuster)(key_count);
+            }
+        }
+        let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
+        let replica_read = snapshot_ctx.replica_read;
+        let lock_tracker = self.read_lock_tracker.clone();
+        let resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        let match_store_ids = self.options.match_store_ids.clone();
+        let match_store_labels = self.options.match_store_labels.clone();
+        let resource_group_tag_set = self.options.resource_group_tag.is_some();
+        let resource_group_tagger = self.resource_group_tagger.clone();
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+
+        let mut request = crate::transaction::requests::new_batch_get_request(
+            keys.into_iter().map(Into::into).collect(),
+            timestamp.version(),
+        );
+        request.need_commit_ts = true;
+        Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
+        if !resource_group_tag_set {
+            if let Some(tagger) = resource_group_tagger.as_ref() {
+                let tag = (tagger)(request.label());
+                let ctx = request
+                    .context
+                    .get_or_insert_with(kvrpcpb::Context::default);
+                ctx.resource_group_tag = tag;
+            }
+        }
+
+        let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock_for_read(
+            resolve_locks_ctx,
+            timestamp,
+            retry_options.lock_backoff,
+            keyspace,
+            false,
+            lock_tracker,
+            lock_resolver_rpc_context,
+        );
+        let plan_builder = if replica_read.is_follower_read() || enable_load_based_replica_read {
+            plan_builder.retry_multi_region_with_replica_read_and_match_stores(
+                retry_options.region_backoff,
+                replica_read,
+                match_store_ids,
+                match_store_labels,
+            )
+        } else {
+            plan_builder.retry_multi_region(retry_options.region_backoff)
+        };
+        let plan = plan_builder.merge(CollectBatchGetWithCommitTs).plan();
+        plan.execute().await.map(move |pairs| {
+            pairs
+                .into_iter()
+                .map(move |(pair, commit_ts)| (pair.truncate_keyspace(keyspace), commit_ts))
+        })
     }
 
     /// Create a new 'batch get for update' request.
@@ -8868,6 +8985,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_with_commit_ts_returns_error_when_commit_ts_not_returned() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                assert!(req.need_commit_ts);
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.value = b"v".to_vec();
+                resp.not_found = false;
+                resp.commit_ts = 0;
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let err = snapshot
+            .get_with_commit_ts(b"k".to_vec())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::CommitTsRequiredButNotReturned));
+    }
+
+    #[tokio::test]
     async fn test_get_with_commit_ts_requires_read_only_snapshots() {
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
             panic!("should not send requests when get_with_commit_ts is not supported");
@@ -8884,6 +9034,117 @@ mod tests {
             txn.get_with_commit_ts(b"k".to_vec()).await,
             Err(Error::StringError(msg))
                 if msg == "get_with_commit_ts is only supported for read-only snapshots"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_batch_get_with_commit_ts_returns_commit_ts() {
+        let batch_get_calls = Arc::new(AtomicUsize::new(0));
+        let batch_get_calls_cloned = batch_get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::BatchGetRequest>()
+                    .expect("expected batch get request");
+                batch_get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                assert!(req.need_commit_ts);
+
+                let mut resp = kvrpcpb::BatchGetResponse::default();
+                for key in &req.keys {
+                    let mut pair = kvrpcpb::KvPair::default();
+                    pair.key = key.clone();
+                    pair.value = b"v".to_vec();
+                    pair.commit_ts = 123;
+                    resp.pairs.push(pair);
+                }
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let mut results = snapshot
+            .batch_get_with_commit_ts(vec![b"k1".to_vec(), b"k2".to_vec()])
+            .await
+            .unwrap()
+            .collect::<Vec<_>>();
+        results.sort_by_key(|(pair, _)| pair.0.clone());
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].0,
+            crate::KvPair::new(b"k1".to_vec(), b"v".to_vec())
+        );
+        assert_eq!(results[0].1, 123);
+        assert_eq!(
+            results[1].0,
+            crate::KvPair::new(b"k2".to_vec(), b"v".to_vec())
+        );
+        assert_eq!(results[1].1, 123);
+        assert_eq!(batch_get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_with_commit_ts_returns_error_when_commit_ts_not_returned() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::BatchGetRequest>()
+                    .expect("expected batch get request");
+                assert!(req.need_commit_ts);
+
+                let mut resp = kvrpcpb::BatchGetResponse::default();
+                let mut pair = kvrpcpb::KvPair::default();
+                pair.key = req.keys[0].clone();
+                pair.value = b"v".to_vec();
+                pair.commit_ts = 0;
+                resp.pairs.push(pair);
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let err = snapshot
+            .batch_get_with_commit_ts(vec![b"k1".to_vec()])
+            .await
+            .err()
+            .expect("expected error");
+        assert!(matches!(err, Error::CommitTsRequiredButNotReturned));
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_with_commit_ts_requires_read_only_snapshots() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            panic!("should not send requests when batch_get_with_commit_ts is not supported");
+        })));
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        assert!(matches!(
+            txn.batch_get_with_commit_ts(vec![b"k".to_vec()]).await,
+            Err(Error::StringError(msg))
+                if msg == "batch_get_with_commit_ts is only supported for read-only snapshots"
         ));
     }
 }
