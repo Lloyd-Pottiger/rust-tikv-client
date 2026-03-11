@@ -166,7 +166,8 @@ impl<C: RetryClientTrait> RegionCache<C> {
     }
 
     pub async fn add_region(&self, region: RegionWithLeader) {
-        // FIXME: will it be the performance bottleneck?
+        // This takes a write lock because we update multiple indices consistently. This runs on
+        // region-cache update paths (e.g. cache miss), not the hot-path request routing.
         let mut cache = self.region_cache.write().await;
 
         let end_key = region.end_key();

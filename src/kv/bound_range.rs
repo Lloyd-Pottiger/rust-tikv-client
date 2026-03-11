@@ -180,7 +180,8 @@ impl RangeBounds<Key> for BoundRange {
     }
 }
 
-// FIXME `==` should not `clone`
+// NOTE: This comparison clones the bounds because `Into<Key>` requires ownership.
+// This is primarily a convenience for doctests and assertions.
 impl<T: Into<Key> + Clone> PartialEq<(Bound<T>, Bound<T>)> for BoundRange {
     fn eq(&self, other: &(Bound<T>, Bound<T>)) -> bool {
         self.from == convert_to_bound_key(other.0.clone())

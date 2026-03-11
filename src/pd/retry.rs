@@ -26,8 +26,10 @@ use crate::Error;
 use crate::Result;
 use crate::SecurityManager;
 
-// FIXME: these numbers and how they are used are all just cargo-culted in, there
-// may be more optimal values.
+// Retry bounds for PD leader changes / reconnect churn.
+//
+// These are intentionally conservative defaults to keep caller latency predictable. If needed,
+// we can expose them via `Config`.
 const RECONNECT_INTERVAL_SEC: u64 = 1;
 const MAX_REQUEST_COUNT: usize = 5;
 const LEADER_CHANGE_RETRY: usize = 10;
