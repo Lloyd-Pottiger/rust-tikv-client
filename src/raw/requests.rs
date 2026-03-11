@@ -708,7 +708,11 @@ mod test {
         let scan = plan.execute().await.unwrap();
 
         assert_eq!(scan.len(), 49);
-        // FIXME test the keys returned.
+        assert!(scan.iter().all(|pair| pair.value().is_empty()));
+
+        let keys: Vec<_> = scan.into_iter().map(|pair| pair.into_key()).collect();
+        let expected_keys: Vec<Key> = (1u8..50).map(|k| vec![k].into()).collect();
+        assert_eq!(keys, expected_keys);
     }
 
     #[tokio::test]
