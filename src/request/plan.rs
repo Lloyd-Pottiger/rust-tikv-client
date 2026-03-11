@@ -760,7 +760,7 @@ where
                     }
                     None => false,
                 };
-                let leader_can_send_replica_read = if attempt >= 2 {
+                let leader_can_send_replica_read = if attempt >= 1 {
                     if let Some(leader_store_id) = leader_store_id {
                         leader_attempted
                             && !unreachable_store_ids.contains(&leader_store_id)
@@ -3008,6 +3008,72 @@ mod test {
             vec![(51, true, false), (41, false, false), (61, false, true)],
             "stale read retries should fall back to leader read once, then switch to replica read when the leader is healthy"
         );
+    }
+
+    #[tokio::test]
+    async fn test_stale_read_first_retry_switches_to_replica_read_when_leader_already_tried() {
+        let seen = Arc::new(Mutex::new(Vec::<(u64, bool, bool)>::new()));
+        let seen_captured = seen.clone();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_captured = call_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push((
+                    peer.store_id,
+                    ctx.stale_read,
+                    ctx.replica_read,
+                ));
+
+                let call = call_count_captured.fetch_add(1, Ordering::SeqCst);
+                let mut resp = kvrpcpb::GetResponse::default();
+                if call == 0 {
+                    let mut region_error = errorpb::Error::default();
+                    region_error.data_is_not_ready = Some(errorpb::DataIsNotReady {
+                        region_id: 1,
+                        peer_id: peer.id,
+                        safe_ts: 0,
+                    });
+                    resp.region_error = Some(region_error);
+                }
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context {
+            stale_read: true,
+            replica_read: false,
+            ..Default::default()
+        });
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read_and_match_store_ids(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Mixed,
+                Arc::new(vec![41]),
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], (41, true, false));
+
+        let (store_id, stale_read, replica_read) = seen[1];
+        assert_ne!(store_id, 41);
+        assert!(!stale_read);
+        assert!(replica_read);
     }
 
     #[derive(Clone)]
