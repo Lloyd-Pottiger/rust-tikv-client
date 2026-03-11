@@ -297,11 +297,27 @@ fn select_replica_read_peer(
             .filter(|(_, score)| **score == max_score)
             .map(|(idx, _)| idx)
             .collect::<Vec<_>>();
-        let start = (attempt as usize) % best_indices.len();
-        return best_indices
-            .get(start)
-            .and_then(|idx| candidates.get(*idx))
-            .cloned();
+        if best_indices.is_empty() {
+            return None;
+        }
+        let selected = {
+            #[cfg(test)]
+            {
+                let start = (attempt as usize) % best_indices.len();
+                best_indices[start]
+            }
+            #[cfg(not(test))]
+            {
+                use rand::seq::SliceRandom;
+
+                let mut rng = rand::thread_rng();
+                match best_indices.choose(&mut rng) {
+                    Some(selected) => *selected,
+                    None => 0,
+                }
+            }
+        };
+        return candidates.get(selected).cloned();
     }
 
     fn select_peer_with_attempt<F>(
