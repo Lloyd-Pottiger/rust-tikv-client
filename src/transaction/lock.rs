@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 
 use fail::fail_point;
 use log::debug;
@@ -1003,6 +1004,29 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
         self.inner.resolving().await
     }
 
+    /// Resolves the given locks and returns any that remain live.
+    ///
+    /// This retries until either all locks are resolved or the provided `backoff` is exhausted.
+    /// The `timestamp` is used as the caller start timestamp when checking transaction status.
+    pub async fn resolve_locks(
+        &mut self,
+        locks: Vec<kvrpcpb::LockInfo>,
+        timestamp: Timestamp,
+        backoff: Backoff,
+        pessimistic_region_resolve: bool,
+    ) -> Result<Vec<kvrpcpb::LockInfo>> {
+        self.inner
+            .resolve_locks(
+                locks,
+                timestamp,
+                backoff,
+                self.pd_client.clone(),
+                self.keyspace,
+                pessimistic_region_resolve,
+            )
+            .await
+    }
+
     /// Get the transaction status for `txn_id` (start TS) and `primary` key.
     pub async fn get_txn_status(
         &mut self,
@@ -1157,6 +1181,84 @@ impl LockResolver {
             .filter_map(|slot| slot.as_ref())
             .flat_map(|locks| locks.iter().cloned())
             .collect()
+    }
+
+    /// Resolves the given locks and returns any that remain live.
+    ///
+    /// This retries until either all locks are resolved or the provided `backoff` is exhausted.
+    /// The `timestamp` is used as the caller start timestamp when checking transaction status.
+    pub async fn resolve_locks(
+        &mut self,
+        mut locks: Vec<kvrpcpb::LockInfo>,
+        timestamp: Timestamp,
+        mut backoff: Backoff,
+        pd_client: Arc<impl PdClient>,
+        keyspace: Keyspace,
+        pessimistic_region_resolve: bool,
+    ) -> Result<Vec<kvrpcpb::LockInfo>> {
+        if locks.is_empty() {
+            return Ok(locks);
+        }
+
+        let ctx = self.ctx.clone();
+        let rpc_context = self.rpc_context.clone();
+        let caller_start_ts = timestamp.version();
+        let mut resolving_record_token: Option<usize> = None;
+
+        loop {
+            let token = match resolving_record_token {
+                Some(token) => {
+                    self.update_resolving_locks(&locks, caller_start_ts, token)
+                        .await;
+                    token
+                }
+                None => {
+                    let token = self.record_resolving_locks(&locks, caller_start_ts).await;
+                    resolving_record_token = Some(token);
+                    token
+                }
+            };
+
+            let resolve_result = match resolve_locks_with_options(
+                ctx.clone(),
+                locks,
+                timestamp.clone(),
+                pd_client.clone(),
+                keyspace,
+                pessimistic_region_resolve,
+                rpc_context.clone(),
+            )
+            .await
+            {
+                Ok(resolve_result) => resolve_result,
+                Err(err) => {
+                    self.resolve_locks_done(caller_start_ts, token).await;
+                    return Err(err);
+                }
+            };
+
+            let ms_before_txn_expired = resolve_result.ms_before_txn_expired;
+            locks = resolve_result.live_locks;
+            if locks.is_empty() {
+                self.resolve_locks_done(caller_start_ts, token).await;
+                return Ok(locks);
+            }
+
+            match backoff.next_delay_duration() {
+                None => {
+                    self.resolve_locks_done(caller_start_ts, token).await;
+                    return Ok(locks);
+                }
+                Some(delay_duration) => {
+                    let delay_duration = if ms_before_txn_expired > 0 {
+                        delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64))
+                    } else {
+                        delay_duration
+                    };
+                    sleep(delay_duration).await;
+                }
+            }
+        }
     }
 
     /// Get the transaction status for `txn_id` (start TS) and `primary` key.
@@ -1845,7 +1947,7 @@ mod tests {
         )));
 
         let mut lock = kvrpcpb::LockInfo::default();
-        lock.key = vec![2];
+        lock.key = vec![10];
         lock.primary_lock = vec![1];
         lock.lock_version = txn_id;
         lock.lock_ttl = 100;
@@ -2359,6 +2461,113 @@ mod tests {
         );
 
         lock_resolver.resolve_locks_done(42, token).await;
+        assert!(lock_resolver.resolving().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_resolve_locks_returns_live_locks_when_backoff_exhausted() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        lock_ttl: 100,
+                        lock_info: Some(kvrpcpb::LockInfo {
+                            key: vec![1],
+                            primary_lock: vec![1],
+                            lock_version: 7,
+                            lock_ttl: 100,
+                            lock_type: kvrpcpb::Op::Put as i32,
+                            ..Default::default()
+                        }),
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![2];
+        lock.primary_lock = vec![1];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let live_locks = lock_resolver
+            .resolve_locks(
+                vec![lock],
+                Timestamp::from_version(42),
+                Backoff::no_backoff(),
+                client,
+                Keyspace::Disable,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(live_locks.len(), 1);
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert!(lock_resolver.resolving().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_bound_lock_resolver_resolve_locks_returns_live_locks_when_backoff_exhausted() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        lock_ttl: 100,
+                        lock_info: Some(kvrpcpb::LockInfo {
+                            key: vec![1],
+                            primary_lock: vec![1],
+                            lock_version: 7,
+                            lock_ttl: 100,
+                            lock_type: kvrpcpb::Op::Put as i32,
+                            ..Default::default()
+                        }),
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![1];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let mut lock_resolver =
+            BoundLockResolver::new(pd_client, Keyspace::Disable, ResolveLocksContext::default());
+        let live_locks = lock_resolver
+            .resolve_locks(
+                vec![lock],
+                Timestamp::from_version(42),
+                Backoff::no_backoff(),
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(live_locks.len(), 1);
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert!(lock_resolver.resolving().await.is_empty());
     }
 
