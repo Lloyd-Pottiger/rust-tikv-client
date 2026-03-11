@@ -22,6 +22,7 @@ use crate::transaction::lowering::new_scan_lock_request;
 use crate::transaction::lowering::new_unsafe_destroy_range_request;
 use crate::transaction::requests::new_store_safe_ts_request_all;
 use crate::transaction::resolve_locks_with_options;
+use crate::transaction::LockResolver;
 use crate::transaction::LockResolverRpcContext;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::Snapshot;
@@ -171,6 +172,14 @@ impl Client {
     #[must_use]
     pub fn pd_client(&self) -> Arc<PdRpcClient> {
         self.pd.clone()
+    }
+
+    /// Returns a [`LockResolver`] handle associated with this client.
+    ///
+    /// The returned resolver shares the resolve-lock caches with this client.
+    #[must_use]
+    pub fn lock_resolver(&self) -> LockResolver {
+        LockResolver::new(self.resolve_locks_ctx.clone())
     }
 
     /// Creates a new optimistic [`Transaction`].

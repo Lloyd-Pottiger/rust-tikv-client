@@ -105,6 +105,12 @@ impl SyncTransactionClient {
         self.client.pd_client()
     }
 
+    /// Returns a [`LockResolver`](crate::transaction::LockResolver) handle associated with this client.
+    #[must_use]
+    pub fn lock_resolver(&self) -> crate::transaction::LockResolver {
+        self.client.lock_resolver()
+    }
+
     /// Creates a new optimistic [`SyncTransaction`].
     ///
     /// Use the transaction to issue requests like [`get`](SyncTransaction::get) or
