@@ -800,7 +800,61 @@ where
                 }
             }
 
-            if !stale_read_leader_fallback && read_type.is_follower_read() {
+            let leader_is_busy_under_threshold = if read_type == ReplicaReadType::Leader
+                && busy_threshold_ms > 0
+                && !stale_read_enabled
+                && !replica_read.retry_same_replica
+            {
+                if let Some(leader_store_id) = leader_store_id {
+                    let busy_threshold = Duration::from_millis(u64::from(busy_threshold_ms));
+                    pd_client.store_estimated_wait_time(leader_store_id) > busy_threshold
+                        || replica_read.is_store_server_is_busy(leader_store_id).await
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !stale_read_leader_fallback && leader_is_busy_under_threshold {
+                // Align with client-go load-based replica read: when the leader is busy, try an
+                // idle replica first.
+                let server_is_busy_store_ids = replica_read.server_is_busy_store_ids().await;
+                let busy_threshold = Duration::from_millis(u64::from(busy_threshold_ms));
+                let mut unavailable_store_ids = unreachable_store_ids.clone();
+                unavailable_store_ids.extend(server_is_busy_store_ids.iter().copied());
+                for peer in region.region.peers.iter() {
+                    if pd_client.store_estimated_wait_time(peer.store_id) > busy_threshold
+                        && !unavailable_store_ids.contains(&peer.store_id)
+                    {
+                        unavailable_store_ids.push(peer.store_id);
+                    }
+                }
+                if let Some(leader_store_id) = leader_store_id {
+                    if !unavailable_store_ids.contains(&leader_store_id) {
+                        unavailable_store_ids.push(leader_store_id);
+                    }
+                }
+
+                let attempted_store_ids = replica_read.attempted_store_ids().await;
+                if let Some(peer) = select_replica_read_peer(
+                    &region,
+                    ReplicaReadType::Mixed,
+                    attempt,
+                    &unavailable_store_ids,
+                    &server_is_busy_store_ids,
+                    &attempted_store_ids,
+                    false,
+                    false,
+                    &[],
+                ) {
+                    region.leader = Some(peer);
+                }
+
+                if region.leader.as_ref().map(|peer| peer.store_id) == leader_store_id {
+                    fallback_to_leader_under_busy_threshold = true;
+                }
+            } else if !stale_read_leader_fallback && read_type.is_follower_read() {
                 let server_is_busy_store_ids = if replica_read.retry_same_replica {
                     Vec::new()
                 } else {
@@ -1131,7 +1185,7 @@ fn adjust_replica_read_flag(
     leader_store_id: Option<StoreId>,
     replica_read: ReplicaReadType,
 ) {
-    if ctx.stale_read || !replica_read.is_follower_read() {
+    if ctx.stale_read {
         ctx.replica_read = false;
         return;
     }
@@ -1142,7 +1196,11 @@ fn adjust_replica_read_flag(
         return;
     };
 
-    ctx.replica_read = peer_store_id != leader_store_id;
+    ctx.replica_read = match replica_read {
+        ReplicaReadType::Leader => ctx.busy_threshold_ms > 0 && peer_store_id != leader_store_id,
+        _ if replica_read.is_follower_read() => peer_store_id != leader_store_id,
+        _ => false,
+    };
 }
 
 // Returns
@@ -2782,6 +2840,110 @@ mod test {
             seen,
             vec![61],
             "load-based replica read should avoid stores whose estimated wait exceeds busy_threshold_ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_based_replica_read_leader_avoids_busy_leader_with_high_estimated_wait() {
+        let seen = Arc::new(Mutex::new(Vec::<(u64, bool, u32)>::new()));
+        let seen_captured = seen.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push((
+                    peer.store_id,
+                    ctx.replica_read,
+                    ctx.busy_threshold_ms,
+                ));
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        // Simulate leader being busy via store load stats.
+        pd_client.update_store_load_stats(41, 10_000);
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context {
+            busy_threshold_ms: 100,
+            ..Default::default()
+        });
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Leader,
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![(51, true, 100)],
+            "load-based replica read should route leader-mode reads to an idle replica when the leader is busy"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_based_replica_read_leader_disables_threshold_when_all_peers_are_busy() {
+        let seen = Arc::new(Mutex::new(Vec::<(u64, bool, u32)>::new()));
+        let seen_captured = seen.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push((
+                    peer.store_id,
+                    ctx.replica_read,
+                    ctx.busy_threshold_ms,
+                ));
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        // All replicas exceed the busy threshold.
+        pd_client.update_store_load_stats(41, 10_000);
+        pd_client.update_store_load_stats(51, 10_000);
+        pd_client.update_store_load_stats(61, 10_000);
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context {
+            busy_threshold_ms: 100,
+            ..Default::default()
+        });
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Leader,
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![(41, false, 0)],
+            "load-based replica read should disable busy_threshold_ms and fall back to leader when all replicas are too busy"
         );
     }
 
