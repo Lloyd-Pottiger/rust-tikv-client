@@ -1,15 +1,18 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::collections::HashSet;
 use std::iter;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use derive_new::new;
 use fail::fail_point;
 use futures::prelude::*;
 use log::{debug, error, info, trace, warn};
+use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use super::requests::CollectPessimisticLock;
@@ -111,6 +114,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     timestamp: Timestamp,
     buffer: Buffer,
     read_lock_tracker: ReadLockTracker,
+    pipelined: Option<PipelinedState>,
     rpc: Arc<PdC>,
     resolve_locks_ctx: ResolveLocksContext,
     options: TransactionOptions,
@@ -182,6 +186,10 @@ impl<PdC: PdClient> Transaction<PdC> {
             timestamp,
             buffer: Buffer::new(options.is_pessimistic()),
             read_lock_tracker: ReadLockTracker::default(),
+            pipelined: options
+                .pipelined_txn
+                .as_ref()
+                .map(|_| PipelinedState::new()),
             rpc,
             resolve_locks_ctx,
             options,
@@ -453,6 +461,9 @@ impl<PdC: PdClient> Transaction<PdC> {
     pub async fn get(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         trace!("invoking transactional get request");
         self.check_allow_operation().await?;
+        if let Some(state) = self.pipelined.as_mut() {
+            state.flush_wait().await?;
+        }
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
@@ -472,12 +483,70 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
+        let pipelined_has_flushed = self
+            .pipelined
+            .as_ref()
+            .map(|state| state.generation > 0)
+            .unwrap_or(false);
+        let pipelined_flushed_deletes = self
+            .pipelined
+            .as_ref()
+            .map(|state| state.flushed_deletes.clone());
         let lock_resolver_rpc_context = self
             .options
             .lock_resolver_rpc_context(self.resource_group_tagger.clone());
 
         self.buffer
             .get_or_else(key, |key| async move {
+                if pipelined_has_flushed {
+                    if pipelined_flushed_deletes
+                        .as_ref()
+                        .is_some_and(|deleted| deleted.lock().unwrap().contains(&key))
+                    {
+                        return Ok(None);
+                    }
+
+                    let mut request =
+                        new_buffer_batch_get_request(iter::once(key.clone()), timestamp.clone());
+                    Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx.clone());
+                    if !resource_group_tag_set {
+                        if let Some(tagger) = resource_group_tagger.as_ref() {
+                            let tag = (tagger)(request.label());
+                            let ctx = request
+                                .context
+                                .get_or_insert_with(kvrpcpb::Context::default);
+                            ctx.resource_group_tag = tag;
+                        }
+                    }
+
+                    let plan_builder = PlanBuilder::new(rpc.clone(), keyspace, request)
+                        .resolve_lock_for_read(
+                            resolve_locks_ctx.clone(),
+                            timestamp.clone(),
+                            retry_options.lock_backoff.clone(),
+                            keyspace,
+                            true,
+                            lock_tracker.clone(),
+                            lock_resolver_rpc_context.clone(),
+                        );
+                    let plan_builder =
+                        if replica_read.is_follower_read() || enable_load_based_replica_read {
+                            plan_builder.retry_multi_region_with_replica_read_and_match_stores(
+                                DEFAULT_REGION_BACKOFF,
+                                replica_read,
+                                match_store_ids.clone(),
+                                match_store_labels.clone(),
+                            )
+                        } else {
+                            plan_builder.retry_multi_region(DEFAULT_REGION_BACKOFF)
+                        };
+                    let plan = plan_builder.merge(Collect).plan();
+                    let mut pairs = plan.execute().await?;
+                    if let Some(pair) = pairs.pop() {
+                        return Ok(Some(pair.1));
+                    }
+                }
+
                 let mut request = new_get_request(key, timestamp.clone());
                 Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
                 if !resource_group_tag_set {
@@ -632,6 +701,9 @@ impl<PdC: PdClient> Transaction<PdC> {
     ) -> Result<impl Iterator<Item = KvPair>> {
         debug!("invoking transactional batch_get request");
         self.check_allow_operation().await?;
+        if let Some(state) = self.pipelined.as_mut() {
+            state.flush_wait().await?;
+        }
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let keyspace = self.keyspace;
@@ -647,6 +719,15 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
+        let pipelined_has_flushed = self
+            .pipelined
+            .as_ref()
+            .map(|state| state.generation > 0)
+            .unwrap_or(false);
+        let pipelined_flushed_deletes = self
+            .pipelined
+            .as_ref()
+            .map(|state| state.flushed_deletes.clone());
         let lock_resolver_rpc_context = self
             .options
             .lock_resolver_rpc_context(self.resource_group_tagger.clone());
@@ -666,6 +747,121 @@ impl<PdC: PdClient> Transaction<PdC> {
                 let match_store_labels = match_store_labels.clone();
 
                 async move {
+                    let mut keys = keys;
+
+                    if pipelined_has_flushed {
+                        if let Some(deleted) = pipelined_flushed_deletes.as_ref() {
+                            let deleted = deleted.lock().unwrap();
+                            keys.retain(|key| !deleted.contains(key));
+                        }
+                        if keys.is_empty() {
+                            return Ok(Vec::new());
+                        }
+
+                        let mut buffer_request =
+                            crate::transaction::requests::new_buffer_batch_get_request(
+                                keys.iter().cloned().map(Into::into).collect(),
+                                timestamp.version(),
+                            );
+                        Self::apply_snapshot_read_context(
+                            &mut buffer_request.context,
+                            snapshot_ctx.clone(),
+                        );
+                        if !resource_group_tag_set {
+                            if let Some(tagger) = resource_group_tagger.as_ref() {
+                                let tag = (tagger)(buffer_request.label());
+                                let ctx = buffer_request
+                                    .context
+                                    .get_or_insert_with(kvrpcpb::Context::default);
+                                ctx.resource_group_tag = tag;
+                            }
+                        }
+
+                        let plan_builder = PlanBuilder::new(rpc.clone(), keyspace, buffer_request)
+                            .resolve_lock_for_read(
+                                resolve_locks_ctx.clone(),
+                                timestamp.clone(),
+                                retry_options.lock_backoff.clone(),
+                                keyspace,
+                                false,
+                                lock_tracker.clone(),
+                                lock_resolver_rpc_context.clone(),
+                            );
+                        let plan_builder = if replica_read.is_follower_read()
+                            || enable_load_based_replica_read
+                        {
+                            plan_builder.retry_multi_region_with_replica_read_and_match_stores(
+                                retry_options.region_backoff.clone(),
+                                replica_read,
+                                match_store_ids.clone(),
+                                match_store_labels.clone(),
+                            )
+                        } else {
+                            plan_builder.retry_multi_region(retry_options.region_backoff.clone())
+                        };
+                        let plan = plan_builder.merge(Collect).plan();
+                        let mut buffer_pairs: Vec<KvPair> =
+                            plan.execute().await?.into_iter().map(Into::into).collect();
+
+                        let buffer_keys = buffer_pairs
+                            .iter()
+                            .map(|pair| pair.0.clone())
+                            .collect::<HashSet<_>>();
+                        let snapshot_keys = keys
+                            .into_iter()
+                            .filter(|key| !buffer_keys.contains(key))
+                            .collect::<Vec<_>>();
+                        if snapshot_keys.is_empty() {
+                            return Ok(buffer_pairs);
+                        }
+
+                        let mut snapshot_request =
+                            crate::transaction::requests::new_batch_get_request(
+                                snapshot_keys.into_iter().map(Into::into).collect(),
+                                timestamp.version(),
+                            );
+                        Self::apply_snapshot_read_context(
+                            &mut snapshot_request.context,
+                            snapshot_ctx,
+                        );
+                        if !resource_group_tag_set {
+                            if let Some(tagger) = resource_group_tagger.as_ref() {
+                                let tag = (tagger)(snapshot_request.label());
+                                let ctx = snapshot_request
+                                    .context
+                                    .get_or_insert_with(kvrpcpb::Context::default);
+                                ctx.resource_group_tag = tag;
+                            }
+                        }
+
+                        let plan_builder = PlanBuilder::new(rpc, keyspace, snapshot_request)
+                            .resolve_lock_for_read(
+                                resolve_locks_ctx,
+                                timestamp,
+                                retry_options.lock_backoff,
+                                keyspace,
+                                false,
+                                lock_tracker,
+                                lock_resolver_rpc_context,
+                            );
+                        let plan_builder =
+                            if replica_read.is_follower_read() || enable_load_based_replica_read {
+                                plan_builder.retry_multi_region_with_replica_read_and_match_stores(
+                                    retry_options.region_backoff,
+                                    replica_read,
+                                    match_store_ids,
+                                    match_store_labels,
+                                )
+                            } else {
+                                plan_builder.retry_multi_region(retry_options.region_backoff)
+                            };
+                        let plan = plan_builder.merge(Collect).plan();
+                        let snapshot_pairs: Vec<KvPair> =
+                            plan.execute().await?.into_iter().map(Into::into).collect();
+                        buffer_pairs.extend(snapshot_pairs);
+                        return Ok(buffer_pairs);
+                    }
+
                     let mut request = crate::transaction::requests::new_batch_get_request(
                         keys.into_iter().map(Into::into).collect(),
                         timestamp.version(),
@@ -1003,6 +1199,157 @@ impl<PdC: PdClient> Transaction<PdC> {
         Ok(())
     }
 
+    /// Flush buffered mutations to TiKV.
+    ///
+    /// This is only supported for pipelined transactions enabled via
+    /// [`TransactionOptions::pipelined`] / [`TransactionOptions::pipelined_txn`].
+    ///
+    /// The returned boolean indicates whether a flush was triggered.
+    pub async fn flush(&mut self, force: bool) -> Result<bool> {
+        debug!("invoking transactional flush");
+        self.check_allow_operation().await?;
+
+        let Some(pipelined) = self.options.pipelined_txn else {
+            return Err(Error::StringError(
+                "flush is only supported for pipelined transactions".to_owned(),
+            ));
+        };
+
+        let mutation_count = self.buffer.mutation_count();
+        let write_size = self.buffer.mutation_size();
+        if mutation_count == 0 {
+            return Ok(false);
+        }
+
+        let should_flush = self
+            .pipelined
+            .as_ref()
+            .expect("pipelined state must exist when pipelined options are set")
+            .should_flush(force, mutation_count, write_size);
+        if !should_flush {
+            return Ok(false);
+        }
+
+        // If the mutable buffer is too large, block until the previous flush finishes.
+        let is_flushing = self
+            .pipelined
+            .as_ref()
+            .expect("pipelined state must exist when pipelined options are set")
+            .is_flushing();
+        if is_flushing {
+            self.pipelined
+                .as_mut()
+                .expect("pipelined state must exist when pipelined options are set")
+                .flush_wait()
+                .await?;
+        }
+
+        // Match client-go: pipelined flush requires a primary key (a non-check mutation).
+        if self
+            .pipelined
+            .as_ref()
+            .and_then(|state| state.primary_key.clone())
+            .is_none()
+            && self.buffer.get_primary_key().is_none()
+        {
+            return Err(Error::StringError(
+                "[pipelined dml] primary key should be set before pipelined flush".to_owned(),
+            ));
+        }
+
+        let mutations = self.buffer.take_mutations();
+        debug_assert!(!mutations.is_empty());
+
+        let (primary_key, generation, flush_ewma) = {
+            let state = self
+                .pipelined
+                .as_mut()
+                .expect("pipelined state must exist when pipelined options are set");
+            let primary_key = state.primary_key_or_init(&mutations)?;
+            state.record_flushed_mutations(&mutations);
+            let generation = state.next_generation();
+            let flush_ewma = state.flush_duration_ewma.clone();
+            (primary_key, generation, flush_ewma)
+        };
+
+        self.start_auto_heartbeat().await?;
+
+        let mut flush_request = new_flush_request(
+            mutations,
+            primary_key,
+            self.timestamp.clone(),
+            self.timestamp.version().saturating_add(1),
+            generation,
+            MAX_TTL,
+            kvrpcpb::AssertionLevel::Off,
+        );
+        self.options.apply_write_context(&mut flush_request.context);
+        if let Some(ctx) = flush_request.context.as_mut() {
+            ctx.request_source = PIPELINED_REQUEST_SOURCE.to_owned();
+        }
+        if self.options.resource_group_tag.is_none() {
+            if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                let tag = (tagger)(flush_request.label());
+                let ctx = flush_request
+                    .context
+                    .get_or_insert_with(kvrpcpb::Context::default);
+                ctx.resource_group_tag = tag;
+            }
+        }
+
+        let flush_pd = self.rpc.clone();
+        let flush_keyspace = self.keyspace;
+        let flush_resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        let flush_start_version = self.timestamp.clone();
+        let flush_lock_backoff = self.options.retry_options.lock_backoff.clone();
+        let flush_region_backoff = self.options.retry_options.region_backoff.clone();
+        let flush_concurrency = pipelined.flush_concurrency();
+        let flush_lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let write_throttle_ratio = pipelined.write_throttle_ratio();
+
+        let flush_handle = tokio::spawn(async move {
+            throttle_pipelined_flush(flush_ewma.clone(), write_throttle_ratio).await;
+
+            let start = Instant::now();
+            let plan = PlanBuilder::new(flush_pd, flush_keyspace, flush_request)
+                .resolve_lock_in_context(
+                    flush_resolve_locks_ctx,
+                    flush_start_version,
+                    flush_lock_backoff,
+                    flush_keyspace,
+                    flush_lock_resolver_rpc_context,
+                )
+                .retry_multi_region_with_concurrency(flush_region_backoff, flush_concurrency)
+                .merge(CollectError)
+                .extract_error()
+                .plan();
+            let result = plan.execute().await.map(|_| ());
+
+            let sample_ms = start.elapsed().as_millis() as f64;
+            flush_ewma.lock().unwrap().observe(sample_ms);
+
+            result
+        });
+        self.pipelined
+            .as_mut()
+            .expect("pipelined state must exist when pipelined options are set")
+            .flushing = Some(flush_handle);
+
+        Ok(true)
+    }
+
+    /// Wait for an outstanding pipelined flush (if any) to complete.
+    pub async fn flush_wait(&mut self) -> Result<()> {
+        debug!("invoking transactional flush_wait");
+        self.check_allow_operation().await?;
+        if let Some(state) = self.pipelined.as_mut() {
+            state.flush_wait().await?;
+        }
+        Ok(())
+    }
+
     /// Lock the given keys without mutating their values.
     ///
     /// In optimistic mode, write conflicts are not checked until commit.
@@ -1078,19 +1425,40 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Err(Error::OperationAfterCommitError);
         }
 
-        let primary_key = self.buffer.get_primary_key();
+        if let Some(state) = self.pipelined.as_mut() {
+            state.flush_wait().await?;
+        }
+
         let mutations = self.buffer.to_proto_mutations();
-        if mutations.is_empty() {
-            assert!(primary_key.is_none());
+        let buffer_primary_key = self.buffer.get_primary_key();
+        let has_flushed_range = self
+            .pipelined
+            .as_ref()
+            .map(PipelinedState::has_flushed_range)
+            .unwrap_or(false);
+        if mutations.is_empty() && !has_flushed_range {
+            assert!(buffer_primary_key.is_none());
             return Ok(None);
         }
 
-        self.start_auto_heartbeat().await?;
-
-        let primary_key = match &self.options.kind {
-            TransactionKind::Optimistic => None,
-            TransactionKind::Pessimistic(_) => primary_key,
+        let primary_key = if self.options.pipelined_txn.is_some() {
+            let state = self
+                .pipelined
+                .as_mut()
+                .expect("pipelined state must exist when pipelined options are set");
+            // Initialize the pipelined primary key if this is the first (commit-time) flush.
+            if state.primary_key.is_none() {
+                let _ = state.primary_key_or_init(&mutations)?;
+            }
+            state.primary_key.clone()
+        } else {
+            match &self.options.kind {
+                TransactionKind::Optimistic => None,
+                TransactionKind::Pessimistic(_) => buffer_primary_key,
+            }
         };
+
+        self.start_auto_heartbeat().await?;
 
         let mut committer = Committer::new(
             primary_key,
@@ -1102,6 +1470,12 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.buffer.get_write_size() as u64,
             self.start_instant,
         );
+        if let Some(state) = self.pipelined.as_ref() {
+            committer.pipelined_generation = state.generation;
+            committer.pipelined_range_start = state.flushed_range_start.clone();
+            committer.pipelined_range_end = state.flushed_range_end.clone();
+            committer.pipelined_flush_duration_ewma = Some(state.flush_duration_ewma.clone());
+        }
         committer.resolve_locks_ctx = self.resolve_locks_ctx.clone();
         committer.resource_group_tagger = self.resource_group_tagger.clone();
         committer.schema_ver = self.schema_ver;
@@ -1683,9 +2057,14 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Ok(());
         }
 
-        let primary_key = self.buffer.get_primary_key().ok_or_else(|| {
-            crate::internal_err!("auto heartbeat requested without a primary key")
-        })?;
+        let primary_key = self
+            .pipelined
+            .as_ref()
+            .and_then(|state| state.primary_key.clone())
+            .or_else(|| self.buffer.get_primary_key())
+            .ok_or_else(|| {
+                crate::internal_err!("auto heartbeat requested without a primary key")
+            })?;
 
         self.is_heartbeat_started = true;
 
@@ -1804,6 +2183,214 @@ const DEFAULT_ASYNC_COMMIT_SAFE_WINDOW: Duration = Duration::from_secs(2);
 pub const TXN_COMMIT_BATCH_SIZE: u64 = 16 * 1024;
 const TTL_FACTOR: f64 = 6000.0;
 const PIPELINED_REQUEST_SOURCE: &str = "pipelined_flush";
+
+const PIPELINED_MIN_FLUSH_KEYS: u64 = 10_000;
+const PIPELINED_MIN_FLUSH_MEM_SIZE: u64 = 16 * 1024 * 1024; // 16MB
+const PIPELINED_FORCE_FLUSH_MEM_SIZE_THRESHOLD: u64 = 128 * 1024 * 1024; // 128MB
+const PIPELINED_FLUSH_EWMA_AGE: f64 = 10.0;
+
+fn pipelined_min_flush_keys() -> u64 {
+    fail_point!("pipelined_memdb_min_flush_keys", |val| {
+        val.map(|val| val.parse::<u64>().unwrap())
+            .unwrap_or(PIPELINED_MIN_FLUSH_KEYS)
+    });
+    PIPELINED_MIN_FLUSH_KEYS
+}
+
+fn pipelined_min_flush_mem_size() -> u64 {
+    fail_point!("pipelined_memdb_min_flush_size", |val| {
+        val.map(|val| val.parse::<u64>().unwrap())
+            .unwrap_or(PIPELINED_MIN_FLUSH_MEM_SIZE)
+    });
+    PIPELINED_MIN_FLUSH_MEM_SIZE
+}
+
+fn pipelined_force_flush_mem_size_threshold() -> u64 {
+    fail_point!("pipelined_memdb_force_flush_size_threshold", |val| {
+        val.map(|val| val.parse::<u64>().unwrap())
+            .unwrap_or(PIPELINED_FORCE_FLUSH_MEM_SIZE_THRESHOLD)
+    });
+    PIPELINED_FORCE_FLUSH_MEM_SIZE_THRESHOLD
+}
+
+#[derive(Debug, Default)]
+struct FlushDurationEwma {
+    value_ms: f64,
+}
+
+impl FlushDurationEwma {
+    fn value_ms(&self) -> f64 {
+        self.value_ms
+    }
+
+    fn observe(&mut self, sample_ms: f64) {
+        if self.value_ms == 0.0 {
+            self.value_ms = sample_ms;
+        } else {
+            self.value_ms = (self.value_ms * (PIPELINED_FLUSH_EWMA_AGE - 1.0) + sample_ms)
+                / PIPELINED_FLUSH_EWMA_AGE;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PipelinedState {
+    primary_key: Option<Key>,
+    generation: u64,
+    flushing: Option<JoinHandle<Result<()>>>,
+    flushed_deletes: Arc<Mutex<HashSet<Key>>>,
+    flushed_range_start: Option<Key>,
+    flushed_range_end: Option<Key>,
+    flush_duration_ewma: Arc<Mutex<FlushDurationEwma>>,
+}
+
+impl PipelinedState {
+    fn new() -> PipelinedState {
+        PipelinedState {
+            primary_key: None,
+            generation: 0,
+            flushing: None,
+            flushed_deletes: Arc::new(Mutex::new(HashSet::new())),
+            flushed_range_start: None,
+            flushed_range_end: None,
+            flush_duration_ewma: Arc::new(Mutex::new(FlushDurationEwma::default())),
+        }
+    }
+
+    fn has_flushed_range(&self) -> bool {
+        self.flushed_range_start.is_some() && self.flushed_range_end.is_some()
+    }
+
+    fn primary_key_or_init(&mut self, mutations: &[kvrpcpb::Mutation]) -> Result<Key> {
+        if let Some(primary_key) = self.primary_key.clone() {
+            return Ok(primary_key);
+        }
+
+        let primary_key = mutations
+            .iter()
+            .filter(|m| m.op != kvrpcpb::Op::CheckNotExists as i32)
+            .min_by(|a, b| a.key.cmp(&b.key))
+            .map(|m| Key::from(m.key.clone()))
+            .ok_or_else(|| {
+                Error::StringError(
+                    "[pipelined dml] primary key should be set before pipelined flush".to_owned(),
+                )
+            })?;
+        self.primary_key = Some(primary_key.clone());
+        Ok(primary_key)
+    }
+
+    fn is_flushing(&self) -> bool {
+        self.flushing.is_some()
+    }
+
+    fn should_flush(&self, force: bool, mutation_count: usize, write_size: u64) -> bool {
+        if force {
+            return mutation_count > 0;
+        }
+
+        let min_keys = pipelined_min_flush_keys();
+        let min_size = pipelined_min_flush_mem_size();
+        let force_size = pipelined_force_flush_mem_size_threshold();
+
+        if write_size < min_size
+            || (u64::try_from(mutation_count).unwrap_or(u64::MAX) < min_keys
+                && write_size < force_size)
+        {
+            return false;
+        }
+
+        if self.is_flushing() && write_size < force_size {
+            return false;
+        }
+
+        true
+    }
+
+    fn next_generation(&mut self) -> u64 {
+        self.generation = self.generation.saturating_add(1);
+        self.generation
+    }
+
+    fn record_flushed_mutations(&mut self, mutations: &[kvrpcpb::Mutation]) {
+        let mut flushed_deletes = self.flushed_deletes.lock().unwrap();
+        let mut range_start: Option<Key> = None;
+        let mut range_end_inclusive: Option<Key> = None;
+
+        for m in mutations {
+            match m.op {
+                op if op == kvrpcpb::Op::Del as i32 || op == kvrpcpb::Op::CheckNotExists as i32 => {
+                    flushed_deletes.insert(Key::from(m.key.clone()));
+                }
+                op if op == kvrpcpb::Op::Put as i32 || op == kvrpcpb::Op::Insert as i32 => {
+                    flushed_deletes.remove(&Key::from(m.key.clone()));
+                }
+                _ => {}
+            }
+
+            if m.op == kvrpcpb::Op::CheckNotExists as i32 {
+                continue;
+            }
+
+            let key = Key::from(m.key.clone());
+            if range_start.as_ref().map_or(true, |start| &key < start) {
+                range_start = Some(key.clone());
+            }
+            if range_end_inclusive.as_ref().map_or(true, |end| &key > end) {
+                range_end_inclusive = Some(key);
+            }
+        }
+
+        let Some(range_start) = range_start else {
+            return;
+        };
+        let Some(range_end_inclusive) = range_end_inclusive else {
+            return;
+        };
+        let range_end = range_end_inclusive.next_key();
+
+        self.flushed_range_start = match self.flushed_range_start.take() {
+            Some(existing) => Some(existing.min(range_start)),
+            None => Some(range_start),
+        };
+        self.flushed_range_end = match self.flushed_range_end.take() {
+            Some(existing) => Some(existing.max(range_end)),
+            None => Some(range_end),
+        };
+    }
+
+    async fn flush_wait(&mut self) -> Result<()> {
+        let Some(handle) = self.flushing.take() else {
+            return Ok(());
+        };
+        match handle.await {
+            Ok(result) => result,
+            Err(err) => Err(Error::InternalError {
+                message: format!("pipelined flush task failed: {err}"),
+            }),
+        }?;
+        Ok(())
+    }
+}
+
+async fn throttle_pipelined_flush(ewma: Arc<Mutex<FlushDurationEwma>>, write_throttle_ratio: f64) {
+    if write_throttle_ratio == 0.0 {
+        return;
+    }
+
+    let expected_flush_ms = ewma.lock().unwrap().value_ms();
+    if expected_flush_ms == 0.0 {
+        return;
+    }
+
+    let sleep_ms =
+        (write_throttle_ratio / (1.0 - write_throttle_ratio) * expected_flush_ms).round() as u64;
+    if sleep_ms == 0 {
+        return;
+    }
+
+    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+}
 
 /// Optimistic or pessimistic transaction.
 #[derive(Clone, PartialEq, Debug)]
@@ -2504,6 +3091,14 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     schema_ver: Option<i64>,
     #[new(default)]
     schema_lease_checker: Option<Arc<dyn SchemaLeaseChecker>>,
+    #[new(default)]
+    pipelined_generation: u64,
+    #[new(default)]
+    pipelined_range_start: Option<Key>,
+    #[new(default)]
+    pipelined_range_end: Option<Key>,
+    #[new(default)]
+    pipelined_flush_duration_ewma: Option<Arc<Mutex<FlushDurationEwma>>>,
 }
 
 impl<PdC: PdClient> Committer<PdC> {
@@ -2585,84 +3180,117 @@ impl<PdC: PdClient> Committer<PdC> {
             ));
         }
 
-        // Match client-go: pipelined flush must have a primary key which produces a lock.
-        let primary_key = self
-            .mutations
-            .iter()
-            .filter(|m| m.op != kvrpcpb::Op::CheckNotExists as i32)
-            .min_by(|a, b| a.key.cmp(&b.key))
-            .map(|m| Key::from(m.key.clone()))
-            .ok_or_else(|| {
-                Error::StringError(
-                    "[pipelined dml] primary key should be set before pipelined flush".to_owned(),
-                )
-            })?;
-        self.primary_key = Some(primary_key.clone());
+        // Match client-go: pipelined flush requires a primary key.
+        let primary_key = self.primary_key.clone().ok_or_else(|| {
+            Error::StringError(
+                "[pipelined dml] primary key should be set before pipelined flush".to_owned(),
+            )
+        })?;
 
-        let mut non_check_keys = self
-            .mutations
-            .iter()
-            .filter(|m| m.op != kvrpcpb::Op::CheckNotExists as i32)
-            .map(|m| Key::from(m.key.clone()))
-            .collect::<Vec<_>>();
-        non_check_keys.sort();
+        let mut range_start = self.pipelined_range_start.clone();
+        let mut range_end = self.pipelined_range_end.clone();
 
-        let range_start = non_check_keys
-            .first()
-            .cloned()
-            .ok_or_else(|| Error::InternalError {
-                message: "pipelined txn primary key is set but no non-check keys found".to_owned(),
-            })?;
-        let range_end = non_check_keys
-            .last()
-            .cloned()
-            .ok_or_else(|| Error::InternalError {
-                message: "pipelined txn primary key is set but no non-check keys found".to_owned(),
-            })?
-            .next_key();
-
-        let mut flush_request = new_flush_request(
-            self.mutations.clone(),
-            primary_key,
-            self.start_version.clone(),
-            self.start_version.version().saturating_add(1),
-            1,
-            MAX_TTL,
-            kvrpcpb::AssertionLevel::Off,
-        );
-        self.options.apply_write_context(&mut flush_request.context);
-        if let Some(ctx) = flush_request.context.as_mut() {
-            ctx.request_source = PIPELINED_REQUEST_SOURCE.to_owned();
-        }
-        if self.options.resource_group_tag.is_none() {
-            if let Some(tagger) = self.resource_group_tagger.as_ref() {
-                let tag = (tagger)(flush_request.label());
-                let ctx = flush_request
-                    .context
-                    .get_or_insert_with(kvrpcpb::Context::default);
-                ctx.resource_group_tag = tag;
+        let mut pending_range_start: Option<Key> = None;
+        let mut pending_range_end_inclusive: Option<Key> = None;
+        for m in &self.mutations {
+            if m.op == kvrpcpb::Op::CheckNotExists as i32 {
+                continue;
+            }
+            let key = Key::from(m.key.clone());
+            if pending_range_start
+                .as_ref()
+                .map_or(true, |start| &key < start)
+            {
+                pending_range_start = Some(key.clone());
+            }
+            if pending_range_end_inclusive
+                .as_ref()
+                .map_or(true, |end| &key > end)
+            {
+                pending_range_end_inclusive = Some(key);
             }
         }
+        let pending_range_end = pending_range_end_inclusive.map(Key::next_key);
 
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
-        let flush_plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, flush_request)
-            .resolve_lock_in_context(
-                self.resolve_locks_ctx.clone(),
+        if let Some(pending_range_start) = pending_range_start {
+            range_start = match range_start.take() {
+                Some(existing) => Some(existing.min(pending_range_start)),
+                None => Some(pending_range_start),
+            };
+        }
+        if let Some(pending_range_end) = pending_range_end {
+            range_end = match range_end.take() {
+                Some(existing) => Some(existing.max(pending_range_end)),
+                None => Some(pending_range_end),
+            };
+        }
+
+        let (range_start, range_end) = match (range_start, range_end) {
+            (Some(range_start), Some(range_end)) => (range_start, range_end),
+            _ => {
+                return Err(Error::StringError(
+                    "[pipelined dml] primary key should be set before pipelined flush".to_owned(),
+                ))
+            }
+        };
+
+        if !self.mutations.is_empty() {
+            let generation = self.pipelined_generation.saturating_add(1);
+            let pipelined_ewma = self.pipelined_flush_duration_ewma.clone();
+            if let Some(ewma) = pipelined_ewma.as_ref() {
+                throttle_pipelined_flush(ewma.clone(), pipelined.write_throttle_ratio()).await;
+            }
+
+            let mutations = std::mem::take(&mut self.mutations);
+            let mut flush_request = new_flush_request(
+                mutations,
+                primary_key.clone(),
                 self.start_version.clone(),
-                self.options.retry_options.lock_backoff.clone(),
-                self.keyspace,
-                lock_resolver_rpc_context,
-            )
-            .retry_multi_region_with_concurrency(
-                self.options.retry_options.region_backoff.clone(),
-                pipelined.flush_concurrency(),
-            )
-            .merge(CollectError)
-            .extract_error()
-            .plan();
-        let _flush_responses = flush_plan.execute().await?;
+                self.start_version.version().saturating_add(1),
+                generation,
+                MAX_TTL,
+                kvrpcpb::AssertionLevel::Off,
+            );
+            self.options.apply_write_context(&mut flush_request.context);
+            if let Some(ctx) = flush_request.context.as_mut() {
+                ctx.request_source = PIPELINED_REQUEST_SOURCE.to_owned();
+            }
+            if self.options.resource_group_tag.is_none() {
+                if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                    let tag = (tagger)(flush_request.label());
+                    let ctx = flush_request
+                        .context
+                        .get_or_insert_with(kvrpcpb::Context::default);
+                    ctx.resource_group_tag = tag;
+                }
+            }
+
+            let lock_resolver_rpc_context = self
+                .options
+                .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+            let flush_plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, flush_request)
+                .resolve_lock_in_context(
+                    self.resolve_locks_ctx.clone(),
+                    self.start_version.clone(),
+                    self.options.retry_options.lock_backoff.clone(),
+                    self.keyspace,
+                    lock_resolver_rpc_context,
+                )
+                .retry_multi_region_with_concurrency(
+                    self.options.retry_options.region_backoff.clone(),
+                    pipelined.flush_concurrency(),
+                )
+                .merge(CollectError)
+                .extract_error()
+                .plan();
+            let start = Instant::now();
+            let flush_result = flush_plan.execute().await;
+            if let Some(ewma) = pipelined_ewma.as_ref() {
+                let sample_ms = start.elapsed().as_millis() as f64;
+                ewma.lock().unwrap().observe(sample_ms);
+            }
+            let _flush_responses = flush_result?;
+        }
 
         let commit_ts = match self.commit_primary_with_retry().await {
             Ok(commit_ts) => commit_ts,
@@ -3210,6 +3838,87 @@ mod tests {
             Err(Error::StringError(msg)) if msg.contains("invalid write throttle ratio")
         ));
         assert!(PipelinedTxnOptions::new(1, 1, 0.0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_flush_force_triggers_flush_and_increments_generation() {
+        let flushed = Arc::new(Mutex::new(Vec::<kvrpcpb::FlushRequest>::new()));
+        let flushed_cloned = flushed.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::FlushRequest>() {
+                    flushed_cloned.lock().unwrap().push(req.clone());
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+
+        assert!(!txn.flush(false).await.unwrap());
+        assert_eq!(
+            txn.pipelined
+                .as_ref()
+                .expect("pipelined state must exist")
+                .generation,
+            0
+        );
+        assert!(flushed.lock().unwrap().is_empty());
+
+        assert!(txn.flush(true).await.unwrap());
+        assert_eq!(
+            txn.pipelined
+                .as_ref()
+                .expect("pipelined state must exist")
+                .generation,
+            1
+        );
+        txn.flush_wait().await.unwrap();
+
+        let flushed = flushed.lock().unwrap().clone();
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].start_ts, 5);
+        assert_eq!(flushed[0].min_commit_ts, 6);
+        assert_eq!(flushed[0].generation, 1);
+        assert_eq!(flushed[0].lock_ttl, 20000);
+        assert_eq!(flushed[0].primary_key, vec![1u8]);
+        assert_eq!(
+            flushed[0].context.as_ref().unwrap().request_source,
+            "pipelined_flush"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flush_rejects_non_pipelined_transaction() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            Err(Error::StringError("unexpected request".to_owned()))
+        })));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        assert!(matches!(
+            txn.flush(false).await,
+            Err(Error::StringError(msg)) if msg == "flush is only supported for pipelined transactions"
+        ));
     }
 
     #[tokio::test]

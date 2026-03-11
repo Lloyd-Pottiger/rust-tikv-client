@@ -29,6 +29,28 @@ impl Buffer {
         }
     }
 
+    pub(crate) fn mutation_count(&self) -> usize {
+        self.entry_map
+            .values()
+            .filter(|entry| !matches!(entry, BufferEntry::Cached(_)))
+            .count()
+    }
+
+    pub(crate) fn mutation_size(&self) -> u64 {
+        self.entry_map
+            .iter()
+            .map(|(key, entry)| match entry {
+                BufferEntry::Cached(_) => 0,
+                BufferEntry::Put(value) | BufferEntry::Insert(value) => {
+                    u64::try_from(key.len() + value.len()).unwrap_or(u64::MAX)
+                }
+                BufferEntry::Del | BufferEntry::Locked(_) | BufferEntry::CheckNotExist => {
+                    u64::try_from(key.len()).unwrap_or(u64::MAX)
+                }
+            })
+            .sum()
+    }
+
     /// Get the primary key of the buffer.
     pub fn get_primary_key(&self) -> Option<Key> {
         self.primary_key.clone()
@@ -263,6 +285,30 @@ impl Buffer {
             .collect()
     }
 
+    /// Take all non-cached mutations from the buffer and return them as proto mutations.
+    ///
+    /// This is used by pipelined transactions that flush buffered mutations during execution.
+    pub(crate) fn take_mutations(&mut self) -> Vec<kvrpcpb::Mutation> {
+        let mut cached_entries = BTreeMap::new();
+        let mut mutations = Vec::new();
+
+        for (key, entry) in std::mem::take(&mut self.entry_map) {
+            match entry {
+                BufferEntry::Cached(value) => {
+                    cached_entries.insert(key, BufferEntry::Cached(value));
+                }
+                entry => {
+                    if let Some(mutation) = entry.into_proto_with_key(key) {
+                        mutations.push(mutation);
+                    }
+                }
+            }
+        }
+
+        self.entry_map = cached_entries;
+        mutations
+    }
+
     pub fn get_write_size(&self) -> usize {
         self.entry_map
             .iter()
@@ -371,6 +417,26 @@ impl BufferEntry {
             BufferEntry::CheckNotExist => pb.op = kvrpcpb::Op::CheckNotExists.into(),
         };
         pb.key = key.clone().into();
+        Some(pb)
+    }
+
+    fn into_proto_with_key(self, key: Key) -> Option<kvrpcpb::Mutation> {
+        let mut pb = kvrpcpb::Mutation::default();
+        match self {
+            BufferEntry::Cached(_) => return None,
+            BufferEntry::Put(value) => {
+                pb.op = kvrpcpb::Op::Put.into();
+                pb.value = value;
+            }
+            BufferEntry::Del => pb.op = kvrpcpb::Op::Del.into(),
+            BufferEntry::Locked(_) => pb.op = kvrpcpb::Op::Lock.into(),
+            BufferEntry::Insert(value) => {
+                pb.op = kvrpcpb::Op::Insert.into();
+                pb.value = value;
+            }
+            BufferEntry::CheckNotExist => pb.op = kvrpcpb::Op::CheckNotExists.into(),
+        }
+        pb.key = key.into();
         Some(pb)
     }
 
