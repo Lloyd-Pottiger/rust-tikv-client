@@ -13,6 +13,7 @@ use log::{debug, error, info, trace, warn};
 use tokio::time::Duration;
 
 use super::requests::CollectPessimisticLock;
+use super::requests::ResolveLockRangeRequest;
 use super::LockResolverRpcContext;
 use super::ReadLockTracker;
 use super::ResolveLocksContext;
@@ -1802,6 +1803,7 @@ const DEFAULT_ASYNC_COMMIT_SAFE_WINDOW: Duration = Duration::from_secs(2);
 /// each request below 16KB.
 pub const TXN_COMMIT_BATCH_SIZE: u64 = 16 * 1024;
 const TTL_FACTOR: f64 = 6000.0;
+const PIPELINED_REQUEST_SOURCE: &str = "pipelined_flush";
 
 /// Optimistic or pessimistic transaction.
 #[derive(Clone, PartialEq, Debug)]
@@ -1864,6 +1866,8 @@ pub struct TransactionOptions {
     read_only: bool,
     /// How to retry in the event of certain errors.
     retry_options: RetryOptions,
+    /// Options for pipelined DML transactions.
+    pipelined_txn: Option<PipelinedTxnOptions>,
     /// Lock wait timeout for pessimistic lock requests (`kvrpcpb::PessimisticLockRequest.wait_timeout`).
     ///
     /// Only effective for pessimistic transactions.
@@ -1872,6 +1876,89 @@ pub struct TransactionOptions {
     check_level: CheckLevel,
     #[doc(hidden)]
     heartbeat_option: HeartbeatOption,
+}
+
+/// Options for configuring pipelined DML transactions.
+///
+/// This maps to client-go `TxnOptions.PipelinedTxn`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PipelinedTxnOptions {
+    flush_concurrency: usize,
+    resolve_lock_concurrency: usize,
+    /// Write throttle ratio in `[0, 1)`.
+    ///
+    /// - `0.0` means no throttle.
+    /// - Values closer to `1.0` yield more throttling.
+    write_throttle_ratio: f64,
+}
+
+impl PipelinedTxnOptions {
+    /// Default pipelined flush concurrency.
+    ///
+    /// This matches client-go `defaultPipelinedFlushConcurrency`.
+    pub const DEFAULT_FLUSH_CONCURRENCY: usize = 128;
+
+    /// Default pipelined resolve-lock concurrency.
+    ///
+    /// This matches client-go `defaultPipelinedResolveLockConcurrency`.
+    pub const DEFAULT_RESOLVE_LOCK_CONCURRENCY: usize = 8;
+
+    /// Default pipelined write throttle ratio.
+    ///
+    /// This matches client-go `defaultPipelinedWriteThrottleRatio`.
+    pub const DEFAULT_WRITE_THROTTLE_RATIO: f64 = 0.0;
+
+    /// Create pipelined transaction options.
+    ///
+    /// Returns an error if any parameter is invalid.
+    pub fn new(
+        flush_concurrency: usize,
+        resolve_lock_concurrency: usize,
+        write_throttle_ratio: f64,
+    ) -> Result<PipelinedTxnOptions> {
+        if flush_concurrency == 0 {
+            return Err(Error::StringError(
+                "pipelined txn flush concurrency should be greater than 0".to_owned(),
+            ));
+        }
+        if resolve_lock_concurrency == 0 {
+            return Err(Error::StringError(
+                "pipelined txn resolve lock concurrency should be greater than 0".to_owned(),
+            ));
+        }
+        if !(0.0..1.0).contains(&write_throttle_ratio) {
+            return Err(Error::StringError(format!(
+                "invalid write throttle ratio: {write_throttle_ratio}"
+            )));
+        }
+        Ok(PipelinedTxnOptions {
+            flush_concurrency,
+            resolve_lock_concurrency,
+            write_throttle_ratio,
+        })
+    }
+
+    pub fn flush_concurrency(&self) -> usize {
+        self.flush_concurrency
+    }
+
+    pub fn resolve_lock_concurrency(&self) -> usize {
+        self.resolve_lock_concurrency
+    }
+
+    pub fn write_throttle_ratio(&self) -> f64 {
+        self.write_throttle_ratio
+    }
+}
+
+impl Default for PipelinedTxnOptions {
+    fn default() -> Self {
+        Self {
+            flush_concurrency: Self::DEFAULT_FLUSH_CONCURRENCY,
+            resolve_lock_concurrency: Self::DEFAULT_RESOLVE_LOCK_CONCURRENCY,
+            write_throttle_ratio: Self::DEFAULT_WRITE_THROTTLE_RATIO,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1967,6 +2054,7 @@ impl TransactionOptions {
             causal_consistency: false,
             read_only: false,
             retry_options: RetryOptions::default_optimistic(),
+            pipelined_txn: None,
             lock_wait_timeout: LockWaitTimeout::Default,
             check_level: CheckLevel::Panic,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
@@ -1999,10 +2087,27 @@ impl TransactionOptions {
             causal_consistency: false,
             read_only: false,
             retry_options: RetryOptions::default_pessimistic(),
+            pipelined_txn: None,
             lock_wait_timeout: LockWaitTimeout::AlwaysWait,
             check_level: CheckLevel::Panic,
             heartbeat_option: HeartbeatOption::FixedTime(DEFAULT_HEARTBEAT_INTERVAL),
         }
+    }
+
+    /// Enable a pipelined DML transaction with default parameters.
+    ///
+    /// This maps to client-go `tikv.WithDefaultPipelinedTxn`.
+    #[must_use]
+    pub fn pipelined(mut self) -> TransactionOptions {
+        self.pipelined_txn = Some(PipelinedTxnOptions::default());
+        self
+    }
+
+    /// Enable a pipelined DML transaction with custom parameters.
+    #[must_use]
+    pub fn pipelined_txn(mut self, options: PipelinedTxnOptions) -> TransactionOptions {
+        self.pipelined_txn = Some(options);
+        self
     }
 
     /// Try to use async commit.
@@ -2408,6 +2513,10 @@ impl<PdC: PdClient> Committer<PdC> {
             };
         }
 
+        if self.options.pipelined_txn.is_some() {
+            return self.commit_pipelined().await;
+        }
+
         let min_commit_ts = self.prewrite().await?;
 
         fail_point!("after-prewrite", |_| {
@@ -2447,6 +2556,154 @@ impl<PdC: PdClient> Committer<PdC> {
                 log::warn!("Failed to commit secondary keys: {}", e);
             }
         }));
+        Ok(Some(commit_ts))
+    }
+
+    async fn commit_pipelined(mut self) -> Result<Option<Timestamp>> {
+        debug!("committing (pipelined)");
+
+        let Some(pipelined) = self.options.pipelined_txn else {
+            return Err(Error::InternalError {
+                message: "commit_pipelined called without pipelined options".to_owned(),
+            });
+        };
+
+        if self.options.try_one_pc || self.options.async_commit {
+            return Err(Error::StringError(
+                "pipelined txn does not support async-commit or 1pc".to_owned(),
+            ));
+        }
+
+        // Match client-go: pipelined flush must have a primary key which produces a lock.
+        let primary_key = self
+            .mutations
+            .iter()
+            .filter(|m| m.op != kvrpcpb::Op::CheckNotExists as i32)
+            .min_by(|a, b| a.key.cmp(&b.key))
+            .map(|m| Key::from(m.key.clone()))
+            .ok_or_else(|| {
+                Error::StringError(
+                    "[pipelined dml] primary key should be set before pipelined flush".to_owned(),
+                )
+            })?;
+        self.primary_key = Some(primary_key.clone());
+
+        let mut non_check_keys = self
+            .mutations
+            .iter()
+            .filter(|m| m.op != kvrpcpb::Op::CheckNotExists as i32)
+            .map(|m| Key::from(m.key.clone()))
+            .collect::<Vec<_>>();
+        non_check_keys.sort();
+
+        let range_start = non_check_keys
+            .first()
+            .cloned()
+            .ok_or_else(|| Error::InternalError {
+                message: "pipelined txn primary key is set but no non-check keys found".to_owned(),
+            })?;
+        let range_end = non_check_keys
+            .last()
+            .cloned()
+            .ok_or_else(|| Error::InternalError {
+                message: "pipelined txn primary key is set but no non-check keys found".to_owned(),
+            })?
+            .next_key();
+
+        let mut flush_request = new_flush_request(
+            self.mutations.clone(),
+            primary_key,
+            self.start_version.clone(),
+            self.start_version.version().saturating_add(1),
+            1,
+            MAX_TTL,
+            kvrpcpb::AssertionLevel::Off,
+        );
+        self.options.apply_write_context(&mut flush_request.context);
+        if let Some(ctx) = flush_request.context.as_mut() {
+            ctx.request_source = PIPELINED_REQUEST_SOURCE.to_owned();
+        }
+        if self.options.resource_group_tag.is_none() {
+            if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                let tag = (tagger)(flush_request.label());
+                let ctx = flush_request
+                    .context
+                    .get_or_insert_with(kvrpcpb::Context::default);
+                ctx.resource_group_tag = tag;
+            }
+        }
+
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let flush_plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, flush_request)
+            .resolve_lock_in_context(
+                self.resolve_locks_ctx.clone(),
+                self.start_version.clone(),
+                self.options.retry_options.lock_backoff.clone(),
+                self.keyspace,
+                lock_resolver_rpc_context,
+            )
+            .retry_multi_region_with_concurrency(
+                self.options.retry_options.region_backoff.clone(),
+                pipelined.flush_concurrency(),
+            )
+            .merge(CollectError)
+            .extract_error()
+            .plan();
+        let _flush_responses = flush_plan.execute().await?;
+
+        let commit_ts = match self.commit_primary_with_retry().await {
+            Ok(commit_ts) => commit_ts,
+            Err(e) => {
+                return if self.undetermined {
+                    Err(Error::UndeterminedError(Box::new(e)))
+                } else {
+                    Err(e)
+                };
+            }
+        };
+
+        let mut resolve_request = ResolveLockRangeRequest::new(
+            super::requests::new_resolve_lock_request(
+                self.start_version.version(),
+                commit_ts.version(),
+                false,
+            ),
+            range_start,
+            range_end,
+        );
+        self.options
+            .apply_write_context(&mut resolve_request.inner_mut().context);
+        if let Some(ctx) = resolve_request.inner_mut().context.as_mut() {
+            ctx.request_source = PIPELINED_REQUEST_SOURCE.to_owned();
+        }
+        if self.options.resource_group_tag.is_none() {
+            if let Some(tagger) = self.resource_group_tagger.as_ref() {
+                let tag = (tagger)(resolve_request.label());
+                let ctx = resolve_request
+                    .inner_mut()
+                    .context
+                    .get_or_insert_with(kvrpcpb::Context::default);
+                ctx.resource_group_tag = tag;
+            }
+        }
+
+        let resolve_pd = self.rpc.clone();
+        let resolve_keyspace = self.keyspace;
+        let resolve_backoff = self.options.retry_options.region_backoff.clone();
+        let resolve_concurrency = pipelined.resolve_lock_concurrency();
+        tokio::spawn(async move {
+            let plan = PlanBuilder::new(resolve_pd, resolve_keyspace, resolve_request)
+                .retry_multi_region_with_concurrency(resolve_backoff, resolve_concurrency)
+                .merge(CollectError)
+                .extract_error()
+                .plan();
+            if let Err(err) = plan.execute().await {
+                log::warn!("Failed to resolve pipelined locks: {}", err);
+            }
+        });
+
         Ok(Some(commit_ts))
     }
 
@@ -2915,10 +3172,164 @@ mod tests {
     use crate::Error;
     use crate::IsolationLevel;
     use crate::Key;
+    use crate::PipelinedTxnOptions;
     use crate::ReplicaReadType;
     use crate::StoreLabel;
     use crate::Transaction;
     use crate::TransactionOptions;
+
+    #[test]
+    fn test_pipelined_txn_options_validation() {
+        assert!(matches!(
+            PipelinedTxnOptions::new(0, 1, 0.0),
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn flush concurrency should be greater than 0"
+        ));
+        assert!(matches!(
+            PipelinedTxnOptions::new(1, 0, 0.0),
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn resolve lock concurrency should be greater than 0"
+        ));
+        assert!(matches!(
+            PipelinedTxnOptions::new(1, 1, -0.1),
+            Err(Error::StringError(msg)) if msg.contains("invalid write throttle ratio")
+        ));
+        assert!(matches!(
+            PipelinedTxnOptions::new(1, 1, 1.0),
+            Err(Error::StringError(msg)) if msg.contains("invalid write throttle ratio")
+        ));
+        assert!(PipelinedTxnOptions::new(1, 1, 0.0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_commit_uses_flush_and_resolve_lock_range() {
+        let flushed = Arc::new(Mutex::new(Vec::<kvrpcpb::FlushRequest>::new()));
+        let committed = Arc::new(Mutex::new(Vec::<kvrpcpb::CommitRequest>::new()));
+        let resolved = Arc::new(Mutex::new(Vec::<kvrpcpb::ResolveLockRequest>::new()));
+
+        let (resolve_tx, mut resolve_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+        let flushed_cloned = flushed.clone();
+        let committed_cloned = committed.clone();
+        let resolved_cloned = resolved.clone();
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::FlushRequest>() {
+                    flushed_cloned.lock().unwrap().push(req.clone());
+                    return Ok(Box::new(kvrpcpb::FlushResponse::default()) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    committed_cloned.lock().unwrap().push(req.clone());
+                    return Ok(Box::new(kvrpcpb::CommitResponse::default()) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    resolved_cloned.lock().unwrap().push(req.clone());
+                    let _ = resolve_tx.send(());
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()) as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            }))
+            .with_tso_sequence(100),
+        );
+
+        let start_ts = Timestamp::from_version(5);
+        let options = TransactionOptions::new_optimistic()
+            .pipelined()
+            .heartbeat_option(HeartbeatOption::NoHeartbeat);
+        let mut txn = Transaction::new(start_ts.clone(), pd_client, options, Keyspace::Disable);
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        txn.put(vec![10u8], b"v2".to_vec()).await.unwrap();
+
+        let commit_ts = txn.commit().await.unwrap().unwrap();
+        assert_eq!(commit_ts.version(), 100);
+
+        // Pipelined resolve-lock runs in a background task.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            for _ in 0..2 {
+                resolve_rx
+                    .recv()
+                    .await
+                    .expect("resolve-lock request should be sent");
+            }
+        })
+        .await
+        .expect("timed out waiting for pipelined resolve-lock");
+
+        let flushed = flushed.lock().unwrap().clone();
+        assert_eq!(flushed.len(), 2, "expected one flush per region");
+        for req in &flushed {
+            assert_eq!(req.start_ts, 5);
+            assert_eq!(req.min_commit_ts, 6);
+            assert_eq!(req.generation, 1);
+            assert_eq!(req.lock_ttl, 20000);
+            assert_eq!(req.primary_key, vec![1u8]);
+            assert_eq!(
+                req.context.as_ref().unwrap().request_source,
+                "pipelined_flush"
+            );
+        }
+
+        let committed = committed.lock().unwrap().clone();
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].start_version, 5);
+        assert_eq!(committed[0].commit_version, 100);
+        assert_eq!(committed[0].keys, vec![vec![1u8]]);
+
+        let resolved = resolved.lock().unwrap().clone();
+        assert_eq!(resolved.len(), 2, "expected resolve-lock per region");
+        for req in &resolved {
+            assert_eq!(req.start_version, 5);
+            assert_eq!(req.commit_version, 100);
+            assert_eq!(
+                req.context.as_ref().unwrap().request_source,
+                "pipelined_flush"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_commit_rejects_async_commit_and_one_pc() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            Err(Error::StringError("unexpected request".to_owned()))
+        })));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .use_async_commit()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        assert!(matches!(
+            txn.commit().await,
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            Err(Error::StringError("unexpected request".to_owned()))
+        })));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .try_one_pc()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        assert!(matches!(
+            txn.commit().await,
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
+    }
 
     #[tokio::test]
     async fn test_resolve_lock_for_read_committed_locks_propagates_to_context() {

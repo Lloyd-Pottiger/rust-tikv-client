@@ -36,12 +36,14 @@ macro_rules! has_region_error {
 has_region_error!(kvrpcpb::GetResponse);
 has_region_error!(kvrpcpb::ScanResponse);
 has_region_error!(kvrpcpb::PrewriteResponse);
+has_region_error!(kvrpcpb::FlushResponse);
 has_region_error!(kvrpcpb::CommitResponse);
 has_region_error!(kvrpcpb::PessimisticLockResponse);
 has_region_error!(kvrpcpb::ImportResponse);
 has_region_error!(kvrpcpb::BatchRollbackResponse);
 has_region_error!(kvrpcpb::PessimisticRollbackResponse);
 has_region_error!(kvrpcpb::BatchGetResponse);
+has_region_error!(kvrpcpb::BufferBatchGetResponse);
 has_region_error!(kvrpcpb::ScanLockResponse);
 has_region_error!(kvrpcpb::ResolveLockResponse);
 has_region_error!(kvrpcpb::TxnHeartBeatResponse);
@@ -134,7 +136,19 @@ impl HasKeyErrors for kvrpcpb::ScanResponse {
 
 impl HasKeyErrors for kvrpcpb::BatchGetResponse {
     fn key_errors(&mut self) -> Option<Vec<Error>> {
-        extract_errors(self.pairs.iter_mut().map(|pair| pair.error.take()))
+        let error = self.error.take();
+        extract_errors(
+            std::iter::once(error).chain(self.pairs.iter_mut().map(|pair| pair.error.take())),
+        )
+    }
+}
+
+impl HasKeyErrors for kvrpcpb::BufferBatchGetResponse {
+    fn key_errors(&mut self) -> Option<Vec<Error>> {
+        let error = self.error.take();
+        extract_errors(
+            std::iter::once(error).chain(self.pairs.iter_mut().map(|pair| pair.error.take())),
+        )
     }
 }
 
@@ -157,6 +171,12 @@ impl HasKeyErrors for kvrpcpb::RawBatchScanResponse {
 }
 
 impl HasKeyErrors for kvrpcpb::PrewriteResponse {
+    fn key_errors(&mut self) -> Option<Vec<Error>> {
+        extract_errors(std::mem::take(&mut self.errors).into_iter().map(Some))
+    }
+}
+
+impl HasKeyErrors for kvrpcpb::FlushResponse {
     fn key_errors(&mut self) -> Option<Vec<Error>> {
         extract_errors(std::mem::take(&mut self.errors).into_iter().map(Some))
     }

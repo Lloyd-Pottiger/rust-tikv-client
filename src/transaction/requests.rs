@@ -4,6 +4,7 @@ use std::cmp;
 use std::iter;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::stream::{self};
 use futures::StreamExt;
@@ -156,6 +157,33 @@ impl Merge<kvrpcpb::BatchGetResponse> for Collect {
     }
 }
 
+pub fn new_buffer_batch_get_request(
+    keys: Vec<Vec<u8>>,
+    timestamp: u64,
+) -> kvrpcpb::BufferBatchGetRequest {
+    let mut req = kvrpcpb::BufferBatchGetRequest::default();
+    req.keys = keys;
+    req.version = timestamp;
+    req
+}
+
+impl KvRequest for kvrpcpb::BufferBatchGetRequest {
+    type Response = kvrpcpb::BufferBatchGetResponse;
+}
+
+shardable_keys!(kvrpcpb::BufferBatchGetRequest);
+
+impl Merge<kvrpcpb::BufferBatchGetResponse> for Collect {
+    type Out = Vec<KvPair>;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::BufferBatchGetResponse>>) -> Result<Self::Out> {
+        input
+            .into_iter()
+            .flat_map_ok(|resp| resp.pairs.into_iter().map(Into::into))
+            .collect()
+    }
+}
+
 pub fn new_scan_request(
     start_key: Vec<u8>,
     end_key: Vec<u8>,
@@ -223,6 +251,99 @@ impl KvRequest for kvrpcpb::ResolveLockRequest {
     type Response = kvrpcpb::ResolveLockResponse;
 }
 
+/// A pipelined resolve-lock request that resolves locks for the given range.
+///
+/// `kvrpcpb::ResolveLockRequest` itself doesn't carry keys, so it cannot be sharded by region.
+/// This wrapper provides the key range used for sharding while delegating the RPC request body.
+#[derive(Clone, Debug)]
+pub(crate) struct ResolveLockRangeRequest {
+    inner: kvrpcpb::ResolveLockRequest,
+    range_start: Key,
+    range_end: Key,
+}
+
+impl ResolveLockRangeRequest {
+    pub(crate) fn new(
+        inner: kvrpcpb::ResolveLockRequest,
+        range_start: Key,
+        range_end: Key,
+    ) -> ResolveLockRangeRequest {
+        ResolveLockRangeRequest {
+            inner,
+            range_start,
+            range_end,
+        }
+    }
+
+    pub(crate) fn inner_mut(&mut self) -> &mut kvrpcpb::ResolveLockRequest {
+        &mut self.inner
+    }
+}
+
+#[async_trait]
+impl Request for ResolveLockRangeRequest {
+    async fn dispatch(
+        &self,
+        client: &crate::proto::tikvpb::tikv_client::TikvClient<tonic::transport::Channel>,
+        timeout: std::time::Duration,
+    ) -> Result<Box<dyn std::any::Any>> {
+        self.inner.dispatch(client, timeout).await
+    }
+
+    fn label(&self) -> &'static str {
+        self.inner.label()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        // Expose the inner request for dispatch hooks and tests.
+        self.inner.as_any()
+    }
+
+    fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()> {
+        self.inner.set_leader(leader)
+    }
+
+    fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion) {
+        self.inner.set_api_version(api_version)
+    }
+
+    fn set_is_retry_request(&mut self, is_retry_request: bool) {
+        self.inner.set_is_retry_request(is_retry_request)
+    }
+
+    fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.inner.context_mut()
+    }
+}
+
+impl KvRequest for ResolveLockRangeRequest {
+    type Response = kvrpcpb::ResolveLockResponse;
+}
+
+impl Shardable for ResolveLockRangeRequest {
+    type Shard = ();
+
+    fn shards(
+        &self,
+        pd_client: &Arc<impl PdClient>,
+    ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+        let range = (
+            Vec::<u8>::from(self.range_start.clone()),
+            Vec::<u8>::from(self.range_end.clone()),
+        );
+
+        region_stream_for_range(range, pd_client.clone())
+            .map(|res| res.map(|(_range, region)| ((), region)))
+            .boxed()
+    }
+
+    fn apply_shard(&mut self, _shard: Self::Shard) {}
+
+    fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        self.inner.set_leader(&store.region_with_leader)
+    }
+}
+
 pub fn new_prewrite_request(
     mutations: Vec<kvrpcpb::Mutation>,
     primary_lock: Vec<u8>,
@@ -257,6 +378,114 @@ pub fn new_pessimistic_prewrite_request(
 
 impl KvRequest for kvrpcpb::PrewriteRequest {
     type Response = kvrpcpb::PrewriteResponse;
+}
+
+pub fn new_flush_request(
+    mutations: Vec<kvrpcpb::Mutation>,
+    primary_key: Vec<u8>,
+    start_ts: u64,
+    min_commit_ts: u64,
+    generation: u64,
+    lock_ttl: u64,
+    assertion_level: kvrpcpb::AssertionLevel,
+) -> kvrpcpb::FlushRequest {
+    let mut req = kvrpcpb::FlushRequest::default();
+    req.mutations = mutations;
+    req.primary_key = primary_key;
+    req.start_ts = start_ts;
+    req.min_commit_ts = min_commit_ts;
+    req.generation = generation;
+    req.lock_ttl = lock_ttl;
+    req.assertion_level = assertion_level.into();
+    req
+}
+
+impl KvRequest for kvrpcpb::FlushRequest {
+    type Response = kvrpcpb::FlushResponse;
+}
+
+#[derive(Debug, Clone)]
+pub struct FlushRequestShard {
+    mutations: Vec<kvrpcpb::Mutation>,
+}
+
+#[derive(Debug, Clone)]
+struct FlushMutation {
+    key: Key,
+    mutation: kvrpcpb::Mutation,
+}
+
+impl AsRef<Key> for FlushMutation {
+    fn as_ref(&self) -> &Key {
+        &self.key
+    }
+}
+
+impl Shardable for kvrpcpb::FlushRequest {
+    type Shard = FlushRequestShard;
+
+    fn shards(
+        &self,
+        pd_client: &Arc<impl PdClient>,
+    ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+        let mut mutations = self
+            .mutations
+            .iter()
+            .cloned()
+            .map(|mutation| FlushMutation {
+                key: Key::from(mutation.key.clone()),
+                mutation,
+            })
+            .collect::<Vec<_>>();
+        mutations.sort_by(|a, b| a.key.cmp(&b.key));
+
+        region_stream_for_keys(mutations.into_iter(), pd_client.clone())
+            .flat_map(
+                move |result: Result<(Vec<FlushMutation>, RegionWithLeader)>| match result {
+                    Ok((mutations, region)) => {
+                        let batches = {
+                            let mut batches: Vec<Vec<FlushMutation>> = Vec::new();
+                            let mut batch: Vec<FlushMutation> = Vec::new();
+                            let mut size = 0;
+
+                            for item in mutations {
+                                let item_size = item.mutation.key.len() as u64
+                                    + item.mutation.value.len() as u64;
+                                if size + item_size >= TXN_COMMIT_BATCH_SIZE && !batch.is_empty() {
+                                    batches.push(batch);
+                                    batch = Vec::new();
+                                    size = 0;
+                                }
+                                size += item_size;
+                                batch.push(item);
+                            }
+                            if !batch.is_empty() {
+                                batches.push(batch)
+                            }
+                            batches
+                        };
+
+                        stream::iter(batches)
+                            .map(move |batch| {
+                                let mutations =
+                                    batch.into_iter().map(|item| item.mutation).collect();
+                                Ok((FlushRequestShard { mutations }, region.clone()))
+                            })
+                            .boxed()
+                    }
+                    Err(e) => stream::iter(iter::once(Err(e))).boxed(),
+                },
+            )
+            .boxed()
+    }
+
+    fn apply_shard(&mut self, shard: Self::Shard) {
+        self.mutations = shard.mutations;
+    }
+
+    fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        self.set_leader(&store.region_with_leader)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1048,6 +1277,7 @@ pub struct SecondaryLocksStatus {
 }
 
 pair_locks!(kvrpcpb::BatchGetResponse);
+pair_locks!(kvrpcpb::BufferBatchGetResponse);
 pair_locks!(kvrpcpb::ScanResponse);
 error_locks!(kvrpcpb::GetResponse);
 error_locks!(kvrpcpb::ResolveLockResponse);
@@ -1087,6 +1317,16 @@ impl HasLocks for kvrpcpb::PessimisticLockResponse {
 }
 
 impl HasLocks for kvrpcpb::PrewriteResponse {
+    fn take_locks(&mut self) -> Vec<kvrpcpb::LockInfo> {
+        self.errors
+            .iter_mut()
+            .filter_map(|error| error.locked.take())
+            .flat_map(flatten_lock_info)
+            .collect()
+    }
+}
+
+impl HasLocks for kvrpcpb::FlushResponse {
     fn take_locks(&mut self) -> Vec<kvrpcpb::LockInfo> {
         self.errors
             .iter_mut()

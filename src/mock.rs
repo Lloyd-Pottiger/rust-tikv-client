@@ -7,7 +7,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -30,6 +30,7 @@ use crate::store::KvConnect;
 use crate::store::RegionStore;
 use crate::store::Request;
 use crate::store::{KvClient, Store};
+use crate::timestamp::TimestampExt;
 use crate::Config;
 use crate::Error;
 use crate::Key;
@@ -95,6 +96,10 @@ pub struct MockPdClient {
     slow_store_until: Mutex<HashMap<StoreId, Instant>>,
     #[new(value = "Mutex::new(HashMap::new())")]
     store_estimated_wait_until: Mutex<HashMap<StoreId, Instant>>,
+    #[new(value = "Arc::new(AtomicU64::new(0))")]
+    tso_version: Arc<AtomicU64>,
+    #[new(value = "false")]
+    use_tso_sequence: bool,
 }
 
 #[async_trait]
@@ -142,6 +147,12 @@ impl MockPdClient {
             Err(poisoned) => poisoned.into_inner(),
         };
         locations.clone()
+    }
+
+    pub fn with_tso_sequence(mut self, start_version: u64) -> MockPdClient {
+        self.use_tso_sequence = true;
+        self.tso_version.store(start_version, Ordering::SeqCst);
+        self
     }
 
     pub fn region1() -> RegionWithLeader {
@@ -377,7 +388,12 @@ impl PdClient for MockPdClient {
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
         self.get_timestamp_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Timestamp::default())
+        if self.use_tso_sequence {
+            let version = self.tso_version.fetch_add(1, Ordering::SeqCst);
+            Ok(Timestamp::from_version(version))
+        } else {
+            Ok(Timestamp::default())
+        }
     }
 
     async fn get_timestamp_with_dc_location(
@@ -392,7 +408,12 @@ impl PdClient for MockPdClient {
         };
         locations.push(dc_location);
 
-        Ok(Timestamp::default())
+        if self.use_tso_sequence {
+            let version = self.tso_version.fetch_add(1, Ordering::SeqCst);
+            Ok(Timestamp::from_version(version))
+        } else {
+            Ok(Timestamp::default())
+        }
     }
 
     async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {

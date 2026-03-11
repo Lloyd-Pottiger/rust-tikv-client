@@ -106,6 +106,7 @@ impl_request!(PrewriteRequest, kv_prewrite, "kv_prewrite");
 impl_request!(CommitRequest, kv_commit, "kv_commit");
 impl_request!(BatchGetRequest, kv_batch_get, "kv_batch_get");
 impl_request!(BatchRollbackRequest, kv_batch_rollback, "kv_batch_rollback");
+impl_request!(FlushRequest, kv_flush, "kv_flush");
 impl_request!(
     PessimisticRollbackRequest,
     kv_pessimistic_rollback,
@@ -128,6 +129,11 @@ impl_request!(
     CheckSecondaryLocksRequest,
     kv_check_secondary_locks,
     "kv_check_secondary_locks_request"
+);
+impl_request!(
+    BufferBatchGetRequest,
+    kv_buffer_batch_get,
+    "kv_buffer_batch_get"
 );
 impl_request!(GcRequest, kv_gc, "kv_gc");
 impl_request!(DeleteRangeRequest, kv_delete_range, "kv_delete_range");

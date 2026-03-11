@@ -32,6 +32,13 @@ pub fn new_batch_get_request(
     requests::new_batch_get_request(keys.map(Into::into).collect(), timestamp.version())
 }
 
+pub fn new_buffer_batch_get_request(
+    keys: impl Iterator<Item = Key>,
+    timestamp: Timestamp,
+) -> kvrpcpb::BufferBatchGetRequest {
+    requests::new_buffer_batch_get_request(keys.map(Into::into).collect(), timestamp.version())
+}
+
 pub fn new_scan_request(
     range: BoundRange,
     timestamp: Timestamp,
@@ -185,6 +192,26 @@ pub fn new_heart_beat_request(
     ttl: u64,
 ) -> kvrpcpb::TxnHeartBeatRequest {
     requests::new_heart_beat_request(start_ts.version(), primary_lock.into(), ttl)
+}
+
+pub fn new_flush_request(
+    mutations: Vec<kvrpcpb::Mutation>,
+    primary_key: Key,
+    start_ts: Timestamp,
+    min_commit_ts: u64,
+    generation: u64,
+    lock_ttl: u64,
+    assertion_level: kvrpcpb::AssertionLevel,
+) -> kvrpcpb::FlushRequest {
+    requests::new_flush_request(
+        mutations,
+        primary_key.into(),
+        start_ts.version(),
+        min_commit_ts,
+        generation,
+        lock_ttl,
+        assertion_level,
+    )
 }
 
 pub fn new_unsafe_destroy_range_request(range: BoundRange) -> kvrpcpb::UnsafeDestroyRangeRequest {

@@ -8,7 +8,9 @@ use super::Keyspace;
 use crate::backoff::Backoff;
 use crate::pd::PdClient;
 use crate::request::plan::ResolveLockInContext;
-use crate::request::plan::{CleanupLocks, HasKvContext, RetryableAllStores};
+use crate::request::plan::{
+    CleanupLocks, HasKvContext, RetryableAllStores, DEFAULT_MULTI_REGION_CONCURRENCY,
+};
 use crate::request::shard::HasNextBatch;
 use crate::request::Dispatch;
 use crate::request::ExtractError;
@@ -278,6 +280,23 @@ where
             None,
             Arc::new(Vec::new()),
             Arc::new(Vec::new()),
+            DEFAULT_MULTI_REGION_CONCURRENCY,
+        )
+    }
+
+    /// Split the request into shards sending a request to the region of each shard, with a custom maximum concurrency.
+    pub fn retry_multi_region_with_concurrency(
+        self,
+        backoff: Backoff,
+        concurrency: usize,
+    ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
+        self.make_retry_multi_region(
+            backoff,
+            false,
+            None,
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            concurrency,
         )
     }
 
@@ -293,6 +312,7 @@ where
             None,
             Arc::new(Vec::new()),
             Arc::new(Vec::new()),
+            DEFAULT_MULTI_REGION_CONCURRENCY,
         )
     }
 
@@ -310,6 +330,7 @@ where
             Some(replica_read),
             Arc::new(Vec::new()),
             Arc::new(Vec::new()),
+            DEFAULT_MULTI_REGION_CONCURRENCY,
         )
     }
 
@@ -366,6 +387,7 @@ where
             Some(replica_read),
             match_store_ids,
             match_store_labels,
+            DEFAULT_MULTI_REGION_CONCURRENCY,
         )
     }
 
@@ -376,6 +398,7 @@ where
         replica_read: Option<ReplicaReadType>,
         match_store_ids: Arc<Vec<u64>>,
         match_store_labels: Arc<Vec<StoreLabel>>,
+        concurrency: usize,
     ) -> PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted> {
         PlanBuilder {
             pd_client: self.pd_client.clone(),
@@ -383,6 +406,7 @@ where
                 inner: self.plan,
                 pd_client: self.pd_client,
                 backoff,
+                concurrency,
                 preserve_region_results,
                 replica_read,
                 match_store_ids,

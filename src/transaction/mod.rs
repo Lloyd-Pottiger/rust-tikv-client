@@ -26,6 +26,7 @@ pub use transaction::CheckLevel;
 pub use transaction::HeartbeatOption;
 pub use transaction::LockWaitTimeout;
 pub use transaction::Mutation;
+pub use transaction::PipelinedTxnOptions;
 pub use transaction::SchemaLeaseChecker;
 pub use transaction::Transaction;
 pub use transaction::TransactionOptions;

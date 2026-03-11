@@ -100,7 +100,7 @@ impl<Req: KvRequest + StoreRequest> StoreRequest for Dispatch<Req> {
     }
 }
 
-const MULTI_REGION_CONCURRENCY: usize = 16;
+pub(crate) const DEFAULT_MULTI_REGION_CONCURRENCY: usize = 16;
 const MULTI_STORES_CONCURRENCY: usize = 16;
 
 pub(crate) fn is_grpc_error(e: &Error) -> bool {
@@ -636,6 +636,8 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     pub(super) inner: P,
     pub pd_client: Arc<PdC>,
     pub backoff: Backoff,
+
+    pub(super) concurrency: usize,
 
     /// Preserve all regions' results for other downstream plans to handle.
     /// If true, return Ok and preserve all regions' results, even if some of them are Err.
@@ -1388,6 +1390,7 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
             inner: self.inner.clone(),
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
+            concurrency: self.concurrency,
             preserve_region_results: self.preserve_region_results,
             replica_read: self.replica_read,
             match_store_ids: self.match_store_ids.clone(),
@@ -1407,7 +1410,12 @@ where
         // Limit the maximum concurrency of multi-region request. If there are
         // too many concurrent requests, TiKV is more likely to return a "TiKV
         // is busy" error
-        let concurrency_permits = Arc::new(Semaphore::new(MULTI_REGION_CONCURRENCY));
+        if self.concurrency == 0 {
+            return Err(Error::InternalError {
+                message: "multi-region request concurrency must be greater than 0".to_owned(),
+            });
+        }
+        let concurrency_permits = Arc::new(Semaphore::new(self.concurrency));
         let mut inner = self.inner.clone();
         let stale_read = inner
             .kv_context_mut()
@@ -3371,6 +3379,7 @@ mod test {
             },
             pd_client: Arc::new(MockPdClient::default()),
             backoff: Backoff::no_backoff(),
+            concurrency: DEFAULT_MULTI_REGION_CONCURRENCY,
             preserve_region_results: false,
             replica_read: None,
             match_store_ids: Arc::new(Vec::new()),
