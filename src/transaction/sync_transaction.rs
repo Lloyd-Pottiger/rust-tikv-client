@@ -1,7 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
-    transaction::Mutation, BoundRange, DiskFullOpt, Key, KvPair, Result, Timestamp, Transaction,
-    Value,
+    transaction::Mutation, BoundRange, CommandPriority, DiskFullOpt, Key, KvPair, Result,
+    SchemaLeaseChecker, Timestamp, Transaction, Value,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,6 +113,59 @@ impl SyncTransaction {
     /// Set the server-side maximum execution duration for transactional write requests.
     pub fn set_max_write_execution_duration(&mut self, duration: Duration) {
         self.inner.set_max_write_execution_duration(duration);
+    }
+
+    /// Set the schema version used for schema validity checks during commit.
+    pub fn set_schema_ver(&mut self, schema_ver: i64) {
+        self.inner.set_schema_ver(schema_ver);
+    }
+
+    /// Clear the configured schema version.
+    pub fn clear_schema_ver(&mut self) {
+        self.inner.clear_schema_ver();
+    }
+
+    /// Set a schema lease checker used to validate schema changes during commit.
+    pub fn set_schema_lease_checker(&mut self, checker: Arc<dyn SchemaLeaseChecker>) {
+        self.inner.set_schema_lease_checker(checker);
+    }
+
+    /// Clear the configured schema lease checker.
+    pub fn clear_schema_lease_checker(&mut self) {
+        self.inner.clear_schema_lease_checker();
+    }
+
+    /// Set the priority for requests.
+    pub fn set_priority(&mut self, priority: CommandPriority) {
+        self.inner.set_priority(priority);
+    }
+
+    /// Set resource group tag for requests.
+    pub fn set_resource_group_tag(&mut self, tag: Vec<u8>) {
+        self.inner.set_resource_group_tag(tag);
+    }
+
+    /// Set a resource group tagger used to fill `kvrpcpb::Context.resource_group_tag`.
+    pub fn set_resource_group_tagger<F>(&mut self, tagger: F)
+    where
+        F: Fn(&str) -> Vec<u8> + Send + Sync + 'static,
+    {
+        self.inner.set_resource_group_tagger(tagger);
+    }
+
+    /// Clear the configured resource group tagger.
+    pub fn clear_resource_group_tagger(&mut self) {
+        self.inner.clear_resource_group_tagger();
+    }
+
+    /// Set resource group name for requests.
+    pub fn set_resource_group_name(&mut self, name: impl Into<String>) {
+        self.inner.set_resource_group_name(name);
+    }
+
+    /// Set request source for requests.
+    pub fn set_request_source(&mut self, source: impl Into<String>) {
+        self.inner.set_request_source(source);
     }
 
     /// Get the value associated with the given key.
