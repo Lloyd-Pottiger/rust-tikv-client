@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use super::RawChecksum;
 use super::RawRpcRequest;
 use crate::collect_single;
 use crate::kv::KvPairTTL;
@@ -451,6 +452,53 @@ impl Merge<kvrpcpb::RawBatchScanResponse> for Collect {
     }
 }
 
+pub fn new_raw_checksum_request(range: kvrpcpb::KeyRange) -> kvrpcpb::RawChecksumRequest {
+    let mut req = kvrpcpb::RawChecksumRequest::default();
+    req.algorithm = kvrpcpb::ChecksumAlgorithm::Crc64Xor as i32;
+    req.ranges = vec![range];
+    req
+}
+
+impl KvRequest for kvrpcpb::RawChecksumRequest {
+    type Response = kvrpcpb::RawChecksumResponse;
+}
+
+impl Shardable for kvrpcpb::RawChecksumRequest {
+    type Shard = Vec<kvrpcpb::KeyRange>;
+
+    fn shards(
+        &self,
+        pd_client: &Arc<impl PdClient>,
+    ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+        region_stream_for_ranges(self.ranges.clone(), pd_client.clone())
+    }
+
+    fn apply_shard(&mut self, shard: Self::Shard) {
+        self.ranges = shard;
+    }
+
+    fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        self.set_leader(&store.region_with_leader)
+    }
+}
+
+impl Merge<kvrpcpb::RawChecksumResponse> for Collect {
+    type Out = RawChecksum;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::RawChecksumResponse>>) -> Result<Self::Out> {
+        input
+            .into_iter()
+            .try_fold(RawChecksum::default(), |acc, resp| {
+                let resp = resp?;
+                Ok(RawChecksum {
+                    crc64_xor: acc.crc64_xor ^ resp.checksum,
+                    total_kvs: acc.total_kvs + resp.total_kvs,
+                    total_bytes: acc.total_bytes + resp.total_bytes,
+                })
+            })
+    }
+}
+
 pub fn new_cas_request(
     key: Vec<u8>,
     value: Vec<u8>,
@@ -653,6 +701,8 @@ impl HasLocks for kvrpcpb::RawCasResponse {}
 
 impl HasLocks for kvrpcpb::RawCoprocessorResponse {}
 
+impl HasLocks for kvrpcpb::RawChecksumResponse {}
+
 #[cfg(test)]
 mod test {
     use std::any::Any;
@@ -713,6 +763,51 @@ mod test {
         let keys: Vec<_> = scan.into_iter().map(|pair| pair.into_key()).collect();
         let expected_keys: Vec<Key> = (1u8..50).map(|k| vec![k].into()).collect();
         assert_eq!(keys, expected_keys);
+    }
+
+    #[rstest::rstest]
+    #[case(Keyspace::Disable)]
+    #[case(Keyspace::Enable { keyspace_id: 0 })]
+    #[tokio::test]
+    async fn test_raw_checksum_merges_by_xor_and_sums_counts(#[case] keyspace: Keyspace) {
+        let expected_api_version = keyspace.api_version() as i32;
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req: &kvrpcpb::RawChecksumRequest = req.downcast_ref().unwrap();
+                assert_eq!(req.algorithm, kvrpcpb::ChecksumAlgorithm::Crc64Xor as i32);
+                assert_eq!(
+                    req.context.as_ref().unwrap().api_version,
+                    expected_api_version
+                );
+                assert_eq!(req.ranges.len(), 1);
+
+                let checksum = req.ranges[0].start_key.first().copied().unwrap_or_default() as u64;
+                let resp = kvrpcpb::RawChecksumResponse {
+                    checksum,
+                    total_kvs: 1,
+                    total_bytes: 2,
+                    ..Default::default()
+                };
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let start: Key = vec![1].into();
+        let end: Key = vec![50].into();
+        let req = new_raw_checksum_request(kvrpcpb::KeyRange {
+            start_key: start.into(),
+            end_key: end.into(),
+        });
+        let plan = crate::request::PlanBuilder::new(client, keyspace, req)
+            .retry_multi_region(DEFAULT_REGION_BACKOFF)
+            .extract_error()
+            .merge(Collect)
+            .plan();
+
+        let checksum = plan.execute().await.unwrap();
+        assert_eq!(checksum.crc64_xor, 1 ^ 10);
+        assert_eq!(checksum.total_kvs, 2);
+        assert_eq!(checksum.total_bytes, 4);
     }
 
     #[tokio::test]

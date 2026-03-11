@@ -619,6 +619,25 @@ impl<PdC: PdClient> Client<PdC> {
             .collect())
     }
 
+    /// Do checksum of continuous kv pairs in range [startKey, endKey).
+    ///
+    /// If endKey is empty, it means unbounded.
+    ///
+    /// If you want to exclude the startKey or include the endKey, push a '\0' to the key. For example, to scan
+    /// (startKey, endKey], you can write:
+    /// `checksum(push(startKey, '\0'), push(endKey, '\0'))`.
+    pub async fn checksum(&self, range: impl Into<BoundRange>) -> Result<super::RawChecksum> {
+        debug!("invoking raw checksum request");
+        let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
+        let request = new_raw_checksum_request(range);
+        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .retry_multi_region(self.backoff.clone())
+            .extract_error()
+            .merge(Collect)
+            .plan();
+        plan.execute().await
+    }
+
     /// Create a new 'batch scan' request.
     ///
     /// Once resolved this request will result in a set of scanners over the given keys.

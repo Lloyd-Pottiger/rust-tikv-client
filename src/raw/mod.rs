@@ -19,6 +19,18 @@ mod client;
 pub mod lowering;
 mod requests;
 
+/// The result of a raw-keyspace checksum operation.
+///
+/// This struct is returned by [`raw::Client::checksum`](Client::checksum), which currently uses
+/// the TiKV `Crc64_Xor` algorithm and merges per-region results by XOR-ing `crc64_xor` and summing
+/// the counters.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RawChecksum {
+    pub crc64_xor: u64,
+    pub total_kvs: u64,
+    pub total_bytes: u64,
+}
+
 /// A [`ColumnFamily`](ColumnFamily) is an optional parameter for [`raw::Client`](Client) requests.
 ///
 /// TiKV uses RocksDB's `ColumnFamily` support. You can learn more about RocksDB's `ColumnFamily`s [on their wiki](https://github.com/facebook/rocksdb/wiki/Column-Families).
