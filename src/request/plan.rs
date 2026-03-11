@@ -117,6 +117,11 @@ fn is_grpc_deadline_exceeded(e: &Error) -> bool {
     )
 }
 
+fn is_deadline_exceeded_region_error(e: &errorpb::Error) -> bool {
+    // Match client-go's `isDeadlineExceeded` check for configurable timeout errors.
+    e.message.contains("Deadline is exceeded")
+}
+
 #[doc(hidden)]
 pub trait HasKvContext {
     fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context>;
@@ -1054,6 +1059,12 @@ where
                 .kv_context_mut()
                 .map(|ctx| ctx.busy_threshold_ms)
                 .unwrap_or(0);
+            let max_execution_duration_ms = plan
+                .kv_context_mut()
+                .map(|ctx| ctx.max_execution_duration_ms)
+                .unwrap_or(0);
+            let is_deadline_exceeded =
+                max_execution_duration_ms > 0 && is_deadline_exceeded_region_error(&e);
             let retry_same_replica = !is_stale_read_request
                 && !is_stale_read_leader_fallback_attempt
                 && ((is_server_busy && busy_threshold_ms == 0)
@@ -1097,6 +1108,12 @@ where
                                 state.switch_to(ReplicaReadType::Mixed, backoff.current_attempts()),
                             )
                         }
+                        (_, replica_read) => replica_read,
+                    };
+                    let replica_read = match (is_deadline_exceeded, replica_read) {
+                        (true, Some(state)) if state.read_type == ReplicaReadType::Leader => Some(
+                            state.switch_to(ReplicaReadType::Mixed, backoff.current_attempts()),
+                        ),
                         (_, replica_read) => replica_read,
                     };
                     let replica_read = if retry_same_replica {
@@ -1258,6 +1275,10 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
     } else if e.data_is_not_ready.is_some() {
         // Specific to stale read. The target replica is randomly selected and may not have caught up
         // yet. Retry immediately.
+        Ok(true)
+    } else if is_deadline_exceeded_region_error(&e) {
+        // Match client-go `RegionRequestSender.onRegionError` configurable-timeout fast retry
+        // behavior: do not invalidate caches or backoff for deadline-exceeded region errors.
         Ok(true)
     } else if e.server_is_busy.is_some()
         || e.max_timestamp_not_synced.is_some()
@@ -2947,6 +2968,65 @@ mod test {
             vec![(41, false, 0)],
             "load-based replica read should disable busy_threshold_ms and fall back to leader when all replicas are too busy"
         );
+    }
+
+    #[tokio::test]
+    async fn test_leader_read_timeout_falls_back_to_replica_read_replicas() {
+        let seen = Arc::new(Mutex::new(Vec::<(u64, bool, bool, u64)>::new()));
+        let seen_captured = seen.clone();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_captured = call_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push((
+                    peer.store_id,
+                    ctx.replica_read,
+                    ctx.stale_read,
+                    ctx.max_execution_duration_ms,
+                ));
+
+                let call = call_count_captured.fetch_add(1, Ordering::SeqCst);
+                let mut resp = kvrpcpb::GetResponse::default();
+                if call < 2 {
+                    resp.region_error = Some(errorpb::Error {
+                        message: "Deadline is exceeded".to_owned(),
+                        ..Default::default()
+                    });
+                }
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context {
+            max_execution_duration_ms: 1,
+            ..Default::default()
+        });
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Leader,
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0], (41, false, false, 1));
+        assert_eq!(seen[1], (51, true, false, 1));
+        assert_eq!(seen[2], (61, true, false, 1));
     }
 
     #[tokio::test]
