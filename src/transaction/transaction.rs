@@ -1084,7 +1084,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Ok(None);
         }
 
-        self.start_auto_heartbeat().await;
+        self.start_auto_heartbeat().await?;
 
         let primary_key = match &self.options.kind {
             TransactionKind::Optimistic => None,
@@ -1307,19 +1307,16 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Once resolved it acquires locks on the keys in TiKV.
     /// A lock prevents other transactions from mutating the entry until it is released.
     ///
-    /// # Panics
-    ///
-    /// Only valid for pessimistic transactions, panics if called on an optimistic transaction.
+    /// Returns [`Error::InvalidTransactionType`] if called on an optimistic transaction.
     async fn pessimistic_lock(
         &mut self,
         keys: impl IntoIterator<Item = impl PessimisticLock>,
         need_value: bool,
     ) -> Result<Vec<KvPair>> {
         debug!("acquiring pessimistic lock");
-        assert!(
-            matches!(self.options.kind, TransactionKind::Pessimistic(_)),
-            "`pessimistic_lock` is only valid to use with pessimistic transactions"
-        );
+        if !matches!(self.options.kind, TransactionKind::Pessimistic(_)) {
+            return Err(Error::InvalidTransactionType);
+        }
 
         let mut locks: Vec<(Key, kvrpcpb::Assertion)> = keys
             .into_iter()
@@ -1464,7 +1461,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         };
 
         self.buffer.primary_key_or(&primary_lock);
-        self.start_auto_heartbeat().await;
+        self.start_auto_heartbeat().await?;
         for (key, _assertion) in locks {
             self.buffer.lock(key);
         }
@@ -1679,18 +1676,19 @@ impl<PdC: PdClient> Transaction<PdC> {
         matches!(self.options.kind, TransactionKind::Pessimistic(_))
     }
 
-    async fn start_auto_heartbeat(&mut self) {
+    async fn start_auto_heartbeat(&mut self) -> Result<()> {
         debug!("starting auto_heartbeat");
         if !self.options.heartbeat_option.is_auto_heartbeat() || self.is_heartbeat_started {
-            return;
+            return Ok(());
         }
+
+        let primary_key = self.buffer.get_primary_key().ok_or_else(|| {
+            crate::internal_err!("auto heartbeat requested without a primary key")
+        })?;
+
         self.is_heartbeat_started = true;
 
         let status = self.status.clone();
-        let primary_key = self
-            .buffer
-            .get_primary_key()
-            .expect("Primary key should exist");
         let start_ts = self.timestamp.clone();
         let region_backoff = self.options.retry_options.region_backoff.clone();
         let rpc = self.rpc.clone();
@@ -1734,6 +1732,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 log::error!("Error: While sending heartbeat. {}", err);
             }
         });
+        Ok(())
     }
 
     fn get_status(&self) -> TransactionStatus {
@@ -2294,15 +2293,19 @@ impl TransactionOptions {
     }
 
     fn push_for_update_ts(&mut self, for_update_ts: Timestamp) {
-        match &mut self.kind {
-            TransactionKind::Optimistic => unreachable!(),
-            TransactionKind::Pessimistic(old_for_update_ts) => {
-                self.kind = TransactionKind::Pessimistic(Timestamp::from_version(std::cmp::max(
-                    old_for_update_ts.version(),
-                    for_update_ts.version(),
-                )));
+        let old_version = match &self.kind {
+            TransactionKind::Optimistic => {
+                debug_assert!(
+                    false,
+                    "push_for_update_ts called on optimistic transaction options"
+                );
+                return;
             }
-        }
+            TransactionKind::Pessimistic(old_for_update_ts) => old_for_update_ts.version(),
+        };
+
+        let max_version = std::cmp::max(old_version, for_update_ts.version());
+        self.kind = TransactionKind::Pessimistic(Timestamp::from_version(max_version));
     }
 
     #[must_use]
@@ -5847,6 +5850,25 @@ mod tests {
         assert_eq!(*heart_beat_resource_group_tag.lock().unwrap(), tag);
     }
 
+    #[tokio::test]
+    async fn test_start_auto_heartbeat_without_primary_key_returns_error() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_secs(1)))
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let err = txn
+            .start_auto_heartbeat()
+            .await
+            .expect_err("auto heartbeat requires a primary key");
+        assert!(matches!(err, Error::InternalError { .. }));
+        assert!(!txn.is_heartbeat_started);
+    }
+
     #[rstest::rstest]
     #[case(Keyspace::Disable)]
     #[case(Keyspace::Enable { keyspace_id: 0 })]
@@ -6710,6 +6732,22 @@ mod tests {
             .await
             .expect("expected async commit request to be dispatched");
         assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_on_optimistic_transaction_returns_error() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let err = txn
+            .pessimistic_lock(std::iter::once(Key::from(b"k".to_vec())), false)
+            .await
+            .expect_err("pessimistic_lock should reject optimistic transactions");
+        assert!(matches!(err, Error::InvalidTransactionType));
     }
 
     #[tokio::test]
