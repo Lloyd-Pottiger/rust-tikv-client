@@ -1305,7 +1305,7 @@ impl LockResolver {
         &mut self,
         store: RegionStore,
         locks: Vec<kvrpcpb::LockInfo>,
-        pd_client: Arc<impl PdClient>, // TODO: make pd_client a member of LockResolver
+        pd_client: Arc<impl PdClient>,
         keyspace: Keyspace,
     ) -> Result<()> {
         if locks.is_empty() {
