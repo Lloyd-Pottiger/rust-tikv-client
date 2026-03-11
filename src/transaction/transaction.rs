@@ -99,6 +99,18 @@ impl From<AssertionLevel> for kvrpcpb::AssertionLevel {
     }
 }
 
+/// Specifies the policy when prewrite encounters locks.
+///
+/// This maps to client-go `KVTxn.SetPrewriteEncounterLockPolicy`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PrewriteEncounterLockPolicy {
+    /// Try to resolve locks and retry prewrite (default).
+    #[default]
+    TryResolve,
+    /// Do not resolve locks; return lock errors directly.
+    NoResolve,
+}
+
 /// An undo-able set of actions on the dataset.
 ///
 /// Create a transaction using a [`TransactionClient`](crate::TransactionClient), then run actions
@@ -614,6 +626,16 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// This maps to client-go `KVTxn.SetAssertionLevel`.
     pub fn set_assertion_level(&mut self, assertion_level: AssertionLevel) {
         self.options.assertion_level = assertion_level;
+    }
+
+    /// Set the policy for handling locks encountered during prewrite.
+    ///
+    /// When set to [`PrewriteEncounterLockPolicy::NoResolve`], prewrite returns lock errors directly
+    /// without attempting lock resolution.
+    ///
+    /// This maps to client-go `KVTxn.SetPrewriteEncounterLockPolicy`.
+    pub fn set_prewrite_encounter_lock_policy(&mut self, policy: PrewriteEncounterLockPolicy) {
+        self.options.prewrite_encounter_lock_policy = policy;
     }
 
     /// Set the minimum commit timestamp constraint for the transaction.
@@ -2931,6 +2953,10 @@ pub struct TransactionOptions {
     read_only: bool,
     /// How to retry in the event of certain errors.
     retry_options: RetryOptions,
+    /// Specifies the policy when prewrite encounters locks.
+    ///
+    /// This maps to client-go `KVTxn.SetPrewriteEncounterLockPolicy`.
+    prewrite_encounter_lock_policy: PrewriteEncounterLockPolicy,
     /// Options for pipelined DML transactions.
     pipelined_txn: Option<PipelinedTxnOptions>,
     /// Lock wait timeout for pessimistic lock requests (`kvrpcpb::PessimisticLockRequest.wait_timeout`).
@@ -3133,6 +3159,7 @@ impl TransactionOptions {
             causal_consistency: false,
             read_only: false,
             retry_options: RetryOptions::default_optimistic(),
+            prewrite_encounter_lock_policy: PrewriteEncounterLockPolicy::TryResolve,
             pipelined_txn: None,
             lock_wait_timeout: LockWaitTimeout::Default,
             check_level: CheckLevel::Panic,
@@ -3168,6 +3195,7 @@ impl TransactionOptions {
             causal_consistency: false,
             read_only: false,
             retry_options: RetryOptions::default_pessimistic(),
+            prewrite_encounter_lock_policy: PrewriteEncounterLockPolicy::TryResolve,
             pipelined_txn: None,
             lock_wait_timeout: LockWaitTimeout::AlwaysWait,
             check_level: CheckLevel::Panic,
@@ -3249,6 +3277,21 @@ impl TransactionOptions {
     #[must_use]
     pub fn assertion_level(mut self, assertion_level: AssertionLevel) -> TransactionOptions {
         self.assertion_level = assertion_level;
+        self
+    }
+
+    /// Set the policy for handling locks encountered during prewrite.
+    ///
+    /// When set to [`PrewriteEncounterLockPolicy::NoResolve`], prewrite returns lock errors directly
+    /// without attempting lock resolution.
+    ///
+    /// This maps to client-go `KVTxn.SetPrewriteEncounterLockPolicy`.
+    #[must_use]
+    pub fn prewrite_encounter_lock_policy(
+        mut self,
+        policy: PrewriteEncounterLockPolicy,
+    ) -> TransactionOptions {
+        self.prewrite_encounter_lock_policy = policy;
         self
     }
 
@@ -3955,23 +3998,35 @@ impl<PdC: PdClient> Committer<PdC> {
                 current_ts.saturating_add(safe_window_ms.saturating_mul(1_u64 << 18));
         }
 
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
-        let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .resolve_lock_with_pessimistic_region_in_context(
-                self.resolve_locks_ctx.clone(),
-                self.start_version.clone(),
-                self.options.retry_options.lock_backoff.clone(),
-                self.keyspace,
-                true,
-                lock_resolver_rpc_context,
-            )
-            .retry_multi_region(self.options.retry_options.region_backoff.clone())
-            .merge(CollectError)
-            .extract_error()
-            .plan();
-        let response = plan.execute().await?;
+        let response = match self.options.prewrite_encounter_lock_policy {
+            PrewriteEncounterLockPolicy::TryResolve => {
+                let lock_resolver_rpc_context = self
+                    .options
+                    .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+                let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+                    .resolve_lock_with_pessimistic_region_in_context(
+                        self.resolve_locks_ctx.clone(),
+                        self.start_version.clone(),
+                        self.options.retry_options.lock_backoff.clone(),
+                        self.keyspace,
+                        true,
+                        lock_resolver_rpc_context,
+                    )
+                    .retry_multi_region(self.options.retry_options.region_backoff.clone())
+                    .merge(CollectError)
+                    .extract_error()
+                    .plan();
+                plan.execute().await?
+            }
+            PrewriteEncounterLockPolicy::NoResolve => {
+                let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+                    .retry_multi_region(self.options.retry_options.region_backoff.clone())
+                    .merge(CollectError)
+                    .extract_error()
+                    .plan();
+                plan.execute().await?
+            }
+        };
 
         if self.options.try_one_pc && response.len() == 1 {
             if response[0].one_pc_commit_ts == 0 {
@@ -4429,7 +4484,7 @@ mod tests {
     use async_trait::async_trait;
     use fail::FailScenario;
 
-    use super::AssertionLevel;
+    use super::{AssertionLevel, PrewriteEncounterLockPolicy};
 
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
@@ -8498,6 +8553,60 @@ mod tests {
 
         let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
         assert_eq!(commit_ts.version(), commit_version);
+    }
+
+    #[tokio::test]
+    async fn test_prewrite_encounter_lock_policy_no_resolve_skips_lock_resolution_rpcs() {
+        let start_version = 7;
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert_eq!(req.start_version, start_version);
+                let resp = kvrpcpb::PrewriteResponse {
+                    errors: vec![kvrpcpb::KeyError {
+                        locked: Some(kvrpcpb::LockInfo {
+                            key: vec![1],
+                            primary_lock: vec![1],
+                            lock_version: start_version.saturating_sub(1),
+                            lock_ttl: 100,
+                            lock_type: kvrpcpb::Op::Put as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if req
+                .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                .is_some()
+                || req.downcast_ref::<kvrpcpb::ResolveLockRequest>().is_some()
+            {
+                panic!(
+                    "lock resolution RPC should not be sent when NoResolve policy is configured"
+                );
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_prewrite_encounter_lock_policy(PrewriteEncounterLockPolicy::NoResolve);
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+
+        txn.commit()
+            .await
+            .expect_err("expected commit to fail on lock without resolving");
     }
 
     #[tokio::test]

@@ -189,6 +189,8 @@ pub use crate::transaction::LockWaitTimeout;
 #[doc(inline)]
 pub use crate::transaction::PipelinedTxnOptions;
 #[doc(inline)]
+pub use crate::transaction::PrewriteEncounterLockPolicy;
+#[doc(inline)]
 pub use crate::transaction::ProtoLockInfo;
 #[doc(inline)]
 pub use crate::transaction::SchemaLeaseChecker;

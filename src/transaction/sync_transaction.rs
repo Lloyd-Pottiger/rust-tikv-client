@@ -1,7 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
     transaction::Mutation, AssertionLevel, BoundRange, CommandPriority, DiskFullOpt, Key, KvPair,
-    Result, SchemaLeaseChecker, Timestamp, Transaction, Value,
+    PrewriteEncounterLockPolicy, Result, SchemaLeaseChecker, Timestamp, Transaction, Value,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,6 +59,16 @@ impl SyncTransaction {
     /// This maps to client-go `KVTxn.SetAssertionLevel`.
     pub fn set_assertion_level(&mut self, assertion_level: AssertionLevel) {
         self.inner.set_assertion_level(assertion_level);
+    }
+
+    /// Set the policy for handling locks encountered during prewrite.
+    ///
+    /// When set to [`PrewriteEncounterLockPolicy::NoResolve`], prewrite returns lock errors directly
+    /// without attempting lock resolution.
+    ///
+    /// This maps to client-go `KVTxn.SetPrewriteEncounterLockPolicy`.
+    pub fn set_prewrite_encounter_lock_policy(&mut self, policy: PrewriteEncounterLockPolicy) {
+        self.inner.set_prewrite_encounter_lock_policy(policy);
     }
 
     /// Set the minimum commit timestamp constraint for the transaction.
