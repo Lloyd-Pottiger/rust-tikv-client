@@ -89,6 +89,12 @@
 //! # Ok(())
 //! # })}
 //! ```
+//!
+//! To begin a transaction with an explicit start timestamp (without fetching a new PD TSO), use
+//! [`TransactionClient::begin_with_start_timestamp`].
+//!
+//! To begin using a local TSO for a given transaction scope (`txn_scope`/PD `dc_location`), use
+//! [`TransactionClient::begin_with_txn_scope`].
 
 #![allow(clippy::field_reassign_with_default)]
 

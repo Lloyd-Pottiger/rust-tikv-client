@@ -50,6 +50,24 @@ let value = txn.get("key".to_owned()).await?;
 txn.commit().await?;
 ```
 
+You can also begin a transaction with an explicit start timestamp (no PD TSO fetch), or ask PD for
+TSO in a specific transaction scope (`txn_scope`/`dc_location`):
+
+```rust
+use tikv_client::{TransactionClient, TransactionOptions};
+
+let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
+
+// Begin using a local TSO (txn_scope -> PD dc_location).
+let mut txn = txn_client
+    .begin_with_txn_scope("dc1", TransactionOptions::new_optimistic())
+    .await?;
+
+// Begin with an explicit start timestamp (no PD call).
+let start_ts = txn_client.current_timestamp().await?;
+let mut txn = txn_client.begin_with_start_timestamp(start_ts, TransactionOptions::new_optimistic());
+```
+
 Since the TiKV client provides an async API, you'll need to use an async runtime (we currently only support Tokio). See [getting-started.md](getting-started.md) for a complete example.
 
 ## API summary
