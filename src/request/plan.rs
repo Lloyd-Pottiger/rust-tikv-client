@@ -1074,6 +1074,16 @@ where
             match backoff.next_delay_duration() {
                 Some(duration) => {
                     let store_id = region_store.region_with_leader.get_store_id().ok();
+                    if is_deadline_exceeded {
+                        // Match client-go `deadlineErrUsingConfTimeoutFlag` behavior by treating
+                        // deadline-exceeded stores as temporarily unavailable for replica-read
+                        // selection and stale-read replica-read flips.
+                        if let (Some(store_id), Some(replica_read)) =
+                            (store_id, replica_read.as_ref())
+                        {
+                            replica_read.mark_store_unreachable(store_id).await;
+                        }
+                    }
                     if is_server_busy {
                         if let Some(store_id) = store_id {
                             pd_client.update_store_load_stats(
@@ -3090,6 +3100,72 @@ mod test {
             vec![(51, true, false), (41, false, false), (61, false, true)],
             "stale read retries should fall back to leader read once, then switch to replica read when the leader is healthy"
         );
+    }
+
+    #[tokio::test]
+    async fn test_stale_read_does_not_flip_to_replica_read_when_leader_deadline_exceeded() {
+        let seen = Arc::new(Mutex::new(Vec::<(u64, bool, bool)>::new()));
+        let seen_captured = seen.clone();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_captured = call_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+                seen_captured.lock().unwrap().push((
+                    peer.store_id,
+                    ctx.stale_read,
+                    ctx.replica_read,
+                ));
+
+                let call = call_count_captured.fetch_add(1, Ordering::SeqCst);
+                let mut resp = kvrpcpb::GetResponse::default();
+                if call == 0 {
+                    resp.region_error = Some(errorpb::Error {
+                        message: "Deadline is exceeded".to_owned(),
+                        ..Default::default()
+                    });
+                }
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context {
+            stale_read: true,
+            replica_read: false,
+            max_execution_duration_ms: 1,
+            ..Default::default()
+        });
+
+        // Force the first stale-read attempt to hit the leader, so the deadline-exceeded feedback
+        // is registered on the leader store.
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region_with_replica_read_and_match_store_ids(
+                Backoff::no_jitter_backoff(0, 0, 10),
+                ReplicaReadType::Mixed,
+                Arc::new(vec![41]),
+            )
+            .plan();
+
+        let results = plan.execute().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], (41, true, false));
+
+        let (store_id, stale_read, replica_read) = seen[1];
+        assert_ne!(store_id, 41);
+        assert!(stale_read);
+        assert!(!replica_read);
     }
 
     #[tokio::test]
