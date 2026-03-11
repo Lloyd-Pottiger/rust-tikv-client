@@ -124,6 +124,8 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     replica_read_adjuster: Option<ReplicaReadAdjuster>,
     schema_ver: Option<i64>,
     schema_lease_checker: Option<Arc<dyn SchemaLeaseChecker>>,
+    commit_wait_until_tso: u64,
+    commit_wait_until_tso_timeout: Duration,
     keyspace: Keyspace,
     is_heartbeat_started: bool,
     start_instant: Instant,
@@ -252,6 +254,8 @@ impl<PdC: PdClient> Transaction<PdC> {
             replica_read_adjuster: None,
             schema_ver: None,
             schema_lease_checker: None,
+            commit_wait_until_tso: 0,
+            commit_wait_until_tso_timeout: DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT,
             keyspace,
             is_heartbeat_started: false,
             start_instant: std::time::Instant::now(),
@@ -493,6 +497,38 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Clear the configured schema lease checker.
     pub fn clear_schema_lease_checker(&mut self) {
         self.schema_lease_checker = None;
+    }
+
+    /// Set the minimum commit timestamp constraint for the transaction.
+    ///
+    /// When set, the commit timestamp returned by PD must be strictly greater than
+    /// `commit_wait_until_tso`.
+    ///
+    /// This maps to client-go `KVTxn.SetCommitWaitUntilTSO`.
+    pub fn set_commit_wait_until_tso(&mut self, commit_wait_until_tso: u64) {
+        self.commit_wait_until_tso = self.commit_wait_until_tso.max(commit_wait_until_tso);
+    }
+
+    /// Returns the commit-wait constraint configured by [`Transaction::set_commit_wait_until_tso`].
+    ///
+    /// A value of `0` means "no commit-wait constraint".
+    #[must_use]
+    pub fn commit_wait_until_tso(&self) -> u64 {
+        self.commit_wait_until_tso
+    }
+
+    /// Set the maximum time allowed for PD TSO to catch up to the commit-wait target timestamp.
+    ///
+    /// This maps to client-go `KVTxn.SetCommitWaitUntilTSOTimeout`.
+    pub fn set_commit_wait_until_tso_timeout(&mut self, timeout: Duration) {
+        self.commit_wait_until_tso_timeout = timeout;
+    }
+
+    /// Returns the commit-wait timeout configured by
+    /// [`Transaction::set_commit_wait_until_tso_timeout`].
+    #[must_use]
+    pub fn commit_wait_until_tso_timeout(&self) -> Duration {
+        self.commit_wait_until_tso_timeout
     }
 
     /// Create a new 'get' request
@@ -1739,6 +1775,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         committer.resource_group_tagger = self.resource_group_tagger.clone();
         committer.schema_ver = self.schema_ver;
         committer.schema_lease_checker = self.schema_lease_checker.clone();
+        committer.commit_wait_until_tso = self.commit_wait_until_tso;
+        committer.commit_wait_until_tso_timeout = self.commit_wait_until_tso_timeout;
         let res = committer.commit().await;
 
         if res.is_ok() {
@@ -2438,6 +2476,10 @@ const MAX_TTL: u64 = 20000;
 const DEFAULT_LOCK_TTL: u64 = 3000;
 /// The default heartbeat interval
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(MAX_TTL / 2);
+/// Default maximum time allowed for PD TSO to catch up to the commit-wait target timestamp.
+///
+/// This matches client-go `KVTxn.commitWaitUntilTSOTimeout` default.
+const DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT: Duration = Duration::from_secs(1);
 /// Default safe window for async commit / 1PC max-commit-ts calculation.
 ///
 /// This matches the default in client-go.
@@ -3415,6 +3457,10 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     #[new(default)]
     schema_lease_checker: Option<Arc<dyn SchemaLeaseChecker>>,
     #[new(default)]
+    commit_wait_until_tso: u64,
+    #[new(value = "DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT")]
+    commit_wait_until_tso_timeout: Duration,
+    #[new(default)]
     pipelined_generation: u64,
     #[new(default)]
     pipelined_range_start: Option<Key>,
@@ -3813,13 +3859,89 @@ impl<PdC: PdClient> Committer<PdC> {
         Ok(min_commit_ts)
     }
 
+    async fn get_timestamp_for_commit(&mut self) -> Result<Timestamp> {
+        let first_attempt =
+            get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
+                .await?;
+        let first_attempt_version = first_attempt.version();
+
+        if self.commit_wait_until_tso == 0 || first_attempt_version > self.commit_wait_until_tso {
+            return Ok(first_attempt);
+        }
+
+        let max_sleep = self.commit_wait_until_tso_timeout;
+        if max_sleep.is_zero() {
+            return Err(Error::StringError(format!(
+                "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: 1, last attempted commit TS: {}",
+                first_attempt_version,
+                self.commit_wait_until_tso,
+                max_sleep,
+                first_attempt_version
+            )));
+        }
+
+        // Match client-go: if PD lags too far behind (clock drift exceeds the allowed timeout),
+        // fail fast rather than waiting.
+        let first_physical = Timestamp::from_version(first_attempt_version).physical;
+        let expected_physical = Timestamp::from_version(self.commit_wait_until_tso).physical;
+        let interval_ms =
+            u64::try_from(expected_physical.saturating_sub(first_physical)).unwrap_or(0);
+        let interval = Duration::from_millis(interval_ms);
+        if interval > max_sleep {
+            return Err(Error::StringError(format!(
+                "PD TSO '{}' lags the expected timestamp '{}', clock drift {:?} exceeds maximum allowed timeout {:?}",
+                first_attempt_version,
+                self.commit_wait_until_tso,
+                interval,
+                max_sleep
+            )));
+        }
+
+        let deadline = Instant::now() + max_sleep;
+        let mut backoff = Backoff::no_jitter_backoff(2, 500, 32);
+        let mut attempts = 1_usize;
+        let mut last_attempt = first_attempt;
+
+        while last_attempt.version() <= self.commit_wait_until_tso {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline.duration_since(now);
+            let mut delay = backoff.next_delay_duration().unwrap_or(remaining);
+            if delay > remaining {
+                delay = remaining;
+            }
+            if delay.is_zero() {
+                break;
+            }
+            tokio::time::sleep(delay).await;
+
+            attempts += 1;
+            last_attempt =
+                get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
+                    .await?;
+        }
+
+        if last_attempt.version() <= self.commit_wait_until_tso {
+            return Err(Error::StringError(format!(
+                "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: {}, last attempted commit TS: {}",
+                first_attempt_version,
+                self.commit_wait_until_tso,
+                max_sleep,
+                attempts,
+                last_attempt.version()
+            )));
+        }
+
+        Ok(last_attempt)
+    }
+
     /// Commits the primary key and returns the commit version
     async fn commit_primary(&mut self) -> Result<Timestamp> {
         debug!("committing primary");
         let primary_key = self.primary_key.clone().into_iter();
-        let commit_version =
-            get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
-                .await?;
+        let commit_version = self.get_timestamp_for_commit().await?;
         let mut req = new_commit_request(
             primary_key,
             self.start_version.clone(),
@@ -7781,6 +7903,106 @@ mod tests {
             .handle_commit_primary_extracted_errors(Vec::new())
             .expect_err("expected internal error");
         assert!(matches!(err, Error::InternalError { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_commit_wait_until_tso_waits_for_pd_tso() {
+        let start_version = 7;
+        let first_commit_version = 8;
+        let commit_wait_until = 10;
+        let expected_commit_version = 11;
+
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
+
+        let prewrite_count_captured = prewrite_count.clone();
+        let commit_count_captured = commit_count.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, expected_commit_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(first_commit_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        txn.set_commit_wait_until_tso(commit_wait_until);
+        txn.set_commit_wait_until_tso_timeout(Duration::from_millis(50));
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), expected_commit_version);
+        assert_eq!(pd_client.get_timestamp_call_count(), 4);
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+        assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_commit_wait_until_tso_timeout_returns_error() {
+        let start_version = 7;
+        let first_commit_version = 8;
+        let commit_wait_until = 10;
+
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+
+        let prewrite_count_captured = prewrite_count.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                panic!("commit request should not be sent when commit-wait times out");
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(first_commit_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        txn.set_commit_wait_until_tso(commit_wait_until);
+        txn.set_commit_wait_until_tso_timeout(Duration::ZERO);
+
+        let err = txn
+            .commit()
+            .await
+            .expect_err("expected commit-wait timeout error");
+        assert!(
+            matches!(err, Error::StringError(message) if message.contains("PD TSO '8' lags the expected timestamp '10'"))
+        );
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
