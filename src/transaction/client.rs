@@ -389,13 +389,20 @@ impl<PdC: PdClient> Client<PdC> {
         Ok(res)
     }
 
+    /// Clean up locks in the given key range up to the provided `safepoint`.
+    ///
+    /// This is primarily intended for GC-like workflows. When `options.async_commit_only` is set,
+    /// only async-commit locks are processed (other lock types are ignored).
     pub async fn cleanup_locks(
         &self,
         range: impl Into<BoundRange>,
         safepoint: &Timestamp,
         options: ResolveLocksOptions,
     ) -> Result<CleanupLocksResult> {
-        debug!("invoking cleanup async commit locks");
+        debug!(
+            "invoking cleanup locks (async_commit_only={})",
+            options.async_commit_only
+        );
         // scan all locks with ts <= safepoint
         let ctx = self.resolve_locks_ctx.clone();
         let backoff = Backoff::equal_jitter_backoff(100, 10000, 50);

@@ -831,8 +831,16 @@ pub struct ResolvingLock {
 }
 
 #[derive(Clone, Copy, Debug)]
+/// Options for GC-style lock cleanup.
+///
+/// These options are used by [`TransactionClient::cleanup_locks`](crate::TransactionClient::cleanup_locks)
+/// (and by extension [`TransactionClient::gc`](crate::TransactionClient::gc)).
 pub struct ResolveLocksOptions {
+    /// When `true`, only async-commit locks are processed.
+    ///
+    /// Non-async-commit locks are ignored.
     pub async_commit_only: bool,
+    /// The per-batch `ScanLock` limit used when scanning locks.
     pub batch_size: u32,
 }
 
