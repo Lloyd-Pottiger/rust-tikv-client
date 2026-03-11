@@ -1954,7 +1954,7 @@ where
                     self.pd_client.clone(),
                     self.keyspace,
                     self.force_resolve_lock_lite,
-                    self.lock_tracker.clone(),
+                    Some(self.lock_tracker.clone()),
                     self.rpc_context.clone(),
                 )
                 .await

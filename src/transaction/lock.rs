@@ -99,12 +99,22 @@ pub(crate) struct ResolveLocksResult {
     pub(crate) ms_before_txn_expired: i64,
 }
 
-#[derive(Debug)]
-pub(crate) struct ResolveLocksForReadResult {
-    pub(crate) ms_before_txn_expired: i64,
-    pub(crate) live_locks: Vec<kvrpcpb::LockInfo>,
-    pub(crate) resolved_locks: Vec<u64>,
-    pub(crate) committed_locks: Vec<u64>,
+/// The result of resolving locks for read.
+///
+/// This mirrors client-go `LockResolver.ResolveLocksForRead` behavior:
+/// - `resolved_locks` contains transaction IDs that can be ignored by subsequent reads
+///   (`kvrpcpb::Context.resolved_locks`).
+/// - `committed_locks` contains transaction IDs that can be accessed by subsequent reads
+///   (`kvrpcpb::Context.committed_locks`).
+/// - `ms_before_txn_expired` is the minimum remaining TTL (in milliseconds) among any still-live
+///   locks (0 when there is no live lock or the lock is already expired).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ResolveLocksForReadResult {
+    pub ms_before_txn_expired: i64,
+    pub live_locks: Vec<kvrpcpb::LockInfo>,
+    pub resolved_locks: Vec<u64>,
+    pub committed_locks: Vec<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -386,7 +396,7 @@ pub(crate) async fn resolve_locks_for_read(
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
     force_resolve_lock_lite: bool,
-    lock_tracker: ReadLockTracker,
+    lock_tracker: Option<ReadLockTracker>,
     rpc_context: LockResolverRpcContext,
 ) -> Result<ResolveLocksForReadResult> {
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
@@ -530,7 +540,9 @@ pub(crate) async fn resolve_locks_for_read(
                 warn!("async resolve_lock_for_read failed: {err}");
             }
         });
-        lock_tracker.track_cleanup_task(task).await;
+        if let Some(lock_tracker) = lock_tracker.as_ref() {
+            lock_tracker.track_cleanup_task(task).await;
+        }
     }
 
     Ok(ResolveLocksForReadResult {
@@ -1035,6 +1047,29 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
             .await
     }
 
+    /// Resolves locks for read and returns any that remain live.
+    ///
+    /// This is a public wrapper around the internal resolve-lock-for-read path used by
+    /// transactional reads (mirroring client-go `LockResolver.ResolveLocksForRead`).
+    ///
+    /// Note: non-pessimistic lock cleanup is performed asynchronously in a background task.
+    pub async fn resolve_locks_for_read(
+        &mut self,
+        locks: Vec<kvrpcpb::LockInfo>,
+        timestamp: Timestamp,
+        force_resolve_lock_lite: bool,
+    ) -> Result<ResolveLocksForReadResult> {
+        self.inner
+            .resolve_locks_for_read(
+                locks,
+                timestamp,
+                self.pd_client.clone(),
+                self.keyspace,
+                force_resolve_lock_lite,
+            )
+            .await
+    }
+
     /// Get the transaction status for `txn_id` (start TS) and `primary` key.
     pub async fn get_txn_status(
         &mut self,
@@ -1267,6 +1302,33 @@ impl LockResolver {
                 }
             }
         }
+    }
+
+    /// Resolves locks for read and returns the classification information.
+    ///
+    /// This is a public wrapper around the internal resolve-lock-for-read path used by
+    /// transactional reads (mirroring client-go `LockResolver.ResolveLocksForRead`).
+    ///
+    /// Note: non-pessimistic lock cleanup is performed asynchronously in a background task.
+    pub async fn resolve_locks_for_read(
+        &mut self,
+        locks: Vec<kvrpcpb::LockInfo>,
+        timestamp: Timestamp,
+        pd_client: Arc<impl PdClient>,
+        keyspace: Keyspace,
+        force_resolve_lock_lite: bool,
+    ) -> Result<ResolveLocksForReadResult> {
+        resolve_locks_for_read(
+            self.ctx.clone(),
+            locks,
+            timestamp,
+            pd_client,
+            keyspace,
+            force_resolve_lock_lite,
+            None,
+            self.rpc_context.clone(),
+        )
+        .await
     }
 
     /// Get the transaction status for `txn_id` (start TS) and `primary` key.
@@ -3236,7 +3298,7 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
-            lock_tracker.clone(),
+            Some(lock_tracker.clone()),
             LockResolverRpcContext::default(),
         )
         .await
@@ -3245,6 +3307,71 @@ mod tests {
         let keys = tokio::time::timeout(std::time::Duration::from_secs(1), resolve_lock_keys_rx)
             .await
             .expect("resolve_lock_for_read should issue resolve-lock cleanup request")
+            .expect("resolve-lock request should report the `keys` field");
+        assert_eq!(keys, vec![vec![1]]);
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_resolve_locks_for_read_detaches_cleanup_task() {
+        let (resolve_lock_keys_tx, resolve_lock_keys_rx) =
+            tokio::sync::oneshot::channel::<Vec<Vec<u8>>>();
+        let resolve_lock_keys_tx = Arc::new(Mutex::new(Some(resolve_lock_keys_tx)));
+
+        let base_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook({
+            let resolve_lock_keys_tx = resolve_lock_keys_tx.clone();
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 2,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    if let Some(tx) = resolve_lock_keys_tx.lock().unwrap().take() {
+                        let _ = tx.send(req.keys.clone());
+                    }
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            }
+        })));
+
+        let client = Arc::new(TimestampedPdClient::new_with_resolve_lock_lite_threshold(
+            base_client,
+            Timestamp::default(),
+            0,
+        ));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 1;
+        lock.lock_ttl = 100;
+        lock.txn_size = 256;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let result = lock_resolver
+            .resolve_locks_for_read(
+                vec![lock],
+                Timestamp::default(),
+                client,
+                Keyspace::Disable,
+                true,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.ms_before_txn_expired, 0);
+        assert!(result.live_locks.is_empty());
+        assert_eq!(result.resolved_locks, vec![1]);
+        assert!(result.committed_locks.is_empty());
+
+        let keys = tokio::time::timeout(std::time::Duration::from_secs(1), resolve_lock_keys_rx)
+            .await
+            .expect("resolve_locks_for_read should issue resolve-lock cleanup request")
             .expect("resolve-lock request should report the `keys` field");
         assert_eq!(keys, vec![vec![1]]);
     }
@@ -3294,7 +3421,7 @@ mod tests {
             client,
             Keyspace::Disable,
             false,
-            lock_tracker,
+            Some(lock_tracker),
             LockResolverRpcContext::default(),
         )
         .await
