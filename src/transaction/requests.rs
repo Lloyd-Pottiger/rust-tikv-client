@@ -554,7 +554,6 @@ pub fn new_pessimistic_lock_request(
     req.lock_ttl = lock_ttl;
     req.for_update_ts = for_update_ts;
     req.is_first_lock = is_first_lock;
-    // FIXME: make them configurable
     req.wait_timeout = 0;
     req.return_values = need_value;
     req.min_commit_ts = for_update_ts.saturating_add(1);
