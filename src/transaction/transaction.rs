@@ -61,6 +61,7 @@ use crate::Value;
 ///
 /// The input is the request label (for example, `"kv_get"` or `"kv_commit"`).
 type ResourceGroupTagger = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
+type CommitTsUpperBoundCheck = Arc<dyn Fn(u64) -> bool + Send + Sync>;
 
 /// Hook for validating schema versions during commit.
 ///
@@ -126,6 +127,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     schema_lease_checker: Option<Arc<dyn SchemaLeaseChecker>>,
     commit_wait_until_tso: u64,
     commit_wait_until_tso_timeout: Duration,
+    commit_ts_upper_bound_check: Option<CommitTsUpperBoundCheck>,
     keyspace: Keyspace,
     is_heartbeat_started: bool,
     start_instant: Instant,
@@ -256,6 +258,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             schema_lease_checker: None,
             commit_wait_until_tso: 0,
             commit_wait_until_tso_timeout: DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT,
+            commit_ts_upper_bound_check: None,
             keyspace,
             is_heartbeat_started: false,
             start_instant: std::time::Instant::now(),
@@ -529,6 +532,27 @@ impl<PdC: PdClient> Transaction<PdC> {
     #[must_use]
     pub fn commit_wait_until_tso_timeout(&self) -> Duration {
         self.commit_wait_until_tso_timeout
+    }
+
+    /// Set a commit-ts upper bound checker for this transaction.
+    ///
+    /// When set, the checker is invoked with the chosen commit timestamp (TSO version). If it
+    /// returns false, the commit is aborted with an error.
+    ///
+    /// This maps to client-go `KVTxn.SetCommitTSUpperBoundCheck`.
+    ///
+    /// Note: client-go disables async-commit and 1PC when this checker is set. This client matches
+    /// that behavior during commit.
+    pub fn set_commit_ts_upper_bound_check<F>(&mut self, checker: F)
+    where
+        F: Fn(u64) -> bool + Send + Sync + 'static,
+    {
+        self.commit_ts_upper_bound_check = Some(Arc::new(checker));
+    }
+
+    /// Clear the configured commit-ts upper bound checker.
+    pub fn clear_commit_ts_upper_bound_check(&mut self) {
+        self.commit_ts_upper_bound_check = None;
     }
 
     /// Create a new 'get' request
@@ -1777,6 +1801,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         committer.schema_lease_checker = self.schema_lease_checker.clone();
         committer.commit_wait_until_tso = self.commit_wait_until_tso;
         committer.commit_wait_until_tso_timeout = self.commit_wait_until_tso_timeout;
+        committer.commit_ts_upper_bound_check = self.commit_ts_upper_bound_check.clone();
         let res = committer.commit().await;
 
         if res.is_ok() {
@@ -3461,6 +3486,8 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     #[new(value = "DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT")]
     commit_wait_until_tso_timeout: Duration,
     #[new(default)]
+    commit_ts_upper_bound_check: Option<CommitTsUpperBoundCheck>,
+    #[new(default)]
     pipelined_generation: u64,
     #[new(default)]
     pipelined_range_start: Option<Key>,
@@ -3492,8 +3519,9 @@ impl<PdC: PdClient> Committer<PdC> {
             return self.commit_pipelined().await;
         }
 
-        // Match client-go: async-commit / 1PC are disabled for local transactions.
-        if !self.options.is_global_txn_scope() {
+        // Match client-go: async-commit / 1PC are disabled for local transactions and when a
+        // commit-ts upper bound checker is configured.
+        if !self.options.is_global_txn_scope() || self.commit_ts_upper_bound_check.is_some() {
             self.options.try_one_pc = false;
             self.options.async_commit = false;
         }
@@ -3859,6 +3887,22 @@ impl<PdC: PdClient> Committer<PdC> {
         Ok(min_commit_ts)
     }
 
+    fn check_commit_ts_upper_bound(&self, commit_ts: u64) -> Result<()> {
+        let Some(checker) = self.commit_ts_upper_bound_check.as_ref() else {
+            return Ok(());
+        };
+
+        if (checker)(commit_ts) {
+            Ok(())
+        } else {
+            Err(Error::StringError(format!(
+                "check commit ts upper bound fail, start_ts: {}, comm: {}",
+                self.start_version.version(),
+                commit_ts
+            )))
+        }
+    }
+
     async fn get_timestamp_for_commit(&mut self) -> Result<Timestamp> {
         let first_attempt =
             get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
@@ -3866,6 +3910,7 @@ impl<PdC: PdClient> Committer<PdC> {
         let first_attempt_version = first_attempt.version();
 
         if self.commit_wait_until_tso == 0 || first_attempt_version > self.commit_wait_until_tso {
+            self.check_commit_ts_upper_bound(first_attempt_version)?;
             return Ok(first_attempt);
         }
 
@@ -3934,6 +3979,7 @@ impl<PdC: PdClient> Committer<PdC> {
             )));
         }
 
+        self.check_commit_ts_upper_bound(last_attempt.version())?;
         Ok(last_attempt)
     }
 
@@ -8003,6 +8049,110 @@ mod tests {
         );
         assert_eq!(pd_client.get_timestamp_call_count(), 1);
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_commit_ts_upper_bound_check_aborts_commit() {
+        let start_version = 7;
+        let first_commit_version = 8;
+
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let prewrite_count_captured = prewrite_count.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                panic!("commit request should not be sent when commit-ts upper bound check fails");
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(first_commit_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        txn.set_commit_ts_upper_bound_check(|commit_ts| commit_ts < 8);
+
+        let err = txn
+            .commit()
+            .await
+            .expect_err("expected upper bound check error");
+        assert!(
+            matches!(err, Error::StringError(message) if message.contains("check commit ts upper bound fail"))
+        );
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_commit_ts_upper_bound_check_disables_async_commit_and_one_pc() {
+        let start_version = 7;
+        let first_commit_version = 8;
+
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
+
+        let prewrite_count_captured = prewrite_count.clone();
+        let commit_count_captured = commit_count.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                assert!(!req.use_async_commit);
+                assert!(!req.try_one_pc);
+                assert_eq!(req.min_commit_ts, 0);
+                assert_eq!(req.max_commit_ts, 0);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, first_commit_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(first_commit_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .use_async_commit()
+                .try_one_pc()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        txn.set_commit_ts_upper_bound_check(|_| true);
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), first_commit_version);
+        assert_eq!(
+            pd_client.get_timestamp_call_count(),
+            1,
+            "upper bound check must disable async/1PC min_commit_ts seeding"
+        );
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+        assert_eq!(commit_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
