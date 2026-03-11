@@ -148,6 +148,19 @@ impl SyncTransactionClient {
         Ok(SyncTransaction::new(inner, Arc::clone(&self.runtime)))
     }
 
+    /// Create a new customized [`SyncTransaction`] with an explicit start timestamp.
+    ///
+    /// This does not contact PD to fetch a timestamp. The provided `timestamp` is used as the
+    /// transaction's start timestamp (`start_ts`).
+    pub fn begin_with_start_timestamp(
+        &self,
+        timestamp: Timestamp,
+        options: TransactionOptions,
+    ) -> SyncTransaction {
+        let inner = self.client.begin_with_start_timestamp(timestamp, options);
+        SyncTransaction::new(inner, Arc::clone(&self.runtime))
+    }
+
     /// Create a new read-only [`SyncSnapshot`] at the given [`Timestamp`].
     ///
     /// This is a synchronous version of [`TransactionClient::snapshot`](crate::TransactionClient::snapshot).

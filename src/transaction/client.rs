@@ -59,13 +59,13 @@ const SCAN_LOCK_BATCH_SIZE: u32 = 1024;
 ///
 /// The returned results of transactional requests are [`Future`](std::future::Future)s that must be
 /// awaited to execute.
-pub struct Client {
-    pd: Arc<PdRpcClient>,
+pub struct Client<PdC: PdClient = PdRpcClient> {
+    pd: Arc<PdC>,
     keyspace: Keyspace,
     resolve_locks_ctx: ResolveLocksContext,
 }
 
-impl Clone for Client {
+impl<PdC: PdClient> Clone for Client<PdC> {
     fn clone(&self) -> Self {
         Self {
             pd: self.pd.clone(),
@@ -174,7 +174,9 @@ impl Client {
     pub fn pd_client(&self) -> Arc<PdRpcClient> {
         self.pd.clone()
     }
+}
 
+impl<PdC: PdClient> Client<PdC> {
     /// Returns a [`LockResolver`] handle associated with this client.
     ///
     /// The returned resolver shares the resolve-lock caches with this client.
@@ -188,7 +190,7 @@ impl Client {
     /// The returned resolver binds this client's PD client and keyspace. It also shares the
     /// resolve-lock caches with this client.
     #[must_use]
-    pub fn bound_lock_resolver(&self) -> BoundLockResolver<PdRpcClient> {
+    pub fn bound_lock_resolver(&self) -> BoundLockResolver<PdC> {
         BoundLockResolver::new(
             self.pd.clone(),
             self.keyspace,
@@ -216,7 +218,7 @@ impl Client {
     /// transaction.commit().await.unwrap();
     /// # });
     /// ```
-    pub async fn begin_optimistic(&self) -> Result<Transaction> {
+    pub async fn begin_optimistic(&self) -> Result<Transaction<PdC>> {
         debug!("creating new optimistic transaction");
         let timestamp = self.current_timestamp().await?;
         Ok(self.new_transaction(timestamp, TransactionOptions::new_optimistic()))
@@ -239,7 +241,7 @@ impl Client {
     /// transaction.commit().await.unwrap();
     /// # });
     /// ```
-    pub async fn begin_pessimistic(&self) -> Result<Transaction> {
+    pub async fn begin_pessimistic(&self) -> Result<Transaction<PdC>> {
         debug!("creating new pessimistic transaction");
         let timestamp = self.current_timestamp().await?;
         Ok(self.new_transaction(timestamp, TransactionOptions::new_pessimistic()))
@@ -262,16 +264,26 @@ impl Client {
     /// transaction.commit().await.unwrap();
     /// # });
     /// ```
-    pub async fn begin_with_options(&self, options: TransactionOptions) -> Result<Transaction> {
+    pub async fn begin_with_options(
+        &self,
+        options: TransactionOptions,
+    ) -> Result<Transaction<PdC>> {
         debug!("creating new customized transaction");
         let timestamp = self.current_timestamp().await?;
         Ok(self.new_transaction(timestamp, options))
     }
 
-    /// Create a new [`Snapshot`](Snapshot) at the given [`Timestamp`](Timestamp).
-    pub fn snapshot(&self, timestamp: Timestamp, options: TransactionOptions) -> Snapshot {
-        debug!("creating new snapshot");
-        Snapshot::new(self.new_transaction(timestamp, options.read_only()))
+    /// Create a new customized [`Transaction`] with an explicit start timestamp.
+    ///
+    /// This does not contact PD to fetch a timestamp. The provided `timestamp` is used as the
+    /// transaction's start timestamp (`start_ts`).
+    pub fn begin_with_start_timestamp(
+        &self,
+        timestamp: Timestamp,
+        options: TransactionOptions,
+    ) -> Transaction<PdC> {
+        debug!("creating new customized transaction with explicit start timestamp");
+        self.new_transaction(timestamp, options)
     }
 
     /// Retrieve the current [`Timestamp`].
@@ -288,27 +300,6 @@ impl Client {
     /// ```
     pub async fn current_timestamp(&self) -> Result<Timestamp> {
         self.pd.clone().get_timestamp().await
-    }
-
-    /// Retrieve the current [`Timestamp`] for the given transaction scope.
-    ///
-    /// When `txn_scope` is `"global"` (or empty), this uses the global TSO allocator
-    /// (`dc_location=""`). Otherwise `txn_scope` is passed through as PD `dc_location` to
-    /// request a local TSO, matching client-go `CurrentTimestamp(txnScope)` behavior.
-    pub async fn current_timestamp_with_txn_scope(
-        &self,
-        txn_scope: impl AsRef<str>,
-    ) -> Result<Timestamp> {
-        let txn_scope = txn_scope.as_ref();
-        let dc_location = if txn_scope.is_empty() || txn_scope == "global" {
-            String::new()
-        } else {
-            txn_scope.to_owned()
-        };
-        self.pd
-            .clone()
-            .get_timestamp_with_dc_location(dc_location)
-            .await
     }
 
     /// Get the cluster-wide minimum `safe_ts` across all TiKV stores.
@@ -465,7 +456,11 @@ impl Client {
         plan.execute().await
     }
 
-    fn new_transaction(&self, timestamp: Timestamp, options: TransactionOptions) -> Transaction {
+    fn new_transaction(
+        &self,
+        timestamp: Timestamp,
+        options: TransactionOptions,
+    ) -> Transaction<PdC> {
         Transaction::new_with_resolve_locks_ctx(
             timestamp,
             self.pd.clone(),
@@ -473,5 +468,98 @@ impl Client {
             self.keyspace,
             self.resolve_locks_ctx.clone(),
         )
+    }
+}
+
+impl Client {
+    /// Create a new [`Snapshot`](Snapshot) at the given [`Timestamp`](Timestamp).
+    pub fn snapshot(&self, timestamp: Timestamp, options: TransactionOptions) -> Snapshot {
+        debug!("creating new snapshot");
+        Snapshot::new(self.new_transaction(timestamp, options.read_only()))
+    }
+
+    /// Retrieve the current [`Timestamp`] for the given transaction scope.
+    ///
+    /// When `txn_scope` is `"global"` (or empty), this uses the global TSO allocator
+    /// (`dc_location=""`). Otherwise `txn_scope` is passed through as PD `dc_location` to
+    /// request a local TSO, matching client-go `CurrentTimestamp(txnScope)` behavior.
+    pub async fn current_timestamp_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+    ) -> Result<Timestamp> {
+        let txn_scope = txn_scope.as_ref();
+        let dc_location = if txn_scope.is_empty() || txn_scope == "global" {
+            String::new()
+        } else {
+            txn_scope.to_owned()
+        };
+        self.pd
+            .clone()
+            .get_timestamp_with_dc_location(dc_location)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use crate::mock::{MockKvClient, MockPdClient};
+    use crate::proto::kvrpcpb;
+    use crate::request::Keyspace;
+    use crate::timestamp::TimestampExt;
+    use crate::transaction::ResolveLocksContext;
+    use crate::Timestamp;
+    use crate::TransactionOptions;
+
+    use super::Client;
+
+    #[tokio::test]
+    async fn test_begin_with_start_timestamp_uses_provided_start_ts_without_pd_tso() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls_cloned = get_calls.clone();
+
+        let start_ts = Timestamp {
+            physical: 0,
+            logical: 42,
+            ..Default::default()
+        };
+        let start_version = start_ts.version();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
+                    get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.version, start_version);
+
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    resp.value = b"v".to_vec();
+                    resp.not_found = false;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        let client = Client {
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+        };
+
+        let mut transaction = client.begin_with_start_timestamp(
+            start_ts,
+            TransactionOptions::new_optimistic().drop_check(crate::CheckLevel::None),
+        );
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+
+        let value = transaction.get("k".to_owned()).await.unwrap();
+        assert_eq!(value, Some(b"v".to_vec()));
+
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+        assert_eq!(get_calls.load(Ordering::SeqCst), 1);
     }
 }

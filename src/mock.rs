@@ -87,6 +87,8 @@ pub struct MockPdClient {
     store_metas: RwLock<HashMap<StoreId, metapb::Store>>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
     store_meta_by_id_calls: Arc<AtomicUsize>,
+    #[new(value = "Arc::new(AtomicUsize::new(0))")]
+    get_timestamp_calls: Arc<AtomicUsize>,
     #[new(value = "Mutex::new(HashMap::new())")]
     slow_store_until: Mutex<HashMap<StoreId, Instant>>,
     #[new(value = "Mutex::new(HashMap::new())")]
@@ -126,6 +128,10 @@ impl MockPdClient {
 
     pub fn store_meta_by_id_call_count(&self) -> usize {
         self.store_meta_by_id_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn get_timestamp_call_count(&self) -> usize {
+        self.get_timestamp_calls.load(Ordering::SeqCst)
     }
 
     pub fn region1() -> RegionWithLeader {
@@ -360,6 +366,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+        self.get_timestamp_calls.fetch_add(1, Ordering::SeqCst);
         Ok(Timestamp::default())
     }
 
