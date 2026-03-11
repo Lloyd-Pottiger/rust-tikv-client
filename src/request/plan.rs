@@ -122,6 +122,11 @@ fn is_deadline_exceeded_region_error(e: &errorpb::Error) -> bool {
     e.message.contains("Deadline is exceeded")
 }
 
+fn is_invalid_max_ts_update_region_error(e: &errorpb::Error) -> bool {
+    // Match client-go's `isInvalidMaxTsUpdate` check.
+    e.message.contains("invalid max_ts update")
+}
+
 #[doc(hidden)]
 pub trait HasKvContext {
     fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context>;
@@ -1310,6 +1315,9 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
     {
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
+    } else if is_invalid_max_ts_update_region_error(&e) {
+        // Match client-go `isInvalidMaxTsUpdate`: fail fast without invalidating caches.
+        Err(Error::RegionError(Box::new(e)))
     } else {
         // TODO: pass the logger around
         // info!("unknwon region error: {:?}", e);
@@ -3667,6 +3675,30 @@ mod test {
         match err {
             Error::RegionError(inner) => {
                 assert!(inner.flashback_in_progress.is_some());
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_invalid_max_ts_update_returns_error() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let store = RegionStore::new(
+            MockPdClient::region1(),
+            Arc::new(MockKvClient::with_dispatch_hook(|_| {
+                unreachable!("dispatch not expected")
+            })),
+        );
+
+        let mut err = errorpb::Error::default();
+        err.message = "invalid max_ts update".to_owned();
+
+        let err = handle_region_error(pd_client, err, store)
+            .await
+            .expect_err("invalid max_ts update should not be retryable");
+        match err {
+            Error::RegionError(inner) => {
+                assert!(inner.message.contains("invalid max_ts update"));
             }
             other => panic!("unexpected error: {other:?}"),
         }
