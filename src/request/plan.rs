@@ -330,6 +330,20 @@ fn select_replica_read_peer(
         if best_indices.is_empty() {
             return None;
         }
+        let mut best_indices = best_indices;
+        if non_leader_first
+            && replica_read == ReplicaReadType::Mixed
+            && !unavailable_store_ids.is_empty()
+        {
+            if let Some(leader_store_id) = leader_store_id {
+                if best_indices
+                    .iter()
+                    .any(|&idx| candidates[idx].store_id != leader_store_id)
+                {
+                    best_indices.retain(|&idx| candidates[idx].store_id != leader_store_id);
+                }
+            }
+        }
         let selected = {
             #[cfg(test)]
             {
@@ -758,6 +772,9 @@ where
                         let store_id = peer.store_id;
                         let store_id_matches =
                             !store_ids_configured || match_store_ids.contains(&store_id);
+                        if store_ids_configured && !store_id_matches {
+                            continue;
+                        }
                         if !labels_configured {
                             if store_id_matches {
                                 label_matched_store_ids.push(store_id);
