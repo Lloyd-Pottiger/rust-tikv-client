@@ -97,7 +97,10 @@ macro_rules! retry_core {
         }
 
         last_err?;
-        unreachable!();
+        return Err(internal_err!(concat!(
+            "pd retry exhausted without error: ",
+            $tag
+        )));
     }};
 }
 
