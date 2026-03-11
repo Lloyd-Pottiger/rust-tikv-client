@@ -129,6 +129,11 @@ impl Client<PdRpcClient> {
         })
     }
 
+    /// Returns the TiKV cluster ID.
+    pub fn cluster_id(&self) -> u64 {
+        self.rpc.cluster_id()
+    }
+
     /// Create a new client which is a clone of `self`, but which uses an explicit column family for
     /// all requests.
     ///

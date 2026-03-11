@@ -90,6 +90,13 @@ impl SyncTransactionClient {
         Ok(Self { client, runtime })
     }
 
+    /// Returns the TiKV cluster ID.
+    ///
+    /// This is a synchronous version of [`TransactionClient::cluster_id`](crate::TransactionClient::cluster_id).
+    pub fn cluster_id(&self) -> u64 {
+        self.client.cluster_id()
+    }
+
     /// Creates a new optimistic [`SyncTransaction`].
     ///
     /// Use the transaction to issue requests like [`get`](SyncTransaction::get) or

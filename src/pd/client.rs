@@ -441,6 +441,10 @@ impl PdRpcClient<TikvConnect, Cluster> {
 }
 
 impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
+    pub(crate) fn cluster_id(&self) -> u64 {
+        self.pd.cluster_id()
+    }
+
     pub async fn new<PdFut, MakeKvC, MakePd>(
         config: Config,
         kv_connect: MakeKvC,
@@ -522,6 +526,28 @@ pub mod test {
         let kv3 = client.kv_client(addr2).await.unwrap();
         assert!(kv1.addr != kv2.addr);
         assert_eq!(kv2.addr, kv3.addr);
+    }
+
+    #[tokio::test]
+    async fn test_pd_rpc_client_cluster_id_propagated() {
+        let config = Config::default();
+        let client = PdRpcClient::new(
+            config.clone(),
+            |_| MockKvConnect,
+            |sm| {
+                futures::future::ok(RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    42,
+                    MockCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.cluster_id(), 42);
     }
 
     #[test]

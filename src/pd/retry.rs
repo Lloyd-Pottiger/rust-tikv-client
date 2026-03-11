@@ -52,10 +52,17 @@ pub trait RetryClientTrait {
 }
 /// Client for communication with a PD cluster. Has the facility to reconnect to the cluster.
 pub struct RetryClient<Cl = Cluster> {
+    cluster_id: u64,
     // Tuple is the cluster and the time of the cluster's last reconnect.
     cluster: RwLock<(Cl, Instant)>,
     connection: Connection,
     timeout: Duration,
+}
+
+impl<Cl> RetryClient<Cl> {
+    pub(crate) fn cluster_id(&self) -> u64 {
+        self.cluster_id
+    }
 }
 
 #[cfg(test)]
@@ -63,10 +70,12 @@ impl<Cl> RetryClient<Cl> {
     pub fn new_with_cluster(
         security_mgr: Arc<SecurityManager>,
         timeout: Duration,
+        cluster_id: u64,
         cluster: Cl,
     ) -> RetryClient<Cl> {
         let connection = Connection::new(security_mgr);
         RetryClient {
+            cluster_id,
             cluster: RwLock::new((cluster, Instant::now())),
             connection,
             timeout,
@@ -133,11 +142,11 @@ impl RetryClient<Cluster> {
         timeout: Duration,
     ) -> Result<RetryClient> {
         let connection = Connection::new(security_mgr);
-        let cluster = RwLock::new((
-            connection.connect_cluster(endpoints, timeout).await?,
-            Instant::now(),
-        ));
+        let cluster = connection.connect_cluster(endpoints, timeout).await?;
+        let cluster_id = cluster.cluster_id();
+        let cluster = RwLock::new((cluster, Instant::now()));
         Ok(RetryClient {
+            cluster_id,
             cluster,
             connection,
             timeout,
@@ -333,6 +342,13 @@ mod test {
                 0
             );
         })
+    }
+
+    #[test]
+    fn test_retry_client_cluster_id_returns_configured_value() {
+        let security_mgr = Arc::new(SecurityManager::default());
+        let client = RetryClient::new_with_cluster(security_mgr, Duration::from_secs(1), 42, ());
+        assert_eq!(client.cluster_id(), 42);
     }
 
     #[test]

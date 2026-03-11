@@ -162,6 +162,11 @@ impl Client {
         })
     }
 
+    /// Returns the TiKV cluster ID.
+    pub fn cluster_id(&self) -> u64 {
+        self.pd.cluster_id()
+    }
+
     /// Creates a new optimistic [`Transaction`].
     ///
     /// Use the transaction to issue requests like [`get`](Transaction::get) or
