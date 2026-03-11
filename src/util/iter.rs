@@ -30,7 +30,6 @@ pub struct FlatMapOk<U, F, Ti, E> {
     f: F,
 }
 
-// FIXME: implement other iterator methods like size_hint, etc.
 impl<
         T: IntoIterator<IntoIter = Ti>,
         U: Iterator<Item = std::result::Result<I, E>>,
@@ -59,6 +58,34 @@ impl<
                 None => return None,
                 Some(Ok(inner)) => self.frontiter = Some(Ok((self.f)(inner).into_iter())),
                 Some(Err(e)) => self.frontiter = Some(Err(e)),
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (_, outer_upper) = self.iter.size_hint();
+        match &self.frontiter {
+            Some(Ok(inner)) => {
+                let (lower, upper) = inner.size_hint();
+                let upper = match outer_upper {
+                    Some(0) => upper,
+                    _ => None,
+                };
+                (lower, upper)
+            }
+            Some(Err(_)) => {
+                let upper = match outer_upper {
+                    Some(0) => Some(1),
+                    _ => None,
+                };
+                (1, upper)
+            }
+            None => {
+                let upper = match outer_upper {
+                    Some(0) => Some(0),
+                    _ => None,
+                };
+                (0, upper)
             }
         }
     }
@@ -96,5 +123,23 @@ mod test {
             result,
             vec![Ok(0), Ok(0), Ok(0), Err(()), Ok(2), Ok(2), Ok(2)]
         );
+    }
+
+    #[test]
+    fn test_flat_map_ok_size_hint() {
+        let mut iter = vec![Result::<i32, ()>::Ok(0)]
+            .into_iter()
+            .flat_map_ok(|_| vec![1, 2, 3].into_iter());
+        assert_eq!(iter.size_hint(), (0, None));
+
+        assert_eq!(iter.next(), Some(Ok(1)));
+        assert_eq!(iter.size_hint(), (2, Some(2)));
+
+        assert_eq!(iter.collect::<Vec<_>>(), vec![Ok(2), Ok(3)]);
+
+        let iter: FlatMapOk<_, _, std::option::IntoIter<i32>, ()> = Vec::<Result<i32, ()>>::new()
+            .into_iter()
+            .flat_map_ok(|i| Some(i).into_iter());
+        assert_eq!(iter.size_hint(), (0, Some(0)));
     }
 }
