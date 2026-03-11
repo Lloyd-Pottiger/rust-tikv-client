@@ -249,11 +249,31 @@ fn allocate_timestamps(
             ));
         }
 
+        let logical_step = 1_i64.checked_shl(tail_ts.suffix_bits).ok_or_else(|| {
+            internal_err!(
+                "invalid suffix_bits in TsoResponse timestamp: {}",
+                tail_ts.suffix_bits
+            )
+        })?;
+
         for request in requests {
             offset -= 1;
+            let delta = (offset as i64).checked_mul(logical_step).ok_or_else(|| {
+                internal_err!(
+                    "logical delta overflow allocating batched timestamps: offset={}, step={}",
+                    offset,
+                    logical_step
+                )
+            })?;
             let ts = Timestamp {
                 physical: tail_ts.physical,
-                logical: tail_ts.logical - offset as i64,
+                logical: tail_ts.logical.checked_sub(delta).ok_or_else(|| {
+                    internal_err!(
+                        "logical underflow allocating batched timestamps: tail={}, delta={}",
+                        tail_ts.logical,
+                        delta
+                    )
+                })?,
                 suffix_bits: tail_ts.suffix_bits,
             };
             let _ = request.send(ts);
@@ -326,5 +346,50 @@ mod tests {
         assert_eq!(pending[0].requests.len(), 2);
         assert_eq!(pending[1].tso_request.dc_location, "dc2");
         assert_eq!(pending[1].requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_allocate_timestamps_respects_suffix_bits() {
+        let mut pending_requests = VecDeque::new();
+
+        let (s1, r1) = oneshot::channel();
+        let (s2, r2) = oneshot::channel();
+        let (s3, r3) = oneshot::channel();
+
+        pending_requests.push_back(RequestGroup {
+            tso_request: TsoRequest {
+                header: Some(RequestHeader {
+                    cluster_id: 1,
+                    sender_id: 0,
+                }),
+                count: 3,
+                dc_location: "dc1".to_owned(),
+            },
+            requests: vec![s1, s2, s3],
+        });
+
+        let resp = TsoResponse {
+            count: 3,
+            timestamp: Some(Timestamp {
+                physical: 10,
+                logical: 15,
+                suffix_bits: 2,
+            }),
+            ..Default::default()
+        };
+
+        allocate_timestamps(&resp, &mut pending_requests).unwrap();
+        assert!(pending_requests.is_empty());
+
+        let t1 = r1.await.unwrap();
+        let t2 = r2.await.unwrap();
+        let t3 = r3.await.unwrap();
+
+        assert_eq!(t1.logical, 7);
+        assert_eq!(t2.logical, 11);
+        assert_eq!(t3.logical, 15);
+        assert_eq!(t1.suffix_bits, 2);
+        assert_eq!(t2.suffix_bits, 2);
+        assert_eq!(t3.suffix_bits, 2);
     }
 }
