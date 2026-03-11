@@ -1918,6 +1918,7 @@ mod tests {
     {
         let txn_id = 1;
         let commit_version = 10;
+        let lock_key = vec![10];
 
         let mut ctx = ResolveLocksContext::default();
         ctx.save_resolved(
@@ -1932,6 +1933,7 @@ mod tests {
 
         let resolve_lock_calls = Arc::new(AtomicUsize::new(0));
         let resolve_lock_calls_captured = resolve_lock_calls.clone();
+        let lock_key_captured = lock_key.clone();
 
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
@@ -1946,7 +1948,7 @@ mod tests {
                     assert!(req.txn_infos.is_empty());
                     assert_eq!(req.start_version, txn_id);
                     assert_eq!(req.commit_version, commit_version);
-                    assert_eq!(req.keys, vec![vec![2]]);
+                    assert_eq!(req.keys, vec![lock_key_captured.clone()]);
                     return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
                 }
 
@@ -1955,7 +1957,7 @@ mod tests {
         )));
 
         let mut lock = kvrpcpb::LockInfo::default();
-        lock.key = vec![10];
+        lock.key = lock_key;
         lock.primary_lock = vec![1];
         lock.lock_version = txn_id;
         lock.lock_ttl = 100;
