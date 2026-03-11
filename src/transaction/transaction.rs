@@ -1602,6 +1602,11 @@ impl<PdC: PdClient> Transaction<PdC> {
         reverse: bool,
     ) -> Result<impl Iterator<Item = KvPair>> {
         self.check_allow_operation().await?;
+        if self.options.pipelined_txn.is_some() {
+            return Err(Error::StringError(
+                "scan is not supported for pipelined transactions".to_owned(),
+            ));
+        }
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let retry_options = self.options.retry_options.clone();
@@ -3918,6 +3923,158 @@ mod tests {
         assert!(matches!(
             txn.flush(false).await,
             Err(Error::StringError(msg)) if msg == "flush is only supported for pipelined transactions"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_get_after_flush_reads_remote_buffer() {
+        let flush_calls = Arc::new(AtomicUsize::new(0));
+        let buffer_batch_get_calls = Arc::new(AtomicUsize::new(0));
+
+        let flush_calls_cloned = flush_calls.clone();
+        let buffer_batch_get_calls_cloned = buffer_batch_get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BufferBatchGetRequest>() {
+                    buffer_batch_get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.version, 5);
+                    assert_eq!(req.keys, vec![vec![1u8]]);
+
+                    let mut pair = kvrpcpb::KvPair::default();
+                    pair.key = vec![1u8];
+                    pair.value = b"v1".to_vec();
+
+                    let resp = kvrpcpb::BufferBatchGetResponse {
+                        pairs: vec![pair],
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        assert_eq!(txn.get(vec![1u8]).await.unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(buffer_batch_get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_batch_get_after_flush_merges_buffer_and_snapshot() {
+        let buffer_batch_get_calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_batch_get_calls = Arc::new(AtomicUsize::new(0));
+
+        let buffer_batch_get_calls_cloned = buffer_batch_get_calls.clone();
+        let snapshot_batch_get_calls_cloned = snapshot_batch_get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BufferBatchGetRequest>() {
+                    buffer_batch_get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.version, 5);
+                    assert_eq!(req.keys, vec![vec![1u8], vec![2u8]]);
+
+                    let mut pair = kvrpcpb::KvPair::default();
+                    pair.key = vec![1u8];
+                    pair.value = b"v1".to_vec();
+
+                    let resp = kvrpcpb::BufferBatchGetResponse {
+                        pairs: vec![pair],
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BatchGetRequest>() {
+                    snapshot_batch_get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.version, 5);
+                    assert_eq!(req.keys, vec![vec![2u8]]);
+
+                    let mut pair = kvrpcpb::KvPair::default();
+                    pair.key = vec![2u8];
+                    pair.value = b"v2".to_vec();
+
+                    let resp = kvrpcpb::BatchGetResponse {
+                        pairs: vec![pair],
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        let result: std::collections::HashMap<Key, Vec<u8>> = txn
+            .batch_get(vec![vec![1u8], vec![2u8]])
+            .await
+            .unwrap()
+            .map(|pair| (pair.0, pair.1))
+            .collect();
+
+        assert_eq!(result.get(&Key::from(vec![1u8])), Some(&b"v1".to_vec()));
+        assert_eq!(result.get(&Key::from(vec![2u8])), Some(&b"v2".to_vec()));
+
+        assert_eq!(buffer_batch_get_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot_batch_get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_scan_is_not_supported() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            Err(Error::StringError("unexpected request".to_owned()))
+        })));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        assert!(matches!(
+            txn.scan(vec![0u8]..vec![2u8], 10).await,
+            Err(Error::StringError(msg)) if msg == "scan is not supported for pipelined transactions"
         ));
     }
 
