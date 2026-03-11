@@ -146,6 +146,10 @@ pub trait PdClient: Send + Sync + 'static {
         crate::config::DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD
     }
 
+    /// Groups consecutive keys by region.
+    ///
+    /// The input keys must be sorted in increasing key order so that keys from the same region are
+    /// contiguous.
     fn group_keys_by_region<K, K2>(
         self: Arc<Self>,
         keys: impl Iterator<Item = K> + Send + Sync + 'static,
@@ -584,9 +588,7 @@ pub mod test {
     fn test_group_keys_by_region() {
         let client = MockPdClient::default();
 
-        // FIXME This only works if the keys are in order of regions. Not sure if
-        // that is a reasonable constraint.
-        let tasks: Vec<Key> = vec![
+        let mut tasks: Vec<Key> = vec![
             vec![1].into(),
             vec![2].into(),
             vec![3].into(),
@@ -594,6 +596,7 @@ pub mod test {
             vec![12].into(),
             vec![11, 4].into(),
         ];
+        tasks.sort();
 
         let stream = Arc::new(client).group_keys_by_region(tasks.into_iter());
         let mut stream = executor::block_on_stream(stream);
@@ -610,7 +613,7 @@ pub mod test {
         );
         assert_eq!(
             stream.next().unwrap().unwrap().0,
-            vec![vec![12].into(), vec![11, 4].into()]
+            vec![vec![11, 4].into(), vec![12].into()]
         );
         assert!(stream.next().is_none());
     }
