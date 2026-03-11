@@ -1881,6 +1881,10 @@ pub struct TransactionOptions {
 /// Options for configuring pipelined DML transactions.
 ///
 /// This maps to client-go `TxnOptions.PipelinedTxn`.
+///
+/// Note: client-rust currently performs the pipelined flush during commit (and runs a best-effort
+/// background resolve-lock for the touched key range). It does not yet implement client-go’s
+/// unionstore-style `PipelinedMemDB` that flushes while the transaction is still running.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PipelinedTxnOptions {
     flush_concurrency: usize,
@@ -1889,6 +1893,9 @@ pub struct PipelinedTxnOptions {
     ///
     /// - `0.0` means no throttle.
     /// - Values closer to `1.0` yield more throttling.
+    ///
+    /// Currently this value is accepted for API parity, but it is not yet applied by the Rust
+    /// implementation.
     write_throttle_ratio: f64,
 }
 
@@ -2097,6 +2104,8 @@ impl TransactionOptions {
     /// Enable a pipelined DML transaction with default parameters.
     ///
     /// This maps to client-go `tikv.WithDefaultPipelinedTxn`.
+    ///
+    /// Note: pipelined transactions do not support async-commit or 1PC.
     #[must_use]
     pub fn pipelined(mut self) -> TransactionOptions {
         self.pipelined_txn = Some(PipelinedTxnOptions::default());
@@ -2104,6 +2113,8 @@ impl TransactionOptions {
     }
 
     /// Enable a pipelined DML transaction with custom parameters.
+    ///
+    /// Note: pipelined transactions do not support async-commit or 1PC.
     #[must_use]
     pub fn pipelined_txn(mut self, options: PipelinedTxnOptions) -> TransactionOptions {
         self.pipelined_txn = Some(options);
