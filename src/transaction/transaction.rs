@@ -502,6 +502,29 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.schema_lease_checker = None;
     }
 
+    /// Set the geographical scope of the transaction.
+    ///
+    /// When `txn_scope` is `"global"` (or empty), this uses the global TSO allocator.
+    /// Otherwise `txn_scope` is passed through as PD `dc_location` to request a local TSO.
+    ///
+    /// This maps to client-go `KVTxn.SetScope`.
+    pub fn set_txn_scope(&mut self, txn_scope: impl AsRef<str>) {
+        let txn_scope = txn_scope.as_ref();
+        self.options.txn_scope = if txn_scope.is_empty() || txn_scope == "global" {
+            None
+        } else {
+            Some(txn_scope.to_owned())
+        };
+    }
+
+    /// Returns the geographical scope of the transaction.
+    ///
+    /// This maps to client-go `KVTxn.GetScope`.
+    #[must_use]
+    pub fn txn_scope(&self) -> &str {
+        self.options.txn_scope.as_deref().unwrap_or("global")
+    }
+
     /// Set the minimum commit timestamp constraint for the transaction.
     ///
     /// When set, the commit timestamp returned by PD must be strictly greater than
@@ -8153,6 +8176,49 @@ mod tests {
         );
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
         assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_set_txn_scope_affects_pd_tso_selection() {
+        let start_version = 7;
+        let commit_version = 8;
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert_eq!(req.start_version, start_version);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, commit_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        assert_eq!(txn.txn_scope(), "global");
+        txn.set_txn_scope("dc1");
+        assert_eq!(txn.txn_scope(), "dc1");
+
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+        assert_eq!(
+            pd_client.get_timestamp_dc_locations(),
+            vec!["dc1".to_owned()]
+        );
     }
 
     #[tokio::test]
