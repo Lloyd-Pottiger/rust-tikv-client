@@ -91,12 +91,19 @@ enum TxnStatusFromLock {
     PessimisticRollbackRequired,
 }
 
-#[derive(Debug)]
-pub(crate) struct ResolveLocksResult {
-    pub(crate) live_locks: Vec<kvrpcpb::LockInfo>,
-    // The minimum remaining time (in milliseconds) before any still-live lock expires.
-    // Returns 0 when there is no live lock or the lock is already expired.
-    pub(crate) ms_before_txn_expired: i64,
+/// The result of a one-shot lock-resolve attempt.
+///
+/// This mirrors the result shape of client-go `LockResolver.ResolveLocksWithOpts`/`ResolveLocks`:
+/// `ms_before_txn_expired` is returned so the caller can choose whether to sleep/backoff and retry.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ResolveLocksResult {
+    /// Locks that are still live after this attempt.
+    pub live_locks: Vec<kvrpcpb::LockInfo>,
+    /// The minimum remaining time (in milliseconds) before any still-live lock expires.
+    ///
+    /// Returns 0 when there is no live lock or the lock is already expired.
+    pub ms_before_txn_expired: i64,
 }
 
 /// The result of resolving locks for read.
@@ -1047,6 +1054,27 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
             .await
     }
 
+    /// Performs a one-shot lock resolve attempt and returns the outcome.
+    ///
+    /// This does not perform the caller-side sleep loop: the returned `ms_before_txn_expired` can
+    /// be used by the caller to decide whether to backoff/sleep and retry.
+    pub async fn resolve_locks_once(
+        &mut self,
+        locks: Vec<kvrpcpb::LockInfo>,
+        timestamp: Timestamp,
+        pessimistic_region_resolve: bool,
+    ) -> Result<ResolveLocksResult> {
+        self.inner
+            .resolve_locks_once(
+                locks,
+                timestamp,
+                self.pd_client.clone(),
+                self.keyspace,
+                pessimistic_region_resolve,
+            )
+            .await
+    }
+
     /// Resolves locks for read and returns any that remain live.
     ///
     /// This is a public wrapper around the internal resolve-lock-for-read path used by
@@ -1302,6 +1330,30 @@ impl LockResolver {
                 }
             }
         }
+    }
+
+    /// Performs a one-shot lock resolve attempt and returns the outcome.
+    ///
+    /// This does not perform the caller-side sleep loop: the returned `ms_before_txn_expired` can
+    /// be used by the caller to decide whether to backoff/sleep and retry.
+    pub async fn resolve_locks_once(
+        &mut self,
+        locks: Vec<kvrpcpb::LockInfo>,
+        timestamp: Timestamp,
+        pd_client: Arc<impl PdClient>,
+        keyspace: Keyspace,
+        pessimistic_region_resolve: bool,
+    ) -> Result<ResolveLocksResult> {
+        resolve_locks_with_options(
+            self.ctx.clone(),
+            locks,
+            timestamp,
+            pd_client,
+            keyspace,
+            pessimistic_region_resolve,
+            self.rpc_context.clone(),
+        )
+        .await
     }
 
     /// Resolves locks for read and returns the classification information.
@@ -3245,6 +3297,50 @@ mod tests {
             .await
             .unwrap();
         assert!(live_locks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_resolve_locks_once_uses_resolve_lock_lite_keys() {
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 2,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    assert_eq!(req.keys, vec![vec![1u8]]);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 1;
+        lock.lock_ttl = 100;
+        lock.txn_size = 1;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let result = lock_resolver
+            .resolve_locks_once(
+                vec![lock],
+                Timestamp::default(),
+                client,
+                Keyspace::Disable,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.ms_before_txn_expired, 0);
+        assert!(result.live_locks.is_empty());
     }
 
     #[tokio::test]
