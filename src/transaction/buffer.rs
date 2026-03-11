@@ -93,9 +93,10 @@ impl Buffer {
                 })
                 .partition(|(_, v)| *v == MutationValue::Undetermined);
 
-            let cached_results = cached_results
-                .into_iter()
-                .filter_map(|(k, v)| v.unwrap().map(|v| KvPair(k, v)));
+            let cached_results = cached_results.into_iter().filter_map(|(k, v)| match v {
+                MutationValue::Determined(Some(value)) => Some(KvPair(k, value)),
+                MutationValue::Determined(None) | MutationValue::Undetermined => None,
+            });
 
             let undetermined_keys = undetermined_keys.into_iter().map(|(k, _)| k);
             (cached_results, undetermined_keys)
@@ -395,15 +396,6 @@ enum MutationValue {
     Determined(Option<Value>),
     // The buffer cannot determine the value.
     Undetermined,
-}
-
-impl MutationValue {
-    fn unwrap(self) -> Option<Value> {
-        match self {
-            MutationValue::Determined(v) => v,
-            MutationValue::Undetermined => unreachable!(),
-        }
-    }
 }
 
 #[cfg(test)]
