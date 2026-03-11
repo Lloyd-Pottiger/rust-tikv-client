@@ -69,6 +69,14 @@ pub trait PdClient: Send + Sync + 'static {
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp>;
 
+    async fn get_timestamp_with_dc_location(
+        self: Arc<Self>,
+        dc_location: String,
+    ) -> Result<Timestamp> {
+        let _ = dc_location;
+        self.get_timestamp().await
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<bool>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
@@ -397,6 +405,16 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         self.pd.clone().get_timestamp().await
     }
 
+    async fn get_timestamp_with_dc_location(
+        self: Arc<Self>,
+        dc_location: String,
+    ) -> Result<Timestamp> {
+        self.pd
+            .clone()
+            .get_timestamp_with_dc_location(dc_location)
+            .await
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<bool> {
         self.pd.clone().update_safepoint(safepoint).await
     }
@@ -595,6 +613,20 @@ pub mod test {
             vec![vec![12].into(), vec![11, 4].into()]
         );
         assert!(stream.next().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pd_client_get_timestamp_with_dc_location_in_mock_records_dc_location() {
+        let client = Arc::new(MockPdClient::default());
+
+        let _ts = client
+            .clone()
+            .get_timestamp_with_dc_location("dc1".to_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(client.get_timestamp_call_count(), 1);
+        assert_eq!(client.get_timestamp_dc_locations(), vec!["dc1".to_owned()]);
     }
 
     #[test]
