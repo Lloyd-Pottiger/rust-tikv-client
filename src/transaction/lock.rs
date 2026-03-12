@@ -823,6 +823,11 @@ impl ResolvedTxnStatusCache {
     }
 }
 
+/// Shared lock-resolution state reused across requests.
+///
+/// This is a cheap-to-clone handle (`Arc`-backed) used by [`LockResolver`] and transactional reads
+/// to cache determined transaction statuses and to deduplicate lock cleanup work. Clones share the
+/// same underlying state.
 #[derive(Default, Clone)]
 pub struct ResolveLocksContext {
     // Record the status of each transaction.
@@ -922,7 +927,7 @@ impl ResolveLocksContext {
     ///
     /// Only cacheable, determined statuses (`Committed` or cacheable `RolledBack`) are stored.
     /// Non-cacheable statuses (for example `Locked` or `LockNotExistDoNothing`) are ignored.
-    pub async fn save_resolved(&mut self, txn_id: u64, txn_status: Arc<TransactionStatus>) {
+    pub async fn save_resolved(&self, txn_id: u64, txn_status: Arc<TransactionStatus>) {
         if !txn_status.is_cacheable() {
             warn!(
                 "ignored non-cacheable txn status saved to resolved cache for txn_id={}: {:?}",
@@ -942,7 +947,7 @@ impl ResolveLocksContext {
             .unwrap_or(false)
     }
 
-    pub async fn save_cleaned_region(&mut self, txn_id: u64, region: RegionVerId) {
+    pub async fn save_cleaned_region(&self, txn_id: u64, region: RegionVerId) {
         self.clean_regions
             .write()
             .await
@@ -1926,7 +1931,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_locks_context_resolved_cache_is_bounded_fifo() {
-        let mut ctx = ResolveLocksContext::default();
+        let ctx = ResolveLocksContext::default();
         let status = Arc::new(TransactionStatus {
             kind: TransactionStatusKind::RolledBack,
             action: kvrpcpb::Action::NoAction,
@@ -1947,7 +1952,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_locks_context_resolved_cache_rejects_conflicting_determined_status() {
-        let mut ctx = ResolveLocksContext::default();
+        let ctx = ResolveLocksContext::default();
 
         let committed = Arc::new(TransactionStatus {
             kind: TransactionStatusKind::Committed(Timestamp::from_version(10)),
@@ -1975,7 +1980,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_locks_context_save_resolved_ignores_non_cacheable_statuses() {
-        let mut ctx = ResolveLocksContext::default();
+        let ctx = ResolveLocksContext::default();
 
         let mut lock_info = kvrpcpb::LockInfo::default();
         lock_info.key = vec![1];
@@ -2034,7 +2039,7 @@ mod tests {
         let commit_version = 10;
         let lock_key = vec![10];
 
-        let mut ctx = ResolveLocksContext::default();
+        let ctx = ResolveLocksContext::default();
         ctx.save_resolved(
             txn_id,
             Arc::new(TransactionStatus {
