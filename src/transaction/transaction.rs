@@ -12,6 +12,7 @@ use derive_new::new;
 use fail::fail_point;
 use futures::prelude::*;
 use log::{debug, error, info, trace, warn};
+use serde_derive::Serialize;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -62,6 +63,7 @@ use crate::Value;
 /// The input is the request label (for example, `"kv_get"` or `"kv_commit"`).
 type ResourceGroupTagger = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
 type CommitTsUpperBoundCheck = Arc<dyn Fn(u64) -> bool + Send + Sync>;
+type CommitCallback = Arc<dyn Fn(&str, Option<&Error>) + Send + Sync>;
 
 /// Hook for validating schema versions during commit.
 ///
@@ -164,6 +166,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     replica_read_adjuster: Option<ReplicaReadAdjuster>,
     schema_ver: Option<i64>,
     schema_lease_checker: Option<Arc<dyn SchemaLeaseChecker>>,
+    commit_callback: Option<CommitCallback>,
     commit_wait_until_tso: u64,
     commit_wait_until_tso_timeout: Duration,
     commit_ts_upper_bound_check: Option<CommitTsUpperBoundCheck>,
@@ -186,6 +189,20 @@ struct SnapshotReadContext {
     resource_group_tag: Option<Vec<u8>>,
     resource_group_name: Option<String>,
     request_source: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TxnInfo {
+    txn_scope: String,
+    start_ts: u64,
+    commit_ts: u64,
+    txn_commit_mode: &'static str,
+    async_commit_fallback: bool,
+    one_pc_fallback: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    pipelined: bool,
+    flush_wait_ms: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -297,6 +314,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             replica_read_adjuster: None,
             schema_ver: None,
             schema_lease_checker: None,
+            commit_callback: None,
             commit_wait_until_tso: 0,
             commit_wait_until_tso_timeout: DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT,
             commit_ts_upper_bound_check: None,
@@ -708,6 +726,25 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Clear the configured commit-ts upper bound checker.
     pub fn clear_commit_ts_upper_bound_check(&mut self) {
         self.commit_ts_upper_bound_check = None;
+    }
+
+    /// Set a callback invoked when [`Transaction::commit`] finishes.
+    ///
+    /// The callback receives:
+    /// - `info`: a JSON string containing the commit info (client-go `TxnInfo` compatible); and
+    /// - `err`: the commit error (if any).
+    ///
+    /// This maps to client-go `KVTxn.SetCommitCallback`.
+    pub fn set_commit_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&str, Option<&Error>) + Send + Sync + 'static,
+    {
+        self.commit_callback = Some(Arc::new(callback));
+    }
+
+    /// Clear the commit callback.
+    pub fn clear_commit_callback(&mut self) {
+        self.commit_callback = None;
     }
 
     /// Create a new 'get' request
@@ -1971,8 +2008,12 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Err(Error::OperationAfterCommitError);
         }
 
+        let mut flush_wait_ms = 0i64;
         if let Some(state) = self.pipelined.as_mut() {
+            let start = Instant::now();
             state.flush_wait().await?;
+            let elapsed_ms = start.elapsed().as_millis();
+            flush_wait_ms = elapsed_ms.min(u128::from(i64::MAX as u64)) as i64;
         }
 
         let mutations = self.buffer.to_proto_mutations();
@@ -2030,7 +2071,29 @@ impl<PdC: PdClient> Transaction<PdC> {
         committer.commit_wait_until_tso = self.commit_wait_until_tso;
         committer.commit_wait_until_tso_timeout = self.commit_wait_until_tso_timeout;
         committer.commit_ts_upper_bound_check = self.commit_ts_upper_bound_check.clone();
-        let res = committer.commit().await;
+        let (res, mode_info) = committer.commit_with_mode_info().await;
+
+        if let Some(callback) = self.commit_callback.as_ref() {
+            let commit_ts = match &res {
+                Ok(Some(ts)) => ts.version(),
+                _ => 0,
+            };
+            let info = TxnInfo {
+                txn_scope: self.txn_scope().to_owned(),
+                start_ts: self.timestamp.version(),
+                commit_ts,
+                txn_commit_mode: mode_info.txn_commit_mode(),
+                async_commit_fallback: mode_info.async_commit_fallback(),
+                one_pc_fallback: mode_info.one_pc_fallback(),
+                error: res.as_ref().err().map(|err| err.to_string()),
+                pipelined: self.options.pipelined_txn.is_some(),
+                flush_wait_ms,
+            };
+            let info_str = serde_json::to_string(&info).unwrap_or_else(|err| {
+                format!("failed to serialize transaction commit info: {err}; info: {info:?}")
+            });
+            callback(&info_str, res.as_ref().err());
+        }
 
         if let Ok(Some(commit_ts)) = &res {
             self.commit_ts = Some(commit_ts.clone());
@@ -3897,6 +3960,34 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     pipelined_flush_duration_ewma: Option<Arc<Mutex<FlushDurationEwma>>>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct CommitModeInfo {
+    has_tried_async_commit: bool,
+    has_tried_one_pc: bool,
+    is_async_commit: bool,
+    is_one_pc: bool,
+}
+
+impl CommitModeInfo {
+    fn txn_commit_mode(&self) -> &'static str {
+        if self.is_one_pc {
+            "1pc"
+        } else if self.is_async_commit {
+            "async_commit"
+        } else {
+            "2pc"
+        }
+    }
+
+    fn async_commit_fallback(&self) -> bool {
+        self.has_tried_async_commit && !self.is_async_commit
+    }
+
+    fn one_pc_fallback(&self) -> bool {
+        self.has_tried_one_pc && !self.is_one_pc
+    }
+}
+
 impl<PdC: PdClient> Committer<PdC> {
     fn lock_backoff(&self) -> Backoff {
         let weight = self.vars.backoff_weight_factor();
@@ -3916,7 +4007,13 @@ impl<PdC: PdClient> Committer<PdC> {
             .scaled_max_attempts(self.vars.backoff_weight_factor())
     }
 
-    async fn commit(mut self) -> Result<Option<Timestamp>> {
+    #[cfg(test)]
+    async fn commit(self) -> Result<Option<Timestamp>> {
+        let (res, _mode_info) = self.commit_with_mode_info().await;
+        res
+    }
+
+    async fn commit_with_mode_info(mut self) -> (Result<Option<Timestamp>>, CommitModeInfo) {
         debug!("committing");
 
         if self.primary_key.is_none() {
@@ -3929,12 +4026,13 @@ impl<PdC: PdClient> Committer<PdC> {
                 .map(|m| Key::from(m.key.clone()));
             self.primary_key = match primary_key {
                 Some(primary_key) => Some(primary_key),
-                None => return Ok(None),
+                None => return (Ok(None), CommitModeInfo::default()),
             };
         }
 
         if self.options.pipelined_txn.is_some() {
-            return self.commit_pipelined().await;
+            let res = self.commit_pipelined().await;
+            return (res, CommitModeInfo::default());
         }
 
         // Match client-go: async-commit / 1PC are disabled for local transactions and when a
@@ -3944,46 +4042,98 @@ impl<PdC: PdClient> Committer<PdC> {
             self.options.async_commit = false;
         }
 
-        let min_commit_ts = self.prewrite().await?;
+        // Keep parity with client-go by reporting fallbacks only when we actually tried to use the
+        // commit mode (not when it is disabled by configuration).
+        let has_tried_async_commit = self.options.async_commit;
+        let has_tried_one_pc = self.options.try_one_pc;
 
+        let min_commit_ts = match self.prewrite().await {
+            Ok(min_commit_ts) => min_commit_ts,
+            Err(err) => {
+                let info = CommitModeInfo {
+                    has_tried_async_commit,
+                    has_tried_one_pc,
+                    is_async_commit: self.options.async_commit,
+                    is_one_pc: self.options.try_one_pc,
+                };
+                return (Err(err), info);
+            }
+        };
+
+        let info_after_prewrite = CommitModeInfo {
+            has_tried_async_commit,
+            has_tried_one_pc,
+            is_async_commit: self.options.async_commit,
+            is_one_pc: self.options.try_one_pc,
+        };
         fail_point!("after-prewrite", |_| {
-            Err(Error::StringError(
-                "failpoint: after-prewrite return error".to_owned(),
-            ))
+            (
+                Err(Error::StringError(
+                    "failpoint: after-prewrite return error".to_owned(),
+                )),
+                info_after_prewrite,
+            )
         });
 
         // If we didn't use 1pc, prewrite will set `try_one_pc` to false.
         if self.options.try_one_pc {
-            return Ok(min_commit_ts);
+            let info = CommitModeInfo {
+                has_tried_async_commit,
+                has_tried_one_pc,
+                is_async_commit: self.options.async_commit,
+                is_one_pc: self.options.try_one_pc,
+            };
+            return (Ok(min_commit_ts), info);
         }
 
         let commit_ts = if self.options.async_commit {
             match min_commit_ts {
                 Some(ts) => ts,
                 None => {
-                    return Err(Error::StringError(
+                    let err = Error::StringError(
                         "invalid min_commit_ts after async-commit prewrite".to_owned(),
-                    ));
+                    );
+                    let info = CommitModeInfo {
+                        has_tried_async_commit,
+                        has_tried_one_pc,
+                        is_async_commit: self.options.async_commit,
+                        is_one_pc: self.options.try_one_pc,
+                    };
+                    return (Err(err), info);
                 }
             }
         } else {
             match self.commit_primary_with_retry().await {
                 Ok(commit_ts) => commit_ts,
                 Err(e) => {
-                    return if self.undetermined {
-                        Err(Error::UndeterminedError(Box::new(e)))
+                    let err = if self.undetermined {
+                        Error::UndeterminedError(Box::new(e))
                     } else {
-                        Err(e)
+                        e
                     };
+                    let info = CommitModeInfo {
+                        has_tried_async_commit,
+                        has_tried_one_pc,
+                        is_async_commit: self.options.async_commit,
+                        is_one_pc: self.options.try_one_pc,
+                    };
+                    return (Err(err), info);
                 }
             }
+        };
+
+        let info = CommitModeInfo {
+            has_tried_async_commit,
+            has_tried_one_pc,
+            is_async_commit: self.options.async_commit,
+            is_one_pc: self.options.try_one_pc,
         };
         tokio::spawn(self.commit_secondary(commit_ts.clone()).map(|res| {
             if let Err(e) = res {
                 log::warn!("Failed to commit secondary keys: {}", e);
             }
         }));
-        Ok(Some(commit_ts))
+        (Ok(Some(commit_ts)), info)
     }
 
     async fn commit_pipelined(mut self) -> Result<Option<Timestamp>> {
@@ -8504,6 +8654,105 @@ mod tests {
             .handle_commit_primary_extracted_errors(Vec::new())
             .expect_err("expected internal error");
         assert!(matches!(err, Error::InternalError { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_transaction_commit_callback_receives_client_go_txn_info_json() {
+        let start_version = 7;
+        let commit_version = 8;
+
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
+        let prewrite_count_captured = prewrite_count.clone();
+        let commit_count_captured = commit_count.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, commit_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+        let seen = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let seen_cloned = seen.clone();
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+
+        txn.set_commit_callback(move |info, err| {
+            seen_cloned
+                .lock()
+                .unwrap()
+                .push((info.to_owned(), err.map(|err| err.to_string())));
+        });
+
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+        assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        let (info_json, err) = &seen[0];
+        assert!(err.is_none());
+
+        let info: serde_json::Value = serde_json::from_str(info_json).unwrap();
+        assert_eq!(
+            info.get("txn_scope").and_then(|value| value.as_str()),
+            Some("global")
+        );
+        assert_eq!(
+            info.get("start_ts").and_then(|value| value.as_u64()),
+            Some(start_version)
+        );
+        assert_eq!(
+            info.get("commit_ts").and_then(|value| value.as_u64()),
+            Some(commit_version)
+        );
+        assert_eq!(
+            info.get("txn_commit_mode").and_then(|value| value.as_str()),
+            Some("2pc")
+        );
+        assert_eq!(
+            info.get("async_commit_fallback")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            info.get("one_pc_fallback")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert!(info.get("error").is_none());
+        assert_eq!(
+            info.get("pipelined").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            info.get("flush_wait_ms").and_then(|value| value.as_i64()),
+            Some(0)
+        );
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
-    transaction::Mutation, AssertionLevel, BoundRange, CommandPriority, DiskFullOpt, Key, KvPair,
-    LockWaitTimeout, PrewriteEncounterLockPolicy, Result, SchemaLeaseChecker, Timestamp,
+    transaction::Mutation, AssertionLevel, BoundRange, CommandPriority, DiskFullOpt, Error, Key,
+    KvPair, LockWaitTimeout, PrewriteEncounterLockPolicy, Result, SchemaLeaseChecker, Timestamp,
     Transaction, Value, Variables,
 };
 use std::sync::Arc;
@@ -45,6 +45,25 @@ impl SyncTransaction {
     #[must_use]
     pub fn vars(&self) -> &Variables {
         self.inner.vars()
+    }
+
+    /// Set a callback invoked when [`SyncTransaction::commit`] finishes.
+    ///
+    /// The callback receives:
+    /// - `info`: a JSON string containing the commit info (client-go `TxnInfo` compatible); and
+    /// - `err`: the commit error (if any).
+    ///
+    /// This maps to client-go `KVTxn.SetCommitCallback`.
+    pub fn set_commit_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&str, Option<&Error>) + Send + Sync + 'static,
+    {
+        self.inner.set_commit_callback(callback);
+    }
+
+    /// Clear the commit callback.
+    pub fn clear_commit_callback(&mut self) {
+        self.inner.clear_commit_callback();
     }
 
     /// Enable or disable async commit.
