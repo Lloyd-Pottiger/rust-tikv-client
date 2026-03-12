@@ -160,6 +160,13 @@ impl SyncTransaction {
         self.inner.commit_wait_until_tso_timeout()
     }
 
+    /// Get a timestamp version that can be used as the commit timestamp for this transaction.
+    ///
+    /// This maps to client-go `KVTxn.GetTimestampForCommit`.
+    pub fn get_timestamp_for_commit(&mut self) -> Result<u64> {
+        safe_block_on(&self.runtime, self.inner.get_timestamp_for_commit())
+    }
+
     /// Set a commit-ts upper bound checker for this transaction.
     pub fn set_commit_ts_upper_bound_check<F>(&mut self, checker: F)
     where

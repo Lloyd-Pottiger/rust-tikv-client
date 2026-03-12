@@ -707,6 +707,108 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.commit_wait_until_tso_timeout
     }
 
+    /// Get a timestamp version that can be used as the commit timestamp for this transaction.
+    ///
+    /// Unlike a direct PD TSO request, this also respects the commit-wait constraint configured by
+    /// [`Transaction::set_commit_wait_until_tso`].
+    ///
+    /// This maps to client-go `KVTxn.GetTimestampForCommit`.
+    pub async fn get_timestamp_for_commit(&mut self) -> Result<u64> {
+        let first_attempt =
+            get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
+                .await?;
+        let first_attempt_version = first_attempt.version();
+
+        if self.commit_wait_until_tso == 0 || first_attempt_version > self.commit_wait_until_tso {
+            self.check_commit_ts_upper_bound(first_attempt_version)?;
+            return Ok(first_attempt_version);
+        }
+
+        let max_sleep = self.commit_wait_until_tso_timeout;
+        if max_sleep.is_zero() {
+            return Err(Error::StringError(format!(
+                "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: 1, last attempted commit TS: {}",
+                first_attempt_version,
+                self.commit_wait_until_tso,
+                max_sleep,
+                first_attempt_version
+            )));
+        }
+
+        // Match client-go: if PD lags too far behind (clock drift exceeds the allowed timeout),
+        // fail fast rather than waiting.
+        let first_physical = Timestamp::from_version(first_attempt_version).physical;
+        let expected_physical = Timestamp::from_version(self.commit_wait_until_tso).physical;
+        let interval_ms =
+            u64::try_from(expected_physical.saturating_sub(first_physical)).unwrap_or(0);
+        let interval = Duration::from_millis(interval_ms);
+        if interval > max_sleep {
+            return Err(Error::StringError(format!(
+                "PD TSO '{}' lags the expected timestamp '{}', clock drift {:?} exceeds maximum allowed timeout {:?}",
+                first_attempt_version,
+                self.commit_wait_until_tso,
+                interval,
+                max_sleep
+            )));
+        }
+
+        let deadline = Instant::now() + max_sleep;
+        let mut backoff = Backoff::no_jitter_backoff(2, 500, 32);
+        let mut attempts = 1_usize;
+        let mut last_attempt = first_attempt;
+
+        while last_attempt.version() <= self.commit_wait_until_tso {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline.duration_since(now);
+            let mut delay = backoff.next_delay_duration().unwrap_or(remaining);
+            if delay > remaining {
+                delay = remaining;
+            }
+            if delay.is_zero() {
+                break;
+            }
+            tokio::time::sleep(delay).await;
+
+            attempts += 1;
+            last_attempt =
+                get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
+                    .await?;
+        }
+
+        if last_attempt.version() <= self.commit_wait_until_tso {
+            return Err(Error::StringError(format!(
+                "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: {}, last attempted commit TS: {}",
+                first_attempt_version,
+                self.commit_wait_until_tso,
+                max_sleep,
+                attempts,
+                last_attempt.version()
+            )));
+        }
+
+        self.check_commit_ts_upper_bound(last_attempt.version())?;
+        Ok(last_attempt.version())
+    }
+
+    fn check_commit_ts_upper_bound(&self, commit_ts: u64) -> Result<()> {
+        let Some(checker) = self.commit_ts_upper_bound_check.as_ref() else {
+            return Ok(());
+        };
+
+        if (checker)(commit_ts) {
+            Ok(())
+        } else {
+            Err(Error::StringError(format!(
+                "check commit ts upper bound fail, start_ts: {}, comm: {}",
+                self.timestamp.version(),
+                commit_ts
+            )))
+        }
+    }
+
     /// Set a commit-ts upper bound checker for this transaction.
     ///
     /// When set, the checker is invoked with the chosen commit timestamp (TSO version). If it
@@ -4530,7 +4632,7 @@ impl<PdC: PdClient> Committer<PdC> {
         }
     }
 
-    async fn get_timestamp_for_commit(&mut self) -> Result<Timestamp> {
+    async fn get_timestamp_for_commit_inner(&mut self) -> Result<Timestamp> {
         let first_attempt =
             get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
                 .await?;
@@ -4614,7 +4716,7 @@ impl<PdC: PdClient> Committer<PdC> {
     async fn commit_primary(&mut self) -> Result<Timestamp> {
         debug!("committing primary");
         let primary_key = self.primary_key.clone().into_iter();
-        let commit_version = self.get_timestamp_for_commit().await?;
+        let commit_version = self.get_timestamp_for_commit_inner().await?;
         let mut req = new_commit_request(
             primary_key,
             self.start_version.clone(),
@@ -8846,6 +8948,33 @@ mod tests {
         assert_eq!(pd_client.get_timestamp_call_count(), 4);
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
         assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_timestamp_for_commit_respects_commit_wait_until_tso() {
+        let start_version = 7;
+        let first_commit_version = 8;
+        let commit_wait_until = 10;
+        let expected_commit_version = 11;
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::default()).with_tso_sequence(first_commit_version),
+        );
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_commit_wait_until_tso(commit_wait_until);
+        txn.set_commit_wait_until_tso_timeout(Duration::from_millis(50));
+
+        let commit_ts = txn.get_timestamp_for_commit().await.unwrap();
+        assert_eq!(commit_ts, expected_commit_version);
+        assert_eq!(pd_client.get_timestamp_call_count(), 4);
     }
 
     #[tokio::test]
