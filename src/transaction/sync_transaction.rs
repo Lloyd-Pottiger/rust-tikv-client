@@ -1,7 +1,8 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
     transaction::Mutation, AssertionLevel, BoundRange, CommandPriority, DiskFullOpt, Key, KvPair,
-    PrewriteEncounterLockPolicy, Result, SchemaLeaseChecker, Timestamp, Transaction, Value,
+    LockWaitTimeout, PrewriteEncounterLockPolicy, Result, SchemaLeaseChecker, Timestamp,
+    Transaction, Value,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -275,6 +276,21 @@ impl SyncTransaction {
     /// Lock the given keys without associating any values.
     pub fn lock_keys(&mut self, keys: impl IntoIterator<Item = impl Into<Key>>) -> Result<()> {
         safe_block_on(&self.runtime, self.inner.lock_keys(keys))
+    }
+
+    /// Lock the given keys without associating any values, using the provided lock wait timeout.
+    ///
+    /// This maps to client-go `KVTxn.LockKeysWithWaitTime`.
+    pub fn lock_keys_with_wait_timeout(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+        lock_wait_timeout: LockWaitTimeout,
+    ) -> Result<()> {
+        safe_block_on(
+            &self.runtime,
+            self.inner
+                .lock_keys_with_wait_timeout(keys, lock_wait_timeout),
+        )
     }
 
     /// Commit the transaction.

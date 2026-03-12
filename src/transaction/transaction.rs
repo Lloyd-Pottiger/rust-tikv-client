@@ -1833,6 +1833,32 @@ impl<PdC: PdClient> Transaction<PdC> {
         keys: impl IntoIterator<Item = impl Into<Key>>,
     ) -> Result<()> {
         debug!("invoking transactional lock_keys request");
+        self.lock_keys_impl(keys, self.options.lock_wait_timeout)
+            .await
+    }
+
+    /// Lock the given keys without mutating their values, using the provided lock wait timeout.
+    ///
+    /// In optimistic mode, this behaves the same as [`Transaction::lock_keys`].
+    ///
+    /// In pessimistic mode, the `lock_wait_timeout` controls how long TiKV will wait when
+    /// encountering conflicting locks (`kvrpcpb::PessimisticLockRequest.wait_timeout`).
+    ///
+    /// This maps to client-go `KVTxn.LockKeysWithWaitTime`.
+    pub async fn lock_keys_with_wait_timeout(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+        lock_wait_timeout: LockWaitTimeout,
+    ) -> Result<()> {
+        debug!("invoking transactional lock_keys_with_wait_timeout request");
+        self.lock_keys_impl(keys, lock_wait_timeout).await
+    }
+
+    async fn lock_keys_impl(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+        lock_wait_timeout: LockWaitTimeout,
+    ) -> Result<()> {
         self.check_allow_operation().await?;
         let keyspace = self.keyspace;
         let keys = keys
@@ -1845,7 +1871,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                 }
             }
             TransactionKind::Pessimistic(_) => {
-                self.pessimistic_lock(keys, false).await?;
+                let _ = self
+                    .pessimistic_lock_with_wait_timeout(keys, false, lock_wait_timeout)
+                    .await?;
             }
         }
         Ok(())
@@ -2151,6 +2179,16 @@ impl<PdC: PdClient> Transaction<PdC> {
         keys: impl IntoIterator<Item = impl PessimisticLock>,
         need_value: bool,
     ) -> Result<Vec<KvPair>> {
+        self.pessimistic_lock_with_wait_timeout(keys, need_value, self.options.lock_wait_timeout)
+            .await
+    }
+
+    async fn pessimistic_lock_with_wait_timeout(
+        &mut self,
+        keys: impl IntoIterator<Item = impl PessimisticLock>,
+        need_value: bool,
+        lock_wait_timeout: LockWaitTimeout,
+    ) -> Result<Vec<KvPair>> {
         debug!("acquiring pessimistic lock");
         if !matches!(self.options.kind, TransactionKind::Pessimistic(_)) {
             return Err(Error::InvalidTransactionType);
@@ -2220,6 +2258,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     request,
                     for_update_ts.clone(),
                     need_value,
+                    lock_wait_timeout,
                     lock_wait_start,
                 )
                 .await?
@@ -2243,6 +2282,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                         primary_request,
                         for_update_ts.clone(),
                         need_value,
+                        lock_wait_timeout,
                         lock_wait_start,
                     )
                     .await?;
@@ -2261,6 +2301,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                         secondary_request,
                         for_update_ts.clone(),
                         need_value,
+                        lock_wait_timeout,
                         lock_wait_start,
                     )
                     .await
@@ -2295,6 +2336,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 request,
                 for_update_ts.clone(),
                 need_value,
+                lock_wait_timeout,
                 lock_wait_start,
             )
             .await?
@@ -2313,6 +2355,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         mut request: kvrpcpb::PessimisticLockRequest,
         for_update_ts: Timestamp,
         need_value: bool,
+        lock_wait_timeout: LockWaitTimeout,
         lock_wait_start: Instant,
     ) -> Result<Vec<KvPair>> {
         fn collect_lock_errors(error: &Error, locks: &mut Vec<kvrpcpb::LockInfo>) -> bool {
@@ -2360,8 +2403,6 @@ impl<PdC: PdClient> Transaction<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
-
-        let lock_wait_timeout = self.options.lock_wait_timeout;
 
         loop {
             request.wait_timeout = lock_wait_timeout.effective_wait_timeout_ms(lock_wait_start);
@@ -9433,6 +9474,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_lock_keys_with_wait_timeout_overrides_pessimistic_lock_request_wait_timeout() {
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let lock_requests_captured = lock_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                let attempt = lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                match attempt {
+                    0 => assert_eq!(req.wait_timeout, -1),
+                    1 => assert_eq!(req.wait_timeout, i64::MAX),
+                    _ => panic!("unexpected lock request count {attempt}"),
+                }
+                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.lock_keys_with_wait_timeout(vec![b"k1".to_vec()], crate::LockWaitTimeout::NoWait)
+            .await
+            .unwrap();
+        txn.lock_keys(vec![b"k2".to_vec()]).await.unwrap();
+
+        assert_eq!(lock_requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn test_pessimistic_lock_wait_timeout_returns_error() {
         let lock_requests = Arc::new(AtomicUsize::new(0));
         let check_txn_status_requests = Arc::new(AtomicUsize::new(0));
@@ -9514,7 +9597,13 @@ mod tests {
 
         let lock_wait_start = Instant::now() - Duration::from_millis(10);
         let err = txn
-            .execute_pessimistic_lock_request(request, Timestamp::default(), false, lock_wait_start)
+            .execute_pessimistic_lock_request(
+                request,
+                Timestamp::default(),
+                false,
+                crate::LockWaitTimeout::Wait(Duration::from_millis(1)),
+                lock_wait_start,
+            )
             .await
             .expect_err("expected wait-timeout lock error");
         assert!(matches!(err, Error::LockWaitTimeout));
