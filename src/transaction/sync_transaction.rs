@@ -293,10 +293,28 @@ impl SyncTransaction {
         )
     }
 
+    /// Get the start timestamp version of this transaction.
+    ///
+    /// This maps to client-go `KVTxn.StartTS`.
+    #[must_use]
+    pub fn start_ts(&self) -> u64 {
+        self.inner.start_ts()
+    }
+
     /// Get the commit timestamp of this transaction (if committed).
     #[must_use]
     pub fn commit_timestamp(&self) -> Option<Timestamp> {
         self.inner.commit_timestamp()
+    }
+
+    /// Get the commit timestamp version of this transaction.
+    ///
+    /// Returns 0 when the transaction is not committed.
+    ///
+    /// This maps to client-go `KVTxn.CommitTS`.
+    #[must_use]
+    pub fn commit_ts(&self) -> u64 {
+        self.inner.commit_ts()
     }
 
     /// Returns whether this transaction has only performed read operations so far.
@@ -313,6 +331,22 @@ impl SyncTransaction {
     #[must_use]
     pub fn valid(&self) -> bool {
         self.inner.valid()
+    }
+
+    /// Returns the number of buffered entries in this transaction.
+    ///
+    /// This maps to client-go `KVTxn.Len`.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns the buffered size (sum of key and value lengths) of this transaction.
+    ///
+    /// This maps to client-go `KVTxn.Size`.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.inner.size()
     }
 
     /// Commit the transaction.

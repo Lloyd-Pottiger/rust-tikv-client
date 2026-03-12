@@ -2040,10 +2040,28 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.timestamp.clone()
     }
 
+    /// Get the start timestamp version of this transaction.
+    ///
+    /// This maps to client-go `KVTxn.StartTS`.
+    #[must_use]
+    pub fn start_ts(&self) -> u64 {
+        self.timestamp.version()
+    }
+
     /// Get the commit timestamp of this transaction (if committed).
     #[must_use]
     pub fn commit_timestamp(&self) -> Option<Timestamp> {
         self.commit_ts.clone()
+    }
+
+    /// Get the commit timestamp version of this transaction.
+    ///
+    /// Returns 0 when the transaction is not committed.
+    ///
+    /// This maps to client-go `KVTxn.CommitTS`.
+    #[must_use]
+    pub fn commit_ts(&self) -> u64 {
+        self.commit_ts.as_ref().map(|ts| ts.version()).unwrap_or(0)
     }
 
     /// Returns whether this transaction has only performed read operations so far.
@@ -2071,6 +2089,22 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.get_status(),
             TransactionStatus::ReadOnly | TransactionStatus::Active
         )
+    }
+
+    /// Returns the number of buffered entries in this transaction.
+    ///
+    /// This maps to client-go `KVTxn.Len`.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.buffer.mutation_count()
+    }
+
+    /// Returns the buffered size (sum of key and value lengths) of this transaction.
+    ///
+    /// This maps to client-go `KVTxn.Size`.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.buffer.mutation_size()
     }
 
     /// Send a heart beat message to keep the transaction alive on the server and update its TTL.
@@ -8347,6 +8381,8 @@ mod tests {
                 .heartbeat_option(HeartbeatOption::NoHeartbeat),
             Keyspace::Disable,
         );
+        assert_eq!(txn.start_ts(), start_version);
+        assert_eq!(txn.commit_ts(), 0);
         txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
         assert!(!txn.is_read_only());
         txn.set_commit_wait_until_tso(commit_wait_until);
@@ -8354,6 +8390,7 @@ mod tests {
 
         let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
         assert_eq!(commit_ts.version(), expected_commit_version);
+        assert_eq!(txn.commit_ts(), expected_commit_version);
         assert_eq!(
             txn.commit_timestamp()
                 .expect("expected commit ts stored on transaction")
@@ -8378,6 +8415,31 @@ mod tests {
 
         txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
         assert!(!txn.is_read_only());
+    }
+
+    #[tokio::test]
+    async fn test_transaction_len_and_size_reflects_buffered_mutations() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        assert_eq!(txn.commit_ts(), 0);
+        assert_eq!(txn.len(), 0);
+        assert_eq!(txn.size(), 0);
+
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        assert_eq!(txn.len(), 1);
+        assert_eq!(txn.size(), 2);
+
+        txn.lock_keys(vec!["l".to_owned()]).await.unwrap();
+        assert_eq!(txn.len(), 2);
+        assert_eq!(txn.size(), 3);
+
+        txn.delete("k".to_owned()).await.unwrap();
+        assert_eq!(txn.len(), 2);
+        assert_eq!(txn.size(), 2);
     }
 
     #[tokio::test]
