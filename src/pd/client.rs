@@ -330,7 +330,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         let mut stores = Vec::with_capacity(pb_stores.len());
         for store in pb_stores {
             let client = self.kv_client(&store.address).await?;
-            stores.push(Store::new(Arc::new(client)));
+            stores.push(Store::new(store, Arc::new(client)));
         }
         Ok(stores)
     }

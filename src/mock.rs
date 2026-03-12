@@ -383,7 +383,22 @@ impl PdClient for MockPdClient {
     }
 
     async fn all_stores(&self) -> Result<Vec<Store>> {
-        Ok(vec![Store::new(Arc::new(self.client.clone()))])
+        let metas = self.store_metas.read().await;
+        let client = Arc::new(self.client.clone());
+        if metas.is_empty() {
+            return Ok(vec![Store::new(
+                metapb::Store {
+                    id: 1,
+                    ..Default::default()
+                },
+                client,
+            )]);
+        }
+        Ok(metas
+            .values()
+            .cloned()
+            .map(|meta| Store::new(meta, client.clone()))
+            .collect())
     }
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {

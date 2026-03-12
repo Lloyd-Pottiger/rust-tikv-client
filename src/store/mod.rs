@@ -21,6 +21,7 @@ pub use self::errors::HasRegionErrors;
 pub use self::request::Request;
 use crate::pd::PdClient;
 use crate::proto::kvrpcpb;
+use crate::proto::metapb;
 use crate::region::RegionWithLeader;
 use crate::BoundRange;
 use crate::Key;
@@ -34,6 +35,7 @@ pub struct RegionStore {
 
 #[derive(new, Clone)]
 pub struct Store {
+    pub meta: metapb::Store,
     pub client: Arc<dyn KvClient + Send + Sync>,
 }
 
