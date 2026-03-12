@@ -3536,6 +3536,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_locks_for_read_classifies_committed_resolved_and_live_locks() {
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                    match req.lock_ts {
+                        1 => {
+                            let resp = kvrpcpb::CheckTxnStatusResponse {
+                                commit_version: 5,
+                                action: kvrpcpb::Action::NoAction as i32,
+                                ..Default::default()
+                            };
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        2 => {
+                            let resp = kvrpcpb::CheckTxnStatusResponse {
+                                commit_version: 15,
+                                action: kvrpcpb::Action::NoAction as i32,
+                                ..Default::default()
+                            };
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        3 => {
+                            let resp = kvrpcpb::CheckTxnStatusResponse {
+                                commit_version: 0,
+                                action: kvrpcpb::Action::NoAction as i32,
+                                ..Default::default()
+                            };
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        4 => {
+                            let mut lock_info = kvrpcpb::LockInfo::default();
+                            lock_info.lock_version = req.lock_ts;
+                            lock_info.use_async_commit = false;
+                            let resp = kvrpcpb::CheckTxnStatusResponse {
+                                lock_ttl: 100,
+                                action: kvrpcpb::Action::NoAction as i32,
+                                lock_info: Some(lock_info),
+                                ..Default::default()
+                            };
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        other => panic!("unexpected check_txn_status lock_ts: {other}"),
+                    }
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let mut committed_visible = kvrpcpb::LockInfo::default();
+        committed_visible.key = vec![1];
+        committed_visible.primary_lock = vec![1];
+        committed_visible.lock_version = 1;
+        committed_visible.lock_type = kvrpcpb::Op::Put as i32;
+
+        let mut committed_in_future = kvrpcpb::LockInfo::default();
+        committed_in_future.key = vec![2];
+        committed_in_future.primary_lock = vec![2];
+        committed_in_future.lock_version = 2;
+        committed_in_future.lock_type = kvrpcpb::Op::Put as i32;
+
+        let mut rolled_back = kvrpcpb::LockInfo::default();
+        rolled_back.key = vec![3];
+        rolled_back.primary_lock = vec![3];
+        rolled_back.lock_version = 3;
+        rolled_back.lock_type = kvrpcpb::Op::Put as i32;
+
+        let mut live = kvrpcpb::LockInfo::default();
+        live.key = vec![4];
+        live.primary_lock = vec![4];
+        live.lock_version = 4;
+        live.lock_type = kvrpcpb::Op::Put as i32;
+
+        let ctx = ResolveLocksContext::default();
+        let result = resolve_locks_for_read(
+            ctx.clone(),
+            vec![
+                committed_visible,
+                committed_in_future,
+                rolled_back,
+                live.clone(),
+            ],
+            Timestamp::from_version(10),
+            client,
+            Keyspace::Disable,
+            true,
+            None,
+            LockResolverRpcContext::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.ms_before_txn_expired, 100);
+        assert!(result.live_locks.iter().any(|lock| lock.lock_version == 4));
+        assert_eq!(result.resolved_locks, vec![2, 3]);
+        assert_eq!(result.committed_locks, vec![1]);
+
+        let committed_visible_status = ctx
+            .get_resolved(1)
+            .await
+            .expect("committed status should be cached");
+        assert!(
+            matches!(
+                &committed_visible_status.kind,
+                TransactionStatusKind::Committed(ts) if ts.version() == 5
+            ),
+            "committed status should include commit ts"
+        );
+
+        let committed_in_future_status = ctx
+            .get_resolved(2)
+            .await
+            .expect("committed status should be cached");
+        assert!(
+            matches!(
+                &committed_in_future_status.kind,
+                TransactionStatusKind::Committed(ts) if ts.version() == 15
+            ),
+            "committed status should include commit ts"
+        );
+
+        let rolled_back_status = ctx
+            .get_resolved(3)
+            .await
+            .expect("rolled back status should be cached");
+        assert!(
+            matches!(&rolled_back_status.kind, TransactionStatusKind::RolledBack),
+            "rolled back status should be cached"
+        );
+        assert!(
+            ctx.get_resolved(4).await.is_none(),
+            "live locks should not be stored in resolved cache"
+        );
+    }
+
+    #[tokio::test]
     async fn test_resolve_locks_resolve_lock_lite_skips_primary() {
         let resolve_lock_count = Arc::new(AtomicUsize::new(0));
         let resolve_lock_count_captured = resolve_lock_count.clone();
