@@ -203,6 +203,7 @@ fn select_replica_read_peer(
     unavailable_store_ids: &[StoreId],
     busy_store_ids: &[StoreId],
     attempted_store_ids: &[StoreId],
+    data_is_not_ready_store_ids: &[StoreId],
     match_configured: bool,
     labels_configured: bool,
     label_matched_store_ids: &[StoreId],
@@ -222,6 +223,7 @@ fn select_replica_read_peer(
         unavailable_store_ids: &[StoreId],
         busy_store_ids: &[StoreId],
         attempted_store_ids: &[StoreId],
+        data_is_not_ready_store_ids: &[StoreId],
         leader_store_id: Option<StoreId>,
         labels_configured: bool,
         label_matched_store_ids: &[StoreId],
@@ -236,6 +238,17 @@ fn select_replica_read_peer(
         let is_candidate = |peer: &metapb::Peer| -> bool {
             if !is_store_available(unavailable_store_ids, peer.store_id) {
                 return false;
+            }
+            if matches!(
+                replica_read,
+                ReplicaReadType::Mixed | ReplicaReadType::PreferLeader
+            ) {
+                let allow_data_is_not_ready_retry = data_is_not_ready_store_ids
+                    .contains(&peer.store_id)
+                    && Some(peer.store_id) != leader_store_id;
+                if attempted_store_ids.contains(&peer.store_id) && !allow_data_is_not_ready_retry {
+                    return false;
+                }
             }
             match replica_read {
                 ReplicaReadType::Follower => {
@@ -387,6 +400,7 @@ fn select_replica_read_peer(
             unavailable_store_ids,
             busy_store_ids,
             attempted_store_ids,
+            data_is_not_ready_store_ids,
             leader_store_id,
             labels_configured,
             label_matched_store_ids,
@@ -462,6 +476,7 @@ fn select_replica_read_peer(
             unavailable_store_ids,
             busy_store_ids,
             attempted_store_ids,
+            data_is_not_ready_store_ids,
             leader_store_id,
             labels_configured,
             label_matched_store_ids,
@@ -516,6 +531,7 @@ struct StoreLiveness {
     unreachable_store_ids: RwLock<Vec<StoreId>>,
     server_is_busy_store_ids: RwLock<Vec<StoreId>>,
     attempted_store_ids: RwLock<Vec<StoreId>>,
+    data_is_not_ready_store_ids: RwLock<Vec<StoreId>>,
 }
 
 impl StoreLiveness {
@@ -534,10 +550,30 @@ impl StoreLiveness {
     }
 
     async fn mark_attempted(&self, store_id: StoreId) {
-        let mut attempted_store_ids = self.attempted_store_ids.write().await;
-        if !attempted_store_ids.contains(&store_id) {
-            attempted_store_ids.push(store_id);
+        let already_attempted = {
+            let mut attempted_store_ids = self.attempted_store_ids.write().await;
+            if attempted_store_ids.contains(&store_id) {
+                true
+            } else {
+                attempted_store_ids.push(store_id);
+                false
+            }
+        };
+        if already_attempted {
+            self.clear_data_is_not_ready(store_id).await;
         }
+    }
+
+    async fn mark_data_is_not_ready(&self, store_id: StoreId) {
+        let mut data_is_not_ready_store_ids = self.data_is_not_ready_store_ids.write().await;
+        if !data_is_not_ready_store_ids.contains(&store_id) {
+            data_is_not_ready_store_ids.push(store_id);
+        }
+    }
+
+    async fn clear_data_is_not_ready(&self, store_id: StoreId) {
+        let mut data_is_not_ready_store_ids = self.data_is_not_ready_store_ids.write().await;
+        data_is_not_ready_store_ids.retain(|id| *id != store_id);
     }
 
     async fn unreachable_store_ids(&self) -> Vec<StoreId> {
@@ -550,6 +586,10 @@ impl StoreLiveness {
 
     async fn attempted_store_ids(&self) -> Vec<StoreId> {
         self.attempted_store_ids.read().await.clone()
+    }
+
+    async fn data_is_not_ready_store_ids(&self) -> Vec<StoreId> {
+        self.data_is_not_ready_store_ids.read().await.clone()
     }
 
     async fn is_server_is_busy(&self, store_id: StoreId) -> bool {
@@ -606,6 +646,10 @@ impl ReplicaReadState {
         self.store_liveness.mark_attempted(store_id).await;
     }
 
+    async fn mark_store_data_is_not_ready(&self, store_id: StoreId) {
+        self.store_liveness.mark_data_is_not_ready(store_id).await;
+    }
+
     async fn unreachable_store_ids(&self) -> Vec<StoreId> {
         self.store_liveness.unreachable_store_ids().await
     }
@@ -620,6 +664,10 @@ impl ReplicaReadState {
 
     async fn attempted_store_ids(&self) -> Vec<StoreId> {
         self.store_liveness.attempted_store_ids().await
+    }
+
+    async fn data_is_not_ready_store_ids(&self) -> Vec<StoreId> {
+        self.store_liveness.data_is_not_ready_store_ids().await
     }
 
     async fn has_attempted_store(&self, store_id: StoreId) -> bool {
@@ -772,6 +820,10 @@ where
             Some(replica_read) => replica_read.unreachable_store_ids().await,
             None => Vec::new(),
         };
+        let data_is_not_ready_store_ids = match replica_read.as_ref() {
+            Some(replica_read) => replica_read.data_is_not_ready_store_ids().await,
+            None => Vec::new(),
+        };
         let mut patched_stale_read = false;
         let mut fallback_to_leader_under_busy_threshold = false;
         let mut force_replica_read = false;
@@ -909,6 +961,7 @@ where
                     &unavailable_store_ids,
                     &server_is_busy_store_ids,
                     &attempted_store_ids,
+                    &data_is_not_ready_store_ids,
                     false,
                     false,
                     &[],
@@ -986,6 +1039,7 @@ where
                     &unavailable_store_ids,
                     &busy_store_ids,
                     &attempted_store_ids,
+                    &data_is_not_ready_store_ids,
                     match_configured,
                     labels_configured,
                     &label_matched_store_ids,
@@ -1126,6 +1180,7 @@ where
         } else if let Some(e) = resp.region_error() {
             debug!("single_shard_handler:execute: region error: {:?}", e);
             let is_server_busy = e.server_is_busy.is_some();
+            let is_data_is_not_ready = e.data_is_not_ready.is_some();
             let server_is_busy_estimated_wait_ms = e
                 .server_is_busy
                 .as_ref()
@@ -1177,6 +1232,13 @@ where
                             (store_id, replica_read.as_ref())
                         {
                             replica_read.mark_store_server_is_busy(store_id).await;
+                        }
+                    }
+                    if is_data_is_not_ready {
+                        if let (Some(store_id), Some(replica_read)) =
+                            (store_id, replica_read.as_ref())
+                        {
+                            replica_read.mark_store_data_is_not_ready(store_id).await;
                         }
                     }
                     let region_error_resolved =
@@ -2387,6 +2449,7 @@ mod test {
             &[51],
             &[],
             &[],
+            &[],
             false,
             false,
             &[],
@@ -2405,6 +2468,7 @@ mod test {
             &[],
             &[],
             &[],
+            &[],
             false,
             false,
             &[],
@@ -2419,6 +2483,7 @@ mod test {
             &[],
             &[],
             &[],
+            &[],
             false,
             false,
             &[],
@@ -2430,6 +2495,7 @@ mod test {
             &region,
             ReplicaReadType::Mixed,
             2,
+            &[],
             &[],
             &[],
             &[],
@@ -2451,6 +2517,7 @@ mod test {
             &[],
             &[],
             &[],
+            &[],
             true,
             false,
             &[41, 51],
@@ -2469,12 +2536,32 @@ mod test {
             &[51],
             &[],
             &[61],
+            &[],
             false,
             false,
             &[],
         )
         .expect("expected a replica");
         assert_eq!(peer.store_id, 41);
+    }
+
+    #[test]
+    fn test_select_replica_read_peer_mixed_allows_data_is_not_ready_retry() {
+        let region = MockPdClient::region1();
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::Mixed,
+            0,
+            &[],
+            &[],
+            &[51],
+            &[51],
+            true,
+            true,
+            &[51],
+        )
+        .expect("expected a replica");
+        assert_eq!(peer.store_id, 51);
     }
 
     #[test]
@@ -2485,6 +2572,7 @@ mod test {
             ReplicaReadType::PreferLeader,
             0,
             &[41],
+            &[],
             &[],
             &[],
             false,
@@ -2505,6 +2593,7 @@ mod test {
             &[],
             &[51],
             &[],
+            &[],
             false,
             false,
             &[],
@@ -2523,6 +2612,7 @@ mod test {
             &[],
             &[41],
             &[],
+            &[],
             false,
             false,
             &[],
@@ -2540,6 +2630,7 @@ mod test {
             0,
             &[],
             &[41, 51, 61],
+            &[],
             &[],
             false,
             false,
