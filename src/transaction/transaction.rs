@@ -2046,6 +2046,33 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.commit_ts.clone()
     }
 
+    /// Returns whether this transaction has only performed read operations so far.
+    ///
+    /// This maps to client-go `KVTxn.IsReadOnly`.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        if self.options.read_only {
+            return true;
+        }
+        let has_flushed_range = self
+            .pipelined
+            .as_ref()
+            .map(PipelinedState::has_flushed_range)
+            .unwrap_or(false);
+        self.buffer.mutation_count() == 0 && !has_flushed_range
+    }
+
+    /// Returns whether the transaction is valid.
+    ///
+    /// A transaction becomes invalid after commit or rollback. This maps to client-go `KVTxn.Valid`.
+    #[must_use]
+    pub fn valid(&self) -> bool {
+        matches!(
+            self.get_status(),
+            TransactionStatus::ReadOnly | TransactionStatus::Active
+        )
+    }
+
     /// Send a heart beat message to keep the transaction alive on the server and update its TTL.
     ///
     /// Returns the TTL set on the transaction's locks by TiKV.
@@ -8321,6 +8348,7 @@ mod tests {
             Keyspace::Disable,
         );
         txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        assert!(!txn.is_read_only());
         txn.set_commit_wait_until_tso(commit_wait_until);
         txn.set_commit_wait_until_tso_timeout(Duration::from_millis(50));
 
@@ -8332,9 +8360,24 @@ mod tests {
                 .version(),
             expected_commit_version
         );
+        assert!(!txn.valid());
         assert_eq!(pd_client.get_timestamp_call_count(), 4);
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
         assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_is_read_only_reflects_buffer_mutations() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        assert!(txn.is_read_only());
+
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        assert!(!txn.is_read_only());
     }
 
     #[tokio::test]

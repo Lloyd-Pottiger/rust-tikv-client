@@ -299,6 +299,22 @@ impl SyncTransaction {
         self.inner.commit_timestamp()
     }
 
+    /// Returns whether this transaction has only performed read operations so far.
+    ///
+    /// This maps to client-go `KVTxn.IsReadOnly`.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.inner.is_read_only()
+    }
+
+    /// Returns whether the transaction is valid.
+    ///
+    /// A transaction becomes invalid after commit or rollback. This maps to client-go `KVTxn.Valid`.
+    #[must_use]
+    pub fn valid(&self) -> bool {
+        self.inner.valid()
+    }
+
     /// Commit the transaction.
     pub fn commit(&mut self) -> Result<Option<Timestamp>> {
         safe_block_on(&self.runtime, self.inner.commit())
