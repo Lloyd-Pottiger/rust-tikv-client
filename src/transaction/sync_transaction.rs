@@ -293,6 +293,12 @@ impl SyncTransaction {
         )
     }
 
+    /// Get the commit timestamp of this transaction (if committed).
+    #[must_use]
+    pub fn commit_timestamp(&self) -> Option<Timestamp> {
+        self.inner.commit_timestamp()
+    }
+
     /// Commit the transaction.
     pub fn commit(&mut self) -> Result<Option<Timestamp>> {
         safe_block_on(&self.runtime, self.inner.commit())

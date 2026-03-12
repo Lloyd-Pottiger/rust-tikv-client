@@ -152,6 +152,7 @@ pub enum PrewriteEncounterLockPolicy {
 pub struct Transaction<PdC: PdClient = PdRpcClient> {
     status: Arc<AtomicU8>,
     timestamp: Timestamp,
+    commit_ts: Option<Timestamp>,
     buffer: Buffer,
     read_lock_tracker: ReadLockTracker,
     pipelined: Option<PipelinedState>,
@@ -280,6 +281,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         Transaction {
             status: Arc::new(AtomicU8::new(status as u8)),
             timestamp,
+            commit_ts: None,
             buffer: Buffer::new(options.is_pessimistic()),
             read_lock_tracker: ReadLockTracker::default(),
             pipelined: options
@@ -1968,6 +1970,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         committer.commit_ts_upper_bound_check = self.commit_ts_upper_bound_check.clone();
         let res = committer.commit().await;
 
+        if let Ok(Some(commit_ts)) = &res {
+            self.commit_ts = Some(commit_ts.clone());
+        }
         if res.is_ok() {
             self.set_status(TransactionStatus::Committed);
         }
@@ -2033,6 +2038,12 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Get the start timestamp of this transaction.
     pub fn start_timestamp(&self) -> Timestamp {
         self.timestamp.clone()
+    }
+
+    /// Get the commit timestamp of this transaction (if committed).
+    #[must_use]
+    pub fn commit_timestamp(&self) -> Option<Timestamp> {
+        self.commit_ts.clone()
     }
 
     /// Send a heart beat message to keep the transaction alive on the server and update its TTL.
@@ -8315,6 +8326,12 @@ mod tests {
 
         let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
         assert_eq!(commit_ts.version(), expected_commit_version);
+        assert_eq!(
+            txn.commit_timestamp()
+                .expect("expected commit ts stored on transaction")
+                .version(),
+            expected_commit_version
+        );
         assert_eq!(pd_client.get_timestamp_call_count(), 4);
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
         assert_eq!(commit_count.load(Ordering::SeqCst), 1);
