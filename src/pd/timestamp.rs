@@ -21,6 +21,7 @@ use futures::task::AtomicWaker;
 use futures::task::Context;
 use futures::task::Poll;
 use log::debug;
+use log::error;
 use log::info;
 use pin_project::pin_project;
 use tokio::sync::mpsc;
@@ -65,12 +66,11 @@ impl TimestampOracle {
         let max_pending_count = max_pending_count.max(1);
 
         // Start a background thread to handle TSO requests and responses
-        tokio::spawn(run_tso(
-            cluster_id,
-            pd_client,
-            request_rx,
-            max_pending_count,
-        ));
+        tokio::spawn(async move {
+            if let Err(err) = run_tso(cluster_id, pd_client, request_rx, max_pending_count).await {
+                error!("tso worker exited for cluster_id={cluster_id}: {err:?}");
+            }
+        });
 
         Ok(TimestampOracle { request_tx })
     }
@@ -124,7 +124,8 @@ async fn run_tso(
     // let send_requests = rpc_sender.send_all(&mut request_stream);
     let mut responses = pd_client.tso(request_stream).await?.into_inner();
 
-    while let Some(Ok(resp)) = responses.next().await {
+    while let Some(resp) = responses.next().await {
+        let resp = resp?;
         {
             let mut pending_requests = pending_requests.lock().await;
             allocate_timestamps(&resp, &mut pending_requests)?;
