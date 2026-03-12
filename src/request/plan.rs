@@ -239,6 +239,13 @@ fn select_replica_read_peer(
             if !is_store_available(unavailable_store_ids, peer.store_id) {
                 return false;
             }
+            if replica_read == ReplicaReadType::PreferLeader
+                && Some(peer.store_id) != leader_store_id
+                && busy_store_ids.contains(&peer.store_id)
+            {
+                // Align with client-go PreferLeader behavior: skip slow non-leader replicas.
+                return false;
+            }
             if matches!(
                 replica_read,
                 ReplicaReadType::Mixed | ReplicaReadType::PreferLeader
@@ -504,6 +511,7 @@ fn select_replica_read_peer(
                             |peer| {
                                 Some(peer.store_id) != leader_store_id
                                     && is_store_available(unavailable_store_ids, peer.store_id)
+                                    && !busy_store_ids.contains(&peer.store_id)
                             },
                         )
                     }
@@ -517,6 +525,7 @@ fn select_replica_read_peer(
                 |peer| {
                     Some(peer.store_id) != leader_store_id
                         && is_store_available(unavailable_store_ids, peer.store_id)
+                        && !busy_store_ids.contains(&peer.store_id)
                 },
             ),
         },
@@ -2635,6 +2644,25 @@ mod test {
             false,
             false,
             &[],
+        )
+        .expect("expected a replica");
+        assert_eq!(peer.store_id, 41);
+    }
+
+    #[test]
+    fn test_select_replica_read_peer_prefer_leader_match_configured_skips_slow_non_leader() {
+        let region = MockPdClient::region1();
+        let peer = select_replica_read_peer(
+            &region,
+            ReplicaReadType::PreferLeader,
+            0,
+            &[],
+            &[41, 51, 61],
+            &[],
+            &[],
+            true,
+            true,
+            &[51],
         )
         .expect("expected a replica");
         assert_eq!(peer.store_id, 41);
