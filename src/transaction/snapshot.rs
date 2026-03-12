@@ -3,6 +3,7 @@
 use derive_new::new;
 use log::{debug, trace};
 
+use crate::transaction::Variables;
 use crate::BoundRange;
 use crate::CommandPriority;
 use crate::IsolationLevel;
@@ -29,6 +30,21 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Set the KV variables used by this snapshot.
+    ///
+    /// This maps to client-go `KVSnapshot.SetVars`.
+    pub fn set_vars(&mut self, vars: Variables) {
+        self.transaction.set_vars(vars);
+    }
+
+    /// Get the KV variables used by this snapshot.
+    ///
+    /// This maps to client-go `KVSnapshot.GetVars`.
+    #[must_use]
+    pub fn vars(&self) -> &Variables {
+        self.transaction.vars()
+    }
+
     /// Set replica read behavior.
     ///
     /// This option is only effective for read-only snapshots.

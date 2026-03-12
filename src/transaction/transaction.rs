@@ -20,6 +20,7 @@ use super::requests::ResolveLockRangeRequest;
 use super::LockResolverRpcContext;
 use super::ReadLockTracker;
 use super::ResolveLocksContext;
+use super::Variables;
 use crate::backoff::Backoff;
 use crate::backoff::DEFAULT_REGION_BACKOFF;
 use crate::kv::HexRepr;
@@ -159,6 +160,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     rpc: Arc<PdC>,
     resolve_locks_ctx: ResolveLocksContext,
     options: TransactionOptions,
+    vars: Variables,
     resource_group_tagger: Option<ResourceGroupTagger>,
     replica_read_adjuster: Option<ReplicaReadAdjuster>,
     schema_ver: Option<i64>,
@@ -291,6 +293,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             rpc,
             resolve_locks_ctx,
             options,
+            vars: Variables::default(),
             resource_group_tagger: None,
             replica_read_adjuster: None,
             schema_ver: None,
@@ -575,6 +578,21 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Clear the configured schema lease checker.
     pub fn clear_schema_lease_checker(&mut self) {
         self.schema_lease_checker = None;
+    }
+
+    /// Set the KV variables used by this transaction.
+    ///
+    /// This maps to client-go `KVTxn.SetVars`.
+    pub fn set_vars(&mut self, vars: Variables) {
+        self.vars = vars;
+    }
+
+    /// Get the KV variables used by this transaction.
+    ///
+    /// This maps to client-go `KVTxn.GetVars`.
+    #[must_use]
+    pub fn vars(&self) -> &Variables {
+        &self.vars
     }
 
     /// Set the geographical scope of the transaction.
@@ -8440,6 +8458,31 @@ mod tests {
         txn.delete("k".to_owned()).await.unwrap();
         assert_eq!(txn.len(), 2);
         assert_eq!(txn.size(), 2);
+    }
+
+    #[test]
+    fn test_transaction_vars_set_and_get() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        assert_eq!(txn.vars().backoff_lock_fast_ms, 10);
+        assert_eq!(txn.vars().backoff_weight, 2);
+        assert!(txn.vars().killed.is_none());
+
+        let vars = crate::Variables {
+            backoff_lock_fast_ms: 123,
+            backoff_weight: 7,
+            killed: Some(Arc::new(std::sync::atomic::AtomicU32::new(0))),
+        };
+        txn.set_vars(vars.clone());
+
+        assert_eq!(txn.vars().backoff_lock_fast_ms, 123);
+        assert_eq!(txn.vars().backoff_weight, 7);
+        assert!(txn.vars().killed.is_some());
     }
 
     #[tokio::test]

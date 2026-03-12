@@ -1,7 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
     BoundRange, CommandPriority, IsolationLevel, Key, KvPair, ReplicaReadType, Result, Snapshot,
-    StoreLabel, Value,
+    StoreLabel, Value, Variables,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -85,6 +85,21 @@ impl SyncSnapshot {
         limit: u32,
     ) -> Result<impl Iterator<Item = Key>> {
         safe_block_on(&self.runtime, self.inner.scan_keys_reverse(range, limit))
+    }
+
+    /// Set the KV variables used by this snapshot.
+    ///
+    /// This maps to client-go `KVSnapshot.SetVars`.
+    pub fn set_vars(&mut self, vars: Variables) {
+        self.inner.set_vars(vars);
+    }
+
+    /// Get the KV variables used by this snapshot.
+    ///
+    /// This maps to client-go `KVSnapshot.GetVars`.
+    #[must_use]
+    pub fn vars(&self) -> &Variables {
+        self.inner.vars()
     }
 
     /// Set replica read behavior.

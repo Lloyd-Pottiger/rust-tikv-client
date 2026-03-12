@@ -206,6 +206,8 @@ pub use crate::transaction::SyncTransactionClient;
 pub use crate::transaction::Transaction;
 #[doc(inline)]
 pub use crate::transaction::TransactionOptions;
+#[doc(inline)]
+pub use crate::transaction::Variables;
 
 /// Protobuf-generated store label metadata returned by PD.
 ///

@@ -30,6 +30,7 @@ pub use transaction::PrewriteEncounterLockPolicy;
 pub use transaction::SchemaLeaseChecker;
 pub use transaction::Transaction;
 pub use transaction::TransactionOptions;
+pub use vars::Variables;
 
 mod buffer;
 mod client;
@@ -49,3 +50,4 @@ mod sync_snapshot;
 mod sync_transaction;
 #[allow(clippy::module_inception)]
 mod transaction;
+mod vars;

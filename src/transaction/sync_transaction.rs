@@ -2,7 +2,7 @@ use crate::transaction::sync_client::safe_block_on;
 use crate::{
     transaction::Mutation, AssertionLevel, BoundRange, CommandPriority, DiskFullOpt, Key, KvPair,
     LockWaitTimeout, PrewriteEncounterLockPolicy, Result, SchemaLeaseChecker, Timestamp,
-    Transaction, Value,
+    Transaction, Value, Variables,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +30,21 @@ impl SyncTransaction {
     #[must_use]
     pub fn txn_scope(&self) -> &str {
         self.inner.txn_scope()
+    }
+
+    /// Set the KV variables used by this transaction.
+    ///
+    /// This maps to client-go `KVTxn.SetVars`.
+    pub fn set_vars(&mut self, vars: Variables) {
+        self.inner.set_vars(vars);
+    }
+
+    /// Get the KV variables used by this transaction.
+    ///
+    /// This maps to client-go `KVTxn.GetVars`.
+    #[must_use]
+    pub fn vars(&self) -> &Variables {
+        self.inner.vars()
     }
 
     /// Enable or disable async commit.
