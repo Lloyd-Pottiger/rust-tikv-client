@@ -1,7 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,6 +49,20 @@ use crate::Result;
 use crate::StoreLabel;
 
 use super::keyspace::Keyspace;
+
+fn check_killed(killed: &Option<Arc<AtomicU32>>) -> Result<()> {
+    let Some(killed) = killed.as_ref() else {
+        return Ok(());
+    };
+    let killed_signal = killed.load(Ordering::SeqCst);
+    if killed_signal == 0 {
+        Ok(())
+    } else {
+        Err(Error::StringError(format!(
+            "query interrupted by signal {killed_signal}"
+        )))
+    }
+}
 
 /// A plan for how to execute a request. A user builds up a plan with various
 /// options, then exectutes it.
@@ -650,6 +664,7 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     pub(super) inner: P,
     pub pd_client: Arc<PdC>,
     pub backoff: Backoff,
+    pub(super) killed: Option<Arc<AtomicU32>>,
 
     pub(super) concurrency: usize,
 
@@ -674,6 +689,7 @@ where
         pd_client: Arc<PdC>,
         mut current_plan: P,
         backoff: Backoff,
+        killed: Option<Arc<AtomicU32>>,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
         replica_read: Option<ReplicaReadState>,
@@ -699,6 +715,7 @@ where
                 clone,
                 region,
                 backoff.clone(),
+                killed.clone(),
                 permits.clone(),
                 preserve_region_results,
                 replica_read,
@@ -735,6 +752,7 @@ where
         mut plan: P,
         mut region: RegionWithLeader,
         mut backoff: Backoff,
+        killed: Option<Arc<AtomicU32>>,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
         replica_read: Option<ReplicaReadState>,
@@ -1038,6 +1056,7 @@ where
                     region.clone(),
                     None,
                     backoff,
+                    killed.clone(),
                     permits,
                     preserve_region_results,
                     replica_read,
@@ -1085,6 +1104,7 @@ where
                     region_store.region_with_leader.ver_id(),
                     region_store.region_with_leader.get_store_id().ok(),
                     backoff,
+                    killed.clone(),
                     permits,
                     preserve_region_results,
                     replica_read,
@@ -1163,6 +1183,7 @@ where
                         handle_region_error(pd_client.clone(), e, region_store).await?;
                     // don't sleep if we have resolved the region error
                     if !region_error_resolved {
+                        check_killed(&killed)?;
                         sleep(duration).await;
                     }
                     let replica_read = match (is_server_busy, replica_read) {
@@ -1196,6 +1217,7 @@ where
                         pd_client,
                         plan,
                         backoff,
+                        killed,
                         permits,
                         preserve_region_results,
                         replica_read,
@@ -1218,6 +1240,7 @@ where
         region: RegionVerId,
         store: Option<StoreId>,
         mut backoff: Backoff,
+        killed: Option<Arc<AtomicU32>>,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
         replica_read: Option<ReplicaReadState>,
@@ -1252,11 +1275,13 @@ where
                         _ => replica_read,
                     };
                 }
+                check_killed(&killed)?;
                 sleep(duration).await;
                 Self::single_plan_handler(
                     pd_client,
                     plan,
                     backoff,
+                    killed,
                     permits,
                     preserve_region_results,
                     replica_read,
@@ -1428,6 +1453,7 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
             inner: self.inner.clone(),
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
+            killed: self.killed.clone(),
             concurrency: self.concurrency,
             preserve_region_results: self.preserve_region_results,
             replica_read: self.replica_read,
@@ -1463,6 +1489,7 @@ where
             self.pd_client.clone(),
             inner,
             self.backoff.clone(),
+            self.killed.clone(),
             concurrency_permits.clone(),
             self.preserve_region_results,
             self.replica_read
@@ -1724,6 +1751,8 @@ where
                     self.pd_client.clone(),
                     self.keyspace,
                     self.pessimistic_region_resolve,
+                    backoff.clone(),
+                    None,
                     LockResolverRpcContext::default(),
                 )
                 .await?;
@@ -1755,6 +1784,7 @@ pub(crate) struct ResolveLockInContext<P: Plan, PdC: PdClient> {
     pub(crate) timestamp: Timestamp,
     pub(crate) pd_client: Arc<PdC>,
     pub(crate) backoff: Backoff,
+    pub(crate) killed: Option<Arc<AtomicU32>>,
     pub(crate) keyspace: Keyspace,
     pub(crate) pessimistic_region_resolve: bool,
     pub(crate) rpc_context: LockResolverRpcContext,
@@ -1768,6 +1798,7 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLockInContext<P, PdC> {
             timestamp: self.timestamp.clone(),
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
+            killed: self.killed.clone(),
             keyspace: self.keyspace,
             pessimistic_region_resolve: self.pessimistic_region_resolve,
             rpc_context: self.rpc_context.clone(),
@@ -1816,6 +1847,8 @@ where
                     self.pd_client.clone(),
                     self.keyspace,
                     self.pessimistic_region_resolve,
+                    backoff.clone(),
+                    self.killed.clone(),
                     self.rpc_context.clone(),
                 )
                 .await?;
@@ -1832,6 +1865,7 @@ where
                         } else {
                             delay_duration
                         };
+                        check_killed(&self.killed)?;
                         sleep(delay_duration).await;
                         result = plan.execute().await?;
                     }
@@ -1847,6 +1881,7 @@ pub(crate) struct ResolveLockForRead<P: Plan, PdC: PdClient> {
     pub(crate) timestamp: Timestamp,
     pub(crate) pd_client: Arc<PdC>,
     pub(crate) backoff: Backoff,
+    pub(crate) killed: Option<Arc<AtomicU32>>,
     pub(crate) keyspace: Keyspace,
     pub(crate) force_resolve_lock_lite: bool,
     pub(crate) lock_tracker: ReadLockTracker,
@@ -1861,6 +1896,7 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLockForRead<P, PdC> {
             timestamp: self.timestamp.clone(),
             pd_client: self.pd_client.clone(),
             backoff: self.backoff.clone(),
+            killed: self.killed.clone(),
             keyspace: self.keyspace,
             force_resolve_lock_lite: self.force_resolve_lock_lite,
             lock_tracker: self.lock_tracker.clone(),
@@ -1953,6 +1989,8 @@ where
                     self.timestamp.clone(),
                     self.pd_client.clone(),
                     self.keyspace,
+                    backoff.clone(),
+                    self.killed.clone(),
                     self.force_resolve_lock_lite,
                     Some(self.lock_tracker.clone()),
                     self.rpc_context.clone(),
@@ -2005,6 +2043,7 @@ where
                 Some(delay_duration) => {
                     let delay_duration =
                         delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64));
+                    check_killed(&self.killed)?;
                     sleep(delay_duration).await;
                     result = match plan.execute().await {
                         Ok(result) => result,
@@ -3532,6 +3571,7 @@ mod test {
             },
             pd_client: Arc::new(MockPdClient::default()),
             backoff: Backoff::no_backoff(),
+            killed: None,
             concurrency: DEFAULT_MULTI_REGION_CONCURRENCY,
             preserve_region_results: false,
             replica_read: None,

@@ -22,7 +22,6 @@ use super::ReadLockTracker;
 use super::ResolveLocksContext;
 use super::Variables;
 use crate::backoff::Backoff;
-use crate::backoff::DEFAULT_REGION_BACKOFF;
 use crate::kv::HexRepr;
 use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
@@ -735,7 +734,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
-        let retry_options = self.options.retry_options.clone();
+        let lock_backoff = self.lock_backoff();
+        let region_backoff = self.region_backoff();
+        let killed = self.vars.killed.clone();
         let keyspace = self.keyspace;
         let mut snapshot_ctx = self.snapshot_read_context();
         if snapshot_ctx.replica_read.is_follower_read() {
@@ -800,7 +801,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                         .resolve_lock_for_read(
                             resolve_locks_ctx.clone(),
                             timestamp.clone(),
-                            retry_options.lock_backoff.clone(),
+                            lock_backoff.clone(),
+                            killed.clone(),
                             keyspace,
                             true,
                             lock_tracker.clone(),
@@ -808,14 +810,18 @@ impl<PdC: PdClient> Transaction<PdC> {
                         );
                     let plan_builder =
                         if replica_read.is_follower_read() || enable_load_based_replica_read {
-                            plan_builder.retry_multi_region_with_replica_read_and_match_stores(
-                                DEFAULT_REGION_BACKOFF,
-                                replica_read,
-                                match_store_ids.clone(),
-                                match_store_labels.clone(),
-                            )
+                            plan_builder
+                                .retry_multi_region_with_replica_read_and_match_stores(
+                                    region_backoff.clone(),
+                                    replica_read,
+                                    match_store_ids.clone(),
+                                    match_store_labels.clone(),
+                                )
+                                .with_killed(killed.clone())
                         } else {
-                            plan_builder.retry_multi_region(DEFAULT_REGION_BACKOFF)
+                            plan_builder
+                                .retry_multi_region(region_backoff.clone())
+                                .with_killed(killed.clone())
                         };
                     let plan = plan_builder.merge(Collect).plan();
                     let mut pairs = plan.execute().await?;
@@ -839,7 +845,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                 let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock_for_read(
                     resolve_locks_ctx,
                     timestamp,
-                    retry_options.lock_backoff,
+                    lock_backoff.clone(),
+                    killed.clone(),
                     keyspace,
                     true,
                     lock_tracker,
@@ -847,14 +854,18 @@ impl<PdC: PdClient> Transaction<PdC> {
                 );
                 let plan_builder =
                     if replica_read.is_follower_read() || enable_load_based_replica_read {
-                        plan_builder.retry_multi_region_with_replica_read_and_match_stores(
-                            DEFAULT_REGION_BACKOFF,
-                            replica_read,
-                            match_store_ids,
-                            match_store_labels,
-                        )
+                        plan_builder
+                            .retry_multi_region_with_replica_read_and_match_stores(
+                                region_backoff,
+                                replica_read,
+                                match_store_ids,
+                                match_store_labels,
+                            )
+                            .with_killed(killed)
                     } else {
-                        plan_builder.retry_multi_region(DEFAULT_REGION_BACKOFF)
+                        plan_builder
+                            .retry_multi_region(region_backoff)
+                            .with_killed(killed)
                     };
                 let plan = plan_builder
                     .merge(CollectSingle)
@@ -887,7 +898,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
-        let retry_options = self.options.retry_options.clone();
+        let lock_backoff = self.lock_backoff();
+        let region_backoff = self.region_backoff();
+        let killed = self.vars.killed.clone();
         let keyspace = self.keyspace;
         let mut snapshot_ctx = self.snapshot_read_context();
         if snapshot_ctx.replica_read.is_follower_read() {
@@ -923,21 +936,26 @@ impl<PdC: PdClient> Transaction<PdC> {
         let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock_for_read(
             resolve_locks_ctx,
             timestamp,
-            retry_options.lock_backoff,
+            lock_backoff,
+            killed.clone(),
             keyspace,
             true,
             lock_tracker,
             lock_resolver_rpc_context,
         );
         let plan_builder = if replica_read.is_follower_read() || enable_load_based_replica_read {
-            plan_builder.retry_multi_region_with_replica_read_and_match_stores(
-                DEFAULT_REGION_BACKOFF,
-                replica_read,
-                match_store_ids,
-                match_store_labels,
-            )
+            plan_builder
+                .retry_multi_region_with_replica_read_and_match_stores(
+                    region_backoff,
+                    replica_read,
+                    match_store_ids,
+                    match_store_labels,
+                )
+                .with_killed(killed)
         } else {
-            plan_builder.retry_multi_region(DEFAULT_REGION_BACKOFF)
+            plan_builder
+                .retry_multi_region(region_backoff)
+                .with_killed(killed)
         };
 
         let plan = plan_builder.merge(CollectSingle).plan();
@@ -1067,7 +1085,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         let keys = keys
             .into_iter()
             .map(move |k| k.into().encode_keyspace(keyspace, KeyMode::Txn));
-        let retry_options = self.options.retry_options.clone();
+        let retry_options = RetryOptions::new(self.region_backoff(), self.lock_backoff());
+        let killed = self.vars.killed.clone();
         let snapshot_ctx = self.snapshot_read_context();
         let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
         let lock_tracker = self.read_lock_tracker.clone();
@@ -1155,23 +1174,27 @@ impl<PdC: PdClient> Transaction<PdC> {
                                 resolve_locks_ctx.clone(),
                                 timestamp.clone(),
                                 retry_options.lock_backoff.clone(),
+                                killed.clone(),
                                 keyspace,
                                 false,
                                 lock_tracker.clone(),
                                 lock_resolver_rpc_context.clone(),
                             );
-                        let plan_builder = if replica_read.is_follower_read()
-                            || enable_load_based_replica_read
-                        {
-                            plan_builder.retry_multi_region_with_replica_read_and_match_stores(
-                                retry_options.region_backoff.clone(),
-                                replica_read,
-                                match_store_ids.clone(),
-                                match_store_labels.clone(),
-                            )
-                        } else {
-                            plan_builder.retry_multi_region(retry_options.region_backoff.clone())
-                        };
+                        let plan_builder =
+                            if replica_read.is_follower_read() || enable_load_based_replica_read {
+                                plan_builder
+                                    .retry_multi_region_with_replica_read_and_match_stores(
+                                        retry_options.region_backoff.clone(),
+                                        replica_read,
+                                        match_store_ids.clone(),
+                                        match_store_labels.clone(),
+                                    )
+                                    .with_killed(killed.clone())
+                            } else {
+                                plan_builder
+                                    .retry_multi_region(retry_options.region_backoff.clone())
+                                    .with_killed(killed.clone())
+                            };
                         let plan = plan_builder.merge(Collect).plan();
                         let mut remote_pairs: Vec<KvPair> =
                             plan.execute().await?.into_iter().map(Into::into).collect();
@@ -1213,6 +1236,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                                 resolve_locks_ctx,
                                 timestamp,
                                 retry_options.lock_backoff,
+                                killed.clone(),
                                 keyspace,
                                 false,
                                 lock_tracker,
@@ -1220,14 +1244,18 @@ impl<PdC: PdClient> Transaction<PdC> {
                             );
                         let plan_builder =
                             if replica_read.is_follower_read() || enable_load_based_replica_read {
-                                plan_builder.retry_multi_region_with_replica_read_and_match_stores(
-                                    retry_options.region_backoff,
-                                    replica_read,
-                                    match_store_ids,
-                                    match_store_labels,
-                                )
+                                plan_builder
+                                    .retry_multi_region_with_replica_read_and_match_stores(
+                                        retry_options.region_backoff,
+                                        replica_read,
+                                        match_store_ids,
+                                        match_store_labels,
+                                    )
+                                    .with_killed(killed.clone())
                             } else {
-                                plan_builder.retry_multi_region(retry_options.region_backoff)
+                                plan_builder
+                                    .retry_multi_region(retry_options.region_backoff)
+                                    .with_killed(killed.clone())
                             };
                         let plan = plan_builder.merge(Collect).plan();
                         let snapshot_pairs: Vec<KvPair> =
@@ -1256,6 +1284,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                             resolve_locks_ctx,
                             timestamp,
                             retry_options.lock_backoff,
+                            killed.clone(),
                             keyspace,
                             false,
                             lock_tracker,
@@ -1263,14 +1292,18 @@ impl<PdC: PdClient> Transaction<PdC> {
                         );
                     let plan_builder =
                         if replica_read.is_follower_read() || enable_load_based_replica_read {
-                            plan_builder.retry_multi_region_with_replica_read_and_match_stores(
-                                retry_options.region_backoff,
-                                replica_read,
-                                match_store_ids,
-                                match_store_labels,
-                            )
+                            plan_builder
+                                .retry_multi_region_with_replica_read_and_match_stores(
+                                    retry_options.region_backoff,
+                                    replica_read,
+                                    match_store_ids,
+                                    match_store_labels,
+                                )
+                                .with_killed(killed.clone())
                         } else {
-                            plan_builder.retry_multi_region(retry_options.region_backoff)
+                            plan_builder
+                                .retry_multi_region(retry_options.region_backoff)
+                                .with_killed(killed.clone())
                         };
                     let plan = plan_builder.merge(Collect).plan();
                     plan.execute()
@@ -1312,7 +1345,8 @@ impl<PdC: PdClient> Transaction<PdC> {
             .map(|k| k.into().encode_keyspace(keyspace, KeyMode::Txn))
             .collect::<Vec<_>>();
         let key_count = keys.len();
-        let retry_options = self.options.retry_options.clone();
+        let retry_options = RetryOptions::new(self.region_backoff(), self.lock_backoff());
+        let killed = self.vars.killed.clone();
         let mut snapshot_ctx = self.snapshot_read_context();
         if snapshot_ctx.replica_read.is_follower_read() {
             if let Some(adjuster) = snapshot_ctx.replica_read_adjuster.as_ref() {
@@ -1351,20 +1385,25 @@ impl<PdC: PdClient> Transaction<PdC> {
             resolve_locks_ctx,
             timestamp,
             retry_options.lock_backoff,
+            killed.clone(),
             keyspace,
             false,
             lock_tracker,
             lock_resolver_rpc_context,
         );
         let plan_builder = if replica_read.is_follower_read() || enable_load_based_replica_read {
-            plan_builder.retry_multi_region_with_replica_read_and_match_stores(
-                retry_options.region_backoff,
-                replica_read,
-                match_store_ids,
-                match_store_labels,
-            )
+            plan_builder
+                .retry_multi_region_with_replica_read_and_match_stores(
+                    retry_options.region_backoff,
+                    replica_read,
+                    match_store_ids,
+                    match_store_labels,
+                )
+                .with_killed(killed)
         } else {
-            plan_builder.retry_multi_region(retry_options.region_backoff)
+            plan_builder
+                .retry_multi_region(retry_options.region_backoff)
+                .with_killed(killed)
         };
         let plan = plan_builder.merge(CollectBatchGetWithCommitTs).plan();
         plan.execute().await.map(move |pairs| {
@@ -1682,6 +1721,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     pub async fn flush(&mut self, force: bool) -> Result<bool> {
         debug!("invoking transactional flush");
         self.check_allow_operation().await?;
+        self.vars.check_killed()?;
 
         let Some(pipelined) = self.options.pipelined_txn else {
             return Err(Error::StringError(
@@ -1776,8 +1816,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let flush_keyspace = self.keyspace;
         let flush_resolve_locks_ctx = self.resolve_locks_ctx.clone();
         let flush_start_version = self.timestamp.clone();
-        let flush_lock_backoff = self.options.retry_options.lock_backoff.clone();
-        let flush_region_backoff = self.options.retry_options.region_backoff.clone();
+        let flush_lock_backoff = self.lock_backoff();
+        let flush_region_backoff = self.region_backoff();
+        let flush_killed = self.vars.killed.clone();
         let flush_concurrency = pipelined.flush_concurrency();
         let flush_lock_resolver_rpc_context = self
             .options
@@ -1793,10 +1834,12 @@ impl<PdC: PdClient> Transaction<PdC> {
                     flush_resolve_locks_ctx,
                     flush_start_version,
                     flush_lock_backoff,
+                    flush_killed.clone(),
                     flush_keyspace,
                     flush_lock_resolver_rpc_context,
                 )
                 .retry_multi_region_with_concurrency(flush_region_backoff, flush_concurrency)
+                .with_killed(flush_killed)
                 .merge(CollectError)
                 .extract_error()
                 .plan();
@@ -1973,6 +2016,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.buffer.get_write_size() as u64,
             self.start_instant,
         );
+        committer.vars = self.vars.clone();
         if let Some(state) = self.pipelined.as_ref() {
             committer.pipelined_generation = state.generation;
             committer.pipelined_range_start = state.flushed_range_start.clone();
@@ -2041,6 +2085,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.buffer.get_write_size() as u64,
             self.start_instant,
         );
+        committer.vars = self.vars.clone();
         committer.resolve_locks_ctx = self.resolve_locks_ctx.clone();
         committer.resource_group_tagger = self.resource_group_tagger.clone();
         committer.schema_ver = self.schema_ver;
@@ -2117,6 +2162,12 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.buffer.mutation_count()
     }
 
+    /// Returns true if the transaction has no buffered entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Returns the buffered size (sum of key and value lengths) of this transaction.
     ///
     /// This maps to client-go `KVTxn.Size`.
@@ -2132,6 +2183,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     pub async fn send_heart_beat(&mut self) -> Result<u64> {
         debug!("sending heart_beat");
         self.check_allow_operation().await?;
+        self.vars.check_killed()?;
         let primary_key = match self.buffer.get_primary_key() {
             Some(k) => k,
             None => return Err(Error::NoPrimaryKey),
@@ -2154,15 +2206,20 @@ impl<PdC: PdClient> Transaction<PdC> {
         let lock_resolver_rpc_context = self
             .options
             .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_backoff = self.lock_backoff();
+        let region_backoff = self.region_backoff();
+        let killed = self.vars.killed.clone();
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
                 self.timestamp.clone(),
-                self.options.retry_options.lock_backoff.clone(),
+                lock_backoff,
+                killed.clone(),
                 self.keyspace,
                 lock_resolver_rpc_context,
             )
-            .retry_multi_region(self.options.retry_options.region_backoff.clone())
+            .retry_multi_region(region_backoff)
+            .with_killed(killed)
             .extract_error()
             .merge(CollectSingle)
             .post_process_default()
@@ -2185,7 +2242,6 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
-        let retry_options = self.options.retry_options.clone();
         let keyspace = self.keyspace;
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let snapshot_ctx = self.snapshot_read_context();
@@ -2193,6 +2249,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let replica_read = snapshot_ctx.replica_read;
         let lock_tracker = self.read_lock_tracker.clone();
         let resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        let lock_backoff = self.lock_backoff();
+        let region_backoff = self.region_backoff();
+        let killed = self.vars.killed.clone();
         let match_store_ids = self.options.match_store_ids.clone();
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
@@ -2230,7 +2289,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                         .resolve_lock_for_read(
                             resolve_locks_ctx,
                             timestamp,
-                            retry_options.lock_backoff,
+                            lock_backoff,
+                            killed.clone(),
                             keyspace,
                             false,
                             lock_tracker,
@@ -2239,15 +2299,15 @@ impl<PdC: PdClient> Transaction<PdC> {
                     let plan_builder =
                         if replica_read.is_follower_read() || enable_load_based_replica_read {
                             plan_builder.retry_multi_region_with_replica_read_and_match_stores(
-                                retry_options.region_backoff,
+                                region_backoff,
                                 replica_read,
                                 match_store_ids,
                                 match_store_labels,
                             )
                         } else {
-                            plan_builder.retry_multi_region(retry_options.region_backoff)
+                            plan_builder.retry_multi_region(region_backoff)
                         };
-                    let plan = plan_builder.merge(Collect).plan();
+                    let plan = plan_builder.with_killed(killed).merge(Collect).plan();
                     plan.execute()
                         .await
                         .map(|r| r.into_iter().map(Into::into).collect())
@@ -2494,14 +2554,17 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         }
 
+        let lock_backoff = self.lock_backoff();
+        let region_backoff = self.region_backoff();
+        let killed = self.vars.killed.clone();
+
         loop {
             request.wait_timeout = lock_wait_timeout.effective_wait_timeout_ms(lock_wait_start);
 
             let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request.clone())
                 .preserve_shard()
-                .retry_multi_region_preserve_results(
-                    self.options.retry_options.region_backoff.clone(),
-                )
+                .retry_multi_region_preserve_results(region_backoff.clone())
+                .with_killed(killed.clone())
                 .plan();
             let results = plan.execute().await?;
 
@@ -2562,6 +2625,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                 self.rpc.clone(),
                 self.keyspace,
                 true,
+                lock_backoff.clone(),
+                killed.clone(),
                 lock_resolver_rpc_context,
             )
             .await?;
@@ -2610,15 +2675,20 @@ impl<PdC: PdClient> Transaction<PdC> {
         let lock_resolver_rpc_context = self
             .options
             .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_backoff = self.lock_backoff();
+        let region_backoff = self.region_backoff();
+        let killed = self.vars.killed.clone();
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
                 start_version,
-                self.options.retry_options.lock_backoff.clone(),
+                lock_backoff,
+                killed.clone(),
                 self.keyspace,
                 lock_resolver_rpc_context,
             )
-            .retry_multi_region(self.options.retry_options.region_backoff.clone())
+            .retry_multi_region(region_backoff)
+            .with_killed(killed)
             .extract_error()
             .plan();
         plan.execute().await?;
@@ -2645,6 +2715,24 @@ impl<PdC: PdClient> Transaction<PdC> {
         matches!(self.options.kind, TransactionKind::Pessimistic(_))
     }
 
+    fn lock_backoff(&self) -> Backoff {
+        let weight = self.vars.backoff_weight_factor();
+        self.options
+            .retry_options
+            .lock_backoff
+            .clone()
+            .with_base_delay_ms(self.vars.lock_fast_base_delay_ms())
+            .scaled_max_attempts(weight)
+    }
+
+    fn region_backoff(&self) -> Backoff {
+        self.options
+            .retry_options
+            .region_backoff
+            .clone()
+            .scaled_max_attempts(self.vars.backoff_weight_factor())
+    }
+
     async fn start_auto_heartbeat(&mut self) -> Result<()> {
         debug!("starting auto_heartbeat");
         if !self.options.heartbeat_option.is_auto_heartbeat() || self.is_heartbeat_started {
@@ -2664,7 +2752,8 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         let status = self.status.clone();
         let start_ts = self.timestamp.clone();
-        let region_backoff = self.options.retry_options.region_backoff.clone();
+        let region_backoff = self.region_backoff();
+        let killed = self.vars.killed.clone();
         let rpc = self.rpc.clone();
         let heartbeat_interval = match self.options.heartbeat_option {
             HeartbeatOption::NoHeartbeat => DEFAULT_HEARTBEAT_INTERVAL,
@@ -2687,6 +2776,11 @@ impl<PdC: PdClient> Transaction<PdC> {
                         break;
                     }
                 }
+                if let Some(killed) = killed.as_ref() {
+                    if killed.load(atomic::Ordering::SeqCst) != 0 {
+                        break;
+                    }
+                }
                 let request = new_heart_beat_request(
                     start_ts.clone(),
                     primary_key.clone(),
@@ -2694,6 +2788,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 );
                 let plan = PlanBuilder::new(rpc.clone(), keyspace, request)
                     .retry_multi_region(region_backoff.clone())
+                    .with_killed(killed.clone())
                     .merge(CollectSingle)
                     .plan();
                 plan.execute().await?;
@@ -3774,6 +3869,8 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     resolve_locks_ctx: ResolveLocksContext,
     options: TransactionOptions,
     #[new(default)]
+    vars: Variables,
+    #[new(default)]
     resource_group_tagger: Option<ResourceGroupTagger>,
     keyspace: Keyspace,
     #[new(default)]
@@ -3801,6 +3898,24 @@ struct Committer<PdC: PdClient = PdRpcClient> {
 }
 
 impl<PdC: PdClient> Committer<PdC> {
+    fn lock_backoff(&self) -> Backoff {
+        let weight = self.vars.backoff_weight_factor();
+        self.options
+            .retry_options
+            .lock_backoff
+            .clone()
+            .with_base_delay_ms(self.vars.lock_fast_base_delay_ms())
+            .scaled_max_attempts(weight)
+    }
+
+    fn region_backoff(&self) -> Backoff {
+        self.options
+            .retry_options
+            .region_backoff
+            .clone()
+            .scaled_max_attempts(self.vars.backoff_weight_factor())
+    }
+
     async fn commit(mut self) -> Result<Option<Timestamp>> {
         debug!("committing");
 
@@ -3974,18 +4089,23 @@ impl<PdC: PdClient> Committer<PdC> {
             let lock_resolver_rpc_context = self
                 .options
                 .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+            let flush_lock_backoff = self.lock_backoff();
+            let flush_region_backoff = self.region_backoff();
+            let flush_killed = self.vars.killed.clone();
             let flush_plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, flush_request)
                 .resolve_lock_in_context(
                     self.resolve_locks_ctx.clone(),
                     self.start_version.clone(),
-                    self.options.retry_options.lock_backoff.clone(),
+                    flush_lock_backoff,
+                    flush_killed.clone(),
                     self.keyspace,
                     lock_resolver_rpc_context,
                 )
                 .retry_multi_region_with_concurrency(
-                    self.options.retry_options.region_backoff.clone(),
+                    flush_region_backoff,
                     pipelined.flush_concurrency(),
                 )
+                .with_killed(flush_killed)
                 .merge(CollectError)
                 .extract_error()
                 .plan();
@@ -4036,11 +4156,13 @@ impl<PdC: PdClient> Committer<PdC> {
 
         let resolve_pd = self.rpc.clone();
         let resolve_keyspace = self.keyspace;
-        let resolve_backoff = self.options.retry_options.region_backoff.clone();
+        let resolve_backoff = self.region_backoff();
+        let resolve_killed = self.vars.killed.clone();
         let resolve_concurrency = pipelined.resolve_lock_concurrency();
         tokio::spawn(async move {
             let plan = PlanBuilder::new(resolve_pd, resolve_keyspace, resolve_request)
                 .retry_multi_region_with_concurrency(resolve_backoff, resolve_concurrency)
+                .with_killed(resolve_killed)
                 .merge(CollectError)
                 .extract_error()
                 .plan();
@@ -4054,6 +4176,7 @@ impl<PdC: PdClient> Committer<PdC> {
 
     async fn prewrite(&mut self) -> Result<Option<Timestamp>> {
         debug!("prewriting");
+        self.vars.check_killed()?;
         let primary_lock = self.primary_key.clone().unwrap();
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = self.calc_txn_lock_ttl();
@@ -4129,29 +4252,36 @@ impl<PdC: PdClient> Committer<PdC> {
                 current_ts.saturating_add(safe_window_ms.saturating_mul(1_u64 << 18));
         }
 
+        let killed = self.vars.killed.clone();
         let response = match self.options.prewrite_encounter_lock_policy {
             PrewriteEncounterLockPolicy::TryResolve => {
                 let lock_resolver_rpc_context = self
                     .options
                     .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+                let lock_backoff = self.lock_backoff();
+                let region_backoff = self.region_backoff();
                 let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
                     .resolve_lock_with_pessimistic_region_in_context(
                         self.resolve_locks_ctx.clone(),
                         self.start_version.clone(),
-                        self.options.retry_options.lock_backoff.clone(),
+                        lock_backoff,
+                        killed.clone(),
                         self.keyspace,
                         true,
                         lock_resolver_rpc_context,
                     )
-                    .retry_multi_region(self.options.retry_options.region_backoff.clone())
+                    .retry_multi_region(region_backoff)
+                    .with_killed(killed.clone())
                     .merge(CollectError)
                     .extract_error()
                     .plan();
                 plan.execute().await?
             }
             PrewriteEncounterLockPolicy::NoResolve => {
+                let region_backoff = self.region_backoff();
                 let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-                    .retry_multi_region(self.options.retry_options.region_backoff.clone())
+                    .retry_multi_region(region_backoff)
+                    .with_killed(killed.clone())
                     .merge(CollectError)
                     .extract_error()
                     .plan();
@@ -4320,15 +4450,20 @@ impl<PdC: PdClient> Committer<PdC> {
         let lock_resolver_rpc_context = self
             .options
             .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_backoff = self.lock_backoff();
+        let region_backoff = self.region_backoff();
+        let killed = self.vars.killed.clone();
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
                 self.start_version.clone(),
-                self.options.retry_options.lock_backoff.clone(),
+                lock_backoff,
+                killed.clone(),
                 self.keyspace,
                 lock_resolver_rpc_context,
             )
-            .retry_multi_region(self.options.retry_options.region_backoff.clone())
+            .retry_multi_region(region_backoff)
+            .with_killed(killed)
             .extract_error()
             .plan();
         plan.execute()
@@ -4420,6 +4555,12 @@ impl<PdC: PdClient> Committer<PdC> {
     async fn commit_secondary(self, commit_version: Timestamp) -> Result<()> {
         debug!("committing secondary");
         let start_version = self.start_version.clone();
+        let lock_backoff = self.lock_backoff();
+        let region_backoff = self.region_backoff();
+        let killed = self.vars.killed.clone();
+        let lock_resolver_rpc_context = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         let mutations_len = self.mutations.len();
         let primary_only = mutations_len == 1;
         #[cfg(not(feature = "integration-tests"))]
@@ -4471,18 +4612,17 @@ impl<PdC: PdClient> Committer<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
             .resolve_lock_in_context(
                 self.resolve_locks_ctx.clone(),
                 start_version,
-                self.options.retry_options.lock_backoff,
+                lock_backoff,
+                killed.clone(),
                 self.keyspace,
                 lock_resolver_rpc_context,
             )
-            .retry_multi_region(self.options.retry_options.region_backoff)
+            .retry_multi_region(region_backoff)
+            .with_killed(killed)
             .extract_error()
             .plan();
         plan.execute().await?;
@@ -4494,6 +4634,9 @@ impl<PdC: PdClient> Committer<PdC> {
         if self.options.kind == TransactionKind::Optimistic && self.mutations.is_empty() {
             return Ok(());
         }
+        let lock_backoff = self.lock_backoff();
+        let region_backoff = self.region_backoff();
+        let killed = self.vars.killed.clone();
         let keys = self
             .mutations
             .into_iter()
@@ -4517,11 +4660,13 @@ impl<PdC: PdClient> Committer<PdC> {
                     .resolve_lock_in_context(
                         self.resolve_locks_ctx.clone(),
                         start_version.clone(),
-                        self.options.retry_options.lock_backoff,
+                        lock_backoff,
+                        killed.clone(),
                         self.keyspace,
                         lock_resolver_rpc_context.clone(),
                     )
-                    .retry_multi_region(self.options.retry_options.region_backoff)
+                    .retry_multi_region(region_backoff)
+                    .with_killed(killed)
                     .extract_error()
                     .plan();
                 plan.execute().await?;
@@ -4541,11 +4686,13 @@ impl<PdC: PdClient> Committer<PdC> {
                     .resolve_lock_in_context(
                         self.resolve_locks_ctx.clone(),
                         start_version.clone(),
-                        self.options.retry_options.lock_backoff,
+                        lock_backoff,
+                        killed.clone(),
                         self.keyspace,
                         lock_resolver_rpc_context.clone(),
                     )
-                    .retry_multi_region(self.options.retry_options.region_backoff)
+                    .retry_multi_region(region_backoff)
+                    .with_killed(killed)
                     .extract_error()
                     .plan();
                 plan.execute().await?;

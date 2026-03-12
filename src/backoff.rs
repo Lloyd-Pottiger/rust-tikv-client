@@ -86,6 +86,38 @@ impl Backoff {
         self.current_attempts
     }
 
+    pub(crate) fn with_base_delay_ms(mut self, base_delay_ms: u64) -> Backoff {
+        let min_base_delay_ms = match self.kind {
+            BackoffKind::EqualJitter => 2,
+            BackoffKind::FullJitter | BackoffKind::DecorrelatedJitter => 1,
+            BackoffKind::NoJitter | BackoffKind::None => 0,
+        };
+
+        let base_delay_ms = base_delay_ms.max(min_base_delay_ms);
+        self.base_delay_ms = base_delay_ms;
+        self.current_delay_ms = base_delay_ms;
+
+        let min_max_delay_ms = match self.kind {
+            BackoffKind::EqualJitter => 2,
+            BackoffKind::FullJitter | BackoffKind::DecorrelatedJitter => 1,
+            BackoffKind::NoJitter | BackoffKind::None => 0,
+        };
+        if self.max_delay_ms < min_max_delay_ms {
+            self.max_delay_ms = min_max_delay_ms;
+        }
+
+        self
+    }
+
+    pub(crate) fn scaled_max_attempts(mut self, multiplier: u32) -> Backoff {
+        let multiplier = multiplier.max(1);
+        if multiplier == 1 {
+            return self;
+        }
+        self.max_attempts = self.max_attempts.saturating_mul(multiplier);
+        self
+    }
+
     /// Don't wait. Usually indicates that we should not retry a request.
     pub const fn no_backoff() -> Backoff {
         Backoff {
@@ -199,6 +231,41 @@ enum BackoffKind {
     FullJitter,
     EqualJitter,
     DecorrelatedJitter,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_base_delay_ms_clamps_equal_jitter_to_two_ms() {
+        let backoff = Backoff::equal_jitter_backoff(2, 10, 3).with_base_delay_ms(1);
+        assert_eq!(backoff.base_delay_ms, 2);
+        assert_eq!(backoff.current_delay_ms, 2);
+    }
+
+    #[test]
+    fn with_base_delay_ms_resets_current_delay() {
+        let mut backoff = Backoff::no_jitter_backoff(5, 10, 10);
+        let _ = backoff.next_delay_duration();
+        assert_eq!(backoff.current_delay_ms, 10);
+
+        let backoff = backoff.with_base_delay_ms(7);
+        assert_eq!(backoff.base_delay_ms, 7);
+        assert_eq!(backoff.current_delay_ms, 7);
+    }
+
+    #[test]
+    fn scaled_max_attempts_multiplies_and_saturates() {
+        let backoff = Backoff::no_jitter_backoff(0, 0, 3).scaled_max_attempts(2);
+        assert_eq!(backoff.max_attempts, 6);
+
+        let backoff = Backoff::no_jitter_backoff(0, 0, u32::MAX).scaled_max_attempts(2);
+        assert_eq!(backoff.max_attempts, u32::MAX);
+
+        let backoff = Backoff::no_jitter_backoff(0, 0, 5).scaled_max_attempts(0);
+        assert_eq!(backoff.max_attempts, 5);
+    }
 }
 
 #[cfg(test)]

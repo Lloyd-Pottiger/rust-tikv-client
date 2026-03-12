@@ -356,6 +356,12 @@ impl SyncTransaction {
         self.inner.len()
     }
 
+    /// Returns true if the transaction has no buffered entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Returns the buffered size (sum of key and value lengths) of this transaction.
     ///
     /// This maps to client-go `KVTxn.Size`.

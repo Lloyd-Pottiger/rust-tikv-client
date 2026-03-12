@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +40,20 @@ use crate::transaction::requests::TransactionStatus;
 use crate::transaction::requests::TransactionStatusKind;
 use crate::Error;
 use crate::Result;
+
+fn check_killed(killed: &Option<Arc<AtomicU32>>) -> Result<()> {
+    let Some(killed) = killed.as_ref() else {
+        return Ok(());
+    };
+    let killed_signal = killed.load(Ordering::SeqCst);
+    if killed_signal == 0 {
+        Ok(())
+    } else {
+        Err(Error::StringError(format!(
+            "query interrupted by signal {killed_signal}"
+        )))
+    }
+}
 
 fn format_key_for_log(key: &[u8]) -> String {
     let prefix_len = key.len().min(16);
@@ -193,12 +208,15 @@ pub async fn resolve_locks(
         pd_client,
         keyspace,
         false,
+        OPTIMISTIC_BACKOFF,
+        None,
         LockResolverRpcContext::default(),
     )
     .await?
     .live_locks)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_locks_with_options(
     ctx: ResolveLocksContext,
     locks: Vec<kvrpcpb::LockInfo>,
@@ -206,6 +224,8 @@ pub(crate) async fn resolve_locks_with_options(
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
     pessimistic_region_resolve: bool,
+    lock_backoff: Backoff,
+    killed: Option<Arc<AtomicU32>>,
     rpc_context: LockResolverRpcContext,
 ) -> Result<ResolveLocksResult> {
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
@@ -267,7 +287,8 @@ pub(crate) async fn resolve_locks_with_options(
             None => {
                 let status = lock_resolver
                     .get_txn_status_from_lock(
-                        OPTIMISTIC_BACKOFF,
+                        lock_backoff.clone(),
+                        killed.clone(),
                         &lock,
                         caller_start_ts,
                         current_ts,
@@ -285,7 +306,8 @@ pub(crate) async fn resolve_locks_with_options(
                                 &lock_resolver.rpc_context,
                                 pd_client.clone(),
                                 keyspace,
-                                OPTIMISTIC_BACKOFF,
+                                lock_backoff.clone(),
+                                killed.clone(),
                             )
                             .await?
                             {
@@ -343,7 +365,8 @@ pub(crate) async fn resolve_locks_with_options(
                         &lock_resolver.rpc_context,
                         pd_client.clone(),
                         keyspace,
-                        OPTIMISTIC_BACKOFF,
+                        lock_backoff.clone(),
+                        killed.clone(),
                     )
                     .await?
                     {
@@ -378,7 +401,8 @@ pub(crate) async fn resolve_locks_with_options(
                 &lock_resolver.rpc_context,
                 pd_client.clone(),
                 keyspace,
-                OPTIMISTIC_BACKOFF,
+                lock_backoff.clone(),
+                killed.clone(),
             )
             .await?;
             if !resolve_lite {
@@ -402,6 +426,8 @@ pub(crate) async fn resolve_locks_for_read(
     timestamp: Timestamp,
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
+    lock_backoff: Backoff,
+    killed: Option<Arc<AtomicU32>>,
     force_resolve_lock_lite: bool,
     lock_tracker: Option<ReadLockTracker>,
     rpc_context: LockResolverRpcContext,
@@ -430,7 +456,8 @@ pub(crate) async fn resolve_locks_for_read(
 
         let status = lock_resolver
             .get_txn_status_from_lock(
-                OPTIMISTIC_BACKOFF,
+                lock_backoff.clone(),
+                killed.clone(),
                 &lock,
                 caller_start_ts,
                 current_ts,
@@ -530,6 +557,8 @@ pub(crate) async fn resolve_locks_for_read(
         let is_txn_file = lock.is_txn_file;
         let rpc_context = lock_resolver.rpc_context.clone();
         let pd_client = pd_client.clone();
+        let lock_backoff = lock_backoff.clone();
+        let killed = killed.clone();
         let task = tokio::spawn(async move {
             if let Err(err) = resolve_lock_with_retry(
                 &key,
@@ -540,7 +569,8 @@ pub(crate) async fn resolve_locks_for_read(
                 &rpc_context,
                 pd_client,
                 keyspace,
-                OPTIMISTIC_BACKOFF,
+                lock_backoff,
+                killed,
             )
             .await
             {
@@ -571,6 +601,7 @@ async fn resolve_lock_with_retry(
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
     mut backoff: Backoff,
+    killed: Option<Arc<AtomicU32>>,
 ) -> Result<RegionVerId> {
     debug!("resolving locks with retry");
     let mut attempt = 0;
@@ -595,6 +626,7 @@ async fn resolve_lock_with_retry(
                     pd_client.invalidate_region_cache(region.clone()).await;
                     match backoff.next_delay_duration() {
                         Some(duration) => {
+                            check_killed(&killed)?;
                             sleep(duration).await;
                             continue;
                         }
@@ -617,6 +649,7 @@ async fn resolve_lock_with_retry(
                             let region_error_resolved =
                                 handle_region_error(pd_client.clone(), *e, store.clone()).await?;
                             if !region_error_resolved {
+                                check_killed(&killed)?;
                                 sleep(duration).await;
                             }
                             continue;
@@ -645,6 +678,7 @@ async fn resolve_lock_with_retry(
                     if let Ok(store_id) = store.region_with_leader.get_store_id() {
                         pd_client.invalidate_store_cache(store_id).await;
                     }
+                    check_killed(&killed)?;
                     sleep(duration).await;
                     continue;
                 }
@@ -688,6 +722,7 @@ async fn rollback_pessimistic_lock_with_retry(
     pd_client: Arc<impl PdClient>,
     keyspace: Keyspace,
     mut backoff: Backoff,
+    killed: Option<Arc<AtomicU32>>,
 ) -> Result<Option<RegionVerId>> {
     // Match client-go `resolvePessimisticLock`: primary key is considered resolved by
     // CheckTxnStatus, so no extra rollback request is needed here.
@@ -715,6 +750,7 @@ async fn rollback_pessimistic_lock_with_retry(
                     pd_client.invalidate_region_cache(region.clone()).await;
                     match backoff.next_delay_duration() {
                         Some(duration) => {
+                            check_killed(&killed)?;
                             sleep(duration).await;
                             continue;
                         }
@@ -732,6 +768,7 @@ async fn rollback_pessimistic_lock_with_retry(
                         let region_error_resolved =
                             handle_region_error(pd_client.clone(), *e, store.clone()).await?;
                         if !region_error_resolved {
+                            check_killed(&killed)?;
                             sleep(duration).await;
                         }
                         continue;
@@ -758,6 +795,7 @@ async fn rollback_pessimistic_lock_with_retry(
                     if let Ok(store_id) = store.region_with_leader.get_store_id() {
                         pd_client.invalidate_store_cache(store_id).await;
                     }
+                    check_killed(&killed)?;
                     sleep(duration).await;
                     continue;
                 }
@@ -1302,6 +1340,8 @@ impl LockResolver {
                 pd_client.clone(),
                 keyspace,
                 pessimistic_region_resolve,
+                backoff.clone(),
+                None,
                 rpc_context.clone(),
             )
             .await
@@ -1356,6 +1396,8 @@ impl LockResolver {
             pd_client,
             keyspace,
             pessimistic_region_resolve,
+            OPTIMISTIC_BACKOFF,
+            None,
             self.rpc_context.clone(),
         )
         .await
@@ -1381,6 +1423,8 @@ impl LockResolver {
             timestamp,
             pd_client,
             keyspace,
+            OPTIMISTIC_BACKOFF,
+            None,
             force_resolve_lock_lite,
             None,
             self.rpc_context.clone(),
@@ -1765,6 +1809,7 @@ impl LockResolver {
     async fn get_txn_status_from_lock(
         &self,
         mut backoff: Backoff,
+        killed: Option<Arc<AtomicU32>>,
         lock: &kvrpcpb::LockInfo,
         caller_start_ts: u64,
         current_ts: u64,
@@ -1879,6 +1924,7 @@ impl LockResolver {
                     }
 
                     if let Some(duration) = backoff.next_delay_duration() {
+                        check_killed(&killed)?;
                         sleep(duration).await;
                         continue;
                     }
@@ -2090,6 +2136,8 @@ mod tests {
             client,
             Keyspace::Disable,
             false,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             LockResolverRpcContext::default(),
         )
         .await
@@ -2263,6 +2311,8 @@ mod tests {
             client,
             Keyspace::Disable,
             false,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             rpc_context,
         )
         .await
@@ -2331,6 +2381,8 @@ mod tests {
             client,
             Keyspace::Disable,
             false,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             rpc_context,
         )
         .await
@@ -2866,6 +2918,7 @@ mod tests {
             client.clone(),
             keyspace,
             backoff.clone(),
+            None,
         )
         .await
         .unwrap();
@@ -2888,6 +2941,7 @@ mod tests {
             client,
             keyspace,
             backoff,
+            None,
         )
         .await
         .expect_err("should return error");
@@ -2981,6 +3035,8 @@ mod tests {
             client,
             Keyspace::Disable,
             false,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             LockResolverRpcContext::default(),
         )
         .await
@@ -3398,6 +3454,8 @@ mod tests {
             Timestamp::default(),
             client,
             Keyspace::Disable,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             true,
             Some(lock_tracker.clone()),
             LockResolverRpcContext::default(),
@@ -3521,6 +3579,8 @@ mod tests {
             Timestamp::from_version(5),
             client,
             Keyspace::Disable,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             false,
             Some(lock_tracker),
             LockResolverRpcContext::default(),
@@ -3620,6 +3680,8 @@ mod tests {
             Timestamp::from_version(10),
             client,
             Keyspace::Disable,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             true,
             None,
             LockResolverRpcContext::default(),
@@ -3852,6 +3914,8 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             LockResolverRpcContext::default(),
         )
         .await
@@ -4248,6 +4312,8 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             LockResolverRpcContext::default(),
         )
         .await
@@ -4322,6 +4388,8 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             LockResolverRpcContext::default(),
         )
         .await
@@ -4392,6 +4460,8 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             LockResolverRpcContext::default(),
         )
         .await
@@ -4550,6 +4620,8 @@ mod tests {
             client,
             Keyspace::Disable,
             true,
+            Backoff::no_jitter_backoff(0, 0, 10),
+            None,
             LockResolverRpcContext::default(),
         )
         .await

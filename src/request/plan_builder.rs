@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use super::plan::PreserveShard;
@@ -100,6 +101,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         ctx: ResolveLocksContext,
         timestamp: Timestamp,
         backoff: Backoff,
+        killed: Option<Arc<AtomicU32>>,
         keyspace: Keyspace,
         force_resolve_lock_lite: bool,
         lock_tracker: ReadLockTracker,
@@ -116,6 +118,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 ctx,
                 timestamp,
                 backoff,
+                killed,
                 pd_client: self.pd_client,
                 keyspace,
                 force_resolve_lock_lite,
@@ -131,6 +134,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         ctx: ResolveLocksContext,
         timestamp: Timestamp,
         backoff: Backoff,
+        killed: Option<Arc<AtomicU32>>,
         keyspace: Keyspace,
         rpc_context: LockResolverRpcContext,
     ) -> PlanBuilder<PdC, ResolveLockInContext<P, PdC>, Ph>
@@ -142,17 +146,20 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
             ctx,
             timestamp,
             backoff,
+            killed,
             keyspace,
             false,
             rpc_context,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_lock_with_pessimistic_region_in_context(
         self,
         ctx: ResolveLocksContext,
         timestamp: Timestamp,
         backoff: Backoff,
+        killed: Option<Arc<AtomicU32>>,
         keyspace: Keyspace,
         pessimistic_region_resolve: bool,
         rpc_context: LockResolverRpcContext,
@@ -168,6 +175,7 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 ctx,
                 timestamp,
                 backoff,
+                killed,
                 pd_client: self.pd_client,
                 keyspace,
                 pessimistic_region_resolve,
@@ -406,6 +414,7 @@ where
                 inner: self.plan,
                 pd_client: self.pd_client,
                 backoff,
+                killed: None,
                 concurrency,
                 preserve_region_results,
                 replica_read,
@@ -414,6 +423,17 @@ where
             },
             phantom: PhantomData,
         }
+    }
+}
+
+impl<PdC: PdClient, P: Plan + Shardable + HasKvContext>
+    PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted>
+where
+    P::Result: HasKeyErrors + HasRegionError,
+{
+    pub(crate) fn with_killed(mut self, killed: Option<Arc<AtomicU32>>) -> Self {
+        self.plan.killed = killed;
+        self
     }
 }
 
