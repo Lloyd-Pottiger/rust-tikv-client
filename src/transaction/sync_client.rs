@@ -212,6 +212,18 @@ impl SyncTransactionClient {
         safe_block_on(&self.runtime, self.client.min_safe_ts())
     }
 
+    /// Get the minimum `safe_ts` for a transaction scope.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::min_safe_ts_with_txn_scope`](crate::TransactionClient::min_safe_ts_with_txn_scope).
+    pub fn min_safe_ts_with_txn_scope(&self, txn_scope: impl AsRef<str>) -> Result<u64> {
+        let txn_scope = txn_scope.as_ref().to_owned();
+        safe_block_on(
+            &self.runtime,
+            self.client.min_safe_ts_with_txn_scope(txn_scope),
+        )
+    }
+
     /// Request garbage collection (GC) of the TiKV cluster.
     ///
     /// This is a synchronous version of [`TransactionClient::gc`](crate::TransactionClient::gc).

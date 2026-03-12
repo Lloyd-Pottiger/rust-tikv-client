@@ -10,7 +10,8 @@ use crate::backoff::Backoff;
 use crate::pd::PdClient;
 use crate::request::plan::ResolveLockInContext;
 use crate::request::plan::{
-    CleanupLocks, HasKvContext, RetryableAllStores, DEFAULT_MULTI_REGION_CONCURRENCY,
+    CleanupLocks, HasKvContext, RetryableAllStores, RetryableStores,
+    DEFAULT_MULTI_REGION_CONCURRENCY,
 };
 use crate::request::shard::HasNextBatch;
 use crate::request::Dispatch;
@@ -31,6 +32,7 @@ use crate::store::HasKeyErrors;
 use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
 use crate::store::RegionStore;
+use crate::store::Store;
 use crate::transaction::HasLocks;
 use crate::transaction::LockResolverRpcContext;
 use crate::transaction::ReadLockTracker;
@@ -460,6 +462,22 @@ where
             plan: RetryableAllStores {
                 inner: self.plan,
                 pd_client: self.pd_client,
+                backoff,
+            },
+            phantom: PhantomData,
+        }
+    }
+
+    pub fn stores(
+        self,
+        stores: Vec<Store>,
+        backoff: Backoff,
+    ) -> PlanBuilder<PdC, RetryableStores<P>, Targetted> {
+        PlanBuilder {
+            pd_client: self.pd_client.clone(),
+            plan: RetryableStores {
+                inner: self.plan,
+                stores: Arc::new(stores),
                 backoff,
             },
             phantom: PhantomData,

@@ -243,6 +243,47 @@ impl<PdC: PdClient> Client<PdC> {
         plan.execute().await
     }
 
+    /// Get the minimum `safe_ts` for a transaction scope.
+    ///
+    /// When `txn_scope` is `"global"` (or empty), this behaves the same as [`Client::min_safe_ts`].
+    /// Otherwise, only stores whose `zone` label matches `txn_scope` are considered, matching
+    /// client-go `GetMinSafeTS(txnScope)` behavior.
+    ///
+    /// Returns `0` when the minimum safe-ts cannot be determined, or when no stores match the
+    /// provided scope.
+    pub async fn min_safe_ts_with_txn_scope(&self, txn_scope: impl AsRef<str>) -> Result<u64> {
+        const ZONE_LABEL_KEY: &str = "zone";
+
+        let txn_scope = txn_scope.as_ref();
+        if txn_scope.is_empty() || txn_scope == "global" {
+            return self.min_safe_ts().await;
+        }
+
+        let stores = self.rpc.all_stores().await?;
+        let stores = stores
+            .into_iter()
+            .filter(|store| {
+                store
+                    .meta
+                    .labels
+                    .iter()
+                    .any(|label| label.key == ZONE_LABEL_KEY && label.value == txn_scope)
+            })
+            .collect::<Vec<_>>();
+        if stores.is_empty() {
+            return Ok(0);
+        }
+
+        let request = crate::proto::kvrpcpb::StoreSafeTsRequest {
+            key_range: Some(crate::proto::kvrpcpb::KeyRange::default()),
+        };
+        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+            .stores(stores, DEFAULT_STORE_BACKOFF)
+            .merge(Collect)
+            .plan();
+        plan.execute().await
+    }
+
     /// Create a new 'get' request.
     ///
     /// Once resolved this request will result in the fetching of the value associated with the
@@ -961,6 +1002,7 @@ struct ScanInnerArgs {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -968,6 +1010,7 @@ mod tests {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb;
+    use crate::proto::metapb;
     use crate::Result;
 
     fn new_mock_raw_client_with_scan_data(
@@ -1108,6 +1151,70 @@ mod tests {
         };
 
         assert_eq!(client.min_safe_ts().await?, 42);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_min_safe_ts_with_txn_scope_filters_stores_by_zone_label() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_captured = calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::StoreSafeTsRequest>()
+                    .expect("expected store safe-ts request");
+                let range = req.key_range.as_ref().expect("expected key_range");
+                assert!(range.start_key.is_empty());
+                assert!(range.end_key.is_empty());
+
+                calls_captured.fetch_add(1, Ordering::SeqCst);
+                let resp = kvrpcpb::StoreSafeTsResponse { safe_ts: 42 };
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                labels: vec![metapb::StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "dc1".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                labels: vec![metapb::StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "dc2".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .await;
+
+        let client = Client {
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        };
+
+        assert_eq!(client.min_safe_ts_with_txn_scope("dc1").await?, 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert_eq!(client.min_safe_ts_with_txn_scope("dc2").await?, 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        assert_eq!(client.min_safe_ts_with_txn_scope("dc3").await?, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        assert_eq!(client.min_safe_ts_with_txn_scope("global").await?, 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+
         Ok(())
     }
 

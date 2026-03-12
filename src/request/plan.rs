@@ -1658,6 +1658,87 @@ where
     }
 }
 
+pub struct RetryableStores<P: Plan> {
+    pub(super) inner: P,
+    pub stores: Arc<Vec<Store>>,
+    pub backoff: Backoff,
+}
+
+impl<P: Plan> Clone for RetryableStores<P> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            stores: self.stores.clone(),
+            backoff: self.backoff.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl<P: Plan + StoreRequest> Plan for RetryableStores<P>
+where
+    P::Result: HasKeyErrors + HasRegionError,
+{
+    type Result = Vec<Result<P::Result>>;
+
+    async fn execute(&self) -> Result<Self::Result> {
+        let concurrency_permits = Arc::new(Semaphore::new(MULTI_STORES_CONCURRENCY));
+        let mut handles = Vec::with_capacity(self.stores.len());
+        for store in self.stores.iter().cloned() {
+            let mut clone = self.inner.clone();
+            clone.apply_store(&store);
+            let handle = tokio::spawn(Self::single_store_handler(
+                clone,
+                self.backoff.clone(),
+                concurrency_permits.clone(),
+            ));
+            handles.push(handle);
+        }
+        let results = try_join_all(handles).await?;
+        Ok(results.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl<P: Plan> RetryableStores<P>
+where
+    P::Result: HasKeyErrors + HasRegionError,
+{
+    async fn single_store_handler(
+        plan: P,
+        mut backoff: Backoff,
+        permits: Arc<Semaphore>,
+    ) -> Result<P::Result> {
+        loop {
+            let permit = permits.acquire().await.map_err(|_| Error::InternalError {
+                message: "store request concurrency semaphore closed".to_owned(),
+            })?;
+            let res = plan.execute().await;
+            drop(permit);
+
+            match res {
+                Ok(mut resp) => {
+                    if let Some(e) = resp.key_errors() {
+                        return Err(Error::MultipleKeyErrors(e));
+                    } else if let Some(e) = resp.region_error() {
+                        // Store request should not return region error.
+                        return Err(Error::RegionError(Box::new(e)));
+                    } else {
+                        return Ok(resp);
+                    }
+                }
+                Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
+                    Some(duration) => {
+                        sleep(duration).await;
+                        continue;
+                    }
+                    None => return Err(e),
+                },
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
 /// A technique for merging responses into a single result (with type `Out`).
 pub trait Merge<In>: Sized + Clone + Send + Sync + 'static {
     type Out: Send;
