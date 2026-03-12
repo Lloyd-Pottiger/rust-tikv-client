@@ -2239,6 +2239,37 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.buffer.mutation_size()
     }
 
+    /// Set a hook that is triggered when the local mutation buffer memory footprint changes.
+    ///
+    /// This maps to client-go `KVTxn.SetMemoryFootprintChangeHook`.
+    pub fn set_memory_footprint_change_hook<F>(&mut self, hook: F)
+    where
+        F: Fn(u64) + Send + Sync + 'static,
+    {
+        self.buffer.set_memory_footprint_change_hook(Arc::new(hook));
+    }
+
+    /// Clear the memory footprint change hook.
+    pub fn clear_memory_footprint_change_hook(&mut self) {
+        self.buffer.clear_memory_footprint_change_hook();
+    }
+
+    /// Returns whether the memory footprint change hook is set.
+    ///
+    /// This maps to client-go `KVTxn.MemHookSet`.
+    #[must_use]
+    pub fn mem_hook_set(&self) -> bool {
+        self.buffer.mem_hook_set()
+    }
+
+    /// Returns the current memory footprint of the local mutation buffer.
+    ///
+    /// This maps to client-go `KVTxn.Mem`.
+    #[must_use]
+    pub fn mem(&self) -> u64 {
+        self.buffer.mem()
+    }
+
     /// Send a heart beat message to keep the transaction alive on the server and update its TTL.
     ///
     /// Returns the TTL set on the transaction's locks by TiKV.
@@ -8854,6 +8885,37 @@ mod tests {
         txn.delete("k".to_owned()).await.unwrap();
         assert_eq!(txn.len(), 2);
         assert_eq!(txn.size(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_memory_footprint_change_hook_reports_mem() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let mem_reported = Arc::new(AtomicU64::new(0));
+        let mem_reported_cloned = mem_reported.clone();
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        assert!(!txn.mem_hook_set());
+
+        txn.set_memory_footprint_change_hook(move |mem| {
+            mem_reported_cloned.store(mem, Ordering::SeqCst);
+        });
+        assert!(txn.mem_hook_set());
+        assert_eq!(mem_reported.load(Ordering::SeqCst), 0);
+
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        let reported = mem_reported.load(Ordering::SeqCst);
+        assert!(reported > 0);
+        assert_eq!(reported, txn.mem());
+        assert_eq!(txn.mem(), txn.size());
+
+        txn.clear_memory_footprint_change_hook();
+        assert!(!txn.mem_hook_set());
     }
 
     #[test]

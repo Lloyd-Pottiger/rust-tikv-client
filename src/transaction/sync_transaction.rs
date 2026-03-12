@@ -66,6 +66,37 @@ impl SyncTransaction {
         self.inner.clear_commit_callback();
     }
 
+    /// Set a hook that is triggered when the local mutation buffer memory footprint changes.
+    ///
+    /// This maps to client-go `KVTxn.SetMemoryFootprintChangeHook`.
+    pub fn set_memory_footprint_change_hook<F>(&mut self, hook: F)
+    where
+        F: Fn(u64) + Send + Sync + 'static,
+    {
+        self.inner.set_memory_footprint_change_hook(hook);
+    }
+
+    /// Clear the memory footprint change hook.
+    pub fn clear_memory_footprint_change_hook(&mut self) {
+        self.inner.clear_memory_footprint_change_hook();
+    }
+
+    /// Returns whether the memory footprint change hook is set.
+    ///
+    /// This maps to client-go `KVTxn.MemHookSet`.
+    #[must_use]
+    pub fn mem_hook_set(&self) -> bool {
+        self.inner.mem_hook_set()
+    }
+
+    /// Returns the current memory footprint of the local mutation buffer.
+    ///
+    /// This maps to client-go `KVTxn.Mem`.
+    #[must_use]
+    pub fn mem(&self) -> u64 {
+        self.inner.mem()
+    }
+
     /// Enable or disable async commit.
     ///
     /// This maps to client-go `KVTxn.SetEnableAsyncCommit`.

@@ -3,6 +3,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::Arc;
 
 use crate::proto::kvrpcpb;
 use crate::BoundRange;
@@ -13,11 +14,16 @@ use crate::Value;
 
 use super::transaction::Mutation;
 
+type MemoryFootprintChangeHook = Arc<dyn Fn(u64) + Send + Sync>;
+
 /// A caching layer which buffers reads and writes in a transaction.
 pub struct Buffer {
     primary_key: Option<Key>,
     entry_map: BTreeMap<Key, BufferEntry>,
     is_pessimistic: bool,
+    mutation_count: usize,
+    mutation_size: u64,
+    memory_footprint_change_hook: Option<MemoryFootprintChangeHook>,
 }
 
 impl Buffer {
@@ -26,29 +32,34 @@ impl Buffer {
             primary_key: None,
             entry_map: BTreeMap::new(),
             is_pessimistic,
+            mutation_count: 0,
+            mutation_size: 0,
+            memory_footprint_change_hook: None,
         }
     }
 
     pub(crate) fn mutation_count(&self) -> usize {
-        self.entry_map
-            .values()
-            .filter(|entry| !matches!(entry, BufferEntry::Cached(_)))
-            .count()
+        self.mutation_count
     }
 
     pub(crate) fn mutation_size(&self) -> u64 {
-        self.entry_map
-            .iter()
-            .map(|(key, entry)| match entry {
-                BufferEntry::Cached(_) => 0,
-                BufferEntry::Put(value) | BufferEntry::Insert(value) => {
-                    u64::try_from(key.len() + value.len()).unwrap_or(u64::MAX)
-                }
-                BufferEntry::Del | BufferEntry::Locked(_) | BufferEntry::CheckNotExist => {
-                    u64::try_from(key.len()).unwrap_or(u64::MAX)
-                }
-            })
-            .sum()
+        self.mutation_size
+    }
+
+    pub(crate) fn set_memory_footprint_change_hook(&mut self, hook: MemoryFootprintChangeHook) {
+        self.memory_footprint_change_hook = Some(hook);
+    }
+
+    pub(crate) fn clear_memory_footprint_change_hook(&mut self) {
+        self.memory_footprint_change_hook = None;
+    }
+
+    pub(crate) fn mem_hook_set(&self) -> bool {
+        self.memory_footprint_change_hook.is_some()
+    }
+
+    pub(crate) fn mem(&self) -> u64 {
+        self.mutation_size
     }
 
     /// Get the primary key of the buffer.
@@ -204,70 +215,96 @@ impl Buffer {
     /// Lock the given key if necessary.
     pub fn lock(&mut self, key: Key) {
         self.primary_key.get_or_insert_with(|| key.clone());
-        let value = self
-            .entry_map
-            .entry(key)
-            // Mutated keys don't need a lock.
-            .or_insert(BufferEntry::Locked(None));
-        // But values which we have only read, but not written, do.
-        if let BufferEntry::Cached(v) = value {
-            *value = BufferEntry::Locked(Some(v.take()))
+        let key_len = u64::try_from(key.len()).unwrap_or(u64::MAX);
+        let prev_mem = self.mutation_size;
+
+        let mut should_report = false;
+        match self.entry_map.entry(key) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(BufferEntry::Locked(None));
+                self.mutation_count = self.mutation_count.saturating_add(1);
+                self.mutation_size = self.mutation_size.saturating_add(key_len);
+                should_report = prev_mem != self.mutation_size;
+            }
+            Entry::Occupied(mut occupied) => {
+                if matches!(occupied.get(), BufferEntry::Cached(_)) {
+                    let entry = occupied.get_mut();
+                    let BufferEntry::Cached(cached_value) = entry else {
+                        return;
+                    };
+                    let cached_value = cached_value.take();
+                    *entry = BufferEntry::Locked(Some(cached_value));
+                    self.mutation_count = self.mutation_count.saturating_add(1);
+                    self.mutation_size = self.mutation_size.saturating_add(key_len);
+                    should_report = prev_mem != self.mutation_size;
+                }
+            }
+        }
+
+        if should_report {
+            self.report_memory_footprint();
         }
     }
 
     /// Unlock the given key if locked.
     pub fn unlock(&mut self, key: &Key) {
-        if let Some(value) = self.entry_map.get_mut(key) {
-            if let BufferEntry::Locked(v) = value {
-                if let Some(v) = v {
-                    *value = BufferEntry::Cached(v.take());
-                } else {
-                    self.entry_map.remove(key);
-                }
+        let was_locked = matches!(self.entry_map.get(key), Some(BufferEntry::Locked(_)));
+        if !was_locked {
+            return;
+        }
+
+        let prev_mem = self.mutation_size;
+        let key_len = u64::try_from(key.len()).unwrap_or(u64::MAX);
+
+        let old_entry = self.entry_map.remove(key);
+        if let Some(BufferEntry::Locked(cached_value)) = old_entry {
+            if let Some(cached_value) = cached_value {
+                self.entry_map
+                    .insert(key.clone(), BufferEntry::Cached(cached_value));
             }
+            self.mutation_count = self.mutation_count.saturating_sub(1);
+            self.mutation_size = self.mutation_size.saturating_sub(key_len);
+            if prev_mem != self.mutation_size {
+                self.report_memory_footprint();
+            }
+        } else if let Some(entry) = old_entry {
+            self.entry_map.insert(key.clone(), entry);
         }
     }
 
     /// Put a value into the buffer (does not write through).
     pub fn put(&mut self, key: Key, value: Value) {
-        let mut entry = self.entry_map.entry(key.clone());
-        match entry {
-            Entry::Occupied(ref mut o)
-                if matches!(o.get(), BufferEntry::Insert(_))
-                    || matches!(o.get(), BufferEntry::CheckNotExist) =>
-            {
-                o.insert(BufferEntry::Insert(value));
-            }
-            _ => self.insert_entry(key, BufferEntry::Put(value)),
+        if matches!(
+            self.entry_map.get(&key),
+            Some(BufferEntry::Insert(_)) | Some(BufferEntry::CheckNotExist)
+        ) {
+            self.insert_entry(key, BufferEntry::Insert(value));
+            return;
         }
+        self.insert_entry(key, BufferEntry::Put(value));
     }
 
     /// Mark a value as Insert mutation into the buffer (does not write through).
     pub fn insert(&mut self, key: Key, value: Value) {
-        let mut entry = self.entry_map.entry(key.clone());
-        match entry {
-            Entry::Occupied(ref mut o) if matches!(o.get(), BufferEntry::Del) => {
-                o.insert(BufferEntry::Put(value));
-            }
-            _ => self.insert_entry(key, BufferEntry::Insert(value)),
+        if matches!(self.entry_map.get(&key), Some(BufferEntry::Del)) {
+            self.insert_entry(key, BufferEntry::Put(value));
+            return;
         }
+        self.insert_entry(key, BufferEntry::Insert(value));
     }
 
     /// Mark a value as deleted.
     pub fn delete(&mut self, key: Key) {
-        let is_pessimistic = self.is_pessimistic;
-        let mut entry = self.entry_map.entry(key.clone());
-
-        match entry {
-            Entry::Occupied(ref mut o)
-                if !is_pessimistic
-                    && (matches!(o.get(), BufferEntry::Insert(_))
-                        || matches!(o.get(), BufferEntry::CheckNotExist)) =>
-            {
-                o.insert(BufferEntry::CheckNotExist);
-            }
-            _ => self.insert_entry(key, BufferEntry::Del),
+        if !self.is_pessimistic
+            && matches!(
+                self.entry_map.get(&key),
+                Some(BufferEntry::Insert(_)) | Some(BufferEntry::CheckNotExist)
+            )
+        {
+            self.insert_entry(key, BufferEntry::CheckNotExist);
+            return;
         }
+        self.insert_entry(key, BufferEntry::Del);
     }
 
     pub(crate) fn mutate(&mut self, m: Mutation) {
@@ -289,6 +326,7 @@ impl Buffer {
     ///
     /// This is used by pipelined transactions that flush buffered mutations during execution.
     pub(crate) fn take_mutations(&mut self) -> Vec<kvrpcpb::Mutation> {
+        let prev_mem = self.mutation_size;
         let mut cached_entries = BTreeMap::new();
         let mut mutations = Vec::new();
 
@@ -306,6 +344,11 @@ impl Buffer {
         }
 
         self.entry_map = cached_entries;
+        self.mutation_count = 0;
+        self.mutation_size = 0;
+        if prev_mem != self.mutation_size {
+            self.report_memory_footprint();
+        }
         mutations
     }
 
@@ -354,7 +397,46 @@ impl Buffer {
         if !matches!(entry, BufferEntry::Cached(_) | BufferEntry::CheckNotExist) {
             self.primary_key.get_or_insert_with(|| key.clone());
         }
-        self.entry_map.insert(key, entry);
+        let key_len = key.len();
+        let prev_mem = self.mutation_size;
+        let new_is_mutation = !matches!(entry, BufferEntry::Cached(_));
+        let new_size = mutation_size_for_entry(key_len, &entry);
+
+        if let Some(old_entry) = self.entry_map.insert(key, entry) {
+            if !matches!(old_entry, BufferEntry::Cached(_)) {
+                self.mutation_count = self.mutation_count.saturating_sub(1);
+                let old_size = mutation_size_for_entry(key_len, &old_entry);
+                self.mutation_size = self.mutation_size.saturating_sub(old_size);
+            }
+        }
+
+        if new_is_mutation {
+            self.mutation_count = self.mutation_count.saturating_add(1);
+            self.mutation_size = self.mutation_size.saturating_add(new_size);
+        }
+
+        if prev_mem != self.mutation_size {
+            self.report_memory_footprint();
+        }
+    }
+
+    fn report_memory_footprint(&self) {
+        let Some(hook) = self.memory_footprint_change_hook.as_ref() else {
+            return;
+        };
+        hook(self.mutation_size);
+    }
+}
+
+fn mutation_size_for_entry(key_len: usize, entry: &BufferEntry) -> u64 {
+    match entry {
+        BufferEntry::Cached(_) => 0,
+        BufferEntry::Put(value) | BufferEntry::Insert(value) => {
+            u64::try_from(key_len.saturating_add(value.len())).unwrap_or(u64::MAX)
+        }
+        BufferEntry::Del | BufferEntry::Locked(_) | BufferEntry::CheckNotExist => {
+            u64::try_from(key_len).unwrap_or(u64::MAX)
+        }
     }
 }
 
