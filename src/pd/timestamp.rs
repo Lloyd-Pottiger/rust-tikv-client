@@ -13,6 +13,8 @@
 
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use futures::pin_mut;
@@ -111,6 +113,7 @@ async fn run_tso(
     // more requests from the bounded channel. This waker is used to wake up the sending future
     // if the queue containing pending requests is no longer full.
     let sending_future_waker = Arc::new(AtomicWaker::new());
+    let request_rx_closed = Arc::new(AtomicBool::new(false));
 
     let request_stream = TsoRequestStream {
         cluster_id,
@@ -119,6 +122,7 @@ async fn run_tso(
         pending_requests: pending_requests.clone(),
         self_waker: sending_future_waker.clone(),
         max_pending_count,
+        request_rx_closed: request_rx_closed.clone(),
     };
 
     // let send_requests = rpc_sender.send_all(&mut request_stream);
@@ -134,9 +138,18 @@ async fn run_tso(
         // Wake up the sending future blocked by too many pending requests or locked.
         sending_future_waker.wake();
     }
-    // TODO: distinguish between unexpected stream termination and expected end of test
-    info!("TSO stream terminated");
-    Ok(())
+    let pending_len = pending_requests.lock().await.len();
+    if pending_len != 0 {
+        return Err(internal_err!(
+            "TSO stream terminated with {pending_len} pending request group(s)"
+        ));
+    }
+    if request_rx_closed.load(Ordering::Relaxed) {
+        info!("TSO stream terminated (request channel closed)");
+        Ok(())
+    } else {
+        Err(internal_err!("TSO stream terminated unexpectedly"))
+    }
 }
 
 struct RequestGroup {
@@ -153,6 +166,7 @@ struct TsoRequestStream {
     pending_requests: Arc<Mutex<VecDeque<RequestGroup>>>,
     self_waker: Arc<AtomicWaker>,
     max_pending_count: usize,
+    request_rx_closed: Arc<AtomicBool>,
 }
 
 impl Stream for TsoRequestStream {
@@ -179,8 +193,14 @@ impl Stream for TsoRequestStream {
             } else {
                 match this.request_rx.poll_recv(cx) {
                     Poll::Ready(Some(req)) => Some(req),
-                    Poll::Ready(None) if requests.is_empty() => return Poll::Ready(None),
-                    Poll::Ready(None) => break,
+                    Poll::Ready(None) if requests.is_empty() => {
+                        this.request_rx_closed.store(true, Ordering::Relaxed);
+                        return Poll::Ready(None);
+                    }
+                    Poll::Ready(None) => {
+                        this.request_rx_closed.store(true, Ordering::Relaxed);
+                        break;
+                    }
                     Poll::Pending if requests.is_empty() => {
                         // Set the waker to the context, then the stream can be waked up after the pending queue
                         // is no longer full.
@@ -307,6 +327,7 @@ mod tests {
         let (request_tx, request_rx) = mpsc::channel(MAX_BATCH_SIZE);
         let pending_requests = Arc::new(Mutex::new(VecDeque::new()));
         let self_waker = Arc::new(AtomicWaker::new());
+        let request_rx_closed = Arc::new(AtomicBool::new(false));
 
         let stream = TsoRequestStream {
             cluster_id: 42,
@@ -315,6 +336,7 @@ mod tests {
             pending_requests: pending_requests.clone(),
             self_waker,
             max_pending_count: 16,
+            request_rx_closed,
         };
         futures::pin_mut!(stream);
 
@@ -359,6 +381,30 @@ mod tests {
         assert_eq!(pending[0].requests.len(), 2);
         assert_eq!(pending[1].tso_request.dc_location, "dc2");
         assert_eq!(pending[1].requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_tso_request_stream_marks_request_channel_closed() {
+        let (request_tx, request_rx) = mpsc::channel(MAX_BATCH_SIZE);
+        drop(request_tx);
+
+        let pending_requests = Arc::new(Mutex::new(VecDeque::new()));
+        let self_waker = Arc::new(AtomicWaker::new());
+        let request_rx_closed = Arc::new(AtomicBool::new(false));
+
+        let stream = TsoRequestStream {
+            cluster_id: 42,
+            request_rx,
+            buffered_requests: VecDeque::new(),
+            pending_requests,
+            self_waker,
+            max_pending_count: 16,
+            request_rx_closed: request_rx_closed.clone(),
+        };
+        futures::pin_mut!(stream);
+
+        assert!(stream.next().await.is_none());
+        assert!(request_rx_closed.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
