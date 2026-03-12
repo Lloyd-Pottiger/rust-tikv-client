@@ -449,7 +449,7 @@ impl<PdC: PdClient> Client<PdC> {
     ) -> Result<Vec<ProtoLockInfo>> {
         use crate::request::TruncateKeyspace;
 
-        let mut lock_resolver = self.bound_lock_resolver();
+        let lock_resolver = self.bound_lock_resolver();
         let live_locks = lock_resolver
             .resolve_locks(
                 locks.encode_keyspace(self.keyspace, KeyMode::Txn),
@@ -897,7 +897,7 @@ mod tests {
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
 
-        let mut lock_resolver = client.lock_resolver();
+        let lock_resolver = client.lock_resolver();
         assert!(lock_resolver.resolving().await.is_empty());
     }
 }

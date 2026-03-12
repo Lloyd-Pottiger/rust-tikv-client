@@ -1881,7 +1881,7 @@ where
         let mut backoff = self.backoff.clone();
         let mut forced_leader = false;
         let caller_start_ts = self.timestamp.version();
-        let mut lock_resolver = crate::transaction::LockResolver::new(self.ctx.clone());
+        let lock_resolver = crate::transaction::LockResolver::new(self.ctx.clone());
         let mut resolving_record_token: Option<usize> = None;
 
         let (resolved_locks, committed_locks) = self.lock_tracker.snapshot().await;

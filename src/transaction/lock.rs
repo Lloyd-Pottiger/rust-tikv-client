@@ -1005,7 +1005,7 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
 
     /// Records the locks being resolved for a given `caller_start_ts` and returns a token.
     pub async fn record_resolving_locks(
-        &mut self,
+        &self,
         locks: &[kvrpcpb::LockInfo],
         caller_start_ts: u64,
     ) -> usize {
@@ -1016,7 +1016,7 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
 
     /// Updates the recorded resolving-lock information for `caller_start_ts` and `token`.
     pub async fn update_resolving_locks(
-        &mut self,
+        &self,
         locks: &[kvrpcpb::LockInfo],
         caller_start_ts: u64,
         token: usize,
@@ -1027,12 +1027,12 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
     }
 
     /// Removes the recorded resolving-lock information for `caller_start_ts` and `token`.
-    pub async fn resolve_locks_done(&mut self, caller_start_ts: u64, token: usize) {
+    pub async fn resolve_locks_done(&self, caller_start_ts: u64, token: usize) {
         self.inner.resolve_locks_done(caller_start_ts, token).await
     }
 
     /// Returns the locks currently being resolved.
-    pub async fn resolving(&mut self) -> Vec<ResolvingLock> {
+    pub async fn resolving(&self) -> Vec<ResolvingLock> {
         self.inner.resolving().await
     }
 
@@ -1041,7 +1041,7 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
     /// This retries until either all locks are resolved or the provided `backoff` is exhausted.
     /// The `timestamp` is used as the caller start timestamp when checking transaction status.
     pub async fn resolve_locks(
-        &mut self,
+        &self,
         locks: Vec<kvrpcpb::LockInfo>,
         timestamp: Timestamp,
         backoff: Backoff,
@@ -1064,7 +1064,7 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
     /// This does not perform the caller-side sleep loop: the returned `ms_before_txn_expired` can
     /// be used by the caller to decide whether to backoff/sleep and retry.
     pub async fn resolve_locks_once(
-        &mut self,
+        &self,
         locks: Vec<kvrpcpb::LockInfo>,
         timestamp: Timestamp,
         pessimistic_region_resolve: bool,
@@ -1087,7 +1087,7 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
     ///
     /// Note: non-pessimistic lock cleanup is performed asynchronously in a background task.
     pub async fn resolve_locks_for_read(
-        &mut self,
+        &self,
         locks: Vec<kvrpcpb::LockInfo>,
         timestamp: Timestamp,
         force_resolve_lock_lite: bool,
@@ -1105,7 +1105,7 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
 
     /// Get the transaction status for `txn_id` (start TS) and `primary` key.
     pub async fn get_txn_status(
-        &mut self,
+        &self,
         txn_id: u64,
         primary: Vec<u8>,
         caller_start_ts: u64,
@@ -1123,7 +1123,7 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
 
     /// _Cleanup_ the given locks. Returns whether all the given locks are resolved.
     pub async fn cleanup_locks(
-        &mut self,
+        &self,
         store: RegionStore,
         locks: Vec<kvrpcpb::LockInfo>,
     ) -> Result<()> {
@@ -1134,7 +1134,7 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
 
     #[allow(clippy::too_many_arguments)]
     pub async fn check_txn_status(
-        &mut self,
+        &self,
         txn_id: u64,
         primary: Vec<u8>,
         caller_start_ts: u64,
@@ -1177,7 +1177,7 @@ impl LockResolver {
     ///
     /// This mirrors client-go `LockResolver.RecordResolvingLocks`.
     pub async fn record_resolving_locks(
-        &mut self,
+        &self,
         locks: &[kvrpcpb::LockInfo],
         caller_start_ts: u64,
     ) -> usize {
@@ -1202,7 +1202,7 @@ impl LockResolver {
     ///
     /// This mirrors client-go `LockResolver.UpdateResolvingLocks`.
     pub async fn update_resolving_locks(
-        &mut self,
+        &self,
         locks: &[kvrpcpb::LockInfo],
         caller_start_ts: u64,
         token: usize,
@@ -1230,7 +1230,7 @@ impl LockResolver {
     /// Removes the recorded resolving-lock information for `caller_start_ts` and `token`.
     ///
     /// This mirrors client-go `LockResolver.ResolveLocksDone`.
-    pub async fn resolve_locks_done(&mut self, caller_start_ts: u64, token: usize) {
+    pub async fn resolve_locks_done(&self, caller_start_ts: u64, token: usize) {
         let mut state = self.ctx.resolving.write().await;
         let Some(tokens) = state.resolving.get_mut(&caller_start_ts) else {
             return;
@@ -1248,7 +1248,7 @@ impl LockResolver {
     /// Returns the locks currently being resolved.
     ///
     /// This mirrors client-go `LockResolver.Resolving`.
-    pub async fn resolving(&mut self) -> Vec<ResolvingLock> {
+    pub async fn resolving(&self) -> Vec<ResolvingLock> {
         let state = self.ctx.resolving.read().await;
         state
             .resolving
@@ -1264,7 +1264,7 @@ impl LockResolver {
     /// This retries until either all locks are resolved or the provided `backoff` is exhausted.
     /// The `timestamp` is used as the caller start timestamp when checking transaction status.
     pub async fn resolve_locks(
-        &mut self,
+        &self,
         mut locks: Vec<kvrpcpb::LockInfo>,
         timestamp: Timestamp,
         mut backoff: Backoff,
@@ -1342,7 +1342,7 @@ impl LockResolver {
     /// This does not perform the caller-side sleep loop: the returned `ms_before_txn_expired` can
     /// be used by the caller to decide whether to backoff/sleep and retry.
     pub async fn resolve_locks_once(
-        &mut self,
+        &self,
         locks: Vec<kvrpcpb::LockInfo>,
         timestamp: Timestamp,
         pd_client: Arc<impl PdClient>,
@@ -1368,7 +1368,7 @@ impl LockResolver {
     ///
     /// Note: non-pessimistic lock cleanup is performed asynchronously in a background task.
     pub async fn resolve_locks_for_read(
-        &mut self,
+        &self,
         locks: Vec<kvrpcpb::LockInfo>,
         timestamp: Timestamp,
         pd_client: Arc<impl PdClient>,
@@ -1394,7 +1394,7 @@ impl LockResolver {
     /// `current_ts` from PD and sets `rollback_if_not_exist=true`, matching client-go
     /// `LockResolver.GetTxnStatus`.
     pub async fn get_txn_status(
-        &mut self,
+        &self,
         pd_client: Arc<impl PdClient>,
         keyspace: Keyspace,
         txn_id: u64,
@@ -1421,7 +1421,7 @@ impl LockResolver {
     ///
     /// Note: Will rollback RUNNING transactions. ONLY use in GC.
     pub async fn cleanup_locks(
-        &mut self,
+        &self,
         store: RegionStore,
         locks: Vec<kvrpcpb::LockInfo>,
         pd_client: Arc<impl PdClient>,
@@ -1598,7 +1598,7 @@ impl LockResolver {
 
     #[allow(clippy::too_many_arguments)]
     pub async fn check_txn_status(
-        &mut self,
+        &self,
         pd_client: Arc<impl PdClient>,
         keyspace: Keyspace,
         txn_id: u64,
@@ -1667,7 +1667,7 @@ impl LockResolver {
     }
 
     async fn check_all_secondaries(
-        &mut self,
+        &self,
         pd_client: Arc<impl PdClient>,
         keyspace: Keyspace,
         keys: Vec<Vec<u8>>,
@@ -1698,7 +1698,7 @@ impl LockResolver {
     }
 
     async fn batch_resolve_locks(
-        &mut self,
+        &self,
         pd_client: Arc<impl PdClient>,
         keyspace: Keyspace,
         store: RegionStore,
@@ -1763,7 +1763,7 @@ impl LockResolver {
 
     #[allow(clippy::too_many_arguments)]
     async fn get_txn_status_from_lock(
-        &mut self,
+        &self,
         mut backoff: Backoff,
         lock: &kvrpcpb::LockInfo,
         caller_start_ts: u64,
@@ -2462,7 +2462,7 @@ mod tests {
             Timestamp::from_version(42),
         ));
 
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         let status = lock_resolver
             .get_txn_status(pd_client.clone(), Keyspace::Disable, 7, b"p".to_vec(), 9)
             .await
@@ -2518,7 +2518,7 @@ mod tests {
             Timestamp::from_version(42),
         ));
 
-        let mut lock_resolver =
+        let lock_resolver =
             BoundLockResolver::new(pd_client, keyspace, ResolveLocksContext::default());
         let status = lock_resolver
             .get_txn_status(7, b"p".to_vec(), 9)
@@ -2538,7 +2538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_resolver_resolving_records_updates_and_cleans_up() {
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
 
         let mut lock1 = kvrpcpb::LockInfo::default();
         lock1.key = vec![1];
@@ -2629,7 +2629,7 @@ mod tests {
         lock.lock_ttl = 100;
         lock.lock_type = kvrpcpb::Op::Put as i32;
 
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         let live_locks = lock_resolver
             .resolve_locks(
                 vec![lock],
@@ -2683,7 +2683,7 @@ mod tests {
         lock.lock_ttl = 100;
         lock.lock_type = kvrpcpb::Op::Put as i32;
 
-        let mut lock_resolver =
+        let lock_resolver =
             BoundLockResolver::new(pd_client, Keyspace::Disable, ResolveLocksContext::default());
         let live_locks = lock_resolver
             .resolve_locks(
@@ -3332,7 +3332,7 @@ mod tests {
         lock.txn_size = 1;
         lock.lock_type = kvrpcpb::Op::Put as i32;
 
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         let result = lock_resolver
             .resolve_locks_once(
                 vec![lock],
@@ -3453,7 +3453,7 @@ mod tests {
         lock.txn_size = 256;
         lock.lock_type = kvrpcpb::Op::Put as i32;
 
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         let result = lock_resolver
             .resolve_locks_for_read(
                 vec![lock],
@@ -4660,7 +4660,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         lock_resolver
             .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
             .await
@@ -4733,7 +4733,7 @@ mod tests {
             .store_for_key(&non_pessimistic_lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         lock_resolver
             .cleanup_locks(
                 store,
@@ -4812,7 +4812,7 @@ mod tests {
             .store_for_key(&non_pessimistic_lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
 
         lock_resolver
             .cleanup_locks(
@@ -4881,7 +4881,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
 
         lock_resolver
             .cleanup_locks(
@@ -4953,7 +4953,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         lock_resolver
             .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
             .await
@@ -4982,7 +4982,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         let err = lock_resolver
             .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
             .await
@@ -5040,7 +5040,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         lock_resolver
             .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
             .await
@@ -5098,7 +5098,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         lock_resolver
             .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
             .await
@@ -5154,7 +5154,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         lock_resolver
             .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
             .await
@@ -5223,7 +5223,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         lock_resolver
             .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
             .await
@@ -5274,7 +5274,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         let err = lock_resolver
             .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
             .await
@@ -5349,7 +5349,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         lock_resolver
             .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
             .await
@@ -5408,7 +5408,7 @@ mod tests {
             .store_for_key(&lock.key.clone().into())
             .await
             .unwrap();
-        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
         lock_resolver
             .cleanup_locks(store, vec![lock], client, Keyspace::Disable)
             .await
