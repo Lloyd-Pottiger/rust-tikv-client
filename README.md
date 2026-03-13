@@ -68,6 +68,23 @@ let start_ts = txn_client.current_timestamp().await?;
 let mut txn = txn_client.begin_with_start_timestamp(start_ts, TransactionOptions::new_optimistic());
 ```
 
+Stale reads (replica reads) can be enabled on read-only snapshots:
+
+```rust
+use tikv_client::{ReplicaReadType, TransactionClient, TransactionOptions};
+
+let client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
+let start_ts = client.stale_timestamp(10).await?; // ~10 seconds ago
+
+let mut snapshot = client.snapshot(start_ts, TransactionOptions::new_optimistic());
+snapshot.set_stale_read(true);
+snapshot.set_replica_read(ReplicaReadType::Mixed);
+
+let value = snapshot.get("key".to_owned()).await?;
+```
+
+See `examples/stale_read.rs` for a runnable example.
+
 Since the TiKV client provides an async API, you'll need to use an async runtime (we currently only support Tokio). See [getting-started.md](getting-started.md) for a complete example.
 
 ## API summary
