@@ -451,6 +451,35 @@ mod tests {
             other => panic!("expected deadlock, got {other:?}"),
         }
     }
+
+    #[test]
+    fn test_key_error_commit_ts_expired_remains_key_error() {
+        let mut key_err = kvrpcpb::KeyError::default();
+        key_err.commit_ts_expired = Some(kvrpcpb::CommitTsExpired {
+            start_ts: 7,
+            attempted_commit_ts: 8,
+            key: vec![1, 2, 3],
+            min_commit_ts: 9,
+        });
+
+        let err: Error = key_err.into();
+        match err {
+            Error::KeyError(key_err) => assert!(key_err.commit_ts_expired.is_some()),
+            other => panic!("expected KeyError(commit_ts_expired), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_key_error_primary_mismatch_remains_key_error() {
+        let mut key_err = kvrpcpb::KeyError::default();
+        key_err.primary_mismatch = Some(kvrpcpb::PrimaryMismatch::default());
+
+        let err: Error = key_err.into();
+        match err {
+            Error::KeyError(key_err) => assert!(key_err.primary_mismatch.is_some()),
+            other => panic!("expected KeyError(primary_mismatch), got {other:?}"),
+        }
+    }
 }
 
 /// A result holding an [`Error`](enum@Error).
