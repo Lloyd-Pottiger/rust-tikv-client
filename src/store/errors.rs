@@ -306,6 +306,44 @@ mod test {
     }
 
     #[test]
+    fn prewrite_key_errors_maps_assertion_failed() {
+        let mut resp = kvrpcpb::PrewriteResponse {
+            errors: vec![kvrpcpb::KeyError {
+                assertion_failed: Some(kvrpcpb::AssertionFailed {
+                    start_ts: 7,
+                    key: vec![1, 2, 3],
+                    assertion: kvrpcpb::Assertion::NotExist as i32,
+                    existing_start_ts: 8,
+                    existing_commit_ts: 9,
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let errors = resp.key_errors().expect("expected key errors");
+        assert_eq!(errors.len(), 1);
+
+        match &errors[0] {
+            Error::AssertionFailed(assertion_failed) => {
+                assert_eq!(assertion_failed.start_ts(), 7);
+                assert_eq!(assertion_failed.key(), &[1, 2, 3]);
+                assert_eq!(assertion_failed.existing_start_ts(), 8);
+                assert_eq!(assertion_failed.existing_commit_ts(), 9);
+                assert_eq!(
+                    assertion_failed.assertion(),
+                    Some(kvrpcpb::Assertion::NotExist)
+                );
+                assert_eq!(
+                    assertion_failed.assertion_i32(),
+                    assertion_failed.assertion_failed().assertion
+                );
+            }
+            other => panic!("expected assertion failed error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn prewrite_key_errors_maps_retryable_to_kv_error() {
         let mut resp = kvrpcpb::PrewriteResponse {
             errors: vec![kvrpcpb::KeyError {

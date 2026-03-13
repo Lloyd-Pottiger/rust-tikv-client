@@ -37,6 +37,13 @@ pub use crate::proto::kvrpcpb::Deadlock as ProtoDeadlock;
 #[doc(inline)]
 pub use crate::proto::kvrpcpb::WriteConflict as ProtoWriteConflict;
 
+/// Protobuf-generated assertion failed error returned by TiKV.
+///
+/// This type is generated from TiKV's protobuf definitions and may change in a
+/// future release even if the wire format is compatible.
+#[doc(inline)]
+pub use crate::proto::kvrpcpb::AssertionFailed as ProtoAssertionFailed;
+
 /// Deadlock detected when acquiring pessimistic locks.
 #[derive(Clone, Debug)]
 pub struct DeadlockError {
@@ -161,6 +168,76 @@ impl From<ProtoWriteConflict> for WriteConflictError {
     }
 }
 
+/// Assertion failed when committing or prewriting a transaction.
+#[derive(Clone, Debug)]
+pub struct AssertionFailedError {
+    assertion_failed: ProtoAssertionFailed,
+}
+
+impl AssertionFailedError {
+    pub fn new(assertion_failed: ProtoAssertionFailed) -> Self {
+        Self { assertion_failed }
+    }
+
+    pub fn start_ts(&self) -> u64 {
+        self.assertion_failed.start_ts
+    }
+
+    pub fn key(&self) -> &[u8] {
+        &self.assertion_failed.key
+    }
+
+    pub fn assertion_i32(&self) -> i32 {
+        self.assertion_failed.assertion
+    }
+
+    pub fn assertion(&self) -> Option<kvrpcpb::Assertion> {
+        kvrpcpb::Assertion::try_from(self.assertion_i32()).ok()
+    }
+
+    pub fn existing_start_ts(&self) -> u64 {
+        self.assertion_failed.existing_start_ts
+    }
+
+    pub fn existing_commit_ts(&self) -> u64 {
+        self.assertion_failed.existing_commit_ts
+    }
+
+    pub fn assertion_failed(&self) -> &ProtoAssertionFailed {
+        &self.assertion_failed
+    }
+
+    pub fn into_inner(self) -> ProtoAssertionFailed {
+        self.assertion_failed
+    }
+}
+
+impl fmt::Display for AssertionFailedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let assertion = self
+            .assertion()
+            .map(|assertion| assertion.as_str_name())
+            .unwrap_or("unknown");
+        write!(
+            f,
+            "assertion failed (start_ts={}, assertion={}, existing_start_ts={}, existing_commit_ts={}, key_len={})",
+            self.start_ts(),
+            assertion,
+            self.existing_start_ts(),
+            self.existing_commit_ts(),
+            self.key().len(),
+        )
+    }
+}
+
+impl std::error::Error for AssertionFailedError {}
+
+impl From<ProtoAssertionFailed> for AssertionFailedError {
+    fn from(assertion_failed: ProtoAssertionFailed) -> Self {
+        Self::new(assertion_failed)
+    }
+}
+
 /// An error originating from the TiKV client or dependencies.
 #[derive(Debug, Error)]
 #[allow(clippy::large_enum_variant)]
@@ -226,6 +303,9 @@ pub enum Error {
     /// Write conflict detected when committing or prewriting a transaction.
     #[error("{0}")]
     WriteConflict(WriteConflictError),
+    /// Assertion failed detected when committing or prewriting a transaction.
+    #[error("{0}")]
+    AssertionFailed(AssertionFailedError),
     /// Deadlock detected when acquiring pessimistic locks.
     #[error("{0}")]
     Deadlock(DeadlockError),
@@ -306,6 +386,10 @@ impl From<ProtoKeyError> for Error {
             return Error::KvError {
                 message: std::mem::take(&mut e.retryable),
             };
+        }
+
+        if let Some(assertion_failed) = e.assertion_failed.take() {
+            return Error::AssertionFailed(AssertionFailedError::new(assertion_failed));
         }
 
         if !e.abort.is_empty() {
