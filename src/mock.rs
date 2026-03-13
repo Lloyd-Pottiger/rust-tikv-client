@@ -24,6 +24,7 @@ use crate::proto::keyspacepb;
 use crate::proto::metapb::RegionEpoch;
 use crate::proto::metapb::{self};
 use crate::region::RegionId;
+use crate::region::RegionVerId;
 use crate::region::RegionWithLeader;
 use crate::region::StoreId;
 use crate::store::KvConnect;
@@ -96,6 +97,10 @@ pub struct MockPdClient {
     slow_store_until: Mutex<HashMap<StoreId, Instant>>,
     #[new(value = "Mutex::new(HashMap::new())")]
     store_estimated_wait_until: Mutex<HashMap<StoreId, Instant>>,
+    #[new(value = "Mutex::new(Vec::new())")]
+    invalidated_region_ver_ids: Mutex<Vec<RegionVerId>>,
+    #[new(value = "Mutex::new(Vec::new())")]
+    invalidated_store_ids: Mutex<Vec<StoreId>>,
     #[new(value = "Arc::new(AtomicU64::new(0))")]
     tso_version: Arc<AtomicU64>,
     #[new(value = "false")]
@@ -147,6 +152,22 @@ impl MockPdClient {
             Err(poisoned) => poisoned.into_inner(),
         };
         locations.clone()
+    }
+
+    pub fn invalidated_region_ver_ids(&self) -> Vec<RegionVerId> {
+        let invalidated = match self.invalidated_region_ver_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        invalidated.clone()
+    }
+
+    pub fn invalidated_store_ids(&self) -> Vec<StoreId> {
+        let invalidated = match self.invalidated_store_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        invalidated.clone()
     }
 
     pub fn with_tso_sequence(mut self, start_version: u64) -> MockPdClient {
@@ -443,9 +464,21 @@ impl PdClient for MockPdClient {
         Ok(())
     }
 
-    async fn invalidate_region_cache(&self, _ver_id: crate::region::RegionVerId) {}
+    async fn invalidate_region_cache(&self, ver_id: crate::region::RegionVerId) {
+        let mut invalidated = match self.invalidated_region_ver_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        invalidated.push(ver_id);
+    }
 
-    async fn invalidate_store_cache(&self, _store_id: crate::region::StoreId) {}
+    async fn invalidate_store_cache(&self, store_id: crate::region::StoreId) {
+        let mut invalidated = match self.invalidated_store_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        invalidated.push(store_id);
+    }
 
     async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
         Err(Error::Unimplemented)

@@ -4072,6 +4072,37 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_handle_region_error_store_not_match_invalidates_region_and_store_cache() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let store = RegionStore::new(
+            MockPdClient::region1(),
+            Arc::new(MockKvClient::with_dispatch_hook(|_| {
+                unreachable!("dispatch not expected")
+            })),
+        );
+
+        let ver_id = store.region_with_leader.ver_id();
+        let store_id = store
+            .region_with_leader
+            .get_store_id()
+            .expect("expected leader store id");
+
+        let mut err = errorpb::Error::default();
+        err.store_not_match = Some(errorpb::StoreNotMatch {
+            request_store_id: store_id,
+            actual_store_id: store_id + 1,
+        });
+
+        let resolved = handle_region_error(pd_client.clone(), err, store)
+            .await
+            .unwrap();
+        assert!(!resolved);
+
+        assert!(pd_client.invalidated_region_ver_ids().contains(&ver_id));
+        assert!(pd_client.invalidated_store_ids().contains(&store_id));
+    }
+
+    #[tokio::test]
     async fn test_handle_region_error_flashback_in_progress_returns_error() {
         let pd_client = Arc::new(MockPdClient::default());
         let store = RegionStore::new(
