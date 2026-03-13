@@ -17,7 +17,11 @@ use crate::internal_err;
 use crate::Result;
 
 lazy_static::lazy_static! {
-    static ref SCHEME_REG: Regex = Regex::new(r"^\s*(https?://)").unwrap();
+    static ref SCHEME_REG: Regex = {
+        #[allow(clippy::expect_used)]
+        let reg = Regex::new(r"^\s*(https?://)").expect("invalid scheme regex");
+        reg
+    };
 }
 
 fn check_pem_file(tag: &str, path: &Path) -> Result<File> {

@@ -1034,7 +1034,7 @@ impl Shardable for kvrpcpb::TxnHeartBeatRequest {
 
     fn apply_shard(&mut self, mut shard: Self::Shard) {
         assert!(shard.len() == 1);
-        self.primary_lock = shard.pop().unwrap();
+        self.primary_lock = shard.pop().unwrap_or_default();
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
@@ -1098,7 +1098,7 @@ impl Shardable for kvrpcpb::CheckTxnStatusRequest {
 
     fn apply_shard(&mut self, mut shard: Self::Shard) {
         assert!(shard.len() == 1);
-        self.primary_key = shard.pop().unwrap();
+        self.primary_key = shard.pop().unwrap_or_default();
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {

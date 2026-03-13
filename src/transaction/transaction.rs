@@ -962,10 +962,13 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.buffer
             .get_or_else(key, |key| async move {
                 if pipelined_has_flushed {
-                    if pipelined_flushed_deletes
-                        .as_ref()
-                        .is_some_and(|deleted| deleted.lock().unwrap().contains(&key))
-                    {
+                    if pipelined_flushed_deletes.as_ref().is_some_and(|deleted| {
+                        let deleted = match deleted.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        deleted.contains(&key)
+                    }) {
                         return Ok(None);
                     }
                     if let Some(puts) = pipelined_flushing_puts.as_ref() {
@@ -1376,7 +1379,10 @@ impl<PdC: PdClient> Transaction<PdC> {
 
                     if pipelined_has_flushed {
                         if let Some(deleted) = pipelined_flushed_deletes.as_ref() {
-                            let deleted = deleted.lock().unwrap();
+                            let deleted = match deleted.lock() {
+                                Ok(guard) => guard,
+                                Err(poisoned) => poisoned.into_inner(),
+                            };
                             keys.retain(|key| !deleted.contains(key));
                         }
                         if keys.is_empty() {
@@ -2136,7 +2142,11 @@ impl<PdC: PdClient> Transaction<PdC> {
             let result = plan.execute().await.map(|_| ());
 
             let sample_ms = start.elapsed().as_millis() as f64;
-            flush_ewma.lock().unwrap().observe(sample_ms);
+            let mut flush_ewma = match flush_ewma.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            flush_ewma.observe(sample_ms);
 
             result
         });
@@ -3502,7 +3512,10 @@ impl PipelinedState {
     }
 
     fn record_flushed_mutations(&mut self, mutations: &[kvrpcpb::Mutation]) {
-        let mut flushed_deletes = self.flushed_deletes.lock().unwrap();
+        let mut flushed_deletes = match self.flushed_deletes.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let mut range_start: Option<Key> = None;
         let mut range_end_inclusive: Option<Key> = None;
 
@@ -3569,7 +3582,13 @@ async fn throttle_pipelined_flush(ewma: Arc<Mutex<FlushDurationEwma>>, write_thr
         return;
     }
 
-    let expected_flush_ms = ewma.lock().unwrap().value_ms();
+    let expected_flush_ms = {
+        let ewma = match ewma.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        ewma.value_ms()
+    };
     if expected_flush_ms == 0.0 {
         return;
     }
@@ -4691,7 +4710,11 @@ impl<PdC: PdClient> Committer<PdC> {
             let flush_result = flush_plan.execute().await;
             if let Some(ewma) = pipelined_ewma.as_ref() {
                 let sample_ms = start.elapsed().as_millis() as f64;
-                ewma.lock().unwrap().observe(sample_ms);
+                let mut ewma = match ewma.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                ewma.observe(sample_ms);
             }
             let _flush_responses = flush_result?;
         }
@@ -4761,7 +4784,13 @@ impl<PdC: PdClient> Committer<PdC> {
     async fn prewrite(&mut self) -> Result<Option<Timestamp>> {
         debug!("prewriting");
         self.vars.check_killed()?;
-        let primary_lock = self.primary_key.clone().unwrap();
+        let primary_lock = self
+            .primary_key
+            .clone()
+            .ok_or_else(|| Error::InternalError {
+                message: "primary key should be set before prewrite".to_owned(),
+            })?;
+        let primary_lock_key = primary_lock.clone();
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = self.calc_txn_lock_ttl();
         let mut request = match &self.options.kind {
@@ -4786,7 +4815,7 @@ impl<PdC: PdClient> Committer<PdC> {
         request.secondaries = self
             .mutations
             .iter()
-            .filter(|m| self.primary_key.as_ref().unwrap() != m.key.as_ref())
+            .filter(|m| primary_lock_key.as_ref() != m.key.as_ref())
             .map(|m| m.key.clone())
             .collect();
         self.options.apply_write_context(&mut request.context);
@@ -5191,7 +5220,11 @@ impl<PdC: PdClient> Committer<PdC> {
         } else if primary_only {
             return Ok(());
         } else {
-            let primary_key = self.primary_key.unwrap();
+            let Some(primary_key) = self.primary_key else {
+                return Err(Error::InternalError {
+                    message: "primary key missing for secondary commit".to_owned(),
+                });
+            };
             let keys = mutations
                 .map(|m| m.key.into())
                 .filter(|key| &primary_key != key);
