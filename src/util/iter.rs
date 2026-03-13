@@ -49,7 +49,9 @@ impl<
                     Some(elt) => return Some(Ok(elt)),
                 },
                 Some(Err(_)) => {
-                    let e = self.frontiter.take().unwrap().err().unwrap();
+                    let Some(Err(e)) = self.frontiter.take() else {
+                        continue;
+                    };
                     return Some(Err(e));
                 }
                 None => {}
