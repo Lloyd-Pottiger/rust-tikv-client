@@ -291,6 +291,91 @@ impl SyncTransactionClient {
         safe_block_on(&self.runtime, self.client.unsafe_destroy_range(range))
     }
 
+    /// Compact a specified key range on TiFlash stores.
+    ///
+    /// This is a synchronous version of [`TransactionClient::compact`](crate::TransactionClient::compact).
+    pub fn compact(
+        &self,
+        physical_table_id: i64,
+        logical_table_id: i64,
+        start_key: impl Into<crate::Key>,
+    ) -> Result<Vec<crate::transaction::ProtoCompactResponse>> {
+        safe_block_on(
+            &self.runtime,
+            self.client
+                .compact(physical_table_id, logical_table_id, start_key),
+        )
+    }
+
+    /// Get system table data from TiFlash stores.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::tiflash_system_table`](crate::TransactionClient::tiflash_system_table).
+    pub fn tiflash_system_table(
+        &self,
+        sql: impl Into<String>,
+    ) -> Result<Vec<crate::transaction::ProtoTiFlashSystemTableResponse>> {
+        safe_block_on(&self.runtime, self.client.tiflash_system_table(sql))
+    }
+
+    /// Register a lock observer on all TiKV stores.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::register_lock_observer`](crate::TransactionClient::register_lock_observer).
+    pub fn register_lock_observer(&self, max_ts: u64) -> Result<()> {
+        safe_block_on(&self.runtime, self.client.register_lock_observer(max_ts))
+    }
+
+    /// Check a lock observer on all TiKV stores.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::check_lock_observer`](crate::TransactionClient::check_lock_observer).
+    pub fn check_lock_observer(
+        &self,
+        max_ts: u64,
+    ) -> Result<(bool, Vec<crate::transaction::ProtoLockInfo>)> {
+        safe_block_on(&self.runtime, self.client.check_lock_observer(max_ts))
+    }
+
+    /// Remove a lock observer on all TiKV stores.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::remove_lock_observer`](crate::TransactionClient::remove_lock_observer).
+    pub fn remove_lock_observer(&self, max_ts: u64) -> Result<()> {
+        safe_block_on(&self.runtime, self.client.remove_lock_observer(max_ts))
+    }
+
+    /// Physical scan locks from all TiKV stores.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::physical_scan_lock`](crate::TransactionClient::physical_scan_lock).
+    pub fn physical_scan_lock(
+        &self,
+        max_ts: u64,
+        start_key: impl Into<crate::Key>,
+        limit: u32,
+    ) -> Result<Vec<crate::transaction::ProtoLockInfo>> {
+        safe_block_on(
+            &self.runtime,
+            self.client.physical_scan_lock(max_ts, start_key, limit),
+        )
+    }
+
+    /// Get current lock waiting status from all TiKV stores.
+    ///
+    /// This is a synchronous version of [`TransactionClient::lock_wait_info`](crate::TransactionClient::lock_wait_info).
+    pub fn lock_wait_info(&self) -> Result<Vec<crate::transaction::ProtoWaitForEntry>> {
+        safe_block_on(&self.runtime, self.client.lock_wait_info())
+    }
+
+    /// Get lock waiting history from all TiKV stores.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::lock_wait_history`](crate::TransactionClient::lock_wait_history).
+    pub fn lock_wait_history(&self) -> Result<Vec<crate::transaction::ProtoWaitForEntry>> {
+        safe_block_on(&self.runtime, self.client.lock_wait_history())
+    }
+
     /// Scan all locks in the specified range.
     ///
     /// This is only available for integration tests.

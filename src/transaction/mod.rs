@@ -9,7 +9,9 @@
 //! **Warning:** It is not advisable to use both raw and transactional functionality in the same keyspace.
 
 pub use client::Client;
+pub use client::ProtoCompactResponse;
 pub use client::ProtoLockInfo;
+pub use client::ProtoTiFlashSystemTableResponse;
 pub use client::ProtoWaitForEntry;
 pub(crate) use lock::resolve_locks_for_read;
 pub(crate) use lock::resolve_locks_with_options;

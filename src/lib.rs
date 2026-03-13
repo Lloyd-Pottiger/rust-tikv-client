@@ -217,7 +217,11 @@ pub use crate::transaction::PipelinedTxnOptions;
 #[doc(inline)]
 pub use crate::transaction::PrewriteEncounterLockPolicy;
 #[doc(inline)]
+pub use crate::transaction::ProtoCompactResponse;
+#[doc(inline)]
 pub use crate::transaction::ProtoLockInfo;
+#[doc(inline)]
+pub use crate::transaction::ProtoTiFlashSystemTableResponse;
 #[doc(inline)]
 pub use crate::transaction::ProtoWaitForEntry;
 #[doc(inline)]
