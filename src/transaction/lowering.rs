@@ -219,6 +219,18 @@ pub fn new_unsafe_destroy_range_request(range: BoundRange) -> kvrpcpb::UnsafeDes
     requests::new_unsafe_destroy_range_request(start_key.into(), end_key.unwrap_or_default().into())
 }
 
+pub fn new_delete_range_request(
+    range: BoundRange,
+    notify_only: bool,
+) -> kvrpcpb::DeleteRangeRequest {
+    let (start_key, end_key) = range.into_keys();
+    requests::new_delete_range_request(
+        start_key.into(),
+        end_key.unwrap_or_default().into(),
+        notify_only,
+    )
+}
+
 pub fn new_compact_request(
     start_key: Key,
     physical_table_id: i64,

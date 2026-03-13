@@ -23,6 +23,7 @@ use crate::timestamp::TimestampExt;
 use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_check_lock_observer_request;
 use crate::transaction::lowering::new_compact_request;
+use crate::transaction::lowering::new_delete_range_request;
 use crate::transaction::lowering::new_get_lock_wait_history_request;
 use crate::transaction::lowering::new_get_lock_wait_info_request;
 use crate::transaction::lowering::new_get_ti_flash_system_table_request;
@@ -694,6 +695,59 @@ impl<PdC: PdClient> Client<PdC> {
         Ok(resolve_result)
     }
 
+    async fn delete_range_inner(
+        &self,
+        range: BoundRange,
+        notify_only: bool,
+        concurrency: usize,
+    ) -> Result<usize> {
+        if concurrency == 0 {
+            return Err(crate::Error::StringError(
+                "delete_range concurrency must be greater than 0".to_owned(),
+            ));
+        }
+
+        let range = range.encode_keyspace(self.keyspace, KeyMode::Txn);
+        let req = new_delete_range_request(range, notify_only);
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .retry_multi_region_with_concurrency(DEFAULT_REGION_BACKOFF, concurrency)
+            .extract_error()
+            .merge(crate::request::Collect)
+            .plan();
+        plan.execute().await
+    }
+
+    /// Delete all versions of all keys in the given key range.
+    ///
+    /// This is a region-based request (the range can span multiple regions).
+    ///
+    /// Returns the number of regions affected when successful.
+    ///
+    /// This mirrors client-go `KVStore.DeleteRange`.
+    pub async fn delete_range(
+        &self,
+        range: impl Into<BoundRange>,
+        concurrency: usize,
+    ) -> Result<usize> {
+        self.delete_range_inner(range.into(), false, concurrency)
+            .await
+    }
+
+    /// Notify regions in the given key range of an upcoming unsafe-destroy-range operation.
+    ///
+    /// This sends `DeleteRangeRequest` with `notify_only=true`, which replicates the operation
+    /// through Raft without actually deleting the data.
+    ///
+    /// Returns the number of regions affected when successful.
+    pub async fn notify_delete_range(
+        &self,
+        range: impl Into<BoundRange>,
+        concurrency: usize,
+    ) -> Result<usize> {
+        self.delete_range_inner(range.into(), true, concurrency)
+            .await
+    }
+
     /// Cleans up all keys in a range and quickly reclaim disk space.
     ///
     /// The range can span over multiple regions.
@@ -913,6 +967,7 @@ mod tests {
     use std::any::Any;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::time::Duration;
     use std::time::Instant;
 
@@ -1222,6 +1277,140 @@ mod tests {
         assert_eq!(locks.len(), 2);
         assert!(locks.iter().all(|lock| lock.key.starts_with(b"scan-")));
         assert_eq!(scan_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_apis_encode_keyspace_and_set_notify_only() {
+        use crate::request::EncodeKeyspace;
+        use crate::request::KeyMode;
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xCAFE,
+        };
+        let expected_api_version = keyspace.api_version() as i32;
+
+        let start_key_raw = b"start".to_vec();
+        let end_key_raw = b"end".to_vec();
+        let expected_start_key_encoded: Vec<u8> = crate::Key::from(start_key_raw.clone())
+            .encode_keyspace(keyspace, KeyMode::Txn)
+            .into();
+        let expected_end_key_encoded: Vec<u8> = crate::Key::from(end_key_raw.clone())
+            .encode_keyspace(keyspace, KeyMode::Txn)
+            .into();
+
+        let delete_range_calls = Arc::new(AtomicUsize::new(0));
+        let delete_range_calls_cloned = delete_range_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req: &kvrpcpb::DeleteRangeRequest = req.downcast_ref().unwrap();
+                let call_index = delete_range_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_key, expected_start_key_encoded);
+                assert_eq!(req.end_key, expected_end_key_encoded);
+                assert_eq!(req.notify_only, call_index == 1);
+
+                let ctx = req.context.as_ref().expect("context should be set");
+                assert_eq!(ctx.api_version, expected_api_version);
+                assert_eq!(ctx.keyspace_id, 0xCAFE);
+
+                Ok(Box::new(kvrpcpb::DeleteRangeResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        assert_eq!(
+            client
+                .delete_range(start_key_raw.clone()..end_key_raw.clone(), 4)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            client
+                .notify_delete_range(start_key_raw..end_key_raw, 4)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(delete_range_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_splits_range_across_regions_and_returns_completed_count() {
+        let keyspace = Keyspace::Disable;
+
+        let seen_ranges = Arc::new(Mutex::new(Vec::<(Vec<u8>, Vec<u8>)>::new()));
+        let seen_ranges_cloned = seen_ranges.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req: &kvrpcpb::DeleteRangeRequest = req.downcast_ref().unwrap();
+                assert!(!req.notify_only);
+                seen_ranges_cloned
+                    .lock()
+                    .unwrap()
+                    .push((req.start_key.clone(), req.end_key.clone()));
+
+                Ok(Box::new(kvrpcpb::DeleteRangeResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let completed = client.delete_range(vec![1]..vec![11], 2).await.unwrap();
+        assert_eq!(completed, 2);
+
+        let mut seen_ranges = seen_ranges.lock().unwrap().clone();
+        seen_ranges.sort();
+        assert_eq!(seen_ranges, vec![(vec![1], vec![10]), (vec![10], vec![11])]);
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_rejects_zero_concurrency() {
+        let keyspace = Keyspace::Disable;
+
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls_cloned = dispatch_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |_req: &dyn Any| {
+                dispatch_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let err = client.delete_range(vec![1]..vec![2], 0).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::StringError(msg) if msg.contains("concurrency must be greater than 0")
+        ));
+        assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

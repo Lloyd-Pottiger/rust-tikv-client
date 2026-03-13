@@ -365,6 +365,28 @@ impl SyncTransactionClient {
         safe_block_on(&self.runtime, self.client.unsafe_destroy_range(range))
     }
 
+    /// Delete all versions of all keys in the given key range.
+    ///
+    /// This is a synchronous version of [`TransactionClient::delete_range`](crate::TransactionClient::delete_range).
+    pub fn delete_range(&self, range: impl Into<BoundRange>, concurrency: usize) -> Result<usize> {
+        safe_block_on(&self.runtime, self.client.delete_range(range, concurrency))
+    }
+
+    /// Notify regions in the given key range of an upcoming unsafe-destroy-range operation.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::notify_delete_range`](crate::TransactionClient::notify_delete_range).
+    pub fn notify_delete_range(
+        &self,
+        range: impl Into<BoundRange>,
+        concurrency: usize,
+    ) -> Result<usize> {
+        safe_block_on(
+            &self.runtime,
+            self.client.notify_delete_range(range, concurrency),
+        )
+    }
+
     /// Compact a specified key range on TiFlash stores.
     ///
     /// This is a synchronous version of [`TransactionClient::compact`](crate::TransactionClient::compact).

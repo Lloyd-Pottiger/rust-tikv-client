@@ -19,6 +19,7 @@ use crate::proto::kvrpcpb::TxnHeartBeatResponse;
 use crate::proto::kvrpcpb::TxnInfo;
 use crate::proto::kvrpcpb::{self};
 use crate::proto::pdpb::Timestamp;
+use crate::range_request;
 use crate::region::RegionWithLeader;
 use crate::request::Collect;
 use crate::request::DefaultProcessor;
@@ -1333,6 +1334,36 @@ impl HasLocks for kvrpcpb::FlushResponse {
             .filter_map(|error| error.locked.take())
             .flat_map(flatten_lock_info)
             .collect()
+    }
+}
+
+pub fn new_delete_range_request(
+    start_key: Vec<u8>,
+    end_key: Vec<u8>,
+    notify_only: bool,
+) -> kvrpcpb::DeleteRangeRequest {
+    let mut req = kvrpcpb::DeleteRangeRequest::default();
+    req.start_key = start_key;
+    req.end_key = end_key;
+    req.notify_only = notify_only;
+    req
+}
+
+impl KvRequest for kvrpcpb::DeleteRangeRequest {
+    type Response = kvrpcpb::DeleteRangeResponse;
+}
+
+range_request!(kvrpcpb::DeleteRangeRequest);
+shardable_range!(kvrpcpb::DeleteRangeRequest);
+impl HasLocks for kvrpcpb::DeleteRangeResponse {}
+
+impl Merge<kvrpcpb::DeleteRangeResponse> for Collect {
+    type Out = usize;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::DeleteRangeResponse>>) -> Result<Self::Out> {
+        input
+            .into_iter()
+            .try_fold(0usize, |acc, res| res.map(|_| acc + 1))
     }
 }
 
