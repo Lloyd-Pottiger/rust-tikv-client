@@ -314,6 +314,16 @@ impl From<ProtoKeyError> for Error {
             };
         }
 
+        if let Some(commit_ts_too_large) = e.commit_ts_too_large.take() {
+            return Error::KvError {
+                message: format!("commit TS {} is too large", commit_ts_too_large.commit_ts),
+            };
+        }
+
+        if let Some(txn_not_found) = e.txn_not_found.take() {
+            return Error::TxnNotFound(txn_not_found);
+        }
+
         Error::KeyError(Box::new(e))
     }
 }

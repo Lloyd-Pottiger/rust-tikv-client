@@ -342,4 +342,48 @@ mod test {
             other => panic!("expected kv error, got {other:?}"),
         }
     }
+
+    #[test]
+    fn commit_key_errors_maps_commit_ts_too_large_to_kv_error() {
+        let mut resp = kvrpcpb::CommitResponse {
+            error: Some(kvrpcpb::KeyError {
+                commit_ts_too_large: Some(kvrpcpb::CommitTsTooLarge { commit_ts: 233 }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let errors = resp.key_errors().expect("expected key errors");
+        assert_eq!(errors.len(), 1);
+
+        match &errors[0] {
+            Error::KvError { message } => assert_eq!(message, "commit TS 233 is too large"),
+            other => panic!("expected kv error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_txn_status_key_errors_maps_txn_not_found() {
+        let mut resp = kvrpcpb::CheckTxnStatusResponse {
+            error: Some(kvrpcpb::KeyError {
+                txn_not_found: Some(kvrpcpb::TxnNotFound {
+                    start_ts: 42,
+                    primary_key: vec![1, 2],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let errors = resp.key_errors().expect("expected key errors");
+        assert_eq!(errors.len(), 1);
+
+        match &errors[0] {
+            Error::TxnNotFound(txn_not_found) => {
+                assert_eq!(txn_not_found.start_ts, 42);
+                assert_eq!(txn_not_found.primary_key.as_slice(), &[1, 2]);
+            }
+            other => panic!("expected txn not found error, got {other:?}"),
+        }
+    }
 }
