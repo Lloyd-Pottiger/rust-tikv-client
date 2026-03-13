@@ -341,6 +341,7 @@ mod test {
         pub regions: Mutex<HashMap<RegionId, RegionWithLeader>>,
         pub stores: Mutex<Vec<metapb::Store>>,
         pub get_region_count: AtomicU64,
+        pub get_store_count: AtomicU64,
     }
 
     #[async_trait]
@@ -377,9 +378,16 @@ mod test {
 
         async fn get_store(
             self: Arc<Self>,
-            _id: crate::region::StoreId,
+            id: crate::region::StoreId,
         ) -> Result<crate::proto::metapb::Store> {
-            Err(Error::Unimplemented)
+            self.get_store_count.fetch_add(1, SeqCst);
+            self.stores
+                .lock()
+                .await
+                .iter()
+                .find(|store| store.id == id)
+                .cloned()
+                .ok_or_else(|| Error::StringError("MockRetryClient: store not found".to_owned()))
         }
 
         async fn get_all_stores(self: Arc<Self>) -> Result<Vec<crate::proto::metapb::Store>> {
@@ -682,6 +690,40 @@ mod test {
         assert!(safe_ts_stores
             .iter()
             .any(|store| store.id == 2 && is_tiflash_store(store)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_store_cache_forces_store_meta_refresh() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new(retry_client.clone());
+
+        let store_id = 1;
+        let mut store = metapb::Store {
+            id: store_id,
+            state: metapb::StoreState::Up.into(),
+            address: "old".to_owned(),
+            ..Default::default()
+        };
+        *retry_client.stores.lock().await = vec![store.clone()];
+
+        let cached = cache.get_store_by_id(store_id).await?;
+        assert_eq!(cached.address, "old");
+        assert_eq!(retry_client.get_store_count.load(SeqCst), 1);
+
+        store.address = "new".to_owned();
+        *retry_client.stores.lock().await = vec![store.clone()];
+
+        let cached = cache.get_store_by_id(store_id).await?;
+        assert_eq!(cached.address, "old");
+        assert_eq!(retry_client.get_store_count.load(SeqCst), 1);
+
+        cache.invalidate_store_cache(store_id).await;
+
+        let refreshed = cache.get_store_by_id(store_id).await?;
+        assert_eq!(refreshed.address, "new");
+        assert_eq!(retry_client.get_store_count.load(SeqCst), 2);
 
         Ok(())
     }
