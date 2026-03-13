@@ -286,7 +286,7 @@ impl<C: RetryClientTrait> RegionCache<C> {
             .get_all_stores()
             .await?
             .into_iter()
-            .filter(is_valid_store)
+            .filter(is_valid_safe_ts_store)
             .collect::<Vec<_>>();
         Ok(stores)
     }
@@ -295,20 +295,37 @@ impl<C: RetryClientTrait> RegionCache<C> {
 const ENGINE_LABEL_KEY: &str = "engine";
 const ENGINE_LABEL_TIFLASH: &str = "tiflash";
 const ENGINE_LABEL_TIFLASH_COMPUTE: &str = "tiflash_compute";
+const ENGINE_LABEL_TIFLASH_MPP: &str = "tiflash_mpp";
 
 fn is_valid_store(store: &metapb::Store) -> bool {
     store.state != metapb::StoreState::Tombstone as i32
 }
 
+fn is_valid_safe_ts_store(store: &metapb::Store) -> bool {
+    is_valid_store(store) && !is_tiflash_compute_store(store)
+}
+
 pub(crate) fn is_tiflash_store(store: &metapb::Store) -> bool {
+    store
+        .labels
+        .iter()
+        .any(|label| label.key == ENGINE_LABEL_KEY && label.value == ENGINE_LABEL_TIFLASH)
+}
+
+pub(crate) fn is_tiflash_compute_store(store: &metapb::Store) -> bool {
     store.labels.iter().any(|label| {
         label.key == ENGINE_LABEL_KEY
-            && (label.value == ENGINE_LABEL_TIFLASH || label.value == ENGINE_LABEL_TIFLASH_COMPUTE)
+            && (label.value == ENGINE_LABEL_TIFLASH_COMPUTE
+                || label.value == ENGINE_LABEL_TIFLASH_MPP)
     })
 }
 
+pub(crate) fn is_tiflash_related_store(store: &metapb::Store) -> bool {
+    is_tiflash_store(store) || is_tiflash_compute_store(store)
+}
+
 fn is_valid_tikv_store(store: &metapb::Store) -> bool {
-    is_valid_store(store) && !is_tiflash_store(store)
+    is_valid_store(store) && !is_tiflash_related_store(store)
 }
 
 #[cfg(test)]
@@ -331,6 +348,8 @@ mod test {
     use crate::proto::metapb::{self};
     use crate::region::RegionId;
     use crate::region::RegionWithLeader;
+    use crate::region_cache::is_tiflash_compute_store;
+    use crate::region_cache::is_tiflash_related_store;
     use crate::region_cache::is_tiflash_store;
     use crate::region_cache::is_valid_tikv_store;
     use crate::Key;
@@ -665,6 +684,18 @@ mod test {
             value: "tiflash".to_owned(),
         });
 
+        let mut tiflash_compute_store = metapb::Store {
+            id: 4,
+            state: metapb::StoreState::Up.into(),
+            address: "tiflash_compute".to_owned(),
+            peer_address: "tiflash_compute-peer".to_owned(),
+            ..Default::default()
+        };
+        tiflash_compute_store.labels.push(metapb::StoreLabel {
+            key: "engine".to_owned(),
+            value: "tiflash_compute".to_owned(),
+        });
+
         let tombstone_store = metapb::Store {
             id: 3,
             state: metapb::StoreState::Tombstone.into(),
@@ -672,8 +703,12 @@ mod test {
             ..Default::default()
         };
 
-        *retry_client.stores.lock().await =
-            vec![tikv_store.clone(), tiflash_store, tombstone_store];
+        *retry_client.stores.lock().await = vec![
+            tikv_store.clone(),
+            tiflash_store,
+            tiflash_compute_store,
+            tombstone_store,
+        ];
 
         let all_stores = cache.read_through_all_stores().await?;
         let mut all_store_ids = all_stores.iter().map(|store| store.id).collect::<Vec<_>>();
@@ -690,6 +725,10 @@ mod test {
         assert!(safe_ts_stores
             .iter()
             .any(|store| store.id == 2 && is_tiflash_store(store)));
+        assert!(
+            !safe_ts_stores.iter().any(|store| store.id == 4),
+            "safe-ts store list must exclude tiflash_compute stores"
+        );
 
         Ok(())
     }
@@ -733,6 +772,8 @@ mod test {
         let mut store = metapb::Store::default();
         assert!(is_valid_tikv_store(&store));
         assert!(!is_tiflash_store(&store));
+        assert!(!is_tiflash_compute_store(&store));
+        assert!(!is_tiflash_related_store(&store));
 
         store.state = metapb::StoreState::Tombstone.into();
         assert!(!is_valid_tikv_store(&store));
@@ -756,13 +797,25 @@ mod test {
         });
         assert!(!is_valid_tikv_store(&store));
         assert!(is_tiflash_store(&store));
+        assert!(!is_tiflash_compute_store(&store));
+        assert!(is_tiflash_related_store(&store));
 
         store.labels[1].value = "tiflash_compute".to_string();
         assert!(!is_valid_tikv_store(&store));
-        assert!(is_tiflash_store(&store));
+        assert!(!is_tiflash_store(&store));
+        assert!(is_tiflash_compute_store(&store));
+        assert!(is_tiflash_related_store(&store));
+
+        store.labels[1].value = "tiflash_mpp".to_string();
+        assert!(!is_valid_tikv_store(&store));
+        assert!(!is_tiflash_store(&store));
+        assert!(is_tiflash_compute_store(&store));
+        assert!(is_tiflash_related_store(&store));
 
         store.labels[1].value = "other".to_string();
         assert!(is_valid_tikv_store(&store));
         assert!(!is_tiflash_store(&store));
+        assert!(!is_tiflash_compute_store(&store));
+        assert!(!is_tiflash_related_store(&store));
     }
 }
