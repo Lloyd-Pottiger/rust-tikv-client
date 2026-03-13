@@ -188,6 +188,20 @@ impl TruncateKeyspace for Vec<crate::proto::kvrpcpb::LockInfo> {
     }
 }
 
+impl TruncateKeyspace for Vec<crate::proto::deadlock::WaitForEntry> {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        if !matches!(keyspace, Keyspace::Enable { .. }) {
+            return self;
+        }
+        for entry in &mut self {
+            take_mut::take(&mut entry.key, |key| {
+                Key::from(key).truncate_keyspace(keyspace).into()
+            });
+        }
+        self
+    }
+}
+
 impl EncodeKeyspace for Vec<crate::proto::kvrpcpb::LockInfo> {
     fn encode_keyspace(mut self, keyspace: Keyspace, key_mode: KeyMode) -> Self {
         if !matches!(keyspace, Keyspace::Enable { .. }) {

@@ -722,12 +722,14 @@ impl<PdC: PdClient> Client<PdC> {
     ///
     /// Returns an error if any store request fails.
     pub async fn lock_wait_info(&self) -> Result<Vec<ProtoWaitForEntry>> {
+        use crate::request::TruncateKeyspace;
+
         let req = new_get_lock_wait_info_request();
         let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
             .all_stores(DEFAULT_STORE_BACKOFF)
             .merge(crate::request::Collect)
             .plan();
-        plan.execute().await
+        Ok(plan.execute().await?.truncate_keyspace(self.keyspace))
     }
 
     /// Get lock waiting history from all TiKV stores.
@@ -737,12 +739,14 @@ impl<PdC: PdClient> Client<PdC> {
     ///
     /// Returns an error if any store request fails.
     pub async fn lock_wait_history(&self) -> Result<Vec<ProtoWaitForEntry>> {
+        use crate::request::TruncateKeyspace;
+
         let req = new_get_lock_wait_history_request();
         let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
             .all_stores(DEFAULT_STORE_BACKOFF)
             .merge(crate::request::Collect)
             .plan();
-        plan.execute().await
+        Ok(plan.execute().await?.truncate_keyspace(self.keyspace))
     }
 
     fn new_transaction(
@@ -841,6 +845,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_wait_info_and_history_collect_entries_from_all_stores() {
+        use crate::request::EncodeKeyspace;
+        use crate::request::KeyMode;
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xCAFE,
+        };
+        let expected_key_raw = b"wait-key".to_vec();
+        let expected_key_encoded: Vec<u8> = crate::Key::from(expected_key_raw.clone())
+            .encode_keyspace(keyspace, KeyMode::Txn)
+            .into();
+
         let info_calls = Arc::new(AtomicUsize::new(0));
         let history_calls = Arc::new(AtomicUsize::new(0));
         let info_calls_cloned = info_calls.clone();
@@ -857,7 +872,7 @@ mod tests {
                         txn: call_index + 1,
                         wait_for_txn: 42,
                         key_hash: 0,
-                        key: Vec::new(),
+                        key: expected_key_encoded.clone(),
                         resource_group_tag: Vec::new(),
                         wait_time: 0,
                     };
@@ -877,7 +892,7 @@ mod tests {
                         txn: call_index + 101,
                         wait_for_txn: 42,
                         key_hash: 0,
-                        key: Vec::new(),
+                        key: expected_key_encoded.clone(),
                         resource_group_tag: Vec::new(),
                         wait_time: 0,
                     };
@@ -908,9 +923,9 @@ mod tests {
             .await;
 
         let client = Client {
-            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
-            keyspace: Keyspace::Disable,
+            keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
         };
@@ -920,6 +935,9 @@ mod tests {
         assert_eq!(info.len(), 2);
         assert_eq!(info[0].txn, 1);
         assert_eq!(info[1].txn, 2);
+        for entry in &info {
+            assert_eq!(entry.key, expected_key_raw);
+        }
         assert_eq!(info_calls.load(Ordering::SeqCst), 2);
 
         let mut history = client.lock_wait_history().await.unwrap();
@@ -927,6 +945,9 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].txn, 101);
         assert_eq!(history[1].txn, 102);
+        for entry in &history {
+            assert_eq!(entry.key, expected_key_raw);
+        }
         assert_eq!(history_calls.load(Ordering::SeqCst), 2);
     }
 
