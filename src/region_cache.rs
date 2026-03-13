@@ -278,21 +278,37 @@ impl<C: RetryClientTrait> RegionCache<C> {
         }
         Ok(stores)
     }
+
+    pub async fn read_through_all_stores_for_safe_ts(&self) -> Result<Vec<Store>> {
+        let stores = self
+            .inner_client
+            .clone()
+            .get_all_stores()
+            .await?
+            .into_iter()
+            .filter(is_valid_store)
+            .collect::<Vec<_>>();
+        Ok(stores)
+    }
 }
 
 const ENGINE_LABEL_KEY: &str = "engine";
 const ENGINE_LABEL_TIFLASH: &str = "tiflash";
 const ENGINE_LABEL_TIFLASH_COMPUTE: &str = "tiflash_compute";
 
-fn is_valid_tikv_store(store: &metapb::Store) -> bool {
-    if store.state == metapb::StoreState::Tombstone as i32 {
-        return false;
-    }
-    let is_tiflash = store.labels.iter().any(|label| {
+fn is_valid_store(store: &metapb::Store) -> bool {
+    store.state != metapb::StoreState::Tombstone as i32
+}
+
+pub(crate) fn is_tiflash_store(store: &metapb::Store) -> bool {
+    store.labels.iter().any(|label| {
         label.key == ENGINE_LABEL_KEY
             && (label.value == ENGINE_LABEL_TIFLASH || label.value == ENGINE_LABEL_TIFLASH_COMPUTE)
-    });
-    !is_tiflash
+    })
+}
+
+fn is_valid_tikv_store(store: &metapb::Store) -> bool {
+    is_valid_store(store) && !is_tiflash_store(store)
 }
 
 #[cfg(test)]
@@ -315,6 +331,7 @@ mod test {
     use crate::proto::metapb::{self};
     use crate::region::RegionId;
     use crate::region::RegionWithLeader;
+    use crate::region_cache::is_tiflash_store;
     use crate::region_cache::is_valid_tikv_store;
     use crate::Key;
     use crate::Result;
@@ -619,6 +636,7 @@ mod test {
     fn test_is_valid_tikv_store() {
         let mut store = metapb::Store::default();
         assert!(is_valid_tikv_store(&store));
+        assert!(!is_tiflash_store(&store));
 
         store.state = metapb::StoreState::Tombstone.into();
         assert!(!is_valid_tikv_store(&store));
@@ -641,11 +659,14 @@ mod test {
             value: "tiflash".to_owned(),
         });
         assert!(!is_valid_tikv_store(&store));
+        assert!(is_tiflash_store(&store));
 
         store.labels[1].value = "tiflash_compute".to_string();
         assert!(!is_valid_tikv_store(&store));
+        assert!(is_tiflash_store(&store));
 
         store.labels[1].value = "other".to_string();
         assert!(is_valid_tikv_store(&store));
+        assert!(!is_tiflash_store(&store));
     }
 }

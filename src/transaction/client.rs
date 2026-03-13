@@ -344,7 +344,8 @@ impl<PdC: PdClient> Client<PdC> {
         PdClient::get_timestamp_with_dc_location(self.pd.clone(), dc_location).await
     }
 
-    /// Get the cluster-wide minimum `safe_ts` across all TiKV stores.
+    /// Get the cluster-wide minimum `safe_ts` across all TiKV stores (and TiFlash stores, if
+    /// present).
     ///
     /// This value is a best-effort signal used by stale reads: if it is non-zero, reads at
     /// timestamps less than or equal to the returned `safe_ts` can be served from replicas (subject

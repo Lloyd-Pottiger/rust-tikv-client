@@ -127,7 +127,7 @@ impl<PdC: PdClient> SafeTsCacheInner<PdC> {
     async fn refresh(&self) -> Result<()> {
         let _guard = self.refresh_lock.lock().await;
 
-        let stores = self.pd.all_stores().await?;
+        let stores = self.pd.all_stores_for_safe_ts().await?;
         if stores.is_empty() {
             let mut state = self.state.write().await;
             state.initialized = true;

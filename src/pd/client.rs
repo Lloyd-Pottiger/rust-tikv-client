@@ -24,6 +24,7 @@ use crate::region::RegionId;
 use crate::region::RegionVerId;
 use crate::region::RegionWithLeader;
 use crate::region::StoreId;
+use crate::region_cache::is_tiflash_store;
 use crate::region_cache::RegionCache;
 use crate::store::KvConnect;
 use crate::store::RegionStore;
@@ -93,6 +94,14 @@ pub trait PdClient: Send + Sync + 'static {
     }
 
     async fn all_stores(&self) -> Result<Vec<Store>>;
+
+    /// Returns the list of stores to use for safe-ts maintenance.
+    ///
+    /// Implementations may override this to include additional store types (for example TiFlash)
+    /// that are excluded from [`PdClient::all_stores`] for normal request routing.
+    async fn all_stores_for_safe_ts(&self) -> Result<Vec<Store>> {
+        self.all_stores().await
+    }
 
     /// Fetch PD store metadata by store id.
     ///
@@ -330,6 +339,24 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         let mut stores = Vec::with_capacity(pb_stores.len());
         for store in pb_stores {
             let client = self.kv_client(&store.address).await?;
+            stores.push(Store::new(store, Arc::new(client)));
+        }
+        Ok(stores)
+    }
+
+    async fn all_stores_for_safe_ts(&self) -> Result<Vec<Store>> {
+        let pb_stores = self
+            .region_cache
+            .read_through_all_stores_for_safe_ts()
+            .await?;
+        let mut stores = Vec::with_capacity(pb_stores.len());
+        for store in pb_stores {
+            let addr = if is_tiflash_store(&store) && !store.peer_address.is_empty() {
+                store.peer_address.clone()
+            } else {
+                store.address.clone()
+            };
+            let client = self.kv_client(&addr).await?;
             stores.push(Store::new(store, Arc::new(client)));
         }
         Ok(stores)
