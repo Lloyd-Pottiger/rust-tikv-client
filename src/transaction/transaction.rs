@@ -3085,6 +3085,15 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         };
 
+        let fresh_for_update_ts =
+            get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
+                .await?;
+        self.options.push_for_update_ts(fresh_for_update_ts);
+        let for_update_ts = match &self.options.kind {
+            TransactionKind::Pessimistic(for_update_ts) => for_update_ts.clone(),
+            TransactionKind::Optimistic => return Err(Error::InvalidTransactionType),
+        };
+
         let locks_for_request = if need_value {
             locks.clone()
         } else if track_aggressive_locking {
@@ -3101,6 +3110,13 @@ impl<PdC: PdClient> Transaction<PdC> {
                     if let Some(expected_for_update_ts) =
                         state.last_retry_unnecessary_locks.get(key).copied()
                     {
+                        if for_update_ts.version() < expected_for_update_ts {
+                            return Err(Error::StringError(format!(
+                                "txn {} retrying aggressive locking with for_update_ts ({}) less than previous expected_for_update_ts ({expected_for_update_ts})",
+                                self.timestamp.version(),
+                                for_update_ts.version(),
+                            )));
+                        }
                         if can_try_skip && !last_attempt_locks_may_expire {
                             state.last_retry_unnecessary_locks.remove(key);
                             state
@@ -3126,10 +3142,6 @@ impl<PdC: PdClient> Transaction<PdC> {
         } else {
             locks.clone()
         };
-        let for_update_ts =
-            get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
-                .await?;
-        self.options.push_for_update_ts(for_update_ts.clone());
         if locks_for_request.is_empty() {
             self.buffer.primary_key_or(&primary_lock);
             self.start_auto_heartbeat().await?;
@@ -13009,6 +13021,55 @@ mod tests {
         let rollback_requests = rollback_requests.lock().unwrap().clone();
         assert_eq!(rollback_requests.len(), 1);
         assert_eq!(rollback_requests[0].for_update_ts, 200);
+    }
+
+    #[tokio::test]
+    async fn test_aggressive_locking_retry_rejects_for_update_ts_before_expected_ts() {
+        let lock_requests = Arc::new(Mutex::new(Vec::<kvrpcpb::PessimisticLockRequest>::new()));
+        let lock_requests_captured = lock_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                lock_requests_captured.lock().unwrap().push(req.clone());
+                let mut resp = kvrpcpb::PessimisticLockResponse::default();
+                resp.results.push(kvrpcpb::PessimisticLockKeyResult {
+                    r#type: kvrpcpb::PessimisticLockKeyResultType::LockResultLockedWithConflict
+                        .into(),
+                    existence: true,
+                    locked_with_conflict_ts: 200,
+                    ..Default::default()
+                });
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            Err(Error::StringError("unexpected request".to_owned()))
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(100));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.start_aggressive_locking().unwrap();
+        txn.lock_keys(vec![b"k1".to_vec()]).await.unwrap();
+        txn.retry_aggressive_locking().await.unwrap();
+
+        let err = txn
+            .lock_keys(vec![b"k1".to_vec()])
+            .await
+            .err()
+            .expect("expected error");
+        assert!(
+            matches!(err, Error::StringError(msg) if msg == "txn 5 retrying aggressive locking with for_update_ts (101) less than previous expected_for_update_ts (200)")
+        );
+
+        let lock_requests = lock_requests.lock().unwrap().clone();
+        assert_eq!(lock_requests.len(), 1);
     }
 
     #[tokio::test]
