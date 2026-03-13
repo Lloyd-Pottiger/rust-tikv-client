@@ -38,6 +38,40 @@ let value = txn.get("key".to_owned()).await?;
 txn.commit().await?;
 ```
 
+### RPC interceptors
+
+You can attach RPC interceptors to a transaction (or snapshot) to observe and/or modify outgoing TiKV RPC requests.
+Interceptors run in an "onion model": `before` hooks run in registration order, and `after` hooks run in reverse order.
+
+```rust
+use tikv_client::{CommandPriority, FnRpcInterceptor, RpcCallResult, TransactionClient};
+
+let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"], None).await?;
+let mut txn = txn_client.begin_optimistic().await?;
+
+txn.add_rpc_interceptor(
+    FnRpcInterceptor::new("log")
+        .on_before(|req| {
+            // `label` is a stable request label such as "kv_get" or "kv_commit".
+            // `target` is the TiKV store address the request is sent to.
+            println!("-> {} to {}", req.label(), req.target());
+
+            // Example: force high priority.
+            req.set_priority(CommandPriority::High);
+        })
+        .on_after(|req, result| {
+            let status = match result {
+                RpcCallResult::Ok => "ok",
+                RpcCallResult::Err(_) => "err",
+            };
+            println!("<- {} {status}", req.label());
+        }),
+);
+
+txn.get("key".to_owned()).await?;
+txn.commit().await?;
+```
+
 To make an example which builds and runs,
 
 ```rust
