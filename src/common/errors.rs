@@ -392,6 +392,14 @@ impl From<ProtoKeyError> for Error {
             return Error::AssertionFailed(AssertionFailedError::new(assertion_failed));
         }
 
+        if e.already_exist.take().is_some() {
+            return Error::DuplicateKeyInsertion;
+        }
+
+        if let Some(deadlock) = e.deadlock.take() {
+            return Error::Deadlock(DeadlockError::new(deadlock));
+        }
+
         if !e.abort.is_empty() {
             return Error::KvError {
                 message: format!("tikv aborts txn: {}", std::mem::take(&mut e.abort)),
@@ -409,6 +417,39 @@ impl From<ProtoKeyError> for Error {
         }
 
         Error::KeyError(Box::new(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+    use crate::proto::kvrpcpb;
+
+    #[test]
+    fn test_key_error_already_exist_maps_to_duplicate_key_insertion() {
+        let mut key_err = kvrpcpb::KeyError::default();
+        key_err.already_exist = Some(kvrpcpb::AlreadyExist { key: vec![1, 2, 3] });
+        let err: Error = key_err.into();
+        assert!(matches!(err, Error::DuplicateKeyInsertion));
+    }
+
+    #[test]
+    fn test_key_error_deadlock_maps_to_deadlock() {
+        let mut deadlock = kvrpcpb::Deadlock::default();
+        deadlock.lock_ts = 42;
+        deadlock.deadlock_key_hash = 7;
+
+        let mut key_err = kvrpcpb::KeyError::default();
+        key_err.deadlock = Some(deadlock);
+
+        let err: Error = key_err.into();
+        match err {
+            Error::Deadlock(deadlock) => {
+                assert_eq!(deadlock.lock_ts(), 42);
+                assert_eq!(deadlock.deadlock_key_hash(), 7);
+            }
+            other => panic!("expected deadlock, got {other:?}"),
+        }
     }
 }
 
