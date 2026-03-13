@@ -8456,12 +8456,16 @@ mod tests {
         let second_store_id = Arc::new(AtomicU64::new(0));
         let first_stale_read = Arc::new(AtomicBool::new(false));
         let second_stale_read = Arc::new(AtomicBool::new(true));
+        let first_busy_threshold_ms = Arc::new(AtomicU64::new(0));
+        let second_busy_threshold_ms = Arc::new(AtomicU64::new(0));
 
         let get_count_captured = get_count.clone();
         let first_store_id_captured = first_store_id.clone();
         let second_store_id_captured = second_store_id.clone();
         let first_stale_read_captured = first_stale_read.clone();
         let second_stale_read_captured = second_stale_read.clone();
+        let first_busy_threshold_ms_captured = first_busy_threshold_ms.clone();
+        let second_busy_threshold_ms_captured = second_busy_threshold_ms.clone();
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
                 if req.is::<kvrpcpb::GetRequest>() {
@@ -8475,6 +8479,8 @@ mod tests {
                     if attempt == 0 {
                         first_store_id_captured.store(peer.store_id, Ordering::SeqCst);
                         first_stale_read_captured.store(ctx.stale_read, Ordering::SeqCst);
+                        first_busy_threshold_ms_captured
+                            .store(u64::from(ctx.busy_threshold_ms), Ordering::SeqCst);
 
                         let mut lock = kvrpcpb::LockInfo::default();
                         lock.key = req.key.clone();
@@ -8494,6 +8500,8 @@ mod tests {
 
                     second_store_id_captured.store(peer.store_id, Ordering::SeqCst);
                     second_stale_read_captured.store(ctx.stale_read, Ordering::SeqCst);
+                    second_busy_threshold_ms_captured
+                        .store(u64::from(ctx.busy_threshold_ms), Ordering::SeqCst);
                     return Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>);
                 }
 
@@ -8522,6 +8530,7 @@ mod tests {
                 .stale_read(),
             Keyspace::Disable,
         );
+        snapshot.set_load_based_replica_read_threshold(Duration::from_millis(222));
         let key: Key = vec![0].into();
         let _ = snapshot.get(key).await.unwrap();
 
@@ -8529,6 +8538,8 @@ mod tests {
         assert_eq!(second_store_id.load(Ordering::SeqCst), 41);
         assert!(first_stale_read.load(Ordering::SeqCst));
         assert!(!second_stale_read.load(Ordering::SeqCst));
+        assert_eq!(first_busy_threshold_ms.load(Ordering::SeqCst), 222);
+        assert_eq!(second_busy_threshold_ms.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

@@ -2210,6 +2210,9 @@ where
                             // meets a lock, fall back to normal reads on the leader.
                             ctx.stale_read = false;
                             ctx.replica_read = false;
+                            // client-go also clears busy-threshold (load-based replica read) once
+                            // stale read meets a lock.
+                            ctx.busy_threshold_ms = 0;
                         }
                     }
                     forced_leader = true;
