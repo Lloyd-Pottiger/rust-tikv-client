@@ -4,8 +4,8 @@ The TiKV client is a Rust library (crate). To use this crate in your project, ad
 
 ```toml
 [dependencies]
-tikv-client = "0.1"
-tokio = { version = "1.5", features = ["full"] }
+tikv-client = "0.4"
+tokio = { version = "1", features = ["full"] }
 ```
 
 Note that you need to use Tokio. The TiKV client has an async API and therefore you need an async runtime in your program to use it. At the moment, Tokio is used internally in the client and so you must use Tokio in your code too. We plan to become more flexible in future versions.
@@ -21,7 +21,7 @@ Raw mode:
 ```rust
 use tikv_client::RawClient;
 
-let client = RawClient::new(vec!["127.0.0.1:2379"], None).await?;
+let client = RawClient::new(vec!["127.0.0.1:2379"]).await?;
 client.put("key".to_owned(), "value".to_owned()).await?;
 let value = client.get("key".to_owned()).await?;
 ```
@@ -31,12 +31,14 @@ Transactional mode:
 ```rust
 use tikv_client::TransactionClient;
 
-let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"], None).await?;
+let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
 let mut txn = txn_client.begin_optimistic().await?;
 txn.put("key".to_owned(), "value".to_owned()).await?;
 let value = txn.get("key".to_owned()).await?;
 txn.commit().await?;
 ```
+
+Stale reads (replica reads) are supported on read-only snapshots; see `examples/stale_read.rs` for a runnable example.
 
 ### RPC interceptors
 
@@ -46,7 +48,7 @@ Interceptors run in an "onion model": `before` hooks run in registration order, 
 ```rust
 use tikv_client::{CommandPriority, FnRpcInterceptor, RpcCallResult, TransactionClient};
 
-let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"], None).await?;
+let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
 let mut txn = txn_client.begin_optimistic().await?;
 
 txn.add_rpc_interceptor(
@@ -78,7 +80,7 @@ To make an example which builds and runs,
 use tikv_client::{TransactionClient, Error};
 
 async fn run() -> Result<(), Error> {
-    let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"], None).await?;
+    let txn_client = TransactionClient::new(vec!["127.0.0.1:2379"]).await?;
     let mut txn = txn_client.begin_optimistic().await?;
     txn.put("key".to_owned(), "value".to_owned()).await?;
     let value = txn.get("key".to_owned()).await?;
