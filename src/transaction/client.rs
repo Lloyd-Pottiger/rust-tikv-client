@@ -659,16 +659,17 @@ impl<PdC: PdClient> Client<PdC> {
         plan.execute().await
     }
 
-    /// Compact a specified key range on all TiKV stores.
+    /// Compact a specified key range on TiFlash stores.
     ///
     /// This is a store-level request (not tied to a specific region). Each store compacts its
-    /// local data only.
+    /// local data only. The request is only sent to TiFlash stores (filtered from PD store
+    /// metadata).
     ///
     /// `start_key` controls where compaction starts. Pass [`Key::EMPTY`] to start from the
     /// beginning. For incremental compaction, call again using the `compacted_end_key` returned in
     /// each [`ProtoCompactResponse`].
     ///
-    /// Returns one [`ProtoCompactResponse`] per store.
+    /// Returns one [`ProtoCompactResponse`] per TiFlash store.
     ///
     /// Returns an error if any store request fails.
     pub async fn compact(
@@ -687,8 +688,15 @@ impl<PdC: PdClient> Client<PdC> {
 
         let req = new_compact_request(start_key, physical_table_id, logical_table_id, keyspace_id)
             .encode_keyspace(self.keyspace, KeyMode::Txn);
+
+        let stores = self.pd.all_stores_for_safe_ts().await?;
+        let stores = stores
+            .into_iter()
+            .filter(|store| crate::region_cache::is_tiflash_store(&store.meta))
+            .collect::<Vec<_>>();
+
         let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
-            .all_stores(DEFAULT_STORE_BACKOFF)
+            .stores(stores, DEFAULT_STORE_BACKOFF)
             .merge(crate::request::Collect)
             .plan();
 
@@ -1217,10 +1225,16 @@ mod tests {
             },
         )));
 
+        let tiflash_label = metapb::StoreLabel {
+            key: "engine".to_owned(),
+            value: "tiflash".to_owned(),
+        };
+
         pd_client
             .insert_store_meta(metapb::Store {
                 id: 1,
                 address: "mock://1".to_owned(),
+                labels: vec![tiflash_label.clone()],
                 ..Default::default()
             })
             .await;
@@ -1228,6 +1242,7 @@ mod tests {
             .insert_store_meta(metapb::Store {
                 id: 2,
                 address: "mock://2".to_owned(),
+                labels: vec![tiflash_label],
                 ..Default::default()
             })
             .await;
@@ -1300,10 +1315,16 @@ mod tests {
             },
         )));
 
+        let tiflash_label = metapb::StoreLabel {
+            key: "engine".to_owned(),
+            value: "tiflash".to_owned(),
+        };
+
         pd_client
             .insert_store_meta(metapb::Store {
                 id: 1,
                 address: "mock://1".to_owned(),
+                labels: vec![tiflash_label.clone()],
                 ..Default::default()
             })
             .await;
@@ -1311,6 +1332,7 @@ mod tests {
             .insert_store_meta(metapb::Store {
                 id: 2,
                 address: "mock://2".to_owned(),
+                labels: vec![tiflash_label],
                 ..Default::default()
             })
             .await;
@@ -1333,6 +1355,49 @@ mod tests {
             assert_eq!(resp.compacted_start_key, expected_compacted_start_key_raw);
             assert_eq!(resp.compacted_end_key, expected_compacted_end_key_raw);
         }
+    }
+
+    #[tokio::test]
+    async fn test_compact_returns_empty_when_no_tiflash_stores() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_cloned = calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::CompactRequest>().is_some() {
+                    calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::CompactResponse::default()) as Box<dyn Any>);
+                }
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                address: "mock://1".to_owned(),
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                address: "mock://2".to_owned(),
+                ..Default::default()
+            })
+            .await;
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let res = client.compact(1, 2, crate::Key::EMPTY).await.unwrap();
+        assert!(res.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
