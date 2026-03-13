@@ -130,7 +130,11 @@ mod proptests;
 #[doc(inline)]
 pub use common::security::SecurityManager;
 #[doc(inline)]
+pub use common::DeadlockError;
+#[doc(inline)]
 pub use common::Error;
+#[doc(inline)]
+pub use common::ProtoDeadlock;
 #[doc(inline)]
 pub use common::ProtoKeyError;
 #[doc(inline)]

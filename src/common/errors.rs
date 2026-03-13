@@ -1,5 +1,6 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::fmt;
 use std::result;
 
 use thiserror::Error;
@@ -21,6 +22,65 @@ pub use crate::proto::errorpb::Error as ProtoRegionError;
 /// future release even if the wire format is compatible.
 #[doc(inline)]
 pub use crate::proto::kvrpcpb::KeyError as ProtoKeyError;
+
+/// Protobuf-generated deadlock error returned by TiKV.
+///
+/// This type is generated from TiKV's protobuf definitions and may change in a
+/// future release even if the wire format is compatible.
+#[doc(inline)]
+pub use crate::proto::kvrpcpb::Deadlock as ProtoDeadlock;
+
+/// Deadlock detected when acquiring pessimistic locks.
+#[derive(Clone, Debug)]
+pub struct DeadlockError {
+    deadlock: ProtoDeadlock,
+}
+
+impl DeadlockError {
+    pub fn new(deadlock: ProtoDeadlock) -> Self {
+        Self { deadlock }
+    }
+
+    pub fn lock_ts(&self) -> u64 {
+        self.deadlock.lock_ts
+    }
+
+    pub fn deadlock_key_hash(&self) -> u64 {
+        self.deadlock.deadlock_key_hash
+    }
+
+    pub fn wait_chain_len(&self) -> usize {
+        self.deadlock.wait_chain.len()
+    }
+
+    pub fn deadlock(&self) -> &ProtoDeadlock {
+        &self.deadlock
+    }
+
+    pub fn into_inner(self) -> ProtoDeadlock {
+        self.deadlock
+    }
+}
+
+impl fmt::Display for DeadlockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "deadlock detected (lock_ts={}, deadlock_key_hash={}, wait_chain_len={})",
+            self.lock_ts(),
+            self.deadlock_key_hash(),
+            self.wait_chain_len()
+        )
+    }
+}
+
+impl std::error::Error for DeadlockError {}
+
+impl From<ProtoDeadlock> for DeadlockError {
+    fn from(deadlock: ProtoDeadlock) -> Self {
+        Self::new(deadlock)
+    }
+}
 
 /// An error originating from the TiKV client or dependencies.
 #[derive(Debug, Error)]
@@ -84,6 +144,9 @@ pub enum Error {
     /// Wraps a per-key error returned by TiKV.
     #[error("{0:?}")]
     KeyError(Box<ProtoKeyError>),
+    /// Deadlock detected when acquiring pessimistic locks.
+    #[error("{0}")]
+    Deadlock(DeadlockError),
     /// Multiple errors generated from the ExtractError plan.
     #[error("Multiple errors: {0:?}")]
     ExtractedErrors(Vec<Error>),
