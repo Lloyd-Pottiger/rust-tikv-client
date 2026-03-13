@@ -205,6 +205,30 @@ impl SyncTransactionClient {
         )
     }
 
+    /// Generate a timestamp representing the time `prev_seconds` seconds ago.
+    ///
+    /// This is a synchronous version of [`TransactionClient::stale_timestamp`](crate::TransactionClient::stale_timestamp).
+    pub fn stale_timestamp(&self, prev_seconds: u64) -> Result<Timestamp> {
+        safe_block_on(&self.runtime, self.client.stale_timestamp(prev_seconds))
+    }
+
+    /// Generate a timestamp representing the time `prev_seconds` seconds ago for the given
+    /// transaction scope.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::stale_timestamp_with_txn_scope`](crate::TransactionClient::stale_timestamp_with_txn_scope).
+    pub fn stale_timestamp_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+        prev_seconds: u64,
+    ) -> Result<Timestamp> {
+        safe_block_on(
+            &self.runtime,
+            self.client
+                .stale_timestamp_with_txn_scope(txn_scope, prev_seconds),
+        )
+    }
+
     /// Get the cluster-wide minimum `safe_ts` across all TiKV stores.
     ///
     /// This is a synchronous version of [`TransactionClient::min_safe_ts`](crate::TransactionClient::min_safe_ts).

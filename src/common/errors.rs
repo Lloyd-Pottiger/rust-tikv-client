@@ -420,6 +420,22 @@ impl From<ProtoKeyError> for Error {
     }
 }
 
+/// A result holding an [`Error`](enum@Error).
+pub type Result<T> = result::Result<T, Error>;
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! internal_err {
+    ($e:expr) => ({
+        $crate::Error::InternalError {
+            message: format!("[{}:{}]: {}", file!(), line!(),  $e)
+        }
+    });
+    ($f:tt, $($arg:expr),+) => ({
+        internal_err!(format!($f, $($arg),+))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::Error;
@@ -480,20 +496,4 @@ mod tests {
             other => panic!("expected KeyError(primary_mismatch), got {other:?}"),
         }
     }
-}
-
-/// A result holding an [`Error`](enum@Error).
-pub type Result<T> = result::Result<T, Error>;
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! internal_err {
-    ($e:expr) => ({
-        $crate::Error::InternalError {
-            message: format!("[{}:{}]: {}", file!(), line!(),  $e)
-        }
-    });
-    ($f:tt, $($arg:expr),+) => ({
-        internal_err!(format!($f, $($arg),+))
-    });
 }

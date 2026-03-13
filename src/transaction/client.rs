@@ -1,9 +1,12 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use log::debug;
 use log::info;
+use tokio::sync::RwLock;
 
 use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF};
 use crate::config::Config;
@@ -58,6 +61,13 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
     keyspace: Keyspace,
     resolve_locks_ctx: ResolveLocksContext,
     safe_ts: SafeTsCache<PdC>,
+    last_tsos: Arc<RwLock<HashMap<String, LastTso>>>,
+}
+
+#[derive(Clone, Debug)]
+struct LastTso {
+    tso: Timestamp,
+    arrival: Instant,
 }
 
 impl<PdC: PdClient> Clone for Client<PdC> {
@@ -67,6 +77,7 @@ impl<PdC: PdClient> Clone for Client<PdC> {
             keyspace: self.keyspace,
             resolve_locks_ctx: self.resolve_locks_ctx.clone(),
             safe_ts: self.safe_ts.clone(),
+            last_tsos: self.last_tsos.clone(),
         }
     }
 }
@@ -134,6 +145,7 @@ impl Client {
             pd,
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         })
     }
 
@@ -159,6 +171,7 @@ impl Client {
             pd,
             keyspace: Keyspace::ApiV2NoPrefix,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         })
     }
 
@@ -175,6 +188,78 @@ impl Client {
 }
 
 impl<PdC: PdClient> Client<PdC> {
+    fn canonicalize_txn_scope(txn_scope: &str) -> String {
+        if txn_scope.is_empty() || txn_scope == "global" {
+            String::new()
+        } else {
+            txn_scope.to_owned()
+        }
+    }
+
+    async fn record_last_tso(&self, dc_location: String, tso: Timestamp) {
+        let mut last_tsos = self.last_tsos.write().await;
+        last_tsos.insert(
+            dc_location,
+            LastTso {
+                tso,
+                arrival: Instant::now(),
+            },
+        );
+    }
+
+    fn stale_timestamp_from_last_tso(last_tso: &LastTso, prev_seconds: u64) -> Result<Timestamp> {
+        let physical_seconds = last_tso.tso.physical / 1000;
+        if physical_seconds <= i64::try_from(prev_seconds).unwrap_or(i64::MAX) {
+            return Err(crate::Error::StringError(format!(
+                "invalid prev_seconds {prev_seconds}"
+            )));
+        }
+
+        let elapsed_ms = last_tso.arrival.elapsed().as_millis();
+        let elapsed_ms = i128::try_from(elapsed_ms).unwrap_or(i128::MAX);
+        let prev_ms = u128::from(prev_seconds).saturating_mul(1000);
+        let prev_ms = i128::try_from(prev_ms).unwrap_or(i128::MAX);
+
+        let physical_ms = i128::from(last_tso.tso.physical);
+        let stale_physical_ms = physical_ms + elapsed_ms - prev_ms;
+        if stale_physical_ms < 0 {
+            return Err(crate::Error::StringError(format!(
+                "invalid prev_seconds {prev_seconds}"
+            )));
+        }
+
+        Ok(Timestamp {
+            physical: i64::try_from(stale_physical_ms).unwrap_or(i64::MAX),
+            logical: 0,
+            suffix_bits: last_tso.tso.suffix_bits,
+        })
+    }
+
+    async fn stale_timestamp_with_dc_location(
+        &self,
+        dc_location: String,
+        prev_seconds: u64,
+    ) -> Result<Timestamp> {
+        if let Some(last_tso) = self.last_tsos.read().await.get(&dc_location).cloned() {
+            return Self::stale_timestamp_from_last_tso(&last_tso, prev_seconds);
+        }
+
+        let tso = if dc_location.is_empty() {
+            self.pd.clone().get_timestamp().await?
+        } else {
+            PdClient::get_timestamp_with_dc_location(self.pd.clone(), dc_location.clone()).await?
+        };
+        let last_tso = LastTso {
+            tso: tso.clone(),
+            arrival: Instant::now(),
+        };
+        self.last_tsos
+            .write()
+            .await
+            .insert(dc_location, last_tso.clone());
+        Self::stale_timestamp_from_last_tso(&last_tso, prev_seconds)
+    }
+
     /// Returns a [`LockResolver`] handle associated with this client.
     ///
     /// The returned resolver shares the resolve-lock caches with this client.
@@ -323,7 +408,9 @@ impl<PdC: PdClient> Client<PdC> {
     /// # });
     /// ```
     pub async fn current_timestamp(&self) -> Result<Timestamp> {
-        self.pd.clone().get_timestamp().await
+        let timestamp = self.pd.clone().get_timestamp().await?;
+        self.record_last_tso(String::new(), timestamp.clone()).await;
+        Ok(timestamp)
     }
 
     /// Retrieve the current [`Timestamp`] for the given transaction scope.
@@ -335,13 +422,43 @@ impl<PdC: PdClient> Client<PdC> {
         &self,
         txn_scope: impl AsRef<str>,
     ) -> Result<Timestamp> {
-        let txn_scope = txn_scope.as_ref();
-        let dc_location = if txn_scope.is_empty() || txn_scope == "global" {
-            String::new()
-        } else {
-            txn_scope.to_owned()
-        };
-        PdClient::get_timestamp_with_dc_location(self.pd.clone(), dc_location).await
+        let dc_location = Self::canonicalize_txn_scope(txn_scope.as_ref());
+        let timestamp =
+            PdClient::get_timestamp_with_dc_location(self.pd.clone(), dc_location.clone()).await?;
+        self.record_last_tso(dc_location, timestamp.clone()).await;
+        Ok(timestamp)
+    }
+
+    /// Generate a timestamp representing the time `prev_seconds` seconds ago.
+    ///
+    /// This is intended for staleness reads: when combined with
+    /// [`Snapshot::set_stale_read`](crate::Snapshot::set_stale_read), reads at the returned
+    /// timestamp can be served from replicas whose `safe_ts >= start_ts`.
+    ///
+    /// This maps to client-go `Oracle.GetStaleTimestamp` for the global txn scope.
+    ///
+    /// This method uses the most recently observed PD timestamp to avoid an extra PD call. When no
+    /// timestamp has been observed yet, it fetches one from PD.
+    pub async fn stale_timestamp(&self, prev_seconds: u64) -> Result<Timestamp> {
+        self.stale_timestamp_with_dc_location(String::new(), prev_seconds)
+            .await
+    }
+
+    /// Generate a timestamp representing the time `prev_seconds` seconds ago for the given
+    /// transaction scope.
+    ///
+    /// When `txn_scope` is `"global"` (or empty), this behaves the same as
+    /// [`Client::stale_timestamp`].
+    ///
+    /// This maps to client-go `Oracle.GetStaleTimestamp(txnScope, prevSecond)`.
+    pub async fn stale_timestamp_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+        prev_seconds: u64,
+    ) -> Result<Timestamp> {
+        let dc_location = Self::canonicalize_txn_scope(txn_scope.as_ref());
+        self.stale_timestamp_with_dc_location(dc_location, prev_seconds)
+            .await
     }
 
     /// Get the cluster-wide minimum `safe_ts` across all TiKV stores (and TiFlash stores, if
@@ -540,6 +657,8 @@ mod tests {
     use std::any::Any;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
+    use std::time::Instant;
 
     use crate::mock::{MockKvClient, MockPdClient};
     use crate::proto::kvrpcpb;
@@ -588,6 +707,7 @@ mod tests {
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         };
 
         let mut transaction = client.begin_with_start_timestamp(
@@ -612,6 +732,7 @@ mod tests {
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         };
 
         let _ts = client.current_timestamp_with_txn_scope("").await.unwrap();
@@ -624,6 +745,75 @@ mod tests {
         assert_eq!(
             pd_client.get_timestamp_dc_locations(),
             vec!["".to_owned(), "".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_timestamp_uses_cached_last_tso_without_fetching_pd_timestamp() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        {
+            let mut last_tsos = client.last_tsos.write().await;
+            last_tsos.insert(
+                String::new(),
+                super::LastTso {
+                    tso: Timestamp {
+                        physical: 10_000,
+                        logical: 7,
+                        ..Default::default()
+                    },
+                    arrival: Instant::now() - Duration::from_secs(10),
+                },
+            );
+        }
+
+        let stale = client.stale_timestamp(5).await.unwrap();
+        assert_eq!(stale.logical, 0);
+        assert!(
+            (14_500..=15_500).contains(&stale.physical),
+            "unexpected stale physical {}",
+            stale.physical
+        );
+        assert_eq!(
+            pd_client.get_timestamp_call_count(),
+            0,
+            "stale_timestamp should not fetch PD TSO when cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_timestamp_fetches_current_timestamp_when_cache_empty() {
+        let start_version = 10_000u64 << 18;
+        let pd_client = Arc::new(MockPdClient::default().with_tso_sequence(start_version));
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let stale = client.stale_timestamp(5).await.unwrap();
+        assert_eq!(stale.logical, 0);
+        assert!(
+            (4_500..=5_500).contains(&stale.physical),
+            "unexpected stale physical {}",
+            stale.physical
+        );
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
+
+        let _stale2 = client.stale_timestamp(5).await.unwrap();
+        assert_eq!(
+            pd_client.get_timestamp_call_count(),
+            1,
+            "stale_timestamp should reuse cached last tso"
         );
     }
 
@@ -653,6 +843,7 @@ mod tests {
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         };
 
         let mut transaction = client
@@ -683,6 +874,7 @@ mod tests {
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         };
 
         let _txn = client
@@ -735,6 +927,7 @@ mod tests {
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         };
 
         let mut txn = client
@@ -806,6 +999,7 @@ mod tests {
             pd: pd_client,
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         };
 
         assert_eq!(client.min_safe_ts_with_txn_scope("dc1").await.unwrap(), 42);
@@ -871,6 +1065,7 @@ mod tests {
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         };
 
         let mut txn = client
@@ -922,6 +1117,7 @@ mod tests {
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         };
 
         let mut txn = client
@@ -982,6 +1178,7 @@ mod tests {
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
         };
 
         let mut lock = kvrpcpb::LockInfo::default();
