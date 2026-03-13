@@ -158,8 +158,16 @@ struct AggressiveLockingState {
     primary_key: Option<Key>,
     last_attempt_start: Instant,
     attempt_start: Instant,
+    max_locked_with_conflict_ts: u64,
     last_retry_unnecessary_locks: HashMap<Key, u64>,
     current_locked_keys: HashMap<Key, u64>,
+}
+
+#[derive(Debug, Default)]
+struct PessimisticLockRequestResult {
+    pairs: Vec<KvPair>,
+    locked_keys_actual_for_update_ts: Vec<(Key, u64)>,
+    max_locked_with_conflict_ts: u64,
 }
 
 pub struct Transaction<PdC: PdClient = PdRpcClient> {
@@ -2309,6 +2317,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             primary_key: None,
             last_attempt_start: now,
             attempt_start: now,
+            max_locked_with_conflict_ts: 0,
             last_retry_unnecessary_locks: HashMap::new(),
             current_locked_keys: HashMap::new(),
         });
@@ -3148,6 +3157,22 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         };
 
+        let use_force_lock_wake_up_mode = track_aggressive_locking
+            && !need_value
+            && self.aggressive_locking.is_some()
+            && mode == PessimisticLockMode::Exclusive
+            && locks_for_request.len() == 1;
+        let apply_pessimistic_lock_wake_up_mode =
+            |request: &mut kvrpcpb::PessimisticLockRequest| {
+                if use_force_lock_wake_up_mode {
+                    request.wake_up_mode =
+                        kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock.into();
+                }
+            };
+
+        let mut locked_keys_actual_for_update_ts = Vec::new();
+        let mut max_locked_with_conflict_ts = 0u64;
+
         let pairs = if primary_in_request && locks_for_request.len() > 1 {
             let primary_region = self.rpc.region_for_key(&primary_lock).await?;
             let mut primary_locks = Vec::new();
@@ -3171,15 +3196,23 @@ impl<PdC: PdClient> Transaction<PdC> {
                     is_first_lock,
                 );
                 apply_pessimistic_lock_mode(&mut request);
-                self.execute_pessimistic_lock_request(
-                    request,
-                    for_update_ts.clone(),
-                    lock_wait_timeout,
-                    lock_wait_start,
-                    mode,
-                    track_aggressive_locking,
-                )
-                .await?
+                apply_pessimistic_lock_wake_up_mode(&mut request);
+                let result = self
+                    .execute_pessimistic_lock_request(
+                        request,
+                        for_update_ts.clone(),
+                        lock_wait_timeout,
+                        lock_wait_start,
+                        mode,
+                        track_aggressive_locking,
+                    )
+                    .await?;
+                max_locked_with_conflict_ts = std::cmp::max(
+                    max_locked_with_conflict_ts,
+                    result.max_locked_with_conflict_ts,
+                );
+                locked_keys_actual_for_update_ts.extend(result.locked_keys_actual_for_update_ts);
+                result.pairs
             } else {
                 let mut primary_request = new_pessimistic_lock_request(
                     primary_locks.into_iter(),
@@ -3191,12 +3224,13 @@ impl<PdC: PdClient> Transaction<PdC> {
                     is_first_lock,
                 );
                 apply_pessimistic_lock_mode(&mut primary_request);
+                apply_pessimistic_lock_wake_up_mode(&mut primary_request);
                 let primary_request_keys = primary_request
                     .mutations
                     .iter()
                     .map(|mutation| Key::from(mutation.key.clone()))
                     .collect::<Vec<_>>();
-                let primary_pairs = self
+                let primary_result = self
                     .execute_pessimistic_lock_request(
                         primary_request,
                         for_update_ts.clone(),
@@ -3206,6 +3240,13 @@ impl<PdC: PdClient> Transaction<PdC> {
                         track_aggressive_locking,
                     )
                     .await?;
+                max_locked_with_conflict_ts = std::cmp::max(
+                    max_locked_with_conflict_ts,
+                    primary_result.max_locked_with_conflict_ts,
+                );
+                locked_keys_actual_for_update_ts
+                    .extend(primary_result.locked_keys_actual_for_update_ts);
+                let primary_pairs = primary_result.pairs;
 
                 let mut secondary_request = new_pessimistic_lock_request(
                     secondary_locks.into_iter(),
@@ -3217,6 +3258,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     is_first_lock,
                 );
                 apply_pessimistic_lock_mode(&mut secondary_request);
+                apply_pessimistic_lock_wake_up_mode(&mut secondary_request);
                 let secondary_pairs = match self
                     .execute_pessimistic_lock_request(
                         secondary_request,
@@ -3228,7 +3270,15 @@ impl<PdC: PdClient> Transaction<PdC> {
                     )
                     .await
                 {
-                    Ok(pairs) => pairs,
+                    Ok(result) => {
+                        max_locked_with_conflict_ts = std::cmp::max(
+                            max_locked_with_conflict_ts,
+                            result.max_locked_with_conflict_ts,
+                        );
+                        locked_keys_actual_for_update_ts
+                            .extend(result.locked_keys_actual_for_update_ts);
+                        result.pairs
+                    }
                     Err(err) => {
                         let keep_locks_on_error = track_aggressive_locking
                             && !need_value
@@ -3292,15 +3342,23 @@ impl<PdC: PdClient> Transaction<PdC> {
                 is_first_lock,
             );
             apply_pessimistic_lock_mode(&mut request);
-            self.execute_pessimistic_lock_request(
-                request,
-                for_update_ts.clone(),
-                lock_wait_timeout,
-                lock_wait_start,
-                mode,
-                track_aggressive_locking,
-            )
-            .await?
+            apply_pessimistic_lock_wake_up_mode(&mut request);
+            let result = self
+                .execute_pessimistic_lock_request(
+                    request,
+                    for_update_ts.clone(),
+                    lock_wait_timeout,
+                    lock_wait_start,
+                    mode,
+                    track_aggressive_locking,
+                )
+                .await?;
+            max_locked_with_conflict_ts = std::cmp::max(
+                max_locked_with_conflict_ts,
+                result.max_locked_with_conflict_ts,
+            );
+            locked_keys_actual_for_update_ts.extend(result.locked_keys_actual_for_update_ts);
+            result.pairs
         };
 
         let primary_changed = if track_aggressive_locking && !need_value {
@@ -3322,12 +3380,21 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.start_auto_heartbeat().await?;
         if track_aggressive_locking && !need_value {
             if let Some(state) = self.aggressive_locking.as_mut() {
+                state.max_locked_with_conflict_ts = std::cmp::max(
+                    state.max_locked_with_conflict_ts,
+                    max_locked_with_conflict_ts,
+                );
                 let expected_for_update_ts = for_update_ts.version();
                 for (key, _assertion) in &locks_for_request {
+                    let actual_for_update_ts = locked_keys_actual_for_update_ts
+                        .iter()
+                        .find(|(locked_key, _)| locked_key == key)
+                        .map(|(_, actual_ts)| *actual_ts)
+                        .unwrap_or(expected_for_update_ts);
                     state
                         .current_locked_keys
                         .entry(key.clone())
-                        .or_insert(expected_for_update_ts);
+                        .or_insert(actual_for_update_ts);
                     state.last_retry_unnecessary_locks.remove(key);
                 }
             }
@@ -3349,7 +3416,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         lock_wait_start: Instant,
         mode: PessimisticLockMode,
         track_aggressive_locking: bool,
-    ) -> Result<Vec<KvPair>> {
+    ) -> Result<PessimisticLockRequestResult> {
         let need_value = request.return_values;
         fn collect_lock_errors(
             error: &Error,
@@ -3476,9 +3543,89 @@ impl<PdC: PdClient> Transaction<PdC> {
                 }
             }
 
+            let mut locked_keys_actual_for_update_ts = Vec::new();
+            let mut max_locked_with_conflict_ts = 0u64;
+            if request.wake_up_mode
+                == kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock as i32
+            {
+                for crate::request::ResponseWithShard(resp, mutations) in &success {
+                    if resp.results.is_empty() {
+                        return Err(Error::StringError(
+                            "pessimistic lock response missing results for force lock request"
+                                .to_owned(),
+                        ));
+                    }
+                    if resp.results.len() != mutations.len() {
+                        return Err(Error::StringError(format!(
+                            "pessimistic lock response results length {} does not match mutations length {}",
+                            resp.results.len(),
+                            mutations.len(),
+                        )));
+                    }
+                    for (mutation, result) in mutations.iter().zip(resp.results.iter()) {
+                        let is_failed = match result.r#type {
+                            x if x
+                                == kvrpcpb::PessimisticLockKeyResultType::LockResultNormal as i32 =>
+                            {
+                                false
+                            }
+                            x if x
+                                == kvrpcpb::PessimisticLockKeyResultType::LockResultLockedWithConflict
+                                    as i32 =>
+                            {
+                                false
+                            }
+                            x if x
+                                == kvrpcpb::PessimisticLockKeyResultType::LockResultFailed as i32 =>
+                            {
+                                true
+                            }
+                            other => {
+                                return Err(Error::StringError(format!(
+                                    "unknown pessimistic lock key result type: {other}",
+                                )));
+                            }
+                        };
+                        if is_failed {
+                            return Err(Error::StringError(
+                                "pessimistic lock force lock request failed".to_owned(),
+                            ));
+                        }
+
+                        let locked_with_conflict_ts = result.locked_with_conflict_ts;
+                        if locked_with_conflict_ts != 0
+                            && locked_with_conflict_ts <= request.for_update_ts
+                        {
+                            return Err(Error::StringError(format!(
+                                "pessimistic lock request to key {:?} returns locked_with_conflict_ts({}) not greater than requested for_update_ts({})",
+                                mutation.key,
+                                locked_with_conflict_ts,
+                                request.for_update_ts,
+                            )));
+                        }
+                        max_locked_with_conflict_ts =
+                            std::cmp::max(max_locked_with_conflict_ts, locked_with_conflict_ts);
+                        let actual_for_update_ts =
+                            std::cmp::max(request.for_update_ts, locked_with_conflict_ts);
+                        locked_keys_actual_for_update_ts
+                            .push((Key::from(mutation.key.clone()), actual_for_update_ts));
+                    }
+                }
+            }
+
+            self.options.max_locked_with_conflict_ts = std::cmp::max(
+                self.options.max_locked_with_conflict_ts,
+                max_locked_with_conflict_ts,
+            );
+
             if errors.is_empty() {
-                return CollectPessimisticLock::new(need_value)
-                    .merge(success.into_iter().map(Ok).collect());
+                let pairs = CollectPessimisticLock::new(need_value)
+                    .merge(success.into_iter().map(Ok).collect())?;
+                return Ok(PessimisticLockRequestResult {
+                    pairs,
+                    locked_keys_actual_for_update_ts,
+                    max_locked_with_conflict_ts,
+                });
             }
 
             let success_keys = success
@@ -3649,10 +3796,14 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Ok(());
         }
 
+        let effective_for_update_ts = Timestamp::from_version(std::cmp::max(
+            for_update_ts.version(),
+            self.options.max_locked_with_conflict_ts,
+        ));
         let req = new_pessimistic_rollback_request(
             keys.clone().into_iter(),
             start_version.clone(),
-            for_update_ts,
+            effective_for_update_ts,
         );
         let mut req = req;
         self.options.apply_write_context(&mut req.context);
@@ -4182,6 +4333,10 @@ pub enum TransactionKind {
 pub struct TransactionOptions {
     /// Optimistic or pessimistic (default) transaction.
     kind: TransactionKind,
+    /// The maximum `locked_with_conflict_ts` returned by TiKV for this transaction.
+    ///
+    /// This is used to choose a safe `for_update_ts` when rolling back pessimistic locks.
+    max_locked_with_conflict_ts: u64,
     /// The geographical scope of the transaction.
     ///
     /// When set, PD timestamps used by the transaction (for example, `for_update_ts`, commit-ts,
@@ -4422,6 +4577,7 @@ impl TransactionOptions {
     pub fn new_optimistic() -> TransactionOptions {
         TransactionOptions {
             kind: TransactionKind::Optimistic,
+            max_locked_with_conflict_ts: 0,
             txn_scope: None,
             replica_read: ReplicaReadType::Leader,
             match_store_ids: Arc::new(Vec::new()),
@@ -4458,6 +4614,7 @@ impl TransactionOptions {
     pub fn new_pessimistic() -> TransactionOptions {
         TransactionOptions {
             kind: TransactionKind::Pessimistic(Timestamp::from_version(0)),
+            max_locked_with_conflict_ts: 0,
             txn_scope: None,
             replica_read: ReplicaReadType::Leader,
             match_store_ids: Arc::new(Vec::new()),
@@ -5893,8 +6050,15 @@ impl<PdC: PdClient> Committer<PdC> {
                 plan.execute().await?;
             }
             TransactionKind::Pessimistic(for_update_ts) => {
-                let mut req =
-                    new_pessimistic_rollback_request(keys, start_version.clone(), for_update_ts);
+                let effective_for_update_ts = Timestamp::from_version(std::cmp::max(
+                    for_update_ts.version(),
+                    self.options.max_locked_with_conflict_ts,
+                ));
+                let mut req = new_pessimistic_rollback_request(
+                    keys,
+                    start_version.clone(),
+                    effective_for_update_ts,
+                );
                 self.options.apply_write_context(&mut req.context);
                 if self.options.resource_group_tag.is_none() {
                     if let Some(tagger) = self.resource_group_tagger.as_ref() {
@@ -6010,6 +6174,22 @@ mod tests {
     use crate::StoreLabel;
     use crate::Transaction;
     use crate::TransactionOptions;
+
+    fn ok_pessimistic_lock_response_for_request(
+        request: &kvrpcpb::PessimisticLockRequest,
+    ) -> kvrpcpb::PessimisticLockResponse {
+        let mut resp = kvrpcpb::PessimisticLockResponse::default();
+        if request.wake_up_mode == kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock as i32 {
+            resp.results = std::iter::repeat_with(|| kvrpcpb::PessimisticLockKeyResult {
+                r#type: kvrpcpb::PessimisticLockKeyResultType::LockResultNormal.into(),
+                existence: true,
+                ..Default::default()
+            })
+            .take(request.mutations.len())
+            .collect();
+        }
+        resp
+    }
 
     struct RecordingInterceptor {
         name: &'static str,
@@ -11365,7 +11545,8 @@ mod tests {
                     _ => panic!("unexpected pessimistic lock request count {attempt}"),
                 }
 
-                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
             }
 
             panic!("unexpected request type: {:?}", req.type_id());
@@ -11492,7 +11673,8 @@ mod tests {
                     1 => assert_eq!(req.wait_timeout, i64::MAX),
                     _ => panic!("unexpected lock request count {attempt}"),
                 }
-                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
             }
 
             panic!("unexpected request type: {:?}", req.type_id());
@@ -11565,7 +11747,8 @@ mod tests {
                     }
                     _ => panic!("unexpected lock request count {attempt}"),
                 }
-                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
             }
 
             panic!("unexpected request type: {:?}", req.type_id());
@@ -11633,9 +11816,8 @@ mod tests {
                         assert_eq!(req.mutations[0].key, b"k2".to_vec());
                         assert_eq!(req.mutations[0].op, kvrpcpb::Op::PessimisticLock as i32);
                         assert!(!req.return_values);
-                        return Ok(
-                            Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>
-                        );
+                        let resp = ok_pessimistic_lock_response_for_request(req);
+                        return Ok(Box::new(resp) as Box<dyn Any>);
                     }
                     1 => {
                         assert_eq!(req.mutations[0].key, b"k1".to_vec());
@@ -11703,9 +11885,8 @@ mod tests {
                         assert_eq!(req.mutations[0].key, b"k2".to_vec());
                         assert_eq!(req.mutations[0].op, kvrpcpb::Op::PessimisticLock as i32);
                         assert!(!req.return_values);
-                        return Ok(
-                            Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>
-                        );
+                        let resp = ok_pessimistic_lock_response_for_request(req);
+                        return Ok(Box::new(resp) as Box<dyn Any>);
                     }
                     1 => {
                         assert_eq!(req.mutations.len(), 2);
@@ -12088,10 +12269,7 @@ mod tests {
         let check_txn_status_requests_captured = check_txn_status_requests.clone();
 
         let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
-            if req
-                .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
-                .is_some()
-            {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
                 let attempt = lock_requests_captured.fetch_add(1, Ordering::SeqCst);
                 match attempt {
                     0 => {
@@ -12113,9 +12291,8 @@ mod tests {
                         return Ok(Box::new(resp) as Box<dyn Any>);
                     }
                     1 => {
-                        return Ok(
-                            Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>
-                        );
+                        let resp = ok_pessimistic_lock_response_for_request(req);
+                        return Ok(Box::new(resp) as Box<dyn Any>);
                     }
                     _ => panic!("unexpected lock request count {attempt}"),
                 }
@@ -12157,7 +12334,7 @@ mod tests {
             true,
         );
 
-        let pairs = txn
+        let result = txn
             .execute_pessimistic_lock_request(
                 request,
                 Timestamp::default(),
@@ -12168,7 +12345,7 @@ mod tests {
             )
             .await
             .expect("expected the lock request to eventually succeed");
-        assert!(pairs.is_empty());
+        assert!(result.pairs.is_empty());
 
         assert_eq!(lock_requests.load(Ordering::SeqCst), 2);
         assert_eq!(check_txn_status_requests.load(Ordering::SeqCst), 0);
@@ -12202,10 +12379,7 @@ mod tests {
         let expected_request_source_hook = expected_request_source.clone();
 
         let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
-            if req
-                .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
-                .is_some()
-            {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
                 let call = lock_requests_captured.fetch_add(1, Ordering::SeqCst);
                 if call == 0 {
                     let embedded = kvrpcpb::LockInfo {
@@ -12232,7 +12406,8 @@ mod tests {
                     return Ok(Box::new(resp) as Box<dyn Any>);
                 }
 
-                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
             }
 
             if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
@@ -12334,7 +12509,8 @@ mod tests {
         let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
             if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
                 assert_eq!(req.primary_lock, vec![1]);
-                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
             }
 
             panic!("unexpected request type: {:?}", req.type_id());
@@ -12366,7 +12542,8 @@ mod tests {
                 assert_eq!(req.primary_lock, vec![1]);
                 assert_eq!(req.mutations.len(), 1);
                 assert_eq!(req.mutations[0].key, vec![1]);
-                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
             }
 
             panic!("unexpected request type: {:?}", req.type_id());
@@ -12415,7 +12592,8 @@ mod tests {
                     }
                     other => panic!("unexpected store id {other}"),
                 }
-                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
             }
 
             panic!("unexpected request type: {:?}", req.type_id());
@@ -12457,11 +12635,9 @@ mod tests {
                     Ok(Box::<kvrpcpb::TxnHeartBeatResponse>::default() as Box<dyn Any>)
                 } else if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
                     Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>)
-                } else if req
-                    .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
-                    .is_some()
-                {
-                    Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>)
+                } else if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                    let resp = ok_pessimistic_lock_response_for_request(req);
+                    Ok(Box::new(resp) as Box<dyn Any>)
                 } else {
                     Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>)
                 }
@@ -12686,6 +12862,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_aggressive_locking_single_key_uses_force_lock_wake_up_mode() {
+        let lock_requests = Arc::new(Mutex::new(Vec::<kvrpcpb::PessimisticLockRequest>::new()));
+        let lock_requests_captured = lock_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                lock_requests_captured.lock().unwrap().push(req.clone());
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            Err(Error::StringError("unexpected request".to_owned()))
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(100));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.start_aggressive_locking().unwrap();
+        txn.lock_keys(vec![b"k1".to_vec()]).await.unwrap();
+
+        let lock_requests = lock_requests.lock().unwrap().clone();
+        assert_eq!(lock_requests.len(), 1);
+        assert_eq!(
+            lock_requests[0].wake_up_mode,
+            kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock as i32
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aggressive_locking_records_locked_with_conflict_ts_for_prewrite_constraints() {
+        let prewrite_requests = Arc::new(Mutex::new(Vec::<kvrpcpb::PrewriteRequest>::new()));
+        let prewrite_requests_captured = prewrite_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                assert_eq!(
+                    req.wake_up_mode,
+                    kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock as i32
+                );
+                assert_eq!(req.for_update_ts, 100);
+                assert_eq!(req.mutations.len(), 1);
+                let mut resp = kvrpcpb::PessimisticLockResponse::default();
+                resp.results.push(kvrpcpb::PessimisticLockKeyResult {
+                    r#type: kvrpcpb::PessimisticLockKeyResultType::LockResultLockedWithConflict
+                        .into(),
+                    existence: true,
+                    locked_with_conflict_ts: 200,
+                    ..Default::default()
+                });
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_requests_captured.lock().unwrap().push(req.clone());
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+            if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+            Err(Error::StringError("unexpected request".to_owned()))
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(100));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.start_aggressive_locking().unwrap();
+        txn.lock_keys(vec![b"k1".to_vec()]).await.unwrap();
+        txn.done_aggressive_locking().await.unwrap();
+
+        txn.commit().await.unwrap();
+
+        let prewrite_requests = prewrite_requests.lock().unwrap().clone();
+        assert_eq!(prewrite_requests.len(), 1);
+
+        let req = &prewrite_requests[0];
+        assert_eq!(req.for_update_ts, 100);
+        assert_eq!(
+            req.for_update_ts_constraints,
+            vec![kvrpcpb::prewrite_request::ForUpdateTsConstraint {
+                index: 0,
+                expected_for_update_ts: 200,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aggressive_locking_cancel_uses_max_locked_with_conflict_ts_for_rollback() {
+        let rollback_requests =
+            Arc::new(Mutex::new(Vec::<kvrpcpb::PessimisticRollbackRequest>::new()));
+        let rollback_requests_captured = rollback_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                assert_eq!(
+                    req.wake_up_mode,
+                    kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock as i32
+                );
+                assert_eq!(req.for_update_ts, 100);
+                let mut resp = kvrpcpb::PessimisticLockResponse::default();
+                resp.results.push(kvrpcpb::PessimisticLockKeyResult {
+                    r#type: kvrpcpb::PessimisticLockKeyResultType::LockResultLockedWithConflict
+                        .into(),
+                    existence: true,
+                    locked_with_conflict_ts: 200,
+                    ..Default::default()
+                });
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                rollback_requests_captured.lock().unwrap().push(req.clone());
+                return Ok(Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>);
+            }
+            Err(Error::StringError("unexpected request".to_owned()))
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(100));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.start_aggressive_locking().unwrap();
+        txn.lock_keys(vec![b"k1".to_vec()]).await.unwrap();
+        txn.cancel_aggressive_locking().await.unwrap();
+
+        let rollback_requests = rollback_requests.lock().unwrap().clone();
+        assert_eq!(rollback_requests.len(), 1);
+        assert_eq!(rollback_requests[0].for_update_ts, 200);
+    }
+
+    #[tokio::test]
     async fn test_aggressive_locking_skips_redundant_lock_requests_and_rolls_back_unneeded_locks() {
         let lock_requests = Arc::new(Mutex::new(Vec::<kvrpcpb::PessimisticLockRequest>::new()));
         let rollback_requests =
@@ -12698,7 +13024,8 @@ mod tests {
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
                     lock_requests_captured.lock().unwrap().push(req.clone());
-                    return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                    let resp = ok_pessimistic_lock_response_for_request(req);
+                    return Ok(Box::new(resp) as Box<dyn Any>);
                 }
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
                     rollback_requests_captured.lock().unwrap().push(req.clone());
@@ -12758,7 +13085,8 @@ mod tests {
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
                     lock_requests_captured.lock().unwrap().push(req.clone());
-                    return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                    let resp = ok_pessimistic_lock_response_for_request(req);
+                    return Ok(Box::new(resp) as Box<dyn Any>);
                 }
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
                     rollback_requests_captured.lock().unwrap().push(req.clone());
@@ -12822,7 +13150,8 @@ mod tests {
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
                     lock_requests_captured.lock().unwrap().push(req.clone());
-                    return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                    let resp = ok_pessimistic_lock_response_for_request(req);
+                    return Ok(Box::new(resp) as Box<dyn Any>);
                 }
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
                     rollback_requests_captured.lock().unwrap().push(req.clone());
@@ -12885,7 +13214,8 @@ mod tests {
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
                     lock_requests_captured.lock().unwrap().push(req.clone());
-                    return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                    let resp = ok_pessimistic_lock_response_for_request(req);
+                    return Ok(Box::new(resp) as Box<dyn Any>);
                 }
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
                     rollback_requests_captured.lock().unwrap().push(req.clone());
@@ -12945,7 +13275,8 @@ mod tests {
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
                     lock_requests_captured.lock().unwrap().push(req.clone());
-                    return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                    let resp = ok_pessimistic_lock_response_for_request(req);
+                    return Ok(Box::new(resp) as Box<dyn Any>);
                 }
                 if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
                     rollback_requests_captured.lock().unwrap().push(req.clone());
@@ -12992,11 +13323,9 @@ mod tests {
         let prewrite_requests_captured = prewrite_requests.clone();
 
         let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
-            if req
-                .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
-                .is_some()
-            {
-                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
             }
             if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
                 prewrite_requests_captured.lock().unwrap().push(req.clone());
