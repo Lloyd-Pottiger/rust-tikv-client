@@ -1398,6 +1398,30 @@ impl Merge<kvrpcpb::CompactResponse> for Collect {
     }
 }
 
+pub fn new_get_ti_flash_system_table_request(sql: String) -> kvrpcpb::TiFlashSystemTableRequest {
+    let mut req = kvrpcpb::TiFlashSystemTableRequest::default();
+    req.sql = sql;
+    req
+}
+
+impl KvRequest for kvrpcpb::TiFlashSystemTableRequest {
+    type Response = kvrpcpb::TiFlashSystemTableResponse;
+}
+
+impl StoreRequest for kvrpcpb::TiFlashSystemTableRequest {
+    fn apply_store(&mut self, _store: &Store) {}
+}
+
+impl HasLocks for kvrpcpb::TiFlashSystemTableResponse {}
+
+impl Merge<kvrpcpb::TiFlashSystemTableResponse> for Collect {
+    type Out = Vec<kvrpcpb::TiFlashSystemTableResponse>;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::TiFlashSystemTableResponse>>) -> Result<Self::Out> {
+        input.into_iter().collect()
+    }
+}
+
 pub fn new_register_lock_observer_request(max_ts: u64) -> kvrpcpb::RegisterLockObserverRequest {
     let mut req = kvrpcpb::RegisterLockObserverRequest::default();
     req.max_ts = max_ts;

@@ -260,3 +260,7 @@ pub fn new_get_lock_wait_info_request() -> kvrpcpb::GetLockWaitInfoRequest {
 pub fn new_get_lock_wait_history_request() -> kvrpcpb::GetLockWaitHistoryRequest {
     requests::new_get_lock_wait_history_request()
 }
+
+pub fn new_get_ti_flash_system_table_request(sql: String) -> kvrpcpb::TiFlashSystemTableRequest {
+    requests::new_get_ti_flash_system_table_request(sql)
+}

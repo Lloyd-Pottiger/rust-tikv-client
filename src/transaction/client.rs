@@ -25,6 +25,7 @@ use crate::transaction::lowering::new_check_lock_observer_request;
 use crate::transaction::lowering::new_compact_request;
 use crate::transaction::lowering::new_get_lock_wait_history_request;
 use crate::transaction::lowering::new_get_lock_wait_info_request;
+use crate::transaction::lowering::new_get_ti_flash_system_table_request;
 use crate::transaction::lowering::new_physical_scan_lock_request;
 use crate::transaction::lowering::new_register_lock_observer_request;
 use crate::transaction::lowering::new_remove_lock_observer_request;
@@ -61,6 +62,13 @@ pub use crate::proto::deadlock::WaitForEntry as ProtoWaitForEntry;
 /// future release even if the wire format is compatible.
 #[doc(inline)]
 pub use crate::proto::kvrpcpb::CompactResponse as ProtoCompactResponse;
+
+/// Protobuf-generated TiFlash system table response returned by TiKV.
+///
+/// This type is generated from TiKV's protobuf definitions and may change in a
+/// future release even if the wire format is compatible.
+#[doc(inline)]
+pub use crate::proto::kvrpcpb::TiFlashSystemTableResponse as ProtoTiFlashSystemTableResponse;
 
 /// The TiKV transactional `Client` is used to interact with TiKV using transactional requests.
 ///
@@ -687,6 +695,30 @@ impl<PdC: PdClient> Client<PdC> {
         Ok(plan.execute().await?.truncate_keyspace(self.keyspace))
     }
 
+    /// Get system table data from TiFlash stores.
+    ///
+    /// This is a store-level request (not tied to a specific region). The request is only sent to
+    /// TiFlash stores (filtered from PD store metadata).
+    ///
+    /// Returns one [`ProtoTiFlashSystemTableResponse`] per TiFlash store.
+    pub async fn tiflash_system_table(
+        &self,
+        sql: impl Into<String>,
+    ) -> Result<Vec<ProtoTiFlashSystemTableResponse>> {
+        let stores = self.pd.all_stores_for_safe_ts().await?;
+        let stores = stores
+            .into_iter()
+            .filter(|store| crate::region_cache::is_tiflash_store(&store.meta))
+            .collect::<Vec<_>>();
+
+        let req = new_get_ti_flash_system_table_request(sql.into());
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .stores(stores, DEFAULT_STORE_BACKOFF)
+            .merge(crate::request::Collect)
+            .plan();
+        plan.execute().await
+    }
+
     /// Register a lock observer on all TiKV stores.
     ///
     /// This is a store-level request (not tied to a specific region).
@@ -1301,6 +1333,113 @@ mod tests {
             assert_eq!(resp.compacted_start_key, expected_compacted_start_key_raw);
             assert_eq!(resp.compacted_end_key, expected_compacted_end_key_raw);
         }
+    }
+
+    #[tokio::test]
+    async fn test_tiflash_system_table_returns_empty_when_no_tiflash_stores() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_cloned = calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req
+                    .downcast_ref::<kvrpcpb::TiFlashSystemTableRequest>()
+                    .is_some()
+                {
+                    calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::TiFlashSystemTableResponse {
+                        data: b"unexpected".to_vec(),
+                    }) as Box<dyn Any>);
+                }
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                address: "mock://1".to_owned(),
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                address: "mock://2".to_owned(),
+                ..Default::default()
+            })
+            .await;
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let res = client.tiflash_system_table("select 1").await.unwrap();
+        assert!(res.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_tiflash_system_table_queries_all_tiflash_stores() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_cloned = calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::TiFlashSystemTableRequest>() else {
+                    return Err(crate::Error::Unimplemented);
+                };
+                assert_eq!(req.sql, "select 42");
+
+                let idx = calls_cloned.fetch_add(1, Ordering::SeqCst) as u8;
+                Ok(
+                    Box::new(kvrpcpb::TiFlashSystemTableResponse { data: vec![idx] })
+                        as Box<dyn Any>,
+                )
+            },
+        )));
+
+        let tiflash_label = metapb::StoreLabel {
+            key: "engine".to_owned(),
+            value: "tiflash".to_owned(),
+        };
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                address: "mock://1".to_owned(),
+                labels: vec![tiflash_label.clone()],
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                address: "mock://2".to_owned(),
+                labels: vec![tiflash_label],
+                ..Default::default()
+            })
+            .await;
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let res = client.tiflash_system_table("select 42").await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(res.len(), 2);
+
+        let mut results = res.into_iter().map(|r| r.data).collect::<Vec<_>>();
+        results.sort();
+        assert_eq!(results, vec![vec![0], vec![1]]);
     }
 
     #[tokio::test]

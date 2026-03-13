@@ -160,6 +160,12 @@ impl HasRegionError for kvrpcpb::CompactResponse {
     }
 }
 
+impl HasRegionError for kvrpcpb::TiFlashSystemTableResponse {
+    fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
+        None
+    }
+}
+
 impl HasKeyErrors for kvrpcpb::StoreSafeTsResponse {
     fn key_errors(&mut self) -> Option<Vec<Error>> {
         None
@@ -186,6 +192,12 @@ impl HasKeyErrors for kvrpcpb::CompactResponse {
         };
 
         Some(vec![Error::KvError { message }])
+    }
+}
+
+impl HasKeyErrors for kvrpcpb::TiFlashSystemTableResponse {
+    fn key_errors(&mut self) -> Option<Vec<Error>> {
+        None
     }
 }
 
