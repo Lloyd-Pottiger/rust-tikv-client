@@ -154,9 +154,38 @@ impl HasRegionError for kvrpcpb::StoreSafeTsResponse {
     }
 }
 
+impl HasRegionError for kvrpcpb::CompactResponse {
+    fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
+        None
+    }
+}
+
 impl HasKeyErrors for kvrpcpb::StoreSafeTsResponse {
     fn key_errors(&mut self) -> Option<Vec<Error>> {
         None
+    }
+}
+
+impl HasKeyErrors for kvrpcpb::CompactResponse {
+    fn key_errors(&mut self) -> Option<Vec<Error>> {
+        let error = self.error.take()?;
+        let message = match error.error {
+            Some(kvrpcpb::compact_error::Error::ErrInvalidStartKey(_)) => {
+                "compact invalid start key".to_owned()
+            }
+            Some(kvrpcpb::compact_error::Error::ErrPhysicalTableNotExist(_)) => {
+                "compact physical table not exist".to_owned()
+            }
+            Some(kvrpcpb::compact_error::Error::ErrCompactInProgress(_)) => {
+                "compact in progress".to_owned()
+            }
+            Some(kvrpcpb::compact_error::Error::ErrTooManyPendingTasks(_)) => {
+                "compact too many pending tasks".to_owned()
+            }
+            None => "compact error".to_owned(),
+        };
+
+        Some(vec![Error::KvError { message }])
     }
 }
 
@@ -454,6 +483,26 @@ mod test {
                 assert_eq!(txn_not_found.primary_key.as_slice(), &[1, 2]);
             }
             other => panic!("expected txn not found error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compact_key_errors_maps_compact_in_progress_to_kv_error() {
+        let mut resp = kvrpcpb::CompactResponse {
+            error: Some(kvrpcpb::CompactError {
+                error: Some(kvrpcpb::compact_error::Error::ErrCompactInProgress(
+                    kvrpcpb::CompactErrorCompactInProgress {},
+                )),
+            }),
+            ..Default::default()
+        };
+
+        let errors = resp.key_errors().expect("expected key errors");
+        assert_eq!(errors.len(), 1);
+
+        match &errors[0] {
+            Error::KvError { message } => assert_eq!(message, "compact in progress"),
+            other => panic!("expected kv error, got {other:?}"),
         }
     }
 }

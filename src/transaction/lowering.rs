@@ -219,6 +219,20 @@ pub fn new_unsafe_destroy_range_request(range: BoundRange) -> kvrpcpb::UnsafeDes
     requests::new_unsafe_destroy_range_request(start_key.into(), end_key.unwrap_or_default().into())
 }
 
+pub fn new_compact_request(
+    start_key: Key,
+    physical_table_id: i64,
+    logical_table_id: i64,
+    keyspace_id: u32,
+) -> kvrpcpb::CompactRequest {
+    requests::new_compact_request(
+        start_key.into(),
+        physical_table_id,
+        logical_table_id,
+        keyspace_id,
+    )
+}
+
 pub fn new_register_lock_observer_request(max_ts: u64) -> kvrpcpb::RegisterLockObserverRequest {
     requests::new_register_lock_observer_request(max_ts)
 }

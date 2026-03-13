@@ -202,6 +202,56 @@ impl TruncateKeyspace for Vec<crate::proto::deadlock::WaitForEntry> {
     }
 }
 
+impl EncodeKeyspace for kvrpcpb::CompactRequest {
+    fn encode_keyspace(mut self, keyspace: Keyspace, key_mode: KeyMode) -> Self {
+        if !matches!(keyspace, Keyspace::Enable { .. }) {
+            return self;
+        }
+
+        // Keep empty `start_key` unchanged. The server interprets it as "start from beginning" and
+        // it avoids constructing a synthetic start key, which the proto comment discourages.
+        if self.start_key.is_empty() {
+            return self;
+        }
+
+        take_mut::take(&mut self.start_key, |key| {
+            Key::from(key).encode_keyspace(keyspace, key_mode).into()
+        });
+
+        self
+    }
+}
+
+impl TruncateKeyspace for kvrpcpb::CompactResponse {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        if !matches!(keyspace, Keyspace::Enable { .. }) {
+            return self;
+        }
+
+        if self.compacted_start_key.len() >= KEYSPACE_PREFIX_LEN {
+            pretruncate_bytes::<KEYSPACE_PREFIX_LEN>(&mut self.compacted_start_key);
+        }
+        if self.compacted_end_key.len() >= KEYSPACE_PREFIX_LEN {
+            pretruncate_bytes::<KEYSPACE_PREFIX_LEN>(&mut self.compacted_end_key);
+        }
+
+        self
+    }
+}
+
+impl TruncateKeyspace for Vec<kvrpcpb::CompactResponse> {
+    fn truncate_keyspace(mut self, keyspace: Keyspace) -> Self {
+        if !matches!(keyspace, Keyspace::Enable { .. }) {
+            return self;
+        }
+
+        for resp in &mut self {
+            take_mut::take(resp, |resp| resp.truncate_keyspace(keyspace));
+        }
+        self
+    }
+}
+
 impl EncodeKeyspace for Vec<crate::proto::kvrpcpb::LockInfo> {
     fn encode_keyspace(mut self, keyspace: Keyspace, key_mode: KeyMode) -> Self {
         if !matches!(keyspace, Keyspace::Enable { .. }) {

@@ -22,6 +22,7 @@ use crate::safe_ts::SafeTsCache;
 use crate::timestamp::TimestampExt;
 use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_check_lock_observer_request;
+use crate::transaction::lowering::new_compact_request;
 use crate::transaction::lowering::new_get_lock_wait_history_request;
 use crate::transaction::lowering::new_get_lock_wait_info_request;
 use crate::transaction::lowering::new_physical_scan_lock_request;
@@ -53,6 +54,13 @@ pub use crate::proto::kvrpcpb::LockInfo as ProtoLockInfo;
 /// future release even if the wire format is compatible.
 #[doc(inline)]
 pub use crate::proto::deadlock::WaitForEntry as ProtoWaitForEntry;
+
+/// Protobuf-generated compact response returned by TiKV.
+///
+/// This type is generated from TiKV's protobuf definitions and may change in a
+/// future release even if the wire format is compatible.
+#[doc(inline)]
+pub use crate::proto::kvrpcpb::CompactResponse as ProtoCompactResponse;
 
 /// The TiKV transactional `Client` is used to interact with TiKV using transactional requests.
 ///
@@ -643,6 +651,42 @@ impl<PdC: PdClient> Client<PdC> {
         plan.execute().await
     }
 
+    /// Compact a specified key range on all TiKV stores.
+    ///
+    /// This is a store-level request (not tied to a specific region). Each store compacts its
+    /// local data only.
+    ///
+    /// `start_key` controls where compaction starts. Pass [`Key::EMPTY`] to start from the
+    /// beginning. For incremental compaction, call again using the `compacted_end_key` returned in
+    /// each [`ProtoCompactResponse`].
+    ///
+    /// Returns one [`ProtoCompactResponse`] per store.
+    ///
+    /// Returns an error if any store request fails.
+    pub async fn compact(
+        &self,
+        physical_table_id: i64,
+        logical_table_id: i64,
+        start_key: impl Into<Key>,
+    ) -> Result<Vec<ProtoCompactResponse>> {
+        use crate::request::TruncateKeyspace;
+
+        let start_key = start_key.into();
+        let keyspace_id = match self.keyspace {
+            Keyspace::Enable { keyspace_id } => keyspace_id,
+            _ => 0,
+        };
+
+        let req = new_compact_request(start_key, physical_table_id, logical_table_id, keyspace_id)
+            .encode_keyspace(self.keyspace, KeyMode::Txn);
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .all_stores(DEFAULT_STORE_BACKOFF)
+            .merge(crate::request::Collect)
+            .plan();
+
+        Ok(plan.execute().await?.truncate_keyspace(self.keyspace))
+    }
+
     /// Register a lock observer on all TiKV stores.
     ///
     /// This is a store-level request (not tied to a specific region).
@@ -1086,6 +1130,177 @@ mod tests {
         assert_eq!(locks.len(), 2);
         assert!(locks.iter().all(|lock| lock.key.starts_with(b"scan-")));
         assert_eq!(scan_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_compact_api_encodes_start_key_and_truncates_response_keys() {
+        use crate::request::EncodeKeyspace;
+        use crate::request::KeyMode;
+        use crate::request::Keyspace;
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xCAFE,
+        };
+        let expected_api_version = keyspace.api_version() as i32;
+
+        let start_key_raw = b"start".to_vec();
+        let expected_start_key_encoded: Vec<u8> = crate::Key::from(start_key_raw.clone())
+            .encode_keyspace(keyspace, KeyMode::Txn)
+            .into();
+
+        let expected_compacted_start_key_raw = b"compacted-start".to_vec();
+        let expected_compacted_end_key_raw = b"compacted-end".to_vec();
+        let expected_compacted_start_key_encoded: Vec<u8> =
+            crate::Key::from(expected_compacted_start_key_raw.clone())
+                .encode_keyspace(keyspace, KeyMode::Txn)
+                .into();
+        let expected_compacted_end_key_encoded: Vec<u8> =
+            crate::Key::from(expected_compacted_end_key_raw.clone())
+                .encode_keyspace(keyspace, KeyMode::Txn)
+                .into();
+
+        let compact_calls = Arc::new(AtomicUsize::new(0));
+        let compact_calls_cloned = compact_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::CompactRequest>() else {
+                    return Err(crate::Error::Unimplemented);
+                };
+
+                assert_eq!(req.physical_table_id, 101);
+                assert_eq!(req.logical_table_id, 202);
+                assert_eq!(req.api_version, expected_api_version);
+                assert_eq!(req.keyspace_id, 0xCAFE);
+                assert_eq!(req.start_key, expected_start_key_encoded);
+
+                compact_calls_cloned.fetch_add(1, Ordering::SeqCst);
+
+                Ok(Box::new(kvrpcpb::CompactResponse {
+                    error: None,
+                    has_remaining: true,
+                    compacted_start_key: expected_compacted_start_key_encoded.clone(),
+                    compacted_end_key: expected_compacted_end_key_encoded.clone(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                address: "mock://1".to_owned(),
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                address: "mock://2".to_owned(),
+                ..Default::default()
+            })
+            .await;
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let res = client.compact(101, 202, start_key_raw).await.unwrap();
+        assert_eq!(res.len(), 2);
+        assert_eq!(compact_calls.load(Ordering::SeqCst), 2);
+
+        for resp in &res {
+            assert!(resp.error.is_none());
+            assert!(resp.has_remaining);
+            assert_eq!(resp.compacted_start_key, expected_compacted_start_key_raw);
+            assert_eq!(resp.compacted_end_key, expected_compacted_end_key_raw);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compact_api_keeps_empty_start_key_unencoded() {
+        use crate::request::EncodeKeyspace;
+        use crate::request::KeyMode;
+        use crate::request::Keyspace;
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xCAFE,
+        };
+        let expected_api_version = keyspace.api_version() as i32;
+
+        let expected_compacted_start_key_raw = b"compacted-start".to_vec();
+        let expected_compacted_end_key_raw = b"compacted-end".to_vec();
+        let expected_compacted_start_key_encoded: Vec<u8> =
+            crate::Key::from(expected_compacted_start_key_raw.clone())
+                .encode_keyspace(keyspace, KeyMode::Txn)
+                .into();
+        let expected_compacted_end_key_encoded: Vec<u8> =
+            crate::Key::from(expected_compacted_end_key_raw.clone())
+                .encode_keyspace(keyspace, KeyMode::Txn)
+                .into();
+
+        let compact_calls = Arc::new(AtomicUsize::new(0));
+        let compact_calls_cloned = compact_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::CompactRequest>() else {
+                    return Err(crate::Error::Unimplemented);
+                };
+
+                assert_eq!(req.physical_table_id, 303);
+                assert_eq!(req.logical_table_id, 404);
+                assert_eq!(req.api_version, expected_api_version);
+                assert_eq!(req.keyspace_id, 0xCAFE);
+                assert!(req.start_key.is_empty());
+
+                compact_calls_cloned.fetch_add(1, Ordering::SeqCst);
+
+                Ok(Box::new(kvrpcpb::CompactResponse {
+                    error: None,
+                    has_remaining: false,
+                    compacted_start_key: expected_compacted_start_key_encoded.clone(),
+                    compacted_end_key: expected_compacted_end_key_encoded.clone(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                address: "mock://1".to_owned(),
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                address: "mock://2".to_owned(),
+                ..Default::default()
+            })
+            .await;
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let res = client.compact(303, 404, crate::Key::EMPTY).await.unwrap();
+        assert_eq!(res.len(), 2);
+        assert_eq!(compact_calls.load(Ordering::SeqCst), 2);
+
+        for resp in &res {
+            assert!(resp.error.is_none());
+            assert!(!resp.has_remaining);
+            assert_eq!(resp.compacted_start_key, expected_compacted_start_key_raw);
+            assert_eq!(resp.compacted_end_key, expected_compacted_end_key_raw);
+        }
     }
 
     #[tokio::test]

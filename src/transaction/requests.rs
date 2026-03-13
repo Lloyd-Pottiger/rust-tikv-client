@@ -1366,6 +1366,38 @@ impl Merge<kvrpcpb::UnsafeDestroyRangeResponse> for Collect {
     }
 }
 
+pub fn new_compact_request(
+    start_key: Vec<u8>,
+    physical_table_id: i64,
+    logical_table_id: i64,
+    keyspace_id: u32,
+) -> kvrpcpb::CompactRequest {
+    let mut req = kvrpcpb::CompactRequest::default();
+    req.start_key = start_key;
+    req.physical_table_id = physical_table_id;
+    req.logical_table_id = logical_table_id;
+    req.keyspace_id = keyspace_id;
+    req
+}
+
+impl KvRequest for kvrpcpb::CompactRequest {
+    type Response = kvrpcpb::CompactResponse;
+}
+
+impl StoreRequest for kvrpcpb::CompactRequest {
+    fn apply_store(&mut self, _store: &Store) {}
+}
+
+impl HasLocks for kvrpcpb::CompactResponse {}
+
+impl Merge<kvrpcpb::CompactResponse> for Collect {
+    type Out = Vec<kvrpcpb::CompactResponse>;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::CompactResponse>>) -> Result<Self::Out> {
+        input.into_iter().collect()
+    }
+}
+
 pub fn new_register_lock_observer_request(max_ts: u64) -> kvrpcpb::RegisterLockObserverRequest {
     let mut req = kvrpcpb::RegisterLockObserverRequest::default();
     req.max_ts = max_ts;

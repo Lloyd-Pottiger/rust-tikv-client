@@ -174,6 +174,42 @@ impl_request!(
 );
 
 #[async_trait]
+impl Request for kvrpcpb::CompactRequest {
+    async fn dispatch(
+        &self,
+        client: &TikvClient<Channel>,
+        timeout: Duration,
+    ) -> Result<Box<dyn Any>> {
+        let mut req = self.clone().into_request();
+        req.set_timeout(timeout);
+        client
+            .clone()
+            .compact(req)
+            .await
+            .map(|r| Box::new(r.into_inner()) as Box<dyn Any>)
+            .map_err(Error::GrpcAPI)
+    }
+
+    fn label(&self) -> &'static str {
+        "compact"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn set_leader(&mut self, _leader: &RegionWithLeader) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion) {
+        self.api_version = api_version.into();
+    }
+
+    fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+}
+
+#[async_trait]
 impl Request for kvrpcpb::StoreSafeTsRequest {
     async fn dispatch(
         &self,
