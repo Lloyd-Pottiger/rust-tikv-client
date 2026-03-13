@@ -12067,6 +12067,7 @@ mod tests {
                             lock_key: vec![1],
                             deadlock_key_hash: 42,
                             wait_chain: Vec::new(),
+                            ..Default::default()
                         }),
                         ..Default::default()
                     }],

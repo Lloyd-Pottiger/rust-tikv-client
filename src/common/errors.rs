@@ -59,6 +59,10 @@ impl DeadlockError {
         self.deadlock.lock_ts
     }
 
+    pub fn deadlock_key(&self) -> &[u8] {
+        &self.deadlock.deadlock_key
+    }
+
     pub fn deadlock_key_hash(&self) -> u64 {
         self.deadlock.deadlock_key_hash
     }
@@ -438,7 +442,7 @@ macro_rules! internal_err {
 
 #[cfg(test)]
 mod tests {
-    use super::Error;
+    use super::{DeadlockError, Error};
     use crate::proto::kvrpcpb;
 
     #[test]
@@ -495,5 +499,15 @@ mod tests {
             Error::KeyError(key_err) => assert!(key_err.primary_mismatch.is_some()),
             other => panic!("expected KeyError(primary_mismatch), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_deadlock_error_exposes_deadlock_key() {
+        let deadlock = kvrpcpb::Deadlock {
+            deadlock_key: b"held-key".to_vec(),
+            ..Default::default()
+        };
+        let err = DeadlockError::new(deadlock);
+        assert_eq!(err.deadlock_key(), b"held-key");
     }
 }

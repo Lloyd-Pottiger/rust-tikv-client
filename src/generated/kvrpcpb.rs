@@ -1471,6 +1471,9 @@ pub struct Deadlock {
     pub deadlock_key_hash: u64,
     #[prost(message, repeated, tag = "4")]
     pub wait_chain: ::prost::alloc::vec::Vec<super::deadlock::WaitForEntry>,
+    /// The key that the current transaction has already acquired and blocks another transaction to form the deadlock.
+    #[prost(bytes = "vec", tag = "5")]
+    pub deadlock_key: ::prost::alloc::vec::Vec<u8>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
