@@ -47,6 +47,8 @@ pub use lock::ResolveLocksForReadResult;
 pub use lock::ResolveLocksOptions;
 pub use lock::ResolveLocksResult;
 pub use lock::ResolvingLock;
+pub use requests::TransactionStatus;
+pub use requests::TransactionStatusKind;
 mod snapshot;
 mod sync_client;
 mod sync_snapshot;
