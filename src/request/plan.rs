@@ -67,6 +67,18 @@ fn check_killed(killed: &Option<Arc<AtomicU32>>) -> Result<()> {
     }
 }
 
+fn collapse_key_errors(mut errors: Vec<Error>) -> Error {
+    match errors.len() {
+        0 => Error::InternalError {
+            message: "response returned empty key errors".to_owned(),
+        },
+        1 => errors.pop().unwrap_or_else(|| Error::InternalError {
+            message: "response returned empty key errors".to_owned(),
+        }),
+        _ => Error::MultipleKeyErrors(errors),
+    }
+}
+
 /// A plan for how to execute a request. A user builds up a plan with various
 /// options, then exectutes it.
 #[async_trait]
@@ -1271,7 +1283,7 @@ where
 
         if let Some(e) = resp.key_errors() {
             debug!("single_shard_handler:execute: key errors: {:?}", e);
-            Ok(vec![Err(Error::MultipleKeyErrors(e))])
+            Ok(vec![Err(collapse_key_errors(e))])
         } else if let Some(e) = resp.region_error() {
             debug!("single_shard_handler:execute: region error: {:?}", e);
             let is_server_busy = e.server_is_busy.is_some();
@@ -1723,7 +1735,7 @@ where
             match res {
                 Ok(mut resp) => {
                     if let Some(e) = resp.key_errors() {
-                        return Err(Error::MultipleKeyErrors(e));
+                        return Err(collapse_key_errors(e));
                     } else if let Some(e) = resp.region_error() {
                         // Store request should not return region error.
                         return Err(Error::RegionError(Box::new(e)));
@@ -1804,7 +1816,7 @@ where
             match res {
                 Ok(mut resp) => {
                     if let Some(e) = resp.key_errors() {
-                        return Err(Error::MultipleKeyErrors(e));
+                        return Err(collapse_key_errors(e));
                     } else if let Some(e) = resp.region_error() {
                         // Store request should not return region error.
                         return Err(Error::RegionError(Box::new(e)));

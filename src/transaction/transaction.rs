@@ -11503,6 +11503,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_optimistic_insert_commit_already_exists_returns_error() {
+        let start_version = 7;
+        let commit_version = 8;
+
+        let prewrite_requests = Arc::new(AtomicUsize::new(0));
+        let prewrite_requests_captured = prewrite_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_requests_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.mutations.len(), 1);
+                assert_eq!(req.mutations[0].op, kvrpcpb::Op::Insert as i32);
+
+                let resp = kvrpcpb::PrewriteResponse {
+                    errors: vec![kvrpcpb::KeyError {
+                        already_exist: Some(kvrpcpb::AlreadyExist {
+                            key: req.mutations[0].key.clone(),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                panic!("commit request must not be sent for already-exist prewrite errors");
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.insert("k".to_owned(), "v".to_owned()).await.unwrap();
+
+        let err = txn
+            .commit()
+            .await
+            .expect_err("expected already-exist error");
+        assert!(
+            matches!(err, Error::DuplicateKeyInsertion),
+            "expected duplicate key insertion, got {err:?}"
+        );
+        assert_eq!(prewrite_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn test_pessimistic_lock_skips_resolve_for_recently_updated_lock() {
         let lock_requests = Arc::new(AtomicUsize::new(0));
         let check_txn_status_requests = Arc::new(AtomicUsize::new(0));
