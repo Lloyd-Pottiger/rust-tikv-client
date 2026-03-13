@@ -143,3 +143,245 @@ impl<'a> RpcRequest<'a> {
         }
     }
 }
+
+type BeforeHook = dyn for<'a> Fn(&mut RpcRequest<'a>) + Send + Sync + 'static;
+type AfterHook = dyn for<'a> Fn(&RpcRequest<'a>, RpcCallResult<'a>) + Send + Sync + 'static;
+
+/// A closure-based [`RpcInterceptor`] implementation.
+///
+/// This is a convenience helper for lightweight interceptors that don't need their own struct.
+pub struct FnRpcInterceptor {
+    name: String,
+    before: Option<Box<BeforeHook>>,
+    after: Option<Box<AfterHook>>,
+}
+
+impl FnRpcInterceptor {
+    /// Create a new interceptor with no hooks.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            before: None,
+            after: None,
+        }
+    }
+
+    /// Set the `before` hook.
+    ///
+    /// The hook can observe and mutate the outgoing request (for example, by setting
+    /// `kvrpcpb::Context.priority` via [`RpcRequest::set_priority`]).
+    #[must_use]
+    pub fn on_before<F>(mut self, hook: F) -> Self
+    where
+        F: for<'a> Fn(&mut RpcRequest<'a>) + Send + Sync + 'static,
+    {
+        self.before = Some(Box::new(hook));
+        self
+    }
+
+    /// Set the `after` hook.
+    ///
+    /// The hook can observe the request and the outcome (`Ok`/`Err`) after the RPC finishes.
+    #[must_use]
+    pub fn on_after<F>(mut self, hook: F) -> Self
+    where
+        F: for<'a> Fn(&RpcRequest<'a>, RpcCallResult<'a>) + Send + Sync + 'static,
+    {
+        self.after = Some(Box::new(hook));
+        self
+    }
+}
+
+impl RpcInterceptor for FnRpcInterceptor {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn before(&self, request: &mut RpcRequest<'_>) {
+        if let Some(hook) = self.before.as_ref() {
+            hook(request);
+        }
+    }
+
+    fn after(&self, request: &RpcRequest<'_>, result: RpcCallResult<'_>) {
+        if let Some(hook) = self.after.as_ref() {
+            hook(request, result);
+        }
+    }
+}
+
+/// A chain of interceptors that can be executed as a single [`RpcInterceptor`].
+///
+/// Interceptors are executed in an "onion model" when invoked through this chain:
+/// - `before` hooks run in link order.
+/// - `after` hooks run in reverse link order.
+///
+/// This mirrors client-go's `RPCInterceptorChain`.
+#[derive(Default)]
+pub struct RpcInterceptorChain {
+    chain: Vec<Arc<dyn RpcInterceptor>>,
+}
+
+impl RpcInterceptorChain {
+    /// Create an empty interceptor chain.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add an interceptor.
+    ///
+    /// Interceptors are executed in the order they are linked. If multiple interceptors with the
+    /// same name are linked, only the last one is kept.
+    pub fn link<I>(&mut self, interceptor: I) -> &mut Self
+    where
+        I: RpcInterceptor,
+    {
+        self.link_arc(Arc::new(interceptor));
+        self
+    }
+
+    /// Add an interceptor stored in an [`Arc`].
+    ///
+    /// This is useful when building chains from mixed concrete types.
+    pub fn link_arc(&mut self, interceptor: Arc<dyn RpcInterceptor>) -> &mut Self {
+        let name = interceptor.name().to_owned();
+        self.chain
+            .retain(|existing| existing.name() != name.as_str());
+        self.chain.push(interceptor);
+        self
+    }
+}
+
+impl RpcInterceptor for RpcInterceptorChain {
+    fn name(&self) -> &str {
+        "interceptor-chain"
+    }
+
+    fn before(&self, request: &mut RpcRequest<'_>) {
+        for interceptor in self.chain.iter() {
+            interceptor.before(request);
+        }
+    }
+
+    fn after(&self, request: &RpcRequest<'_>, result: RpcCallResult<'_>) {
+        for interceptor in self.chain.iter().rev() {
+            interceptor.after(request, result);
+        }
+    }
+}
+
+/// Chain multiple interceptors into an [`RpcInterceptorChain`].
+#[must_use]
+pub fn chain_rpc_interceptors(
+    first: Arc<dyn RpcInterceptor>,
+    rest: impl IntoIterator<Item = Arc<dyn RpcInterceptor>>,
+) -> RpcInterceptorChain {
+    let mut chain = RpcInterceptorChain::new();
+    chain.link_arc(first);
+    for interceptor in rest {
+        chain.link_arc(interceptor);
+    }
+    chain
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FnRpcInterceptor, RpcCallResult, RpcInterceptor, RpcInterceptorChain, RpcRequest};
+    use crate::proto::kvrpcpb;
+    use crate::CommandPriority;
+    use crate::Error;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    #[test]
+    fn test_fn_rpc_interceptor_hooks_run_and_can_mutate_context() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls_before = calls.clone();
+        let calls_after = calls.clone();
+
+        let interceptor = FnRpcInterceptor::new("fn")
+            .on_before(move |req| {
+                calls_before.lock().unwrap().push("before".to_owned());
+                req.set_priority(CommandPriority::High);
+            })
+            .on_after(move |_req, result| {
+                let suffix = match result {
+                    RpcCallResult::Ok => "ok",
+                    RpcCallResult::Err(_) => "err",
+                };
+                calls_after.lock().unwrap().push(format!("after:{suffix}"));
+            });
+
+        let mut ctx = kvrpcpb::Context::default();
+        {
+            let mut req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+            interceptor.before(&mut req);
+        }
+        assert_eq!(ctx.priority, CommandPriority::High as i32);
+
+        let err = Error::StringError("interceptor-test".to_owned());
+        {
+            let req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+            interceptor.after(&req, RpcCallResult::Err(&err));
+        }
+
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec!["before".to_owned(), "after:err".to_owned()]
+        );
+    }
+
+    #[test]
+    fn test_rpc_interceptor_chain_onion_order_and_dedup() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls_a_before = calls.clone();
+        let calls_a_after = calls.clone();
+        let calls_b_before = calls.clone();
+        let calls_b_after = calls.clone();
+        let calls_a2_before = calls.clone();
+        let calls_a2_after = calls.clone();
+
+        let a = FnRpcInterceptor::new("a")
+            .on_before(move |_req| calls_a_before.lock().unwrap().push("before:a".to_owned()))
+            .on_after(move |_req, _result| {
+                calls_a_after.lock().unwrap().push("after:a".to_owned())
+            });
+        let b = FnRpcInterceptor::new("b")
+            .on_before(move |_req| calls_b_before.lock().unwrap().push("before:b".to_owned()))
+            .on_after(move |_req, _result| {
+                calls_b_after.lock().unwrap().push("after:b".to_owned())
+            });
+
+        let a_replacement = FnRpcInterceptor::new("a")
+            .on_before(move |_req| calls_a2_before.lock().unwrap().push("before:a2".to_owned()))
+            .on_after(move |_req, _result| {
+                calls_a2_after.lock().unwrap().push("after:a2".to_owned())
+            });
+
+        let mut chain = RpcInterceptorChain::new();
+        chain.link(a);
+        chain.link(b);
+        chain.link(a_replacement);
+
+        let mut ctx = kvrpcpb::Context::default();
+        {
+            let mut req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+            chain.before(&mut req);
+        }
+        {
+            let req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+            chain.after(&req, RpcCallResult::Ok);
+        }
+
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec![
+                "before:b".to_owned(),
+                "before:a2".to_owned(),
+                "after:a2".to_owned(),
+                "after:b".to_owned(),
+            ]
+        );
+    }
+}

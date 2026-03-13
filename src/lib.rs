@@ -175,9 +175,15 @@ pub use crate::request_context::IsolationLevel;
 #[doc(inline)]
 pub use crate::request_context::RequestSource;
 #[doc(inline)]
+pub use crate::rpc_interceptor::chain_rpc_interceptors;
+#[doc(inline)]
+pub use crate::rpc_interceptor::FnRpcInterceptor;
+#[doc(inline)]
 pub use crate::rpc_interceptor::RpcCallResult;
 #[doc(inline)]
 pub use crate::rpc_interceptor::RpcInterceptor;
+#[doc(inline)]
+pub use crate::rpc_interceptor::RpcInterceptorChain;
 #[doc(inline)]
 pub use crate::rpc_interceptor::RpcRequest;
 #[doc(inline)]
