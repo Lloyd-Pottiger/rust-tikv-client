@@ -302,6 +302,18 @@ impl From<ProtoKeyError> for Error {
             return Error::WriteConflict(WriteConflictError::new(conflict));
         }
 
+        if !e.retryable.is_empty() {
+            return Error::KvError {
+                message: std::mem::take(&mut e.retryable),
+            };
+        }
+
+        if !e.abort.is_empty() {
+            return Error::KvError {
+                message: format!("tikv aborts txn: {}", std::mem::take(&mut e.abort)),
+            };
+        }
+
         Error::KeyError(Box::new(e))
     }
 }

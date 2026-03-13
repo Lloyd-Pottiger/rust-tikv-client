@@ -304,4 +304,42 @@ mod test {
             other => panic!("expected write conflict, got {other:?}"),
         }
     }
+
+    #[test]
+    fn prewrite_key_errors_maps_retryable_to_kv_error() {
+        let mut resp = kvrpcpb::PrewriteResponse {
+            errors: vec![kvrpcpb::KeyError {
+                retryable: "mock retryable error".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let errors = resp.key_errors().expect("expected key errors");
+        assert_eq!(errors.len(), 1);
+
+        match &errors[0] {
+            Error::KvError { message } => assert_eq!(message, "mock retryable error"),
+            other => panic!("expected kv error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prewrite_key_errors_maps_abort_to_kv_error() {
+        let mut resp = kvrpcpb::PrewriteResponse {
+            errors: vec![kvrpcpb::KeyError {
+                abort: "mock abort".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let errors = resp.key_errors().expect("expected key errors");
+        assert_eq!(errors.len(), 1);
+
+        match &errors[0] {
+            Error::KvError { message } => assert_eq!(message, "tikv aborts txn: mock abort"),
+            other => panic!("expected kv error, got {other:?}"),
+        }
+    }
 }
