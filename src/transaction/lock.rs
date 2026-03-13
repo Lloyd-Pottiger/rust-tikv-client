@@ -185,6 +185,14 @@ impl ReadLockTracker {
             .retain(|existing| !existing.is_finished());
         state.async_cleanup_tasks.push(task);
     }
+
+    pub(crate) async fn abort_cleanup_tasks(&self) {
+        let mut state = self.inner.write().await;
+        for task in &state.async_cleanup_tasks {
+            task.abort();
+        }
+        state.async_cleanup_tasks.clear();
+    }
 }
 
 /// _Resolves_ the given locks. Returns locks still live. When there is no live locks, all the given locks are resolved.
@@ -1013,6 +1021,7 @@ impl ResolveLocksContext {
 pub struct LockResolver {
     ctx: ResolveLocksContext,
     rpc_context: LockResolverRpcContext,
+    read_lock_tracker: ReadLockTracker,
 }
 
 /// A [`LockResolver`] with a bound PD client and keyspace.
@@ -1054,6 +1063,11 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
     #[must_use]
     pub fn into_inner(self) -> LockResolver {
         self.inner
+    }
+
+    /// Cancels background cleanup tasks spawned by [`BoundLockResolver::resolve_locks_for_read`].
+    pub async fn close(&self) {
+        self.inner.close().await;
     }
 
     /// Records the locks being resolved for a given `caller_start_ts` and returns a token.
@@ -1219,6 +1233,7 @@ impl LockResolver {
         Self {
             ctx,
             rpc_context: LockResolverRpcContext::default(),
+            read_lock_tracker: ReadLockTracker::default(),
         }
     }
 
@@ -1441,10 +1456,17 @@ impl LockResolver {
             OPTIMISTIC_BACKOFF,
             None,
             force_resolve_lock_lite,
-            None,
+            Some(self.read_lock_tracker.clone()),
             self.rpc_context.clone(),
         )
         .await
+    }
+
+    /// Cancels background cleanup tasks spawned by [`LockResolver::resolve_locks_for_read`].
+    ///
+    /// This mirrors client-go `LockResolver.Close`.
+    pub async fn close(&self) {
+        self.read_lock_tracker.abort_cleanup_tasks().await;
     }
 
     /// Get the transaction status for `txn_id` (start TS) and `primary` key.
@@ -3566,6 +3588,31 @@ mod tests {
             .expect("resolve_locks_for_read should issue resolve-lock cleanup request")
             .expect("resolve-lock request should report the `keys` field");
         assert_eq!(keys, vec![vec![1]]);
+
+        assert_eq!(
+            lock_resolver
+                .read_lock_tracker
+                .inner
+                .read()
+                .await
+                .async_cleanup_tasks
+                .len(),
+            1,
+            "resolve_locks_for_read should track the background cleanup task"
+        );
+
+        lock_resolver.close().await;
+        assert_eq!(
+            lock_resolver
+                .read_lock_tracker
+                .inner
+                .read()
+                .await
+                .async_cleanup_tasks
+                .len(),
+            0,
+            "close should abort and clear background cleanup tasks"
+        );
     }
 
     #[tokio::test]
