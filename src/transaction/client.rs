@@ -2118,6 +2118,7 @@ mod tests {
                         .as_ref()
                         .expect("check txn status request must have context");
                     assert_eq!(ctx.api_version, kvrpcpb::ApiVersion::V2 as i32);
+                    assert_eq!(ctx.keyspace_id, keyspace_id);
                     assert_eq!(req.primary_key, expected_encoded_key);
                     assert_eq!(req.caller_start_ts, 42);
                     assert_eq!(req.current_ts, 100);
