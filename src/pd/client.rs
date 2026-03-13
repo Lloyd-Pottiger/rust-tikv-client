@@ -351,12 +351,8 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
             .await?;
         let mut stores = Vec::with_capacity(pb_stores.len());
         for store in pb_stores {
-            let addr = if is_tiflash_store(&store) && !store.peer_address.is_empty() {
-                store.peer_address.clone()
-            } else {
-                store.address.clone()
-            };
-            let client = self.kv_client(&addr).await?;
+            let addr = safe_ts_store_address(&store);
+            let client = self.kv_client(addr).await?;
             stores.push(Store::new(store, Arc::new(client)));
         }
         Ok(stores)
@@ -567,6 +563,14 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC> {
     }
 }
 
+fn safe_ts_store_address(store: &metapb::Store) -> &str {
+    if is_tiflash_store(store) && !store.peer_address.is_empty() {
+        &store.peer_address
+    } else {
+        &store.address
+    }
+}
+
 fn make_key_range(start_key: Vec<u8>, end_key: Vec<u8>) -> kvrpcpb::KeyRange {
     let mut key_range = kvrpcpb::KeyRange::default();
     key_range.start_key = start_key;
@@ -616,6 +620,25 @@ pub mod test {
         .unwrap();
 
         assert_eq!(client.cluster_id(), 42);
+    }
+
+    #[test]
+    fn test_safe_ts_store_address_prefers_tiflash_peer_address() {
+        let mut store = metapb::Store {
+            address: "addr".to_owned(),
+            peer_address: "peer-addr".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(safe_ts_store_address(&store), "addr");
+
+        store.labels.push(metapb::StoreLabel {
+            key: "engine".to_owned(),
+            value: "tiflash".to_owned(),
+        });
+        assert_eq!(safe_ts_store_address(&store), "peer-addr");
+
+        store.peer_address.clear();
+        assert_eq!(safe_ts_store_address(&store), "addr");
     }
 
     #[test]

@@ -339,6 +339,7 @@ mod test {
     #[derive(Default)]
     struct MockRetryClient {
         pub regions: Mutex<HashMap<RegionId, RegionWithLeader>>,
+        pub stores: Mutex<Vec<metapb::Store>>,
         pub get_region_count: AtomicU64,
     }
 
@@ -382,7 +383,7 @@ mod test {
         }
 
         async fn get_all_stores(self: Arc<Self>) -> Result<Vec<crate::proto::metapb::Store>> {
-            Err(Error::Unimplemented)
+            Ok(self.stores.lock().await.clone())
         }
 
         async fn get_timestamp(self: Arc<Self>) -> Result<crate::proto::pdpb::Timestamp> {
@@ -630,6 +631,59 @@ mod test {
         // We don't care about other fields here
 
         region
+    }
+
+    #[tokio::test]
+    async fn test_read_through_all_stores_for_safe_ts_includes_tiflash() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new(retry_client.clone());
+
+        let tikv_store = metapb::Store {
+            id: 1,
+            state: metapb::StoreState::Up.into(),
+            address: "tikv".to_owned(),
+            ..Default::default()
+        };
+
+        let mut tiflash_store = metapb::Store {
+            id: 2,
+            state: metapb::StoreState::Up.into(),
+            address: "tiflash".to_owned(),
+            peer_address: "tiflash-peer".to_owned(),
+            ..Default::default()
+        };
+        tiflash_store.labels.push(metapb::StoreLabel {
+            key: "engine".to_owned(),
+            value: "tiflash".to_owned(),
+        });
+
+        let tombstone_store = metapb::Store {
+            id: 3,
+            state: metapb::StoreState::Tombstone.into(),
+            address: "tombstone".to_owned(),
+            ..Default::default()
+        };
+
+        *retry_client.stores.lock().await =
+            vec![tikv_store.clone(), tiflash_store, tombstone_store];
+
+        let all_stores = cache.read_through_all_stores().await?;
+        let mut all_store_ids = all_stores.iter().map(|store| store.id).collect::<Vec<_>>();
+        all_store_ids.sort_unstable();
+        assert_eq!(all_store_ids, vec![1]);
+
+        let safe_ts_stores = cache.read_through_all_stores_for_safe_ts().await?;
+        let mut safe_ts_store_ids = safe_ts_stores
+            .iter()
+            .map(|store| store.id)
+            .collect::<Vec<_>>();
+        safe_ts_store_ids.sort_unstable();
+        assert_eq!(safe_ts_store_ids, vec![1, 2]);
+        assert!(safe_ts_stores
+            .iter()
+            .any(|store| store.id == 2 && is_tiflash_store(store)));
+
+        Ok(())
     }
 
     #[test]
