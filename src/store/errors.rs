@@ -267,4 +267,41 @@ mod test {
         let mut resp: Result<kvrpcpb::CommitResponse, _> = Err(internal_err!("some error"));
         assert!(resp.key_errors().is_some());
     }
+
+    #[test]
+    fn prewrite_key_errors_maps_write_conflict() {
+        let mut resp = kvrpcpb::PrewriteResponse {
+            errors: vec![kvrpcpb::KeyError {
+                conflict: Some(kvrpcpb::WriteConflict {
+                    start_ts: 42,
+                    conflict_ts: 43,
+                    key: vec![1, 2, 3],
+                    primary: vec![9],
+                    conflict_commit_ts: 44,
+                    reason: kvrpcpb::write_conflict::Reason::Optimistic as i32,
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let errors = resp.key_errors().expect("expected key errors");
+        assert_eq!(errors.len(), 1);
+
+        match &errors[0] {
+            Error::WriteConflict(conflict) => {
+                assert_eq!(conflict.start_ts(), 42);
+                assert_eq!(conflict.conflict_ts(), 43);
+                assert_eq!(conflict.conflict_commit_ts(), 44);
+                assert_eq!(conflict.key(), &[1, 2, 3]);
+                assert_eq!(conflict.primary(), &[9]);
+                assert_eq!(conflict.reason_i32(), conflict.write_conflict().reason);
+                assert_eq!(
+                    conflict.reason(),
+                    kvrpcpb::write_conflict::Reason::Optimistic
+                );
+            }
+            other => panic!("expected write conflict, got {other:?}"),
+        }
+    }
 }

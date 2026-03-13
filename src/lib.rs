@@ -140,7 +140,11 @@ pub use common::ProtoKeyError;
 #[doc(inline)]
 pub use common::ProtoRegionError;
 #[doc(inline)]
+pub use common::ProtoWriteConflict;
+#[doc(inline)]
 pub use common::Result;
+#[doc(inline)]
+pub use common::WriteConflictError;
 #[doc(inline)]
 pub use config::Config;
 

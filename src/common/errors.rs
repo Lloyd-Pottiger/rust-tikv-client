@@ -30,6 +30,13 @@ pub use crate::proto::kvrpcpb::KeyError as ProtoKeyError;
 #[doc(inline)]
 pub use crate::proto::kvrpcpb::Deadlock as ProtoDeadlock;
 
+/// Protobuf-generated write conflict error returned by TiKV.
+///
+/// This type is generated from TiKV's protobuf definitions and may change in a
+/// future release even if the wire format is compatible.
+#[doc(inline)]
+pub use crate::proto::kvrpcpb::WriteConflict as ProtoWriteConflict;
+
 /// Deadlock detected when acquiring pessimistic locks.
 #[derive(Clone, Debug)]
 pub struct DeadlockError {
@@ -79,6 +86,78 @@ impl std::error::Error for DeadlockError {}
 impl From<ProtoDeadlock> for DeadlockError {
     fn from(deadlock: ProtoDeadlock) -> Self {
         Self::new(deadlock)
+    }
+}
+
+/// Write conflict detected when committing or prewriting a transaction.
+#[derive(Clone, Debug)]
+pub struct WriteConflictError {
+    conflict: ProtoWriteConflict,
+}
+
+impl WriteConflictError {
+    pub fn new(conflict: ProtoWriteConflict) -> Self {
+        Self { conflict }
+    }
+
+    pub fn start_ts(&self) -> u64 {
+        self.conflict.start_ts
+    }
+
+    pub fn conflict_ts(&self) -> u64 {
+        self.conflict.conflict_ts
+    }
+
+    pub fn conflict_commit_ts(&self) -> u64 {
+        self.conflict.conflict_commit_ts
+    }
+
+    pub fn key(&self) -> &[u8] {
+        &self.conflict.key
+    }
+
+    pub fn primary(&self) -> &[u8] {
+        &self.conflict.primary
+    }
+
+    pub fn reason_i32(&self) -> i32 {
+        self.conflict.reason
+    }
+
+    pub fn reason(&self) -> kvrpcpb::write_conflict::Reason {
+        kvrpcpb::write_conflict::Reason::try_from(self.reason_i32())
+            .unwrap_or(kvrpcpb::write_conflict::Reason::Unknown)
+    }
+
+    pub fn write_conflict(&self) -> &ProtoWriteConflict {
+        &self.conflict
+    }
+
+    pub fn into_inner(self) -> ProtoWriteConflict {
+        self.conflict
+    }
+}
+
+impl fmt::Display for WriteConflictError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "write conflict detected (start_ts={}, conflict_ts={}, conflict_commit_ts={}, reason={}, key_len={}, primary_len={})",
+            self.start_ts(),
+            self.conflict_ts(),
+            self.conflict_commit_ts(),
+            self.reason().as_str_name(),
+            self.key().len(),
+            self.primary().len()
+        )
+    }
+}
+
+impl std::error::Error for WriteConflictError {}
+
+impl From<ProtoWriteConflict> for WriteConflictError {
+    fn from(conflict: ProtoWriteConflict) -> Self {
+        Self::new(conflict)
     }
 }
 
@@ -144,6 +223,9 @@ pub enum Error {
     /// Wraps a per-key error returned by TiKV.
     #[error("{0:?}")]
     KeyError(Box<ProtoKeyError>),
+    /// Write conflict detected when committing or prewriting a transaction.
+    #[error("{0}")]
+    WriteConflict(WriteConflictError),
     /// Deadlock detected when acquiring pessimistic locks.
     #[error("{0}")]
     Deadlock(DeadlockError),
@@ -215,7 +297,11 @@ impl From<ProtoRegionError> for Error {
 }
 
 impl From<ProtoKeyError> for Error {
-    fn from(e: ProtoKeyError) -> Error {
+    fn from(mut e: ProtoKeyError) -> Error {
+        if let Some(conflict) = e.conflict.take() {
+            return Error::WriteConflict(WriteConflictError::new(conflict));
+        }
+
         Error::KeyError(Box::new(e))
     }
 }
