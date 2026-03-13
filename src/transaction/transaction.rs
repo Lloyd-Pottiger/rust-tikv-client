@@ -9334,8 +9334,8 @@ mod tests {
             Ok(self.timestamp.clone())
         }
 
-        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> crate::Result<bool> {
-            Ok(true)
+        async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> crate::Result<u64> {
+            Ok(safepoint)
         }
 
         async fn load_keyspace(

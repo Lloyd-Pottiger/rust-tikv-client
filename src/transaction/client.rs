@@ -392,21 +392,35 @@ impl<PdC: PdClient> Client<PdC> {
     /// This is a simplified version of [GC in TiDB](https://docs.pingcap.com/tidb/stable/garbage-collection-overview).
     /// We skip the second step "delete ranges" which is an optimization for TiDB.
     pub async fn gc(&self, safepoint: Timestamp) -> Result<bool> {
+        let requested = safepoint.version();
+        let new_safe_point = self.gc_safepoint(safepoint).await?;
+        Ok(new_safe_point == requested)
+    }
+
+    /// Request garbage collection (GC) of the TiKV cluster and return the effective safepoint.
+    ///
+    /// This is identical to [`Client::gc`] except it returns PD's `new_safe_point` (mirroring
+    /// client-go GC behavior, which may return a safepoint lower than requested).
+    pub async fn gc_safepoint(&self, safepoint: Timestamp) -> Result<u64> {
         debug!("invoking transactional gc request");
 
         let options = ResolveLocksOptions::default();
         self.cleanup_locks(.., &safepoint, options).await?;
 
         // update safepoint to PD
-        let res: bool = self
+        let new_safe_point = self
             .pd
             .clone()
             .update_safepoint(safepoint.version())
             .await?;
-        if !res {
-            info!("new safepoint != user-specified safepoint");
+        if new_safe_point != safepoint.version() {
+            info!(
+                "new safepoint {} != user-specified safepoint {}",
+                new_safe_point,
+                safepoint.version()
+            );
         }
-        Ok(res)
+        Ok(new_safe_point)
     }
 
     /// Clean up locks in the given key range up to the provided `safepoint`.

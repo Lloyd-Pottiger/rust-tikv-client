@@ -457,7 +457,7 @@ impl PdClient for MockPdClient {
         }
     }
 
-    async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+    async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
         Err(Error::Unimplemented)
     }
 

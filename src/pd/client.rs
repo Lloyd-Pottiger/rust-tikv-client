@@ -80,7 +80,7 @@ pub trait PdClient: Send + Sync + 'static {
         self.get_timestamp().await
     }
 
-    async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<bool>;
+    async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
 
@@ -482,7 +482,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
             .await
     }
 
-    async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<bool> {
+    async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {
         self.pd.clone().update_safepoint(safepoint).await
     }
 

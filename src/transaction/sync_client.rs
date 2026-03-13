@@ -231,6 +231,14 @@ impl SyncTransactionClient {
         safe_block_on(&self.runtime, self.client.gc(safepoint))
     }
 
+    /// Request garbage collection (GC) of the TiKV cluster and return the effective safepoint.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::gc_safepoint`](crate::TransactionClient::gc_safepoint).
+    pub fn gc_safepoint(&self, safepoint: Timestamp) -> Result<u64> {
+        safe_block_on(&self.runtime, self.client.gc_safepoint(safepoint))
+    }
+
     /// Clean up all locks in the specified range.
     ///
     /// This is a synchronous version of [`TransactionClient::cleanup_locks`](crate::TransactionClient::cleanup_locks).
