@@ -2983,12 +2983,37 @@ impl<PdC: PdClient> Transaction<PdC> {
         lock_wait_timeout: LockWaitTimeout,
         lock_wait_start: Instant,
     ) -> Result<Vec<KvPair>> {
-        fn collect_lock_errors(error: &Error, locks: &mut Vec<kvrpcpb::LockInfo>) -> bool {
-            fn extend_lock_infos(locks: &mut Vec<kvrpcpb::LockInfo>, lock: &kvrpcpb::LockInfo) {
+        fn collect_lock_errors(
+            error: &Error,
+            locks: &mut Vec<kvrpcpb::LockInfo>,
+            skipped_recently_updated_locks: &mut bool,
+        ) -> bool {
+            const SKIP_RESOLVE_THRESHOLD_MS: u64 = 300;
+
+            fn should_skip_lock(lock: &kvrpcpb::LockInfo) -> bool {
+                let duration = lock.duration_to_last_update_ms;
+                duration > 0 && duration < SKIP_RESOLVE_THRESHOLD_MS
+            }
+
+            fn extend_lock_infos(
+                locks: &mut Vec<kvrpcpb::LockInfo>,
+                lock: &kvrpcpb::LockInfo,
+                skipped_recently_updated_locks: &mut bool,
+            ) {
                 if lock.shared_lock_infos.is_empty() {
+                    if should_skip_lock(lock) {
+                        *skipped_recently_updated_locks = true;
+                        return;
+                    }
                     locks.push(lock.clone());
                 } else {
-                    locks.extend(lock.shared_lock_infos.iter().cloned());
+                    for shared_lock in &lock.shared_lock_infos {
+                        if should_skip_lock(shared_lock) {
+                            *skipped_recently_updated_locks = true;
+                            continue;
+                        }
+                        locks.push(shared_lock.clone());
+                    }
                 }
             }
 
@@ -2996,19 +3021,20 @@ impl<PdC: PdClient> Transaction<PdC> {
                 Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
                     let mut has_non_lock_error = false;
                     for err in errors {
-                        has_non_lock_error |= collect_lock_errors(err, locks);
+                        has_non_lock_error |=
+                            collect_lock_errors(err, locks, skipped_recently_updated_locks);
                     }
                     has_non_lock_error
                 }
                 Error::ResolveLockError(live_locks) => {
                     for lock in live_locks {
-                        extend_lock_infos(locks, lock);
+                        extend_lock_infos(locks, lock, skipped_recently_updated_locks);
                     }
                     false
                 }
                 Error::KeyError(key_error) => {
                     if let Some(lock) = &key_error.locked {
-                        extend_lock_infos(locks, lock);
+                        extend_lock_infos(locks, lock, skipped_recently_updated_locks);
                         false
                     } else {
                         true
@@ -3098,9 +3124,12 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
 
             let mut locks = Vec::new();
+            let mut skipped_recently_updated_locks = false;
             let mut first_non_lock_error = None;
             for (idx, err) in errors.iter().enumerate() {
-                if collect_lock_errors(err, &mut locks) && first_non_lock_error.is_none() {
+                if collect_lock_errors(err, &mut locks, &mut skipped_recently_updated_locks)
+                    && first_non_lock_error.is_none()
+                {
                     first_non_lock_error = Some(idx);
                 }
             }
@@ -3109,6 +3138,15 @@ impl<PdC: PdClient> Transaction<PdC> {
                 return Err(errors.swap_remove(idx));
             }
             if locks.is_empty() {
+                if skipped_recently_updated_locks {
+                    if lock_wait_timeout.is_no_wait() {
+                        return Err(Error::LockAcquireFailAndNoWaitSet);
+                    }
+                    if lock_wait_timeout.is_timed_out(lock_wait_start) {
+                        return Err(Error::LockWaitTimeout);
+                    }
+                    continue;
+                }
                 return Err(errors.swap_remove(0));
             }
 
@@ -11369,6 +11407,101 @@ mod tests {
         }
 
         assert_eq!(lock_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(check_txn_status_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_skips_resolve_for_recently_updated_lock() {
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_requests = Arc::new(AtomicUsize::new(0));
+        let timestamp_calls = Arc::new(AtomicUsize::new(0));
+
+        let lock_requests_captured = lock_requests.clone();
+        let check_txn_status_requests_captured = check_txn_status_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req
+                .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
+                .is_some()
+            {
+                let attempt = lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                match attempt {
+                    0 => {
+                        let resp = kvrpcpb::PessimisticLockResponse {
+                            errors: vec![kvrpcpb::KeyError {
+                                locked: Some(kvrpcpb::LockInfo {
+                                    key: vec![1],
+                                    primary_lock: vec![1],
+                                    lock_version: 7,
+                                    lock_ttl: 100,
+                                    lock_type: kvrpcpb::Op::Put as i32,
+                                    duration_to_last_update_ms: 1,
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        };
+                        return Ok(Box::new(resp) as Box<dyn Any>);
+                    }
+                    1 => {
+                        return Ok(
+                            Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>
+                        );
+                    }
+                    _ => panic!("unexpected lock request count {attempt}"),
+                }
+            }
+
+            if req
+                .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                .is_some()
+            {
+                check_txn_status_requests_captured.fetch_add(1, Ordering::SeqCst);
+                panic!("check_txn_status must not be invoked for recently updated locks");
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls,
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let request = crate::transaction::lowering::new_pessimistic_lock_request(
+            std::iter::once(Key::from(vec![1u8])),
+            Key::from(vec![1u8]),
+            Timestamp::default(),
+            100,
+            Timestamp::default(),
+            false,
+            true,
+        );
+
+        let pairs = txn
+            .execute_pessimistic_lock_request(
+                request,
+                Timestamp::default(),
+                false,
+                crate::LockWaitTimeout::Wait(Duration::from_secs(1)),
+                Instant::now(),
+            )
+            .await
+            .expect("expected the lock request to eventually succeed");
+        assert!(pairs.is_empty());
+
+        assert_eq!(lock_requests.load(Ordering::SeqCst), 2);
         assert_eq!(check_txn_status_requests.load(Ordering::SeqCst), 0);
     }
 
