@@ -135,22 +135,50 @@ impl<PdC: PdClient> SafeTsCacheInner<PdC> {
             return Ok(());
         }
 
-        let request = kvrpcpb::StoreSafeTsRequest {
-            key_range: Some(kvrpcpb::KeyRange::default()),
+        let store_ids: Vec<StoreId> = stores.iter().map(|store| store.meta.id).collect();
+        let pd_store_safe_ts = match self.pd.min_resolved_ts_by_stores(&store_ids).await {
+            Ok((_min_resolved_ts, store_safe_ts)) if !store_safe_ts.is_empty() => {
+                Some(store_safe_ts)
+            }
+            _ => None,
         };
-        let plan = PlanBuilder::new(self.pd.clone(), self.keyspace, request)
-            .stores(stores.clone(), DEFAULT_STORE_BACKOFF)
-            .plan();
-        let results = plan.execute().await?;
+
+        let store_safe_ts_updates: Vec<(StoreId, u64)> = match pd_store_safe_ts {
+            Some(pd_store_safe_ts) => stores
+                .iter()
+                .filter_map(|store| {
+                    let store_id = store.meta.id;
+                    pd_store_safe_ts
+                        .get(&store_id)
+                        .copied()
+                        .map(|safe_ts| (store_id, safe_ts))
+                })
+                .collect(),
+            None => {
+                let request = kvrpcpb::StoreSafeTsRequest {
+                    key_range: Some(kvrpcpb::KeyRange::default()),
+                };
+                let plan = PlanBuilder::new(self.pd.clone(), self.keyspace, request)
+                    .stores(stores.clone(), DEFAULT_STORE_BACKOFF)
+                    .plan();
+                let results = plan.execute().await?;
+
+                stores
+                    .iter()
+                    .zip(results)
+                    .filter_map(|(store, result)| {
+                        let resp = match result {
+                            Ok(resp) => resp,
+                            Err(_) => return None,
+                        };
+                        Some((store.meta.id, resp.safe_ts))
+                    })
+                    .collect()
+            }
+        };
 
         let mut state = self.state.write().await;
-        for (store, result) in stores.iter().zip(results) {
-            let store_id = store.meta.id;
-            let new_safe_ts = match result {
-                Ok(resp) => resp.safe_ts,
-                Err(_) => continue,
-            };
-
+        for (store_id, new_safe_ts) in store_safe_ts_updates {
             if new_safe_ts == u64::MAX {
                 debug!("skip setting safe-ts to max value (store_id={})", store_id);
                 continue;
@@ -220,6 +248,8 @@ fn compute_min_safe_ts(store_safe_ts: &HashMap<StoreId, u64>, store_ids: &[Store
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -288,6 +318,70 @@ mod tests {
         async fn invalidate_store_cache(&self, _store_id: StoreId) {}
     }
 
+    #[derive(Clone)]
+    struct SafeTsFastPathPdClient {
+        stores: Vec<Store>,
+        store_safe_ts: HashMap<StoreId, u64>,
+    }
+
+    #[async_trait]
+    impl PdClient for SafeTsFastPathPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            _region: RegionWithLeader,
+        ) -> Result<RegionStore> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_key(&self, _key: &crate::Key) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn all_stores(&self) -> Result<Vec<Store>> {
+            Ok(self.stores.clone())
+        }
+
+        async fn all_stores_for_safe_ts(&self) -> Result<Vec<Store>> {
+            Ok(self.stores.clone())
+        }
+
+        async fn min_resolved_ts_by_stores(
+            &self,
+            store_ids: &[StoreId],
+        ) -> Result<(u64, HashMap<StoreId, u64>)> {
+            let expected_store_ids: Vec<StoreId> =
+                self.stores.iter().map(|store| store.meta.id).collect();
+            assert_eq!(store_ids, expected_store_ids.as_slice());
+            Ok((42, self.store_safe_ts.clone()))
+        }
+
+        async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {}
+
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+    }
+
     fn store_for_safe_ts(
         store_id: StoreId,
         labels: Vec<metapb::StoreLabel>,
@@ -295,6 +389,31 @@ mod tests {
     ) -> Store {
         let kv_client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
             if req.downcast_ref::<kvrpcpb::StoreSafeTsRequest>().is_some() {
+                let resp = kvrpcpb::StoreSafeTsResponse { safe_ts };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            Err(Error::Unimplemented)
+        });
+
+        Store::new(
+            metapb::Store {
+                id: store_id,
+                labels,
+                ..Default::default()
+            },
+            Arc::new(kv_client),
+        )
+    }
+
+    fn store_for_safe_ts_with_counter(
+        store_id: StoreId,
+        labels: Vec<metapb::StoreLabel>,
+        safe_ts: u64,
+        calls: Arc<AtomicUsize>,
+    ) -> Store {
+        let kv_client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::StoreSafeTsRequest>().is_some() {
+                calls.fetch_add(1, Ordering::SeqCst);
                 let resp = kvrpcpb::StoreSafeTsResponse { safe_ts };
                 return Ok(Box::new(resp) as Box<dyn Any>);
             }
@@ -354,6 +473,52 @@ mod tests {
         assert_eq!(safe_ts.min_safe_ts_with_txn_scope("dc1").await?, 100);
         assert_eq!(safe_ts.min_safe_ts_with_txn_scope("dc2").await?, 10);
         assert_eq!(safe_ts.min_safe_ts_with_txn_scope("unknown").await?, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_safe_ts_refresh_prefers_pd_min_resolved_ts_fast_path() -> Result<()> {
+        let store_safe_ts_calls = Arc::new(AtomicUsize::new(0));
+        let tikv_dc1 = store_for_safe_ts_with_counter(
+            1,
+            vec![metapb::StoreLabel {
+                key: "zone".to_owned(),
+                value: "dc1".to_owned(),
+            }],
+            999,
+            store_safe_ts_calls.clone(),
+        );
+        let tikv_dc2 = store_for_safe_ts_with_counter(
+            2,
+            vec![metapb::StoreLabel {
+                key: "zone".to_owned(),
+                value: "dc2".to_owned(),
+            }],
+            999,
+            store_safe_ts_calls.clone(),
+        );
+
+        let mut store_safe_ts = HashMap::new();
+        store_safe_ts.insert(1, 100);
+        store_safe_ts.insert(2, 10);
+
+        let pd_client = Arc::new(SafeTsFastPathPdClient {
+            stores: vec![tikv_dc1, tikv_dc2],
+            store_safe_ts,
+        });
+        let safe_ts = SafeTsCache::new(pd_client, Keyspace::Disable);
+        safe_ts.refresh().await?;
+
+        assert_eq!(
+            store_safe_ts_calls.load(Ordering::SeqCst),
+            0,
+            "pd fast path should skip StoreSafeTS RPCs"
+        );
+
+        assert_eq!(safe_ts.min_safe_ts().await?, 10);
+        assert_eq!(safe_ts.min_safe_ts_with_txn_scope("dc1").await?, 100);
+        assert_eq!(safe_ts.min_safe_ts_with_txn_scope("dc2").await?, 10);
 
         Ok(())
     }

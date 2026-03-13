@@ -9,7 +9,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use futures::prelude::*;
 use futures::stream::BoxStream;
+use log::debug;
 use log::info;
+use serde_derive::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::compat::stream_fn;
@@ -101,6 +103,21 @@ pub trait PdClient: Send + Sync + 'static {
     /// that are excluded from [`PdClient::all_stores`] for normal request routing.
     async fn all_stores_for_safe_ts(&self) -> Result<Vec<Store>> {
         self.all_stores().await
+    }
+
+    /// Returns PD min resolved ts and per-store min resolved ts map, if the PD HTTP API is available.
+    ///
+    /// This mirrors client-go `pdhttp.Client.GetMinResolvedTSByStoresIDs` (used by the safe-ts updater
+    /// fast path).
+    ///
+    /// When `store_ids` is empty, implementations should return the cluster-level min resolved ts.
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn min_resolved_ts_by_stores(
+        &self,
+        store_ids: &[StoreId],
+    ) -> Result<(u64, HashMap<StoreId, u64>)> {
+        let _ = store_ids;
+        Err(Error::Unimplemented)
     }
 
     /// Fetch PD store metadata by store id.
@@ -300,6 +317,9 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
     resolve_lock_lite_threshold: u64,
+    pd_http_client: Option<reqwest::Client>,
+    pd_http_endpoints: Vec<String>,
+    pd_http_use_https: bool,
 }
 
 #[async_trait]
@@ -356,6 +376,25 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
             stores.push(Store::new(store, Arc::new(client)));
         }
         Ok(stores)
+    }
+
+    async fn min_resolved_ts_by_stores(
+        &self,
+        store_ids: &[StoreId],
+    ) -> Result<(u64, HashMap<StoreId, u64>)> {
+        let Some(http_client) = self.pd_http_client.as_ref() else {
+            return Err(Error::Unimplemented);
+        };
+        if self.pd_http_endpoints.is_empty() {
+            return Err(Error::Unimplemented);
+        }
+        pd_http_min_resolved_ts_by_stores(
+            http_client,
+            &self.pd_http_endpoints,
+            self.pd_http_use_https,
+            store_ids,
+        )
+        .await
     }
 
     async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
@@ -469,7 +508,7 @@ impl PdRpcClient<TikvConnect, Cluster> {
         config: Config,
         enable_codec: bool,
     ) -> Result<PdRpcClient> {
-        PdRpcClient::new(
+        let mut client = PdRpcClient::new(
             config.clone(),
             |security_mgr| {
                 TikvConnect::new(
@@ -488,7 +527,9 @@ impl PdRpcClient<TikvConnect, Cluster> {
             },
             enable_codec,
         )
-        .await
+        .await?;
+        client.pd_http_endpoints = pd_endpoints.to_vec();
+        Ok(client)
     }
 }
 
@@ -509,6 +550,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         MakePd: FnOnce(Arc<SecurityManager>) -> PdFut,
     {
         let resolve_lock_lite_threshold = config.resolve_lock_lite_threshold;
+        let (pd_http_client, pd_http_use_https) = build_pd_http_client(&config);
         let security_mgr = Arc::new(
             if let (Some(ca_path), Some(cert_path), Some(key_path)) =
                 (&config.ca_path, &config.cert_path, &config.key_path)
@@ -530,6 +572,9 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             enable_codec,
             region_cache: RegionCache::new(pd),
             resolve_lock_lite_threshold,
+            pd_http_client,
+            pd_http_endpoints: Vec::new(),
+            pd_http_use_https,
         })
     }
 
@@ -563,6 +608,151 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC> {
     }
 }
 
+fn pd_http_base_url(endpoint: &str, use_https: bool) -> String {
+    let endpoint = endpoint.trim();
+    let endpoint = endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"))
+        .unwrap_or(endpoint);
+    let endpoint = endpoint.trim_end_matches('/');
+
+    let scheme = if use_https { "https://" } else { "http://" };
+    format!("{scheme}{endpoint}")
+}
+
+fn build_pd_http_client(config: &Config) -> (Option<reqwest::Client>, bool) {
+    let use_https =
+        config.ca_path.is_some() && config.cert_path.is_some() && config.key_path.is_some();
+    let mut builder = reqwest::Client::builder().timeout(config.timeout);
+
+    if let (Some(ca_path), Some(cert_path), Some(key_path)) =
+        (&config.ca_path, &config.cert_path, &config.key_path)
+    {
+        let ca_pem = match std::fs::read(ca_path) {
+            Ok(pem) => pem,
+            Err(err) => {
+                debug!("pd http client disabled: failed to read CA pem: {err}");
+                return (None, use_https);
+            }
+        };
+        let cert_pem = match std::fs::read(cert_path) {
+            Ok(pem) => pem,
+            Err(err) => {
+                debug!("pd http client disabled: failed to read cert pem: {err}");
+                return (None, use_https);
+            }
+        };
+        let key_pem = match std::fs::read(key_path) {
+            Ok(pem) => pem,
+            Err(err) => {
+                debug!("pd http client disabled: failed to read key pem: {err}");
+                return (None, use_https);
+            }
+        };
+
+        let ca = match reqwest::Certificate::from_pem(&ca_pem) {
+            Ok(ca) => ca,
+            Err(err) => {
+                debug!("pd http client disabled: invalid CA pem: {err}");
+                return (None, use_https);
+            }
+        };
+        builder = builder.add_root_certificate(ca);
+
+        let identity = match reqwest::Identity::from_pkcs8_pem(&cert_pem, &key_pem) {
+            Ok(identity) => identity,
+            Err(err) => {
+                debug!("pd http client disabled: invalid identity pem: {err}");
+                return (None, use_https);
+            }
+        };
+        builder = builder.identity(identity);
+    }
+
+    match builder.build() {
+        Ok(client) => (Some(client), use_https),
+        Err(err) => {
+            debug!("pd http client disabled: failed to build http client: {err}");
+            (None, use_https)
+        }
+    }
+}
+
+async fn pd_http_min_resolved_ts_by_stores(
+    http_client: &reqwest::Client,
+    endpoints: &[String],
+    use_https: bool,
+    store_ids: &[StoreId],
+) -> Result<(u64, HashMap<StoreId, u64>)> {
+    const MIN_RESOLVED_TS_PATH: &str = "/pd/api/v1/min-resolved-ts";
+
+    #[derive(Deserialize)]
+    struct MinResolvedTsResponse {
+        min_resolved_ts: u64,
+        #[serde(default)]
+        is_real_time: bool,
+        #[serde(default)]
+        stores_min_resolved_ts: HashMap<StoreId, u64>,
+    }
+
+    let uri = if store_ids.is_empty() {
+        MIN_RESOLVED_TS_PATH.to_owned()
+    } else {
+        let scope = store_ids
+            .iter()
+            .map(|store_id| store_id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{MIN_RESOLVED_TS_PATH}?scope={scope}")
+    };
+
+    let mut last_err = None;
+    for endpoint in endpoints {
+        let base = pd_http_base_url(endpoint, use_https);
+        let url = format!("{base}{uri}");
+        let resp = match http_client.get(&url).send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                last_err = Some(Error::StringError(format!(
+                    "pd http min-resolved-ts request to {endpoint} failed: {err}"
+                )));
+                continue;
+            }
+        };
+
+        let resp = match resp.error_for_status() {
+            Ok(resp) => resp,
+            Err(err) => {
+                last_err = Some(Error::StringError(format!(
+                    "pd http min-resolved-ts request to {endpoint} failed: {err}"
+                )));
+                continue;
+            }
+        };
+
+        let decoded = match resp.json::<MinResolvedTsResponse>().await {
+            Ok(decoded) => decoded,
+            Err(err) => {
+                last_err = Some(Error::StringError(format!(
+                    "pd http min-resolved-ts response from {endpoint} is invalid: {err}"
+                )));
+                continue;
+            }
+        };
+
+        if !decoded.is_real_time {
+            last_err = Some(Error::StringError(
+                "pd http min-resolved-ts is not enabled".to_owned(),
+            ));
+            continue;
+        }
+
+        return Ok((decoded.min_resolved_ts, decoded.stores_min_resolved_ts));
+    }
+
+    Err(last_err.unwrap_or(Error::Unimplemented))
+}
+
 fn safe_ts_store_address(store: &metapb::Store) -> &str {
     if is_tiflash_store(store) && !store.peer_address.is_empty() {
         &store.peer_address
@@ -580,6 +770,12 @@ fn make_key_range(start_key: Vec<u8>, end_key: Vec<u8>) -> kvrpcpb::KeyRange {
 
 #[cfg(test)]
 pub mod test {
+    use std::io::BufRead;
+    use std::io::BufReader;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread;
+
     use futures::executor;
     use futures::executor::block_on;
 
@@ -620,6 +816,69 @@ pub mod test {
         .unwrap();
 
         assert_eq!(client.cluster_id(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_pd_http_min_resolved_ts_by_stores_ids_parses_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut first_line = String::new();
+            reader.read_line(&mut first_line).unwrap();
+            let path = first_line.split_whitespace().nth(1).unwrap_or("");
+            assert!(
+                path == "/pd/api/v1/min-resolved-ts?scope=1,2"
+                    || path == "/pd/api/v1/min-resolved-ts?scope=1%2C2",
+                "unexpected request path: {path:?}"
+            );
+
+            let body = r#"{"min_resolved_ts":10,"is_real_time":true,"stores_min_resolved_ts":{"1":100,"2":10}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let mut stream = reader.into_inner();
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let config = Config::default();
+        let mut client = PdRpcClient::new(
+            config.clone(),
+            |_| MockKvConnect,
+            |sm| {
+                futures::future::ok(RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    42,
+                    MockCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        client.pd_http_endpoints = vec![addr.to_string()];
+
+        let (min_resolved_ts, store_safe_ts) = pd_http_min_resolved_ts_by_stores(
+            client
+                .pd_http_client
+                .as_ref()
+                .expect("pd http client should be constructed"),
+            &client.pd_http_endpoints,
+            client.pd_http_use_https,
+            &[1, 2],
+        )
+        .await
+        .unwrap();
+        assert_eq!(min_resolved_ts, 10);
+        assert_eq!(store_safe_ts.get(&1).copied(), Some(100));
+        assert_eq!(store_safe_ts.get(&2).copied(), Some(10));
+
+        server.join().unwrap();
     }
 
     #[test]
