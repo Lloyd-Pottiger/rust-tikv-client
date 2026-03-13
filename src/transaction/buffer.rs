@@ -26,6 +26,21 @@ pub struct Buffer {
     memory_footprint_change_hook: Option<MemoryFootprintChangeHook>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BufferedLockKind {
+    Exclusive,
+    Shared,
+}
+
+impl BufferedLockKind {
+    fn to_mutation_op(self) -> kvrpcpb::Op {
+        match self {
+            BufferedLockKind::Exclusive => kvrpcpb::Op::Lock,
+            BufferedLockKind::Shared => kvrpcpb::Op::SharedLock,
+        }
+    }
+}
+
 impl Buffer {
     pub fn new(is_pessimistic: bool) -> Buffer {
         Buffer {
@@ -221,7 +236,7 @@ impl Buffer {
         let mut should_report = false;
         match self.entry_map.entry(key) {
             Entry::Vacant(vacant) => {
-                vacant.insert(BufferEntry::Locked(None));
+                vacant.insert(BufferEntry::Locked(BufferedLockKind::Exclusive, None));
                 self.mutation_count = self.mutation_count.saturating_add(1);
                 self.mutation_size = self.mutation_size.saturating_add(key_len);
                 should_report = prev_mem != self.mutation_size;
@@ -233,7 +248,7 @@ impl Buffer {
                         return;
                     };
                     let cached_value = cached_value.take();
-                    *entry = BufferEntry::Locked(Some(cached_value));
+                    *entry = BufferEntry::Locked(BufferedLockKind::Exclusive, Some(cached_value));
                     self.mutation_count = self.mutation_count.saturating_add(1);
                     self.mutation_size = self.mutation_size.saturating_add(key_len);
                     should_report = prev_mem != self.mutation_size;
@@ -246,9 +261,52 @@ impl Buffer {
         }
     }
 
+    pub(crate) fn lock_shared(&mut self, key: Key) {
+        let key_len = u64::try_from(key.len()).unwrap_or(u64::MAX);
+        let prev_mem = self.mutation_size;
+
+        let mut should_report = false;
+        match self.entry_map.entry(key) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(BufferEntry::Locked(BufferedLockKind::Shared, None));
+                self.mutation_count = self.mutation_count.saturating_add(1);
+                self.mutation_size = self.mutation_size.saturating_add(key_len);
+                should_report = prev_mem != self.mutation_size;
+            }
+            Entry::Occupied(mut occupied) => match occupied.get() {
+                BufferEntry::Cached(_) => {
+                    let entry = occupied.get_mut();
+                    let BufferEntry::Cached(cached_value) = entry else {
+                        return;
+                    };
+                    let cached_value = cached_value.take();
+                    *entry = BufferEntry::Locked(BufferedLockKind::Shared, Some(cached_value));
+                    self.mutation_count = self.mutation_count.saturating_add(1);
+                    self.mutation_size = self.mutation_size.saturating_add(key_len);
+                    should_report = prev_mem != self.mutation_size;
+                }
+                BufferEntry::Locked(BufferedLockKind::Shared, _) => {}
+                // Keep the stronger lock mode.
+                BufferEntry::Locked(BufferedLockKind::Exclusive, _) => {}
+                _ => {}
+            },
+        }
+
+        if should_report {
+            self.report_memory_footprint();
+        }
+    }
+
+    pub(crate) fn is_locked_in_share_mode(&self, key: &Key) -> bool {
+        matches!(
+            self.entry_map.get(key),
+            Some(BufferEntry::Locked(BufferedLockKind::Shared, _))
+        )
+    }
+
     /// Unlock the given key if locked.
     pub fn unlock(&mut self, key: &Key) {
-        let was_locked = matches!(self.entry_map.get(key), Some(BufferEntry::Locked(_)));
+        let was_locked = matches!(self.entry_map.get(key), Some(BufferEntry::Locked(_, _)));
         if !was_locked {
             return;
         }
@@ -257,7 +315,7 @@ impl Buffer {
         let key_len = u64::try_from(key.len()).unwrap_or(u64::MAX);
 
         let old_entry = self.entry_map.remove(key);
-        if let Some(BufferEntry::Locked(cached_value)) = old_entry {
+        if let Some(BufferEntry::Locked(_kind, cached_value)) = old_entry {
             if let Some(cached_value) = cached_value {
                 self.entry_map
                     .insert(key.clone(), BufferEntry::Cached(cached_value));
@@ -372,13 +430,14 @@ impl Buffer {
 
     fn update_cache(&mut self, key: Key, value: Option<Value>) {
         match self.entry_map.get(&key) {
-            Some(BufferEntry::Locked(None)) => {
-                self.entry_map.insert(key, BufferEntry::Locked(Some(value)));
+            Some(BufferEntry::Locked(kind, None)) => {
+                self.entry_map
+                    .insert(key, BufferEntry::Locked(*kind, Some(value)));
             }
             None => {
                 self.entry_map.insert(key, BufferEntry::Cached(value));
             }
-            Some(BufferEntry::Cached(v)) | Some(BufferEntry::Locked(Some(v))) => {
+            Some(BufferEntry::Cached(v)) | Some(BufferEntry::Locked(_, Some(v))) => {
                 assert!(&value == v);
             }
             Some(BufferEntry::Put(v)) => assert!(value.as_ref() == Some(v)),
@@ -394,7 +453,12 @@ impl Buffer {
 
     fn insert_entry(&mut self, key: impl Into<Key>, entry: BufferEntry) {
         let key = key.into();
-        if !matches!(entry, BufferEntry::Cached(_) | BufferEntry::CheckNotExist) {
+        if !matches!(
+            entry,
+            BufferEntry::Cached(_)
+                | BufferEntry::CheckNotExist
+                | BufferEntry::Locked(BufferedLockKind::Shared, _)
+        ) {
             self.primary_key.get_or_insert_with(|| key.clone());
         }
         let key_len = key.len();
@@ -434,7 +498,7 @@ fn mutation_size_for_entry(key_len: usize, entry: &BufferEntry) -> u64 {
         BufferEntry::Put(value) | BufferEntry::Insert(value) => {
             u64::try_from(key_len.saturating_add(value.len())).unwrap_or(u64::MAX)
         }
-        BufferEntry::Del | BufferEntry::Locked(_) | BufferEntry::CheckNotExist => {
+        BufferEntry::Del | BufferEntry::Locked(_, _) | BufferEntry::CheckNotExist => {
             u64::try_from(key_len).unwrap_or(u64::MAX)
         }
     }
@@ -470,7 +534,7 @@ enum BufferEntry {
     //
     // In pessimistic transaction:
     //   The key is locked by `get_for_update` or `batch_get_for_update`
-    Locked(Option<Option<Value>>),
+    Locked(BufferedLockKind, Option<Option<Value>>),
     // Value has been written.
     Put(Value),
     // Value has been deleted.
@@ -491,7 +555,7 @@ impl BufferEntry {
                 pb.value.clone_from(v);
             }
             BufferEntry::Del => pb.op = kvrpcpb::Op::Del.into(),
-            BufferEntry::Locked(_) => pb.op = kvrpcpb::Op::Lock.into(),
+            BufferEntry::Locked(kind, _) => pb.op = kind.to_mutation_op().into(),
             BufferEntry::Insert(v) => {
                 pb.op = kvrpcpb::Op::Insert.into();
                 pb.value.clone_from(v);
@@ -511,7 +575,7 @@ impl BufferEntry {
                 pb.value = value;
             }
             BufferEntry::Del => pb.op = kvrpcpb::Op::Del.into(),
-            BufferEntry::Locked(_) => pb.op = kvrpcpb::Op::Lock.into(),
+            BufferEntry::Locked(kind, _) => pb.op = kind.to_mutation_op().into(),
             BufferEntry::Insert(value) => {
                 pb.op = kvrpcpb::Op::Insert.into();
                 pb.value = value;
@@ -527,8 +591,8 @@ impl BufferEntry {
             BufferEntry::Cached(value) => MutationValue::Determined(value.clone()),
             BufferEntry::Put(value) => MutationValue::Determined(Some(value.clone())),
             BufferEntry::Del => MutationValue::Determined(None),
-            BufferEntry::Locked(None) => MutationValue::Undetermined,
-            BufferEntry::Locked(Some(value)) => MutationValue::Determined(value.clone()),
+            BufferEntry::Locked(_kind, None) => MutationValue::Undetermined,
+            BufferEntry::Locked(_kind, Some(value)) => MutationValue::Determined(value.clone()),
             BufferEntry::Insert(value) => MutationValue::Determined(Some(value.clone())),
             BufferEntry::CheckNotExist => MutationValue::Determined(None),
         }

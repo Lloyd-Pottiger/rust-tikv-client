@@ -267,6 +267,12 @@ async fn get_timestamp_for_txn_scope<PdC: PdClient>(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PessimisticLockMode {
+    Exclusive,
+    Shared,
+}
+
 impl<PdC: PdClient> Transaction<PdC> {
     #[cfg(test)]
     pub(crate) fn new(
@@ -2035,7 +2041,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         keys: impl IntoIterator<Item = impl Into<Key>>,
     ) -> Result<()> {
         debug!("invoking transactional lock_keys request");
-        self.lock_keys_impl(keys, self.options.lock_wait_timeout)
+        self.lock_keys_impl(keys, self.options.lock_wait_timeout, false)
             .await
     }
 
@@ -2053,13 +2059,43 @@ impl<PdC: PdClient> Transaction<PdC> {
         lock_wait_timeout: LockWaitTimeout,
     ) -> Result<()> {
         debug!("invoking transactional lock_keys_with_wait_timeout request");
-        self.lock_keys_impl(keys, lock_wait_timeout).await
+        self.lock_keys_impl(keys, lock_wait_timeout, false).await
+    }
+
+    /// Lock the given keys in share mode without mutating their values.
+    ///
+    /// In optimistic mode, this behaves the same as [`Transaction::lock_keys`]. Shared locks are not
+    /// supported for optimistic transactions.
+    ///
+    /// In pessimistic mode, this issues a `SharedPessimisticLock` request in TiKV. Note that shared
+    /// locks cannot be used as the transaction primary key, so the transaction must already have a
+    /// primary key selected (for example by locking a key in exclusive mode or by writing a key)
+    /// before acquiring shared locks.
+    pub async fn lock_keys_in_share_mode(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+    ) -> Result<()> {
+        debug!("invoking transactional lock_keys_in_share_mode request");
+        self.lock_keys_impl(keys, self.options.lock_wait_timeout, true)
+            .await
+    }
+
+    /// Lock the given keys in share mode without mutating their values, using the provided lock
+    /// wait timeout.
+    pub async fn lock_keys_in_share_mode_with_wait_timeout(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+        lock_wait_timeout: LockWaitTimeout,
+    ) -> Result<()> {
+        debug!("invoking transactional lock_keys_in_share_mode_with_wait_timeout request");
+        self.lock_keys_impl(keys, lock_wait_timeout, true).await
     }
 
     async fn lock_keys_impl(
         &mut self,
         keys: impl IntoIterator<Item = impl Into<Key>>,
         lock_wait_timeout: LockWaitTimeout,
+        in_share_mode: bool,
     ) -> Result<()> {
         self.check_allow_operation().await?;
         let keyspace = self.keyspace;
@@ -2073,9 +2109,17 @@ impl<PdC: PdClient> Transaction<PdC> {
                 }
             }
             TransactionKind::Pessimistic(_) => {
-                let _ = self
-                    .pessimistic_lock_with_wait_timeout(keys, false, lock_wait_timeout)
-                    .await?;
+                let _ = if in_share_mode {
+                    self.pessimistic_lock_in_share_mode_with_wait_timeout(
+                        keys,
+                        false,
+                        lock_wait_timeout,
+                    )
+                    .await?
+                } else {
+                    self.pessimistic_lock_with_wait_timeout(keys, false, lock_wait_timeout)
+                        .await?
+                };
             }
         }
         Ok(())
@@ -2535,6 +2579,37 @@ impl<PdC: PdClient> Transaction<PdC> {
         need_value: bool,
         lock_wait_timeout: LockWaitTimeout,
     ) -> Result<Vec<KvPair>> {
+        self.pessimistic_lock_with_wait_timeout_and_mode(
+            keys,
+            need_value,
+            lock_wait_timeout,
+            PessimisticLockMode::Exclusive,
+        )
+        .await
+    }
+
+    async fn pessimistic_lock_in_share_mode_with_wait_timeout(
+        &mut self,
+        keys: impl IntoIterator<Item = impl PessimisticLock>,
+        need_value: bool,
+        lock_wait_timeout: LockWaitTimeout,
+    ) -> Result<Vec<KvPair>> {
+        self.pessimistic_lock_with_wait_timeout_and_mode(
+            keys,
+            need_value,
+            lock_wait_timeout,
+            PessimisticLockMode::Shared,
+        )
+        .await
+    }
+
+    async fn pessimistic_lock_with_wait_timeout_and_mode(
+        &mut self,
+        keys: impl IntoIterator<Item = impl PessimisticLock>,
+        need_value: bool,
+        lock_wait_timeout: LockWaitTimeout,
+        mode: PessimisticLockMode,
+    ) -> Result<Vec<KvPair>> {
         debug!("acquiring pessimistic lock");
         if !matches!(self.options.kind, TransactionKind::Pessimistic(_)) {
             return Err(Error::InvalidTransactionType);
@@ -2552,6 +2627,12 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Ok(vec![]);
         }
 
+        if mode == PessimisticLockMode::Shared && self.buffer.get_primary_key().is_none() {
+            return Err(Error::StringError(
+                "pessimistic lock in share mode requires primary key to be selected".to_owned(),
+            ));
+        }
+
         // Match client-go: sort and deduplicate keys to keep the lock request deterministic and
         // avoid locking the same key twice in a single call (which can also affect is_first_lock).
         locks.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2564,11 +2645,30 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         });
 
+        if mode == PessimisticLockMode::Exclusive
+            && locks
+                .iter()
+                .any(|(key, _)| self.buffer.is_locked_in_share_mode(key))
+        {
+            return Err(Error::StringError(
+                "upgrading a shared lock to an exclusive lock is not supported".to_owned(),
+            ));
+        }
+
         // we do not set the primary key here, because pessimistic lock request
         // can fail, in which case the keys may not be part of the transaction.
         let existing_primary_key = self.buffer.get_primary_key();
         let is_first_lock = existing_primary_key.is_none() && locks.len() == 1;
-        let primary_lock = existing_primary_key.unwrap_or_else(|| locks[0].0.clone());
+        let primary_lock = match (mode, existing_primary_key) {
+            (PessimisticLockMode::Exclusive, Some(primary)) => primary,
+            (PessimisticLockMode::Exclusive, None) => locks[0].0.clone(),
+            (PessimisticLockMode::Shared, Some(primary)) => primary,
+            (PessimisticLockMode::Shared, None) => {
+                return Err(Error::StringError(
+                    "pessimistic lock in share mode requires primary key to be selected".to_owned(),
+                ));
+            }
+        };
         let for_update_ts =
             get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
                 .await?;
@@ -2577,6 +2677,14 @@ impl<PdC: PdClient> Transaction<PdC> {
         let lock_ttl = elapsed.saturating_add(MAX_TTL);
         let lock_wait_start = Instant::now();
         let primary_in_request = locks.iter().any(|(key, _)| key == &primary_lock);
+
+        let apply_pessimistic_lock_mode = |request: &mut kvrpcpb::PessimisticLockRequest| {
+            if mode == PessimisticLockMode::Shared {
+                for mutation in &mut request.mutations {
+                    mutation.op = kvrpcpb::Op::SharedPessimisticLock.into();
+                }
+            }
+        };
 
         let pairs = if primary_in_request && locks.len() > 1 {
             let primary_region = self.rpc.region_for_key(&primary_lock).await?;
@@ -2591,7 +2699,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
 
             if primary_locks.is_empty() || secondary_locks.is_empty() {
-                let request = new_pessimistic_lock_request(
+                let mut request = new_pessimistic_lock_request(
                     locks.clone().into_iter(),
                     primary_lock.clone(),
                     self.timestamp.clone(),
@@ -2600,6 +2708,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     need_value,
                     is_first_lock,
                 );
+                apply_pessimistic_lock_mode(&mut request);
                 self.execute_pessimistic_lock_request(
                     request,
                     for_update_ts.clone(),
@@ -2609,7 +2718,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 )
                 .await?
             } else {
-                let primary_request = new_pessimistic_lock_request(
+                let mut primary_request = new_pessimistic_lock_request(
                     primary_locks.into_iter(),
                     primary_lock.clone(),
                     self.timestamp.clone(),
@@ -2618,6 +2727,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     need_value,
                     is_first_lock,
                 );
+                apply_pessimistic_lock_mode(&mut primary_request);
                 let primary_request_keys = primary_request
                     .mutations
                     .iter()
@@ -2633,7 +2743,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     )
                     .await?;
 
-                let secondary_request = new_pessimistic_lock_request(
+                let mut secondary_request = new_pessimistic_lock_request(
                     secondary_locks.into_iter(),
                     primary_lock.clone(),
                     self.timestamp.clone(),
@@ -2642,6 +2752,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     need_value,
                     is_first_lock,
                 );
+                apply_pessimistic_lock_mode(&mut secondary_request);
                 let secondary_pairs = match self
                     .execute_pessimistic_lock_request(
                         secondary_request,
@@ -2669,7 +2780,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 pairs
             }
         } else {
-            let request = new_pessimistic_lock_request(
+            let mut request = new_pessimistic_lock_request(
                 locks.clone().into_iter(),
                 primary_lock.clone(),
                 self.timestamp.clone(),
@@ -2678,6 +2789,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 need_value,
                 is_first_lock,
             );
+            apply_pessimistic_lock_mode(&mut request);
             self.execute_pessimistic_lock_request(
                 request,
                 for_update_ts.clone(),
@@ -2691,7 +2803,10 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.buffer.primary_key_or(&primary_lock);
         self.start_auto_heartbeat().await?;
         for (key, _assertion) in locks {
-            self.buffer.lock(key);
+            match mode {
+                PessimisticLockMode::Exclusive => self.buffer.lock(key),
+                PessimisticLockMode::Shared => self.buffer.lock_shared(key),
+            }
         }
         Ok(pairs)
     }
@@ -10263,6 +10378,104 @@ mod tests {
             .await
             .unwrap();
         txn.lock_keys(vec![b"k2".to_vec()]).await.unwrap();
+
+        assert_eq!(lock_requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_lock_keys_in_share_mode_requires_primary_key_for_pessimistic_txn() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let err = txn
+            .lock_keys_in_share_mode(vec![b"k1".to_vec()])
+            .await
+            .expect_err("shared lock without primary key should error");
+        match err {
+            Error::StringError(message) => {
+                assert!(message.contains(
+                    "pessimistic lock in share mode requires primary key to be selected"
+                ));
+            }
+            err => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lock_keys_in_share_mode_sends_shared_pessimistic_lock_and_forbids_upgrade() {
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let lock_requests_captured = lock_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                let attempt = lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.mutations.len(), 1);
+                match attempt {
+                    0 => assert_eq!(req.mutations[0].op, kvrpcpb::Op::PessimisticLock as i32),
+                    1 => {
+                        assert_eq!(
+                            req.mutations[0].op,
+                            kvrpcpb::Op::SharedPessimisticLock as i32
+                        );
+                    }
+                    _ => panic!("unexpected lock request count {attempt}"),
+                }
+                return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.lock_keys(vec![b"k2".to_vec()]).await.unwrap();
+        txn.lock_keys_in_share_mode(vec![b"k1".to_vec()])
+            .await
+            .unwrap();
+
+        let mutations = txn.buffer.to_proto_mutations();
+        let mut lock_op = None;
+        let mut shared_lock_op = None;
+        for mutation in mutations {
+            if mutation.key == b"k1".to_vec() {
+                shared_lock_op = Some(mutation.op);
+            } else if mutation.key == b"k2".to_vec() {
+                lock_op = Some(mutation.op);
+            }
+        }
+        assert_eq!(shared_lock_op, Some(kvrpcpb::Op::SharedLock as i32));
+        assert_eq!(lock_op, Some(kvrpcpb::Op::Lock as i32));
+
+        let err = txn
+            .lock_keys(vec![b"k1".to_vec()])
+            .await
+            .expect_err("upgrading shared lock should error");
+        match err {
+            Error::StringError(message) => {
+                assert!(message
+                    .contains("upgrading a shared lock to an exclusive lock is not supported"))
+            }
+            err => panic!("unexpected error: {err:?}"),
+        }
 
         assert_eq!(lock_requests.load(Ordering::SeqCst), 2);
     }

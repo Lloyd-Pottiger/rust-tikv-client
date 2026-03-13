@@ -365,6 +365,28 @@ impl SyncTransaction {
         )
     }
 
+    /// Lock the given keys in share mode without associating any values.
+    pub fn lock_keys_in_share_mode(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+    ) -> Result<()> {
+        safe_block_on(&self.runtime, self.inner.lock_keys_in_share_mode(keys))
+    }
+
+    /// Lock the given keys in share mode without associating any values, using the provided lock
+    /// wait timeout.
+    pub fn lock_keys_in_share_mode_with_wait_timeout(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+        lock_wait_timeout: LockWaitTimeout,
+    ) -> Result<()> {
+        safe_block_on(
+            &self.runtime,
+            self.inner
+                .lock_keys_in_share_mode_with_wait_timeout(keys, lock_wait_timeout),
+        )
+    }
+
     /// Get the start timestamp version of this transaction.
     ///
     /// This maps to client-go `KVTxn.StartTS`.
