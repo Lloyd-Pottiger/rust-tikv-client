@@ -151,11 +151,13 @@ pub enum PrewriteEncounterLockPolicy {
 /// txn.commit().await.unwrap();
 /// # });
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AggressiveLockingState {
     primary_key_at_start: Option<Key>,
     last_primary_key: Option<Key>,
     primary_key: Option<Key>,
+    last_attempt_start: Instant,
+    attempt_start: Instant,
     last_retry_unnecessary_locks: HashMap<Key, u64>,
     current_locked_keys: HashMap<Key, u64>,
 }
@@ -2300,9 +2302,15 @@ impl<PdC: PdClient> Transaction<PdC> {
                 "aggressive locking is already started".to_owned(),
             ));
         }
+        let now = Instant::now();
         self.aggressive_locking = Some(AggressiveLockingState {
             primary_key_at_start: self.buffer.get_primary_key(),
-            ..Default::default()
+            last_primary_key: None,
+            primary_key: None,
+            last_attempt_start: now,
+            attempt_start: now,
+            last_retry_unnecessary_locks: HashMap::new(),
+            current_locked_keys: HashMap::new(),
         });
         Ok(())
     }
@@ -2345,6 +2353,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                 .or_insert(expected_for_update_ts);
         }
         state.last_retry_unnecessary_locks = next_last_retry_unnecessary_locks;
+        state.last_attempt_start = state.attempt_start;
+        state.attempt_start = Instant::now();
         if state.primary_key_at_start.is_none() && state.primary_key.is_some() {
             state.last_primary_key = state.primary_key.take();
             self.buffer.clear_primary_key();
@@ -3072,6 +3082,8 @@ impl<PdC: PdClient> Transaction<PdC> {
             if let Some(state) = self.aggressive_locking.as_mut() {
                 let can_try_skip = state.primary_key.is_none()
                     || state.last_primary_key.as_ref() == state.primary_key.as_ref();
+                let last_attempt_locks_may_expire =
+                    state.last_attempt_start.elapsed() >= Duration::from_millis(MAX_TTL);
                 let mut filtered = Vec::with_capacity(locks.len());
                 for (key, assertion) in &locks {
                     if state.current_locked_keys.contains_key(key) {
@@ -3080,7 +3092,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     if let Some(expected_for_update_ts) =
                         state.last_retry_unnecessary_locks.get(key).copied()
                     {
-                        if can_try_skip {
+                        if can_try_skip && !last_attempt_locks_may_expire {
                             state.last_retry_unnecessary_locks.remove(key);
                             state
                                 .current_locked_keys
@@ -3090,7 +3102,10 @@ impl<PdC: PdClient> Transaction<PdC> {
                         filtered.push((key.clone(), *assertion));
                         continue;
                     }
-                    if can_try_skip && self.buffer.has_mutation_or_lock(key) {
+                    if can_try_skip
+                        && !last_attempt_locks_may_expire
+                        && self.buffer.has_mutation_or_lock(key)
+                    {
                         continue;
                     }
                     filtered.push((key.clone(), *assertion));
@@ -12855,6 +12870,66 @@ mod tests {
         let rollback_requests = rollback_requests.lock().unwrap().clone();
         assert_eq!(rollback_requests.len(), 1);
         assert_eq!(rollback_requests[0].keys, vec![b"k3".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_aggressive_locking_does_not_skip_locks_when_previous_attempt_may_expire() {
+        let lock_requests = Arc::new(Mutex::new(Vec::<kvrpcpb::PessimisticLockRequest>::new()));
+        let rollback_requests =
+            Arc::new(Mutex::new(Vec::<kvrpcpb::PessimisticRollbackRequest>::new()));
+
+        let lock_requests_captured = lock_requests.clone();
+        let rollback_requests_captured = rollback_requests.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                    lock_requests_captured.lock().unwrap().push(req.clone());
+                    return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    rollback_requests_captured.lock().unwrap().push(req.clone());
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.start_aggressive_locking().unwrap();
+        txn.lock_keys(vec![b"k1".to_vec(), b"k2".to_vec()])
+            .await
+            .unwrap();
+        txn.retry_aggressive_locking().await.unwrap();
+
+        if let Some(state) = txn.aggressive_locking.as_mut() {
+            state.last_attempt_start = Instant::now()
+                - Duration::from_millis(super::MAX_TTL).saturating_add(Duration::from_millis(1));
+        }
+
+        // Even though `k1` was locked in the previous attempt, we should re-lock it when the
+        // previous attempt's locks may have expired.
+        txn.lock_keys(vec![b"k1".to_vec()]).await.unwrap();
+        txn.done_aggressive_locking().await.unwrap();
+
+        let lock_requests = lock_requests.lock().unwrap().clone();
+        assert_eq!(lock_requests.len(), 2);
+        let locked_keys = lock_requests[1]
+            .mutations
+            .iter()
+            .map(|mutation| mutation.key.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(locked_keys, vec![b"k1".to_vec()]);
     }
 
     #[tokio::test]
