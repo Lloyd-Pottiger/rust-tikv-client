@@ -1366,6 +1366,139 @@ impl Merge<kvrpcpb::UnsafeDestroyRangeResponse> for Collect {
     }
 }
 
+pub fn new_register_lock_observer_request(max_ts: u64) -> kvrpcpb::RegisterLockObserverRequest {
+    let mut req = kvrpcpb::RegisterLockObserverRequest::default();
+    req.max_ts = max_ts;
+    req
+}
+
+impl KvRequest for kvrpcpb::RegisterLockObserverRequest {
+    type Response = kvrpcpb::RegisterLockObserverResponse;
+}
+
+impl StoreRequest for kvrpcpb::RegisterLockObserverRequest {
+    fn apply_store(&mut self, _store: &Store) {}
+}
+
+impl HasLocks for kvrpcpb::RegisterLockObserverResponse {}
+
+impl Merge<kvrpcpb::RegisterLockObserverResponse> for Collect {
+    type Out = ();
+
+    fn merge(
+        &self,
+        input: Vec<Result<kvrpcpb::RegisterLockObserverResponse>>,
+    ) -> Result<Self::Out> {
+        let _: Vec<kvrpcpb::RegisterLockObserverResponse> =
+            input.into_iter().collect::<Result<Vec<_>>>()?;
+        Ok(())
+    }
+}
+
+pub fn new_check_lock_observer_request(max_ts: u64) -> kvrpcpb::CheckLockObserverRequest {
+    let mut req = kvrpcpb::CheckLockObserverRequest::default();
+    req.max_ts = max_ts;
+    req
+}
+
+impl KvRequest for kvrpcpb::CheckLockObserverRequest {
+    type Response = kvrpcpb::CheckLockObserverResponse;
+}
+
+impl StoreRequest for kvrpcpb::CheckLockObserverRequest {
+    fn apply_store(&mut self, _store: &Store) {}
+}
+
+impl HasLocks for kvrpcpb::CheckLockObserverResponse {
+    fn take_locks(&mut self) -> Vec<LockInfo> {
+        std::mem::take(&mut self.locks)
+            .into_iter()
+            .flat_map(flatten_lock_info)
+            .collect()
+    }
+}
+
+impl Merge<kvrpcpb::CheckLockObserverResponse> for Collect {
+    type Out = (bool, Vec<kvrpcpb::LockInfo>);
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::CheckLockObserverResponse>>) -> Result<Self::Out> {
+        let mut is_clean = true;
+        let mut locks = Vec::new();
+        for resp in input {
+            let mut resp = resp?;
+            is_clean &= resp.is_clean;
+            locks.extend(resp.take_locks().into_iter().map(Into::into));
+        }
+        Ok((is_clean, locks))
+    }
+}
+
+pub fn new_remove_lock_observer_request(max_ts: u64) -> kvrpcpb::RemoveLockObserverRequest {
+    let mut req = kvrpcpb::RemoveLockObserverRequest::default();
+    req.max_ts = max_ts;
+    req
+}
+
+impl KvRequest for kvrpcpb::RemoveLockObserverRequest {
+    type Response = kvrpcpb::RemoveLockObserverResponse;
+}
+
+impl StoreRequest for kvrpcpb::RemoveLockObserverRequest {
+    fn apply_store(&mut self, _store: &Store) {}
+}
+
+impl HasLocks for kvrpcpb::RemoveLockObserverResponse {}
+
+impl Merge<kvrpcpb::RemoveLockObserverResponse> for Collect {
+    type Out = ();
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::RemoveLockObserverResponse>>) -> Result<Self::Out> {
+        let _: Vec<kvrpcpb::RemoveLockObserverResponse> =
+            input.into_iter().collect::<Result<Vec<_>>>()?;
+        Ok(())
+    }
+}
+
+pub fn new_physical_scan_lock_request(
+    max_ts: u64,
+    start_key: Vec<u8>,
+    limit: u32,
+) -> kvrpcpb::PhysicalScanLockRequest {
+    let mut req = kvrpcpb::PhysicalScanLockRequest::default();
+    req.max_ts = max_ts;
+    req.start_key = start_key;
+    req.limit = limit;
+    req
+}
+
+impl KvRequest for kvrpcpb::PhysicalScanLockRequest {
+    type Response = kvrpcpb::PhysicalScanLockResponse;
+}
+
+impl StoreRequest for kvrpcpb::PhysicalScanLockRequest {
+    fn apply_store(&mut self, _store: &Store) {}
+}
+
+impl HasLocks for kvrpcpb::PhysicalScanLockResponse {
+    fn take_locks(&mut self) -> Vec<LockInfo> {
+        std::mem::take(&mut self.locks)
+            .into_iter()
+            .flat_map(flatten_lock_info)
+            .collect()
+    }
+}
+
+impl Merge<kvrpcpb::PhysicalScanLockResponse> for Collect {
+    type Out = Vec<kvrpcpb::LockInfo>;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::PhysicalScanLockResponse>>) -> Result<Self::Out> {
+        input
+            .into_iter()
+            .flat_map_ok(|mut resp| resp.take_locks().into_iter().map(Into::into))
+            .collect()
+    }
+}
+
 pub fn new_get_lock_wait_info_request() -> kvrpcpb::GetLockWaitInfoRequest {
     kvrpcpb::GetLockWaitInfoRequest::default()
 }
@@ -1576,6 +1709,60 @@ mod tests {
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].txn, 100);
         assert_eq!(merged[1].txn, 1000);
+    }
+
+    #[test]
+    fn test_merge_check_lock_observer_collects_locks_and_ands_is_clean() {
+        let (is_clean, locks) = crate::request::Collect
+            .merge(vec![
+                Ok(kvrpcpb::CheckLockObserverResponse {
+                    error: "".to_owned(),
+                    is_clean: true,
+                    locks: vec![],
+                }),
+                Ok(kvrpcpb::CheckLockObserverResponse {
+                    error: "".to_owned(),
+                    is_clean: false,
+                    locks: vec![kvrpcpb::LockInfo {
+                        key: b"k1".to_vec(),
+                        primary_lock: b"p".to_vec(),
+                        ..Default::default()
+                    }],
+                }),
+            ])
+            .unwrap();
+
+        assert!(!is_clean);
+        assert_eq!(locks.len(), 1);
+        assert_eq!(locks[0].key, b"k1".to_vec());
+    }
+
+    #[test]
+    fn test_merge_physical_scan_lock_collects_locks_across_stores() {
+        let locks = crate::request::Collect
+            .merge(vec![
+                Ok(kvrpcpb::PhysicalScanLockResponse {
+                    error: "".to_owned(),
+                    locks: vec![kvrpcpb::LockInfo {
+                        key: b"k1".to_vec(),
+                        primary_lock: b"p1".to_vec(),
+                        ..Default::default()
+                    }],
+                }),
+                Ok(kvrpcpb::PhysicalScanLockResponse {
+                    error: "".to_owned(),
+                    locks: vec![kvrpcpb::LockInfo {
+                        key: b"k2".to_vec(),
+                        primary_lock: b"p2".to_vec(),
+                        ..Default::default()
+                    }],
+                }),
+            ])
+            .unwrap();
+
+        assert_eq!(locks.len(), 2);
+        assert_eq!(locks[0].key, b"k1".to_vec());
+        assert_eq!(locks[1].key, b"k2".to_vec());
     }
 
     #[test]

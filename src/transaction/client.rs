@@ -21,8 +21,12 @@ use crate::request::Plan;
 use crate::safe_ts::SafeTsCache;
 use crate::timestamp::TimestampExt;
 use crate::transaction::lock::ResolveLocksOptions;
+use crate::transaction::lowering::new_check_lock_observer_request;
 use crate::transaction::lowering::new_get_lock_wait_history_request;
 use crate::transaction::lowering::new_get_lock_wait_info_request;
+use crate::transaction::lowering::new_physical_scan_lock_request;
+use crate::transaction::lowering::new_register_lock_observer_request;
+use crate::transaction::lowering::new_remove_lock_observer_request;
 use crate::transaction::lowering::new_scan_lock_request;
 use crate::transaction::lowering::new_unsafe_destroy_range_request;
 use crate::transaction::BoundLockResolver;
@@ -33,6 +37,7 @@ use crate::transaction::Transaction;
 use crate::transaction::TransactionOptions;
 use crate::Backoff;
 use crate::BoundRange;
+use crate::Key;
 use crate::Result;
 
 /// Protobuf-generated lock information returned by TiKV.
@@ -638,6 +643,78 @@ impl<PdC: PdClient> Client<PdC> {
         plan.execute().await
     }
 
+    /// Register a lock observer on all TiKV stores.
+    ///
+    /// This is a store-level request (not tied to a specific region).
+    ///
+    /// Returns an error if any store request fails.
+    pub async fn register_lock_observer(&self, max_ts: u64) -> Result<()> {
+        let req = new_register_lock_observer_request(max_ts);
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .all_stores(DEFAULT_STORE_BACKOFF)
+            .merge(crate::request::Collect)
+            .plan();
+        plan.execute().await
+    }
+
+    /// Check a lock observer on all TiKV stores.
+    ///
+    /// This is a store-level request (not tied to a specific region).
+    ///
+    /// Returns `(is_clean, locks)` where `is_clean` is true only if all stores report clean.
+    ///
+    /// Returns an error if any store request fails.
+    pub async fn check_lock_observer(&self, max_ts: u64) -> Result<(bool, Vec<ProtoLockInfo>)> {
+        use crate::request::TruncateKeyspace;
+
+        let req = new_check_lock_observer_request(max_ts);
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .all_stores(DEFAULT_STORE_BACKOFF)
+            .merge(crate::request::Collect)
+            .plan();
+        let (is_clean, locks) = plan.execute().await?;
+        Ok((is_clean, locks.truncate_keyspace(self.keyspace)))
+    }
+
+    /// Remove a lock observer on all TiKV stores.
+    ///
+    /// This is a store-level request (not tied to a specific region).
+    ///
+    /// Returns an error if any store request fails.
+    pub async fn remove_lock_observer(&self, max_ts: u64) -> Result<()> {
+        let req = new_remove_lock_observer_request(max_ts);
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .all_stores(DEFAULT_STORE_BACKOFF)
+            .merge(crate::request::Collect)
+            .plan();
+        plan.execute().await
+    }
+
+    /// Physical scan locks from all TiKV stores.
+    ///
+    /// This is a store-level request (not tied to a specific region). The returned locks are
+    /// concatenated across all stores.
+    ///
+    /// Returns an error if any store request fails.
+    pub async fn physical_scan_lock(
+        &self,
+        max_ts: u64,
+        start_key: impl Into<Key>,
+        limit: u32,
+    ) -> Result<Vec<ProtoLockInfo>> {
+        use crate::request::TruncateKeyspace;
+
+        let start_key = start_key
+            .into()
+            .encode_keyspace(self.keyspace, KeyMode::Txn);
+        let req = new_physical_scan_lock_request(max_ts, start_key, limit);
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .all_stores(DEFAULT_STORE_BACKOFF)
+            .merge(crate::request::Collect)
+            .plan();
+        Ok(plan.execute().await?.truncate_keyspace(self.keyspace))
+    }
+
     /// Get current lock waiting status from all TiKV stores.
     ///
     /// This is a store-level request (not tied to a specific region). The returned entries are a
@@ -851,6 +928,143 @@ mod tests {
         assert_eq!(history[0].txn, 101);
         assert_eq!(history[1].txn, 102);
         assert_eq!(history_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_lock_observer_and_physical_scan_lock_apis_truncate_keyspace() {
+        use crate::request::EncodeKeyspace;
+        use crate::request::KeyMode;
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xCAFE,
+        };
+
+        let start_key = crate::Key::from(b"start".to_vec());
+        let expected_start_key: Vec<u8> = start_key
+            .clone()
+            .encode_keyspace(keyspace, KeyMode::Txn)
+            .into();
+
+        let expected_observer_lock_key_raw = b"lock-key".to_vec();
+        let expected_observer_lock_key_encoded: Vec<u8> =
+            crate::Key::from(expected_observer_lock_key_raw.clone())
+                .encode_keyspace(keyspace, KeyMode::Txn)
+                .into();
+
+        let register_calls = Arc::new(AtomicUsize::new(0));
+        let check_calls = Arc::new(AtomicUsize::new(0));
+        let remove_calls = Arc::new(AtomicUsize::new(0));
+        let scan_calls = Arc::new(AtomicUsize::new(0));
+        let register_calls_cloned = register_calls.clone();
+        let check_calls_cloned = check_calls.clone();
+        let remove_calls_cloned = remove_calls.clone();
+        let scan_calls_cloned = scan_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RegisterLockObserverRequest>() {
+                    assert_eq!(req.max_ts, 1);
+                    register_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::RegisterLockObserverResponse {
+                        error: "".to_owned(),
+                    }) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckLockObserverRequest>() {
+                    assert_eq!(req.max_ts, 2);
+                    let call_index = check_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    let is_clean = call_index == 0;
+                    let locks = if is_clean {
+                        vec![]
+                    } else {
+                        vec![kvrpcpb::LockInfo {
+                            key: expected_observer_lock_key_encoded.clone(),
+                            primary_lock: expected_observer_lock_key_encoded.clone(),
+                            ..Default::default()
+                        }]
+                    };
+                    return Ok(Box::new(kvrpcpb::CheckLockObserverResponse {
+                        error: "".to_owned(),
+                        is_clean,
+                        locks,
+                    }) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RemoveLockObserverRequest>() {
+                    assert_eq!(req.max_ts, 3);
+                    remove_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::RemoveLockObserverResponse {
+                        error: "".to_owned(),
+                    }) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PhysicalScanLockRequest>() {
+                    assert_eq!(req.max_ts, 4);
+                    assert_eq!(req.start_key, expected_start_key);
+                    assert_eq!(req.limit, 123);
+
+                    let call_index = scan_calls_cloned.fetch_add(1, Ordering::SeqCst) as u64;
+                    let key_raw = format!("scan-{call_index}").into_bytes();
+                    let key_encoded: Vec<u8> = crate::Key::from(key_raw.clone())
+                        .encode_keyspace(keyspace, KeyMode::Txn)
+                        .into();
+                    let lock = kvrpcpb::LockInfo {
+                        key: key_encoded.clone(),
+                        primary_lock: key_encoded,
+                        ..Default::default()
+                    };
+
+                    return Ok(Box::new(kvrpcpb::PhysicalScanLockResponse {
+                        error: "".to_owned(),
+                        locks: vec![lock],
+                    }) as Box<dyn Any>);
+                }
+
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                address: "mock://1".to_owned(),
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                address: "mock://2".to_owned(),
+                ..Default::default()
+            })
+            .await;
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        client.register_lock_observer(1).await.unwrap();
+        assert_eq!(register_calls.load(Ordering::SeqCst), 2);
+
+        let (is_clean, locks) = client.check_lock_observer(2).await.unwrap();
+        assert!(!is_clean);
+        assert_eq!(locks.len(), 1);
+        assert_eq!(locks[0].key, expected_observer_lock_key_raw);
+        assert_eq!(locks[0].primary_lock, expected_observer_lock_key_raw);
+        assert_eq!(check_calls.load(Ordering::SeqCst), 2);
+
+        client.remove_lock_observer(3).await.unwrap();
+        assert_eq!(remove_calls.load(Ordering::SeqCst), 2);
+
+        let mut locks = client.physical_scan_lock(4, start_key, 123).await.unwrap();
+        locks.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(locks.len(), 2);
+        assert!(locks.iter().all(|lock| lock.key.starts_with(b"scan-")));
+        assert_eq!(scan_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

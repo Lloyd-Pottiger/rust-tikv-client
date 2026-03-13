@@ -219,6 +219,26 @@ pub fn new_unsafe_destroy_range_request(range: BoundRange) -> kvrpcpb::UnsafeDes
     requests::new_unsafe_destroy_range_request(start_key.into(), end_key.unwrap_or_default().into())
 }
 
+pub fn new_register_lock_observer_request(max_ts: u64) -> kvrpcpb::RegisterLockObserverRequest {
+    requests::new_register_lock_observer_request(max_ts)
+}
+
+pub fn new_check_lock_observer_request(max_ts: u64) -> kvrpcpb::CheckLockObserverRequest {
+    requests::new_check_lock_observer_request(max_ts)
+}
+
+pub fn new_remove_lock_observer_request(max_ts: u64) -> kvrpcpb::RemoveLockObserverRequest {
+    requests::new_remove_lock_observer_request(max_ts)
+}
+
+pub fn new_physical_scan_lock_request(
+    max_ts: u64,
+    start_key: Key,
+    limit: u32,
+) -> kvrpcpb::PhysicalScanLockRequest {
+    requests::new_physical_scan_lock_request(max_ts, start_key.into(), limit)
+}
+
 pub fn new_get_lock_wait_info_request() -> kvrpcpb::GetLockWaitInfoRequest {
     requests::new_get_lock_wait_info_request()
 }

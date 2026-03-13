@@ -143,6 +143,26 @@ impl_request!(
     "unsafe_destroy_range"
 );
 impl_request!(
+    RegisterLockObserverRequest,
+    register_lock_observer,
+    "register_lock_observer"
+);
+impl_request!(
+    CheckLockObserverRequest,
+    check_lock_observer,
+    "check_lock_observer"
+);
+impl_request!(
+    RemoveLockObserverRequest,
+    remove_lock_observer,
+    "remove_lock_observer"
+);
+impl_request!(
+    PhysicalScanLockRequest,
+    physical_scan_lock,
+    "physical_scan_lock"
+);
+impl_request!(
     GetLockWaitInfoRequest,
     get_lock_wait_info,
     "get_lock_wait_info"

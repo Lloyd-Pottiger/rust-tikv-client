@@ -117,8 +117,36 @@ has_str_error!(kvrpcpb::RawChecksumResponse);
 has_str_error!(kvrpcpb::ImportResponse);
 has_str_error!(kvrpcpb::DeleteRangeResponse);
 has_str_error!(kvrpcpb::UnsafeDestroyRangeResponse);
+has_str_error!(kvrpcpb::RegisterLockObserverResponse);
+has_str_error!(kvrpcpb::CheckLockObserverResponse);
+has_str_error!(kvrpcpb::RemoveLockObserverResponse);
+has_str_error!(kvrpcpb::PhysicalScanLockResponse);
 has_str_error!(kvrpcpb::GetLockWaitInfoResponse);
 has_str_error!(kvrpcpb::GetLockWaitHistoryResponse);
+
+impl HasRegionError for kvrpcpb::RegisterLockObserverResponse {
+    fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
+        None
+    }
+}
+
+impl HasRegionError for kvrpcpb::CheckLockObserverResponse {
+    fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
+        None
+    }
+}
+
+impl HasRegionError for kvrpcpb::RemoveLockObserverResponse {
+    fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
+        None
+    }
+}
+
+impl HasRegionError for kvrpcpb::PhysicalScanLockResponse {
+    fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
+        None
+    }
+}
 
 impl HasRegionError for kvrpcpb::StoreSafeTsResponse {
     fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
