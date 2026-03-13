@@ -115,6 +115,7 @@ mod region;
 mod region_cache;
 mod replica_read;
 mod request_context;
+mod safe_ts;
 mod stats;
 mod store;
 mod timestamp;

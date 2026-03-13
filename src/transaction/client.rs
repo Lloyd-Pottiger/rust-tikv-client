@@ -15,11 +15,11 @@ use crate::request::EncodeKeyspace;
 use crate::request::KeyMode;
 use crate::request::Keyspace;
 use crate::request::Plan;
+use crate::safe_ts::SafeTsCache;
 use crate::timestamp::TimestampExt;
 use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_scan_lock_request;
 use crate::transaction::lowering::new_unsafe_destroy_range_request;
-use crate::transaction::requests::new_store_safe_ts_request_all;
 use crate::transaction::BoundLockResolver;
 use crate::transaction::LockResolver;
 use crate::transaction::ResolveLocksContext;
@@ -57,6 +57,7 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
     pd: Arc<PdC>,
     keyspace: Keyspace,
     resolve_locks_ctx: ResolveLocksContext,
+    safe_ts: SafeTsCache<PdC>,
 }
 
 impl<PdC: PdClient> Clone for Client<PdC> {
@@ -65,6 +66,7 @@ impl<PdC: PdClient> Clone for Client<PdC> {
             pd: self.pd.clone(),
             keyspace: self.keyspace,
             resolve_locks_ctx: self.resolve_locks_ctx.clone(),
+            safe_ts: self.safe_ts.clone(),
         }
     }
 }
@@ -128,6 +130,7 @@ impl Client {
             None => Keyspace::Disable,
         };
         Ok(Client {
+            safe_ts: SafeTsCache::new(pd.clone(), keyspace),
             pd,
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -152,6 +155,7 @@ impl Client {
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
         Ok(Client {
+            safe_ts: SafeTsCache::new(pd.clone(), Keyspace::ApiV2NoPrefix),
             pd,
             keyspace: Keyspace::ApiV2NoPrefix,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -346,15 +350,14 @@ impl<PdC: PdClient> Client<PdC> {
     /// timestamps less than or equal to the returned `safe_ts` can be served from replicas (subject
     /// to per-region `safe_ts`).
     ///
-    /// Returns `0` when the minimum safe-ts cannot be determined (for example, if any store is
-    /// unreachable).
+    /// Returns `0` when the minimum safe-ts cannot be determined (for example, if it has not been
+    /// successfully refreshed yet).
+    ///
+    /// The returned value is cached and best-effort: once a non-zero safe-ts has been observed for
+    /// all stores, transient store errors will not cause the returned minimum safe-ts to drop back
+    /// to `0`.
     pub async fn min_safe_ts(&self) -> Result<u64> {
-        let req = new_store_safe_ts_request_all();
-        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
-            .all_stores(DEFAULT_STORE_BACKOFF)
-            .merge(crate::request::Collect)
-            .plan();
-        plan.execute().await
+        self.safe_ts.min_safe_ts().await
     }
 
     /// Get the minimum `safe_ts` for a transaction scope.
@@ -365,35 +368,12 @@ impl<PdC: PdClient> Client<PdC> {
     ///
     /// Returns `0` when the minimum safe-ts cannot be determined, or when no stores match the
     /// provided scope.
+    ///
+    /// This method uses the same cached best-effort semantics as [`Client::min_safe_ts`].
     pub async fn min_safe_ts_with_txn_scope(&self, txn_scope: impl AsRef<str>) -> Result<u64> {
-        const ZONE_LABEL_KEY: &str = "zone";
-
-        let txn_scope = txn_scope.as_ref();
-        if txn_scope.is_empty() || txn_scope == "global" {
-            return self.min_safe_ts().await;
-        }
-
-        let stores = self.pd.all_stores().await?;
-        let stores = stores
-            .into_iter()
-            .filter(|store| {
-                store
-                    .meta
-                    .labels
-                    .iter()
-                    .any(|label| label.key == ZONE_LABEL_KEY && label.value == txn_scope)
-            })
-            .collect::<Vec<_>>();
-        if stores.is_empty() {
-            return Ok(0);
-        }
-
-        let req = new_store_safe_ts_request_all();
-        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
-            .stores(stores, DEFAULT_STORE_BACKOFF)
-            .merge(crate::request::Collect)
-            .plan();
-        plan.execute().await
+        self.safe_ts
+            .min_safe_ts_with_txn_scope(txn_scope.as_ref())
+            .await
     }
 
     /// Request garbage collection (GC) of the TiKV cluster.
@@ -550,6 +530,7 @@ mod tests {
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
     use crate::request::Keyspace;
+    use crate::safe_ts::SafeTsCache;
     use crate::timestamp::TimestampExt;
     use crate::transaction::HeartbeatOption;
     use crate::transaction::ResolveLocksContext;
@@ -588,6 +569,7 @@ mod tests {
         )));
 
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -611,6 +593,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default());
 
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -651,6 +634,7 @@ mod tests {
         )));
 
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -680,6 +664,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default());
 
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -731,6 +716,7 @@ mod tests {
 
         let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(start_version));
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -801,13 +787,14 @@ mod tests {
             .await;
 
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client,
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
         };
 
         assert_eq!(client.min_safe_ts_with_txn_scope("dc1").await.unwrap(), 42);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         assert_eq!(client.min_safe_ts_with_txn_scope("dc2").await.unwrap(), 42);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -819,7 +806,7 @@ mod tests {
             client.min_safe_ts_with_txn_scope("global").await.unwrap(),
             42
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -865,6 +852,7 @@ mod tests {
 
         let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(start_version));
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -915,6 +903,7 @@ mod tests {
 
         let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(start_version));
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -974,6 +963,7 @@ mod tests {
         )));
 
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),

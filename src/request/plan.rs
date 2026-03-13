@@ -1684,9 +1684,9 @@ where
     async fn execute(&self) -> Result<Self::Result> {
         let concurrency_permits = Arc::new(Semaphore::new(MULTI_STORES_CONCURRENCY));
         let mut handles = Vec::with_capacity(self.stores.len());
-        for store in self.stores.iter().cloned() {
+        for store in self.stores.iter() {
             let mut clone = self.inner.clone();
-            clone.apply_store(&store);
+            clone.apply_store(store);
             let handle = tokio::spawn(Self::single_store_handler(
                 clone,
                 self.backoff.clone(),

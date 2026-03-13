@@ -22,6 +22,7 @@ use crate::request::Keyspace;
 use crate::request::Plan;
 use crate::request::TruncateKeyspace;
 use crate::request::{plan, Collect};
+use crate::safe_ts::SafeTsCache;
 use crate::store::{HasRegionError, RegionStore};
 use crate::Backoff;
 use crate::BoundRange;
@@ -48,6 +49,7 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
     /// Whether to use the [`atomic mode`](Client::with_atomic_for_cas).
     atomic: bool,
     keyspace: Keyspace,
+    safe_ts: SafeTsCache<PdC>,
 }
 
 impl Clone for Client {
@@ -58,6 +60,7 @@ impl Clone for Client {
             backoff: self.backoff.clone(),
             atomic: self.atomic,
             keyspace: self.keyspace,
+            safe_ts: self.safe_ts.clone(),
         }
     }
 }
@@ -121,6 +124,7 @@ impl Client<PdRpcClient> {
             None => Keyspace::Disable,
         };
         Ok(Client {
+            safe_ts: SafeTsCache::new(rpc.clone(), keyspace),
             rpc,
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,
@@ -166,6 +170,7 @@ impl Client<PdRpcClient> {
             backoff: self.backoff.clone(),
             atomic: self.atomic,
             keyspace: self.keyspace,
+            safe_ts: self.safe_ts.clone(),
         }
     }
 
@@ -195,6 +200,7 @@ impl Client<PdRpcClient> {
             backoff,
             atomic: self.atomic,
             keyspace: self.keyspace,
+            safe_ts: self.safe_ts.clone(),
         }
     }
 
@@ -213,6 +219,7 @@ impl Client<PdRpcClient> {
             backoff: self.backoff.clone(),
             atomic: true,
             keyspace: self.keyspace,
+            safe_ts: self.safe_ts.clone(),
         }
     }
 }
@@ -230,17 +237,14 @@ impl<PdC: PdClient> Client<PdC> {
     /// timestamps less than or equal to the returned `safe_ts` can be served from replicas (subject
     /// to per-region `safe_ts`).
     ///
-    /// Returns `0` when the minimum safe-ts cannot be determined (for example, if any store is
-    /// unreachable).
+    /// Returns `0` when the minimum safe-ts cannot be determined (for example, if it has not been
+    /// successfully refreshed yet).
+    ///
+    /// The returned value is cached and best-effort: once a non-zero safe-ts has been observed for
+    /// all stores, transient store errors will not cause the returned minimum safe-ts to drop back
+    /// to `0`.
     pub async fn min_safe_ts(&self) -> Result<u64> {
-        let request = crate::proto::kvrpcpb::StoreSafeTsRequest {
-            key_range: Some(crate::proto::kvrpcpb::KeyRange::default()),
-        };
-        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .all_stores(DEFAULT_STORE_BACKOFF)
-            .merge(Collect)
-            .plan();
-        plan.execute().await
+        self.safe_ts.min_safe_ts().await
     }
 
     /// Get the minimum `safe_ts` for a transaction scope.
@@ -251,37 +255,12 @@ impl<PdC: PdClient> Client<PdC> {
     ///
     /// Returns `0` when the minimum safe-ts cannot be determined, or when no stores match the
     /// provided scope.
+    ///
+    /// This method uses the same cached best-effort semantics as [`Client::min_safe_ts`].
     pub async fn min_safe_ts_with_txn_scope(&self, txn_scope: impl AsRef<str>) -> Result<u64> {
-        const ZONE_LABEL_KEY: &str = "zone";
-
-        let txn_scope = txn_scope.as_ref();
-        if txn_scope.is_empty() || txn_scope == "global" {
-            return self.min_safe_ts().await;
-        }
-
-        let stores = self.rpc.all_stores().await?;
-        let stores = stores
-            .into_iter()
-            .filter(|store| {
-                store
-                    .meta
-                    .labels
-                    .iter()
-                    .any(|label| label.key == ZONE_LABEL_KEY && label.value == txn_scope)
-            })
-            .collect::<Vec<_>>();
-        if stores.is_empty() {
-            return Ok(0);
-        }
-
-        let request = crate::proto::kvrpcpb::StoreSafeTsRequest {
-            key_range: Some(crate::proto::kvrpcpb::KeyRange::default()),
-        };
-        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .stores(stores, DEFAULT_STORE_BACKOFF)
-            .merge(Collect)
-            .plan();
-        plan.execute().await
+        self.safe_ts
+            .min_safe_ts_with_txn_scope(txn_scope.as_ref())
+            .await
     }
 
     /// Create a new 'get' request.
@@ -1072,6 +1051,7 @@ mod tests {
         })));
 
         Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             rpc: pd_client,
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,
@@ -1129,6 +1109,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_min_safe_ts_uses_store_safe_ts_request() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_captured = calls.clone();
+
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
                 let req = req
@@ -1138,11 +1121,13 @@ mod tests {
                 assert!(range.start_key.is_empty());
                 assert!(range.end_key.is_empty());
 
+                calls_captured.fetch_add(1, Ordering::SeqCst);
                 let resp = kvrpcpb::StoreSafeTsResponse { safe_ts: 42 };
                 Ok(Box::new(resp) as Box<dyn Any>)
             },
         )));
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             rpc: pd_client,
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
@@ -1151,6 +1136,11 @@ mod tests {
         };
 
         assert_eq!(client.min_safe_ts().await?, 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Served from cache.
+        assert_eq!(client.min_safe_ts().await?, 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
@@ -1196,6 +1186,7 @@ mod tests {
             .await;
 
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             rpc: pd_client,
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
@@ -1204,7 +1195,7 @@ mod tests {
         };
 
         assert_eq!(client.min_safe_ts_with_txn_scope("dc1").await?, 42);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         assert_eq!(client.min_safe_ts_with_txn_scope("dc2").await?, 42);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -1213,8 +1204,73 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         assert_eq!(client.min_safe_ts_with_txn_scope("global").await?, 42);
-        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_min_safe_ts_cache_is_monotonic() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_captured = calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                req.downcast_ref::<kvrpcpb::StoreSafeTsRequest>()
+                    .expect("expected store safe-ts request");
+
+                let call = calls_captured.fetch_add(1, Ordering::SeqCst);
+                let safe_ts = if call == 0 { 100 } else { 80 };
+                Ok(Box::new(kvrpcpb::StoreSafeTsResponse { safe_ts }) as Box<dyn Any>)
+            },
+        )));
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        };
+
+        assert_eq!(client.min_safe_ts().await?, 100);
+        client.safe_ts.refresh().await?;
+
+        // A regression should be ignored.
+        assert_eq!(client.min_safe_ts().await?, 100);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_min_safe_ts_cache_does_not_drop_to_zero_on_store_error() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_captured = calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                req.downcast_ref::<kvrpcpb::StoreSafeTsRequest>()
+                    .expect("expected store safe-ts request");
+
+                let call = calls_captured.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    Ok(Box::new(kvrpcpb::StoreSafeTsResponse { safe_ts: 42 }) as Box<dyn Any>)
+                } else {
+                    Err(Error::Unimplemented)
+                }
+            },
+        )));
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        };
+
+        assert_eq!(client.min_safe_ts().await?, 42);
+        client.safe_ts.refresh().await?;
+        assert_eq!(client.min_safe_ts().await?, 42);
         Ok(())
     }
 
@@ -1233,6 +1289,7 @@ mod tests {
             },
         )));
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Enable { keyspace_id: 0 }),
             rpc: pd_client,
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
@@ -1266,6 +1323,7 @@ mod tests {
             },
         )));
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Enable { keyspace_id: 0 }),
             rpc: pd_client,
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
@@ -1301,6 +1359,7 @@ mod tests {
     fn test_pd_client_getter_returns_handle() {
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::default()));
         let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
             rpc: pd_client.clone(),
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,

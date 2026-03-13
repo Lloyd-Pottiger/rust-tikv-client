@@ -1366,12 +1366,6 @@ impl Merge<kvrpcpb::UnsafeDestroyRangeResponse> for Collect {
     }
 }
 
-pub fn new_store_safe_ts_request_all() -> kvrpcpb::StoreSafeTsRequest {
-    kvrpcpb::StoreSafeTsRequest {
-        key_range: Some(kvrpcpb::KeyRange::default()),
-    }
-}
-
 impl KvRequest for kvrpcpb::StoreSafeTsRequest {
     type Response = kvrpcpb::StoreSafeTsResponse;
 }
