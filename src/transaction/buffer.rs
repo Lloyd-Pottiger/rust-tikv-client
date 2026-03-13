@@ -87,6 +87,10 @@ impl Buffer {
         self.primary_key.get_or_insert_with(|| key.clone());
     }
 
+    pub(crate) fn clear_primary_key(&mut self) {
+        self.primary_key = None;
+    }
+
     /// Get a value from the buffer.
     /// If the returned value is None, it means the key doesn't exist in buffer yet.
     pub fn get(&self, key: &Key) -> Option<Value> {

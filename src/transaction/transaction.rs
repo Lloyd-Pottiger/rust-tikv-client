@@ -2,8 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::iter;
-use std::sync::atomic;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{self, AtomicBool, AtomicU8};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -152,11 +151,19 @@ pub enum PrewriteEncounterLockPolicy {
 /// txn.commit().await.unwrap();
 /// # });
 /// ```
+#[derive(Debug, Default)]
+struct AggressiveLockingState {
+    primary_key_at_start: Option<Key>,
+    last_retry_unnecessary_locks: HashSet<Key>,
+    current_locked_keys: HashSet<Key>,
+}
+
 pub struct Transaction<PdC: PdClient = PdRpcClient> {
     status: Arc<AtomicU8>,
     timestamp: Timestamp,
     commit_ts: Option<Timestamp>,
     buffer: Buffer,
+    aggressive_locking: Option<AggressiveLockingState>,
     read_lock_tracker: ReadLockTracker,
     pipelined: Option<PipelinedState>,
     rpc: Arc<PdC>,
@@ -174,6 +181,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     commit_ts_upper_bound_check: Option<CommitTsUpperBoundCheck>,
     keyspace: Keyspace,
     is_heartbeat_started: bool,
+    heartbeat_cancel: Arc<AtomicBool>,
     start_instant: Instant,
 }
 
@@ -269,6 +277,17 @@ async fn get_timestamp_for_txn_scope<PdC: PdClient>(
     }
 }
 
+fn is_write_conflict_error(error: &Error) -> bool {
+    match error {
+        Error::WriteConflict(_) => true,
+        Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
+            errors.iter().any(is_write_conflict_error)
+        }
+        Error::PessimisticLockError { inner, .. } => is_write_conflict_error(inner),
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PessimisticLockMode {
     Exclusive,
@@ -309,6 +328,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             timestamp,
             commit_ts: None,
             buffer: Buffer::new(options.is_pessimistic()),
+            aggressive_locking: None,
             read_lock_tracker: ReadLockTracker::default(),
             pipelined: options
                 .pipelined_txn
@@ -329,6 +349,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             commit_ts_upper_bound_check: None,
             keyspace,
             is_heartbeat_started: false,
+            heartbeat_cancel: Arc::new(AtomicBool::new(false)),
             start_instant: std::time::Instant::now(),
         }
     }
@@ -2248,6 +2269,146 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.lock_keys_impl(keys, lock_wait_timeout, true).await
     }
 
+    /// Start aggressive locking mode for pessimistic transactions.
+    ///
+    /// Aggressive locking keeps pessimistic locks acquired during a statement attempt so they can be reused
+    /// when the statement is retried, avoiding redundant lock RPCs.
+    ///
+    /// This mirrors client-go `KVTxn.StartAggressiveLocking`.
+    pub fn start_aggressive_locking(&mut self) -> Result<()> {
+        match self.get_status() {
+            TransactionStatus::ReadOnly | TransactionStatus::Active => {}
+            TransactionStatus::Committed
+            | TransactionStatus::Rolledback
+            | TransactionStatus::StartedCommit
+            | TransactionStatus::StartedRollback
+            | TransactionStatus::Dropped => return Err(Error::OperationAfterCommitError),
+        }
+        if !self.is_pessimistic() {
+            return Err(Error::InvalidTransactionType);
+        }
+        if self.aggressive_locking.is_some() {
+            return Err(Error::StringError(
+                "aggressive locking is already started".to_owned(),
+            ));
+        }
+        self.aggressive_locking = Some(AggressiveLockingState {
+            primary_key_at_start: self.buffer.get_primary_key(),
+            ..Default::default()
+        });
+        Ok(())
+    }
+
+    /// Returns whether aggressive locking mode is enabled.
+    ///
+    /// This mirrors client-go `KVTxn.IsInAggressiveLockingMode`.
+    #[must_use]
+    pub fn is_in_aggressive_locking_mode(&self) -> bool {
+        self.aggressive_locking.is_some()
+    }
+
+    /// Prepare for retrying a statement under aggressive locking mode.
+    ///
+    /// This rolls back locks that were acquired in the previous attempt but were not reused in the
+    /// current attempt, then promotes the current attempt's locks as reusable for the next attempt.
+    pub async fn retry_aggressive_locking(&mut self) -> Result<()> {
+        self.check_allow_operation().await?;
+        if !self.is_pessimistic() {
+            return Err(Error::InvalidTransactionType);
+        }
+        if self.aggressive_locking.is_none() {
+            return Err(Error::StringError(
+                "aggressive locking is not started".to_owned(),
+            ));
+        }
+
+        self.cleanup_aggressive_locking_redundant_locks().await?;
+
+        let state = self
+            .aggressive_locking
+            .as_mut()
+            .ok_or_else(|| Error::StringError("aggressive locking is not started".to_owned()))?;
+        state.last_retry_unnecessary_locks = std::mem::take(&mut state.current_locked_keys);
+        Ok(())
+    }
+
+    /// Finish aggressive locking mode.
+    ///
+    /// Any redundant locks from the previous attempt are rolled back.
+    pub async fn done_aggressive_locking(&mut self) -> Result<()> {
+        self.check_allow_operation().await?;
+        if !self.is_pessimistic() {
+            return Err(Error::InvalidTransactionType);
+        }
+        if self.aggressive_locking.is_none() {
+            return Err(Error::StringError(
+                "aggressive locking is not started".to_owned(),
+            ));
+        }
+        self.cleanup_aggressive_locking_redundant_locks().await?;
+        self.aggressive_locking = None;
+        Ok(())
+    }
+
+    /// Cancel aggressive locking mode and roll back locks acquired during the aggressive-locking
+    /// attempts.
+    pub async fn cancel_aggressive_locking(&mut self) -> Result<()> {
+        self.check_allow_operation().await?;
+        if !self.is_pessimistic() {
+            return Err(Error::InvalidTransactionType);
+        }
+
+        let Some(state) = self.aggressive_locking.as_ref() else {
+            return Err(Error::StringError(
+                "aggressive locking is not started".to_owned(),
+            ));
+        };
+
+        let primary_key_at_start = state.primary_key_at_start.clone();
+        let current_primary_key = self.buffer.get_primary_key();
+
+        let mut keys: HashSet<Key> = state
+            .last_retry_unnecessary_locks
+            .iter()
+            .chain(state.current_locked_keys.iter())
+            .cloned()
+            .collect();
+        if keys.is_empty() {
+            self.aggressive_locking = None;
+            return Ok(());
+        }
+
+        // When the transaction already had a primary key before aggressive locking started, keep
+        // it stable and avoid rolling it back here.
+        if primary_key_at_start.is_some() {
+            if let Some(primary) = current_primary_key.as_ref() {
+                keys.remove(primary);
+            }
+        }
+
+        let for_update_ts = match &self.options.kind {
+            TransactionKind::Pessimistic(for_update_ts) => for_update_ts.clone(),
+            TransactionKind::Optimistic => return Err(Error::InvalidTransactionType),
+        };
+
+        let rolled_back_primary_key = primary_key_at_start.is_none()
+            && current_primary_key
+                .as_ref()
+                .map(|primary| keys.contains(primary))
+                .unwrap_or(false);
+
+        self.pessimistic_lock_rollback(keys.into_iter(), self.timestamp.clone(), for_update_ts)
+            .await?;
+
+        if rolled_back_primary_key {
+            self.buffer.clear_primary_key();
+            self.stop_auto_heartbeat();
+        }
+
+        self.aggressive_locking = None;
+        Ok(())
+    }
+
     async fn lock_keys_impl(
         &mut self,
         keys: impl IntoIterator<Item = impl Into<Key>>,
@@ -2299,6 +2460,12 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// ```
     pub async fn commit(&mut self) -> Result<Option<Timestamp>> {
         debug!("commiting transaction");
+        if self.aggressive_locking.is_some() {
+            return Err(Error::StringError(
+                "aggressive locking is pending; call done_aggressive_locking or cancel_aggressive_locking first"
+                    .to_owned(),
+            ));
+        }
         if !self.transit_status(
             |status| {
                 matches!(
@@ -2425,6 +2592,12 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// ```
     pub async fn rollback(&mut self) -> Result<()> {
         debug!("rolling back transaction");
+        if self.aggressive_locking.is_some() {
+            return Err(Error::StringError(
+                "aggressive locking is pending; call done_aggressive_locking or cancel_aggressive_locking first"
+                    .to_owned(),
+            ));
+        }
         if !self.transit_status(
             |status| {
                 matches!(
@@ -2833,6 +3006,29 @@ impl<PdC: PdClient> Transaction<PdC> {
                 ));
             }
         };
+
+        let locks_for_request = if need_value {
+            locks.clone()
+        } else if let Some(state) = self.aggressive_locking.as_mut() {
+            let mut filtered = Vec::with_capacity(locks.len());
+            for (key, assertion) in &locks {
+                if state.current_locked_keys.contains(key) {
+                    continue;
+                }
+                if state.last_retry_unnecessary_locks.remove(key) {
+                    state.current_locked_keys.insert(key.clone());
+                    continue;
+                }
+                filtered.push((key.clone(), *assertion));
+            }
+            filtered
+        } else {
+            locks.clone()
+        };
+        if locks_for_request.is_empty() {
+            return Ok(vec![]);
+        }
+
         let for_update_ts =
             get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
                 .await?;
@@ -2840,7 +3036,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = elapsed.saturating_add(MAX_TTL);
         let lock_wait_start = Instant::now();
-        let primary_in_request = locks.iter().any(|(key, _)| key == &primary_lock);
+        let primary_in_request = locks_for_request
+            .iter()
+            .any(|(key, _)| key == &primary_lock);
 
         let apply_pessimistic_lock_mode = |request: &mut kvrpcpb::PessimisticLockRequest| {
             if mode == PessimisticLockMode::Shared {
@@ -2850,11 +3048,11 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         };
 
-        let pairs = if primary_in_request && locks.len() > 1 {
+        let pairs = if primary_in_request && locks_for_request.len() > 1 {
             let primary_region = self.rpc.region_for_key(&primary_lock).await?;
             let mut primary_locks = Vec::new();
             let mut secondary_locks = Vec::new();
-            for lock in &locks {
+            for lock in &locks_for_request {
                 if primary_region.contains(&lock.0) {
                     primary_locks.push(lock.clone());
                 } else {
@@ -2864,7 +3062,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
             if primary_locks.is_empty() || secondary_locks.is_empty() {
                 let mut request = new_pessimistic_lock_request(
-                    locks.clone().into_iter(),
+                    locks_for_request.clone().into_iter(),
                     primary_lock.clone(),
                     self.timestamp.clone(),
                     lock_ttl,
@@ -2879,6 +3077,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     need_value,
                     lock_wait_timeout,
                     lock_wait_start,
+                    mode,
                 )
                 .await?
             } else {
@@ -2904,6 +3103,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                         need_value,
                         lock_wait_timeout,
                         lock_wait_start,
+                        mode,
                     )
                     .await?;
 
@@ -2924,11 +3124,31 @@ impl<PdC: PdClient> Transaction<PdC> {
                         need_value,
                         lock_wait_timeout,
                         lock_wait_start,
+                        mode,
                     )
                     .await
                 {
                     Ok(pairs) => pairs,
                     Err(err) => {
+                        let keep_locks_on_error = !need_value
+                            && self.aggressive_locking.is_some()
+                            && is_write_conflict_error(&err);
+                        if keep_locks_on_error {
+                            self.buffer.primary_key_or(&primary_lock);
+                            self.start_auto_heartbeat().await?;
+                            if let Some(state) = self.aggressive_locking.as_mut() {
+                                state
+                                    .current_locked_keys
+                                    .extend(primary_request_keys.iter().cloned());
+                            }
+                            for key in primary_request_keys {
+                                match mode {
+                                    PessimisticLockMode::Exclusive => self.buffer.lock(key),
+                                    PessimisticLockMode::Shared => self.buffer.lock_shared(key),
+                                }
+                            }
+                            return Err(err);
+                        }
                         self.pessimistic_lock_rollback(
                             primary_request_keys.iter().cloned(),
                             self.timestamp.clone(),
@@ -2945,7 +3165,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         } else {
             let mut request = new_pessimistic_lock_request(
-                locks.clone().into_iter(),
+                locks_for_request.clone().into_iter(),
                 primary_lock.clone(),
                 self.timestamp.clone(),
                 lock_ttl,
@@ -2960,12 +3180,20 @@ impl<PdC: PdClient> Transaction<PdC> {
                 need_value,
                 lock_wait_timeout,
                 lock_wait_start,
+                mode,
             )
             .await?
         };
 
         self.buffer.primary_key_or(&primary_lock);
         self.start_auto_heartbeat().await?;
+        if !need_value {
+            if let Some(state) = self.aggressive_locking.as_mut() {
+                state
+                    .current_locked_keys
+                    .extend(locks.iter().map(|(key, _)| key.clone()));
+            }
+        }
         for (key, _assertion) in locks {
             match mode {
                 PessimisticLockMode::Exclusive => self.buffer.lock(key),
@@ -2982,6 +3210,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         need_value: bool,
         lock_wait_timeout: LockWaitTimeout,
         lock_wait_start: Instant,
+        mode: PessimisticLockMode,
     ) -> Result<Vec<KvPair>> {
         fn collect_lock_errors(
             error: &Error,
@@ -3121,20 +3350,28 @@ impl<PdC: PdClient> Transaction<PdC> {
                         .map(|mutation| Key::from(mutation.key))
                 })
                 .collect::<Vec<_>>();
-            if !success_keys.is_empty() {
-                self.pessimistic_lock_rollback(
-                    success_keys.into_iter(),
-                    self.timestamp.clone(),
-                    for_update_ts.clone(),
-                )
-                .await?;
-            }
 
             if errors.iter().any(contains_already_exist_error) {
+                if !success_keys.is_empty() {
+                    self.pessimistic_lock_rollback(
+                        success_keys.iter().cloned(),
+                        self.timestamp.clone(),
+                        for_update_ts.clone(),
+                    )
+                    .await?;
+                }
                 return Err(Error::DuplicateKeyInsertion);
             }
 
             if let Some(deadlock) = errors.iter().find_map(extract_deadlock_error) {
+                if !success_keys.is_empty() {
+                    self.pessimistic_lock_rollback(
+                        success_keys.iter().cloned(),
+                        self.timestamp.clone(),
+                        for_update_ts.clone(),
+                    )
+                    .await?;
+                }
                 return Err(Error::Deadlock(deadlock));
             }
 
@@ -3150,9 +3387,49 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
 
             if let Some(idx) = first_non_lock_error {
-                return Err(errors.swap_remove(idx));
+                let err = errors.swap_remove(idx);
+                let keep_locks_on_error = !need_value
+                    && self.aggressive_locking.is_some()
+                    && is_write_conflict_error(&err);
+                if keep_locks_on_error {
+                    if !success_keys.is_empty() {
+                        self.buffer
+                            .primary_key_or(&Key::from(request.primary_lock.clone()));
+                        self.start_auto_heartbeat().await?;
+                        if let Some(state) = self.aggressive_locking.as_mut() {
+                            state
+                                .current_locked_keys
+                                .extend(success_keys.iter().cloned());
+                        }
+                        for key in success_keys.iter().cloned() {
+                            match mode {
+                                PessimisticLockMode::Exclusive => self.buffer.lock(key),
+                                PessimisticLockMode::Shared => self.buffer.lock_shared(key),
+                            }
+                        }
+                    }
+                    return Err(err);
+                }
+
+                if !success_keys.is_empty() {
+                    self.pessimistic_lock_rollback(
+                        success_keys.iter().cloned(),
+                        self.timestamp.clone(),
+                        for_update_ts.clone(),
+                    )
+                    .await?;
+                }
+                return Err(err);
             }
             if locks.is_empty() {
+                if !success_keys.is_empty() {
+                    self.pessimistic_lock_rollback(
+                        success_keys.iter().cloned(),
+                        self.timestamp.clone(),
+                        for_update_ts.clone(),
+                    )
+                    .await?;
+                }
                 if skipped_recently_updated_locks {
                     if lock_wait_timeout.is_no_wait() {
                         return Err(Error::LockAcquireFailAndNoWaitSet);
@@ -3163,6 +3440,15 @@ impl<PdC: PdClient> Transaction<PdC> {
                     continue;
                 }
                 return Err(errors.swap_remove(0));
+            }
+
+            if !success_keys.is_empty() {
+                self.pessimistic_lock_rollback(
+                    success_keys.iter().cloned(),
+                    self.timestamp.clone(),
+                    for_update_ts.clone(),
+                )
+                .await?;
             }
 
             let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
@@ -3251,6 +3537,48 @@ impl<PdC: PdClient> Transaction<PdC> {
         Ok(())
     }
 
+    async fn cleanup_aggressive_locking_redundant_locks(&mut self) -> Result<()> {
+        let keys = {
+            let Some(state) = self.aggressive_locking.as_ref() else {
+                return Ok(());
+            };
+            if state.last_retry_unnecessary_locks.is_empty() {
+                return Ok(());
+            }
+
+            let primary_key = self.buffer.get_primary_key();
+            state
+                .last_retry_unnecessary_locks
+                .iter()
+                .filter(|key| primary_key.as_ref() != Some(*key))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if keys.is_empty() {
+            if let Some(state) = self.aggressive_locking.as_mut() {
+                state.last_retry_unnecessary_locks.clear();
+            }
+            return Ok(());
+        }
+
+        let for_update_ts = match &self.options.kind {
+            TransactionKind::Pessimistic(for_update_ts) => for_update_ts.clone(),
+            TransactionKind::Optimistic => return Err(Error::InvalidTransactionType),
+        };
+
+        self.pessimistic_lock_rollback(keys.into_iter(), self.timestamp.clone(), for_update_ts)
+            .await?;
+        if let Some(state) = self.aggressive_locking.as_mut() {
+            state.last_retry_unnecessary_locks.clear();
+        }
+        Ok(())
+    }
+
+    fn stop_auto_heartbeat(&mut self) {
+        self.heartbeat_cancel.store(true, atomic::Ordering::SeqCst);
+        self.is_heartbeat_started = false;
+    }
+
     /// Checks if the transaction can perform arbitrary operations.
     async fn check_allow_operation(&self) -> Result<()> {
         match self.get_status() {
@@ -3300,12 +3628,14 @@ impl<PdC: PdClient> Transaction<PdC> {
                 crate::internal_err!("auto heartbeat requested without a primary key")
             })?;
 
+        self.heartbeat_cancel.store(false, atomic::Ordering::SeqCst);
         self.is_heartbeat_started = true;
 
         let status = self.status.clone();
         let start_ts = self.timestamp.clone();
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
+        let heartbeat_cancel = self.heartbeat_cancel.clone();
         let rpc = self.rpc.clone();
         let rpc_interceptors = self.rpc_interceptors.clone();
         let heartbeat_interval = match self.options.heartbeat_option {
@@ -3333,6 +3663,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                     if killed.load(atomic::Ordering::SeqCst) != 0 {
                         break;
                     }
+                }
+                if heartbeat_cancel.load(atomic::Ordering::SeqCst) {
+                    break;
                 }
                 let request = new_heart_beat_request(
                     start_ts.clone(),
@@ -5472,7 +5805,7 @@ mod tests {
     use async_trait::async_trait;
     use fail::FailScenario;
 
-    use super::{AssertionLevel, PrewriteEncounterLockPolicy};
+    use super::{AssertionLevel, PessimisticLockMode, PrewriteEncounterLockPolicy};
 
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
@@ -11326,6 +11659,7 @@ mod tests {
                 false,
                 crate::LockWaitTimeout::Wait(Duration::from_millis(1)),
                 lock_wait_start,
+                PessimisticLockMode::Exclusive,
             )
             .await
             .expect_err("expected wait-timeout lock error");
@@ -11408,6 +11742,7 @@ mod tests {
                 false,
                 crate::LockWaitTimeout::Default,
                 Instant::now(),
+                PessimisticLockMode::Exclusive,
             )
             .await
             .expect_err("expected deadlock error");
@@ -11493,6 +11828,7 @@ mod tests {
                 false,
                 crate::LockWaitTimeout::Default,
                 Instant::now(),
+                PessimisticLockMode::Exclusive,
             )
             .await
             .expect_err("expected already-exist error");
@@ -11645,6 +11981,7 @@ mod tests {
                 false,
                 crate::LockWaitTimeout::Wait(Duration::from_secs(1)),
                 Instant::now(),
+                PessimisticLockMode::Exclusive,
             )
             .await
             .expect("expected the lock request to eventually succeed");
@@ -12163,5 +12500,119 @@ mod tests {
             Err(Error::StringError(msg))
                 if msg == "batch_get_with_commit_ts is only supported for read-only snapshots"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_aggressive_locking_skips_redundant_lock_requests_and_rolls_back_unneeded_locks() {
+        let lock_requests = Arc::new(Mutex::new(Vec::<kvrpcpb::PessimisticLockRequest>::new()));
+        let rollback_requests =
+            Arc::new(Mutex::new(Vec::<kvrpcpb::PessimisticRollbackRequest>::new()));
+
+        let lock_requests_captured = lock_requests.clone();
+        let rollback_requests_captured = rollback_requests.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                    lock_requests_captured.lock().unwrap().push(req.clone());
+                    return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    rollback_requests_captured.lock().unwrap().push(req.clone());
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.start_aggressive_locking().unwrap();
+        txn.lock_keys(vec![b"k1".to_vec(), b"k2".to_vec()])
+            .await
+            .unwrap();
+
+        txn.retry_aggressive_locking().await.unwrap();
+
+        txn.lock_keys(vec![b"k1".to_vec()]).await.unwrap();
+
+        txn.done_aggressive_locking().await.unwrap();
+        assert!(!txn.is_in_aggressive_locking_mode());
+
+        let lock_requests = lock_requests.lock().unwrap().clone();
+        assert_eq!(lock_requests.len(), 1);
+        let locked_keys = lock_requests[0]
+            .mutations
+            .iter()
+            .map(|mutation| mutation.key.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(locked_keys, vec![b"k1".to_vec(), b"k2".to_vec()]);
+
+        let rollback_requests = rollback_requests.lock().unwrap().clone();
+        assert_eq!(rollback_requests.len(), 1);
+        assert_eq!(rollback_requests[0].keys, vec![b"k2".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_aggressive_locking_rolls_back_locks_and_clears_primary_key() {
+        let lock_requests = Arc::new(Mutex::new(Vec::<kvrpcpb::PessimisticLockRequest>::new()));
+        let rollback_requests =
+            Arc::new(Mutex::new(Vec::<kvrpcpb::PessimisticRollbackRequest>::new()));
+
+        let lock_requests_captured = lock_requests.clone();
+        let rollback_requests_captured = rollback_requests.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                    lock_requests_captured.lock().unwrap().push(req.clone());
+                    return Ok(Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    rollback_requests_captured.lock().unwrap().push(req.clone());
+                    return Ok(
+                        Box::<kvrpcpb::PessimisticRollbackResponse>::default() as Box<dyn Any>
+                    );
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.start_aggressive_locking().unwrap();
+        txn.lock_keys(vec![b"k1".to_vec()]).await.unwrap();
+
+        assert_eq!(
+            txn.buffer.get_primary_key(),
+            Some(Key::from(b"k1".to_vec()))
+        );
+
+        txn.cancel_aggressive_locking().await.unwrap();
+        assert!(!txn.is_in_aggressive_locking_mode());
+        assert_eq!(txn.buffer.get_primary_key(), None);
+
+        let lock_requests = lock_requests.lock().unwrap().clone();
+        assert_eq!(lock_requests.len(), 1);
+
+        let rollback_requests = rollback_requests.lock().unwrap().clone();
+        assert_eq!(rollback_requests.len(), 1);
+        assert_eq!(rollback_requests[0].keys, vec![b"k1".to_vec()]);
     }
 }
