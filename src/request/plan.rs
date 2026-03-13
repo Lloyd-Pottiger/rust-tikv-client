@@ -27,6 +27,9 @@ use crate::request::shard::HasNextBatch;
 use crate::request::NextBatch;
 use crate::request::Shardable;
 use crate::request::{KvRequest, StoreRequest};
+use crate::rpc_interceptor::RpcCallResult;
+use crate::rpc_interceptor::RpcInterceptors;
+use crate::rpc_interceptor::RpcRequest;
 use crate::stats::tikv_stats;
 use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
@@ -107,9 +110,86 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
     }
 }
 
+/// Dispatch with RPC interceptor support.
+///
+/// This is used internally by transactional requests when the caller has configured RPC
+/// interceptors (client-go `KVTxn.SetRPCInterceptor` / `KVSnapshot.SetRPCInterceptor` parity).
+#[derive(Clone)]
+pub struct DispatchWithInterceptor<Req: KvRequest> {
+    pub request: Req,
+    pub kv_client: Option<Arc<dyn KvClient + Send + Sync>>,
+    pub store_address: Option<String>,
+    pub rpc_interceptors: RpcInterceptors,
+}
+
+#[async_trait]
+impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
+    type Result = Req::Response;
+
+    async fn execute(&self) -> Result<Self::Result> {
+        let stats = tikv_stats(self.request.label());
+        let kv_client = self.kv_client.as_ref().ok_or(Error::InternalError {
+            message: "kv_client has not been initialised in DispatchWithInterceptor".to_owned(),
+        })?;
+        if self.rpc_interceptors.is_empty() {
+            let result = kv_client.dispatch(&self.request).await.and_then(|r| {
+                r.downcast::<Req::Response>()
+                    .map(|r| *r)
+                    .map_err(|_| Error::InternalError {
+                        message: format!(
+                            "downcast failed: request and response type mismatch, expected {}",
+                            std::any::type_name::<Req::Response>()
+                        ),
+                    })
+            });
+            return stats.done(result);
+        }
+
+        let target = self.store_address.as_deref().unwrap_or("<unknown>");
+
+        let mut request = self.request.clone();
+        let label = request.label();
+        let mut rpc_request = RpcRequest::new(target, label, request.context_mut());
+        for interceptor in self.rpc_interceptors.iter() {
+            interceptor.before(&mut rpc_request);
+        }
+
+        let result = kv_client.dispatch(&request).await.and_then(|r| {
+            r.downcast::<Req::Response>()
+                .map(|r| *r)
+                .map_err(|_| Error::InternalError {
+                    message: format!(
+                        "downcast failed: request and response type mismatch, expected {}",
+                        std::any::type_name::<Req::Response>()
+                    ),
+                })
+        });
+
+        let label = request.label();
+        let rpc_request = RpcRequest::new(target, label, request.context_mut());
+        let call_result = match &result {
+            Ok(_) => RpcCallResult::Ok,
+            Err(err) => RpcCallResult::Err(err),
+        };
+        for interceptor in self.rpc_interceptors.iter().rev() {
+            interceptor.after(&rpc_request, call_result);
+        }
+
+        stats.done(result)
+    }
+}
+
 impl<Req: KvRequest + StoreRequest> StoreRequest for Dispatch<Req> {
     fn apply_store(&mut self, store: &Store) {
         self.kv_client = Some(store.client.clone());
+        self.request.apply_store(store);
+    }
+}
+
+impl<Req: KvRequest + StoreRequest> StoreRequest for DispatchWithInterceptor<Req> {
+    fn apply_store(&mut self, store: &Store) {
+        self.kv_client = Some(store.client.clone());
+        self.store_address = Some(store.meta.address.clone());
         self.request.apply_store(store);
     }
 }
@@ -147,6 +227,12 @@ pub trait HasKvContext {
 }
 
 impl<Req: KvRequest> HasKvContext for Dispatch<Req> {
+    fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.request.context_mut()
+    }
+}
+
+impl<Req: KvRequest> HasKvContext for DispatchWithInterceptor<Req> {
     fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         self.request.context_mut()
     }
@@ -3994,6 +4080,7 @@ mod test {
             Arc::new(MockKvClient::with_dispatch_hook(|_| {
                 unreachable!("dispatch not expected")
             })),
+            "mock://41".to_owned(),
         );
 
         let mut current_region = metapb::Region::default();
@@ -4017,6 +4104,7 @@ mod test {
             Arc::new(MockKvClient::with_dispatch_hook(|_| {
                 unreachable!("dispatch not expected")
             })),
+            "mock://41".to_owned(),
         );
 
         let mut err = errorpb::Error::default();
@@ -4039,6 +4127,7 @@ mod test {
             Arc::new(MockKvClient::with_dispatch_hook(|_| {
                 unreachable!("dispatch not expected")
             })),
+            "mock://41".to_owned(),
         );
 
         let mut err = errorpb::Error::default();
@@ -4059,6 +4148,7 @@ mod test {
             Arc::new(MockKvClient::with_dispatch_hook(|_| {
                 unreachable!("dispatch not expected")
             })),
+            "mock://41".to_owned(),
         );
 
         let mut err = errorpb::Error::default();
@@ -4079,6 +4169,7 @@ mod test {
             Arc::new(MockKvClient::with_dispatch_hook(|_| {
                 unreachable!("dispatch not expected")
             })),
+            "mock://41".to_owned(),
         );
 
         let ver_id = store.region_with_leader.ver_id();
@@ -4110,6 +4201,7 @@ mod test {
             Arc::new(MockKvClient::with_dispatch_hook(|_| {
                 unreachable!("dispatch not expected")
             })),
+            "mock://41".to_owned(),
         );
 
         let mut err = errorpb::Error::default();
@@ -4137,6 +4229,7 @@ mod test {
             Arc::new(MockKvClient::with_dispatch_hook(|_| {
                 unreachable!("dispatch not expected")
             })),
+            "mock://41".to_owned(),
         );
 
         let mut err = errorpb::Error::default();
@@ -4265,6 +4358,7 @@ mod test {
             store: Some(RegionStore::new(
                 MockPdClient::region2(),
                 Arc::new(MockKvClient::default()),
+                "mock://42".to_owned(),
             )),
             pd_client: Arc::new(MockPdClient::default()),
             keyspace: Keyspace::Disable,
@@ -4427,7 +4521,11 @@ mod test {
         });
 
         let pd_client = Arc::new(MockPdClient::new(kv_client.clone()));
-        let store = RegionStore::new(MockPdClient::region1(), Arc::new(kv_client.clone()));
+        let store = RegionStore::new(
+            MockPdClient::region1(),
+            Arc::new(kv_client.clone()),
+            "mock://41".to_owned(),
+        );
 
         let plan = CleanupLocks {
             inner: ContextScanLockPlan {

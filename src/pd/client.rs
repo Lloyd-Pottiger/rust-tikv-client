@@ -333,8 +333,9 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
         let store_id = region.get_store_id()?;
         let store = self.region_cache.get_store_by_id(store_id).await?;
-        let kv_client = self.kv_client(&store.address).await?;
-        Ok(RegionStore::new(region, Arc::new(kv_client)))
+        let metapb::Store { address, .. } = store;
+        let kv_client = self.kv_client(&address).await?;
+        Ok(RegionStore::new(region, Arc::new(kv_client), address))
     }
 
     async fn region_for_key(&self, key: &Key) -> Result<RegionWithLeader> {

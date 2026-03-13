@@ -45,6 +45,38 @@ impl Snapshot {
         self.transaction.vars()
     }
 
+    /// Set an RPC interceptor for this snapshot.
+    ///
+    /// The interceptor is applied to all TiKV RPC requests initiated by this snapshot,
+    /// including lock resolution and read RPCs.
+    ///
+    /// This maps to client-go `KVSnapshot.SetRPCInterceptor`.
+    pub fn set_rpc_interceptor<I>(&mut self, interceptor: I)
+    where
+        I: crate::RpcInterceptor,
+    {
+        self.transaction.set_rpc_interceptor(interceptor);
+    }
+
+    /// Add an RPC interceptor.
+    ///
+    /// Interceptors are executed in an "onion model": interceptors added earlier execute earlier,
+    /// but return later. If multiple interceptors with the same name are added, only the last one
+    /// is kept.
+    ///
+    /// This maps to client-go `KVSnapshot.AddRPCInterceptor`.
+    pub fn add_rpc_interceptor<I>(&mut self, interceptor: I)
+    where
+        I: crate::RpcInterceptor,
+    {
+        self.transaction.add_rpc_interceptor(interceptor);
+    }
+
+    /// Clear all configured RPC interceptors.
+    pub fn clear_rpc_interceptors(&mut self) {
+        self.transaction.clear_rpc_interceptors();
+    }
+
     /// Set replica read behavior.
     ///
     /// This option is only effective for read-only snapshots.

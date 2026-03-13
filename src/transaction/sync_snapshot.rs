@@ -102,6 +102,31 @@ impl SyncSnapshot {
         self.inner.vars()
     }
 
+    /// Set an RPC interceptor for this snapshot.
+    ///
+    /// This maps to client-go `KVSnapshot.SetRPCInterceptor`.
+    pub fn set_rpc_interceptor<I>(&mut self, interceptor: I)
+    where
+        I: crate::RpcInterceptor,
+    {
+        self.inner.set_rpc_interceptor(interceptor);
+    }
+
+    /// Add an RPC interceptor.
+    ///
+    /// This maps to client-go `KVSnapshot.AddRPCInterceptor`.
+    pub fn add_rpc_interceptor<I>(&mut self, interceptor: I)
+    where
+        I: crate::RpcInterceptor,
+    {
+        self.inner.add_rpc_interceptor(interceptor);
+    }
+
+    /// Clear all configured RPC interceptors.
+    pub fn clear_rpc_interceptors(&mut self) {
+        self.inner.clear_rpc_interceptors();
+    }
+
     /// Set replica read behavior.
     pub fn set_replica_read(&mut self, read_type: ReplicaReadType) {
         self.inner.set_replica_read(read_type);

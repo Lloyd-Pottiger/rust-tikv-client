@@ -302,7 +302,12 @@ impl PdClient for MockPdClient {
     type KvClient = MockKvClient;
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
-        Ok(RegionStore::new(region, Arc::new(self.client.clone())))
+        let store_id = region.get_store_id()?;
+        Ok(RegionStore::new(
+            region,
+            Arc::new(self.client.clone()),
+            format!("mock://{store_id}"),
+        ))
     }
 
     async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {

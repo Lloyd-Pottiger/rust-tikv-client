@@ -41,6 +41,7 @@ use crate::request::Process;
 use crate::request::ProcessResponse;
 use crate::request::RetryOptions;
 use crate::request::TruncateKeyspace;
+use crate::rpc_interceptor::RpcInterceptors;
 use crate::store::Request;
 use crate::timestamp::TimestampExt;
 use crate::transaction::buffer::Buffer;
@@ -161,6 +162,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     rpc: Arc<PdC>,
     resolve_locks_ctx: ResolveLocksContext,
     options: TransactionOptions,
+    rpc_interceptors: RpcInterceptors,
     vars: Variables,
     resource_group_tagger: Option<ResourceGroupTagger>,
     replica_read_adjuster: Option<ReplicaReadAdjuster>,
@@ -315,6 +317,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             rpc,
             resolve_locks_ctx,
             options,
+            rpc_interceptors: Default::default(),
             vars: Variables::default(),
             resource_group_tagger: None,
             replica_read_adjuster: None,
@@ -355,6 +358,14 @@ impl<PdC: PdClient> Transaction<PdC> {
                 ..SnapshotReadContext::default()
             }
         }
+    }
+
+    fn lock_resolver_rpc_context(&self) -> LockResolverRpcContext {
+        let mut ctx = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        ctx.rpc_interceptors = self.rpc_interceptors.clone();
+        ctx
     }
 
     fn apply_snapshot_read_context(ctx: &mut Option<kvrpcpb::Context>, opts: SnapshotReadContext) {
@@ -855,6 +866,42 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.commit_callback = None;
     }
 
+    /// Set an RPC interceptor for this transaction.
+    ///
+    /// The interceptor is applied to all TiKV RPC requests initiated by this transaction,
+    /// including lock resolution and read RPCs.
+    ///
+    /// This maps to client-go `KVTxn.SetRPCInterceptor`.
+    pub fn set_rpc_interceptor<I>(&mut self, interceptor: I)
+    where
+        I: crate::RpcInterceptor,
+    {
+        self.rpc_interceptors = Arc::new(vec![Arc::new(interceptor)]);
+    }
+
+    /// Add an RPC interceptor.
+    ///
+    /// Interceptors are executed in an "onion model": interceptors added earlier execute earlier,
+    /// but return later. If multiple interceptors with the same name are added, only the last one
+    /// is kept.
+    ///
+    /// This maps to client-go `KVTxn.AddRPCInterceptor`.
+    pub fn add_rpc_interceptor<I>(&mut self, interceptor: I)
+    where
+        I: crate::RpcInterceptor,
+    {
+        let interceptor: Arc<dyn crate::RpcInterceptor> = Arc::new(interceptor);
+        let mut interceptors = self.rpc_interceptors.as_ref().clone();
+        interceptors.retain(|existing| existing.name() != interceptor.name());
+        interceptors.push(interceptor);
+        self.rpc_interceptors = Arc::new(interceptors);
+    }
+
+    /// Clear all configured RPC interceptors.
+    pub fn clear_rpc_interceptors(&mut self) {
+        self.rpc_interceptors = Default::default();
+    }
+
     /// Create a new 'get' request
     ///
     /// Once resolved this request will result in the fetching of the value associated with the
@@ -910,9 +957,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             .pipelined
             .as_ref()
             .and_then(|state| state.flushing_puts.clone());
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
 
         self.buffer
             .get_or_else(key, |key| async move {
@@ -942,17 +987,22 @@ impl<PdC: PdClient> Transaction<PdC> {
                         }
                     }
 
-                    let plan_builder = PlanBuilder::new(rpc.clone(), keyspace, request)
-                        .resolve_lock_for_read(
-                            resolve_locks_ctx.clone(),
-                            timestamp.clone(),
-                            lock_backoff.clone(),
-                            killed.clone(),
-                            keyspace,
-                            true,
-                            lock_tracker.clone(),
-                            lock_resolver_rpc_context.clone(),
-                        );
+                    let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+                        rpc.clone(),
+                        keyspace,
+                        request,
+                        lock_resolver_rpc_context.rpc_interceptors.clone(),
+                    )
+                    .resolve_lock_for_read(
+                        resolve_locks_ctx.clone(),
+                        timestamp.clone(),
+                        lock_backoff.clone(),
+                        killed.clone(),
+                        keyspace,
+                        true,
+                        lock_tracker.clone(),
+                        lock_resolver_rpc_context.clone(),
+                    );
                     let plan_builder =
                         if replica_read.is_follower_read() || enable_load_based_replica_read {
                             plan_builder
@@ -987,7 +1037,13 @@ impl<PdC: PdClient> Transaction<PdC> {
                     }
                 }
 
-                let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock_for_read(
+                let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+                    rpc,
+                    keyspace,
+                    request,
+                    lock_resolver_rpc_context.rpc_interceptors.clone(),
+                )
+                .resolve_lock_for_read(
                     resolve_locks_ctx,
                     timestamp,
                     lock_backoff.clone(),
@@ -1061,9 +1117,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
 
         let mut request = new_get_request(key, timestamp.clone());
         request.need_commit_ts = true;
@@ -1078,7 +1132,13 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         }
 
-        let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock_for_read(
+        let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+            rpc,
+            keyspace,
+            request,
+            lock_resolver_rpc_context.rpc_interceptors.clone(),
+        )
+        .resolve_lock_for_read(
             resolve_locks_ctx,
             timestamp,
             lock_backoff,
@@ -1283,9 +1343,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             .pipelined
             .as_ref()
             .and_then(|state| state.flushing_puts.clone());
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
 
         self.buffer
             .batch_get_or_else(keys, move |keys| {
@@ -1344,17 +1402,22 @@ impl<PdC: PdClient> Transaction<PdC> {
                             }
                         }
 
-                        let plan_builder = PlanBuilder::new(rpc.clone(), keyspace, buffer_request)
-                            .resolve_lock_for_read(
-                                resolve_locks_ctx.clone(),
-                                timestamp.clone(),
-                                retry_options.lock_backoff.clone(),
-                                killed.clone(),
-                                keyspace,
-                                false,
-                                lock_tracker.clone(),
-                                lock_resolver_rpc_context.clone(),
-                            );
+                        let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+                            rpc.clone(),
+                            keyspace,
+                            buffer_request,
+                            lock_resolver_rpc_context.rpc_interceptors.clone(),
+                        )
+                        .resolve_lock_for_read(
+                            resolve_locks_ctx.clone(),
+                            timestamp.clone(),
+                            retry_options.lock_backoff.clone(),
+                            killed.clone(),
+                            keyspace,
+                            false,
+                            lock_tracker.clone(),
+                            lock_resolver_rpc_context.clone(),
+                        );
                         let plan_builder =
                             if replica_read.is_follower_read() || enable_load_based_replica_read {
                                 plan_builder
@@ -1406,17 +1469,22 @@ impl<PdC: PdClient> Transaction<PdC> {
                             }
                         }
 
-                        let plan_builder = PlanBuilder::new(rpc, keyspace, snapshot_request)
-                            .resolve_lock_for_read(
-                                resolve_locks_ctx,
-                                timestamp,
-                                retry_options.lock_backoff,
-                                killed.clone(),
-                                keyspace,
-                                false,
-                                lock_tracker,
-                                lock_resolver_rpc_context,
-                            );
+                        let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+                            rpc,
+                            keyspace,
+                            snapshot_request,
+                            lock_resolver_rpc_context.rpc_interceptors.clone(),
+                        )
+                        .resolve_lock_for_read(
+                            resolve_locks_ctx,
+                            timestamp,
+                            retry_options.lock_backoff,
+                            killed.clone(),
+                            keyspace,
+                            false,
+                            lock_tracker,
+                            lock_resolver_rpc_context,
+                        );
                         let plan_builder =
                             if replica_read.is_follower_read() || enable_load_based_replica_read {
                                 plan_builder
@@ -1454,17 +1522,22 @@ impl<PdC: PdClient> Transaction<PdC> {
                         }
                     }
 
-                    let plan_builder = PlanBuilder::new(rpc, keyspace, request)
-                        .resolve_lock_for_read(
-                            resolve_locks_ctx,
-                            timestamp,
-                            retry_options.lock_backoff,
-                            killed.clone(),
-                            keyspace,
-                            false,
-                            lock_tracker,
-                            lock_resolver_rpc_context,
-                        );
+                    let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+                        rpc,
+                        keyspace,
+                        request,
+                        lock_resolver_rpc_context.rpc_interceptors.clone(),
+                    )
+                    .resolve_lock_for_read(
+                        resolve_locks_ctx,
+                        timestamp,
+                        retry_options.lock_backoff,
+                        killed.clone(),
+                        keyspace,
+                        false,
+                        lock_tracker,
+                        lock_resolver_rpc_context,
+                    );
                     let plan_builder =
                         if replica_read.is_follower_read() || enable_load_based_replica_read {
                             plan_builder
@@ -1536,9 +1609,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
 
         let mut request = crate::transaction::requests::new_batch_get_request(
             keys.into_iter().map(Into::into).collect(),
@@ -1556,7 +1627,13 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         }
 
-        let plan_builder = PlanBuilder::new(rpc, keyspace, request).resolve_lock_for_read(
+        let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+            rpc,
+            keyspace,
+            request,
+            lock_resolver_rpc_context.rpc_interceptors.clone(),
+        )
+        .resolve_lock_for_read(
             resolve_locks_ctx,
             timestamp,
             retry_options.lock_backoff,
@@ -2030,29 +2107,32 @@ impl<PdC: PdClient> Transaction<PdC> {
         let flush_region_backoff = self.region_backoff();
         let flush_killed = self.vars.killed.clone();
         let flush_concurrency = pipelined.flush_concurrency();
-        let flush_lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let flush_lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let write_throttle_ratio = pipelined.write_throttle_ratio();
 
         let flush_handle = tokio::spawn(async move {
             throttle_pipelined_flush(flush_ewma.clone(), write_throttle_ratio).await;
 
             let start = Instant::now();
-            let plan = PlanBuilder::new(flush_pd, flush_keyspace, flush_request)
-                .resolve_lock_in_context(
-                    flush_resolve_locks_ctx,
-                    flush_start_version,
-                    flush_lock_backoff,
-                    flush_killed.clone(),
-                    flush_keyspace,
-                    flush_lock_resolver_rpc_context,
-                )
-                .retry_multi_region_with_concurrency(flush_region_backoff, flush_concurrency)
-                .with_killed(flush_killed)
-                .merge(CollectError)
-                .extract_error()
-                .plan();
+            let plan = PlanBuilder::new_with_rpc_interceptors(
+                flush_pd,
+                flush_keyspace,
+                flush_request,
+                flush_lock_resolver_rpc_context.rpc_interceptors.clone(),
+            )
+            .resolve_lock_in_context(
+                flush_resolve_locks_ctx,
+                flush_start_version,
+                flush_lock_backoff,
+                flush_killed.clone(),
+                flush_keyspace,
+                flush_lock_resolver_rpc_context,
+            )
+            .retry_multi_region_with_concurrency(flush_region_backoff, flush_concurrency)
+            .with_killed(flush_killed)
+            .merge(CollectError)
+            .extract_error()
+            .plan();
             let result = plan.execute().await.map(|_| ());
 
             let sample_ms = start.elapsed().as_millis() as f64;
@@ -2269,6 +2349,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.buffer.get_write_size() as u64,
             self.start_instant,
         );
+        committer.rpc_interceptors = self.rpc_interceptors.clone();
         committer.vars = self.vars.clone();
         if let Some(state) = self.pipelined.as_ref() {
             committer.pipelined_generation = state.generation;
@@ -2360,6 +2441,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.buffer.get_write_size() as u64,
             self.start_instant,
         );
+        committer.rpc_interceptors = self.rpc_interceptors.clone();
         committer.vars = self.vars.clone();
         committer.resolve_locks_ctx = self.resolve_locks_ctx.clone();
         committer.resource_group_tagger = self.resource_group_tagger.clone();
@@ -2509,27 +2591,30 @@ impl<PdC: PdClient> Transaction<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
-        let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .resolve_lock_in_context(
-                self.resolve_locks_ctx.clone(),
-                self.timestamp.clone(),
-                lock_backoff,
-                killed.clone(),
-                self.keyspace,
-                lock_resolver_rpc_context,
-            )
-            .retry_multi_region(region_backoff)
-            .with_killed(killed)
-            .extract_error()
-            .merge(CollectSingle)
-            .post_process_default()
-            .plan();
+        let plan = PlanBuilder::new_with_rpc_interceptors(
+            self.rpc.clone(),
+            self.keyspace,
+            request,
+            lock_resolver_rpc_context.rpc_interceptors.clone(),
+        )
+        .resolve_lock_in_context(
+            self.resolve_locks_ctx.clone(),
+            self.timestamp.clone(),
+            lock_backoff,
+            killed.clone(),
+            self.keyspace,
+            lock_resolver_rpc_context,
+        )
+        .retry_multi_region(region_backoff)
+        .with_killed(killed)
+        .extract_error()
+        .merge(CollectSingle)
+        .post_process_default()
+        .plan();
         plan.execute().await
     }
 
@@ -2562,9 +2647,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
 
         self.buffer
             .scan_and_fetch(
@@ -2591,17 +2674,22 @@ impl<PdC: PdClient> Transaction<PdC> {
                         }
                     }
 
-                    let plan_builder = PlanBuilder::new(rpc, keyspace, request)
-                        .resolve_lock_for_read(
-                            resolve_locks_ctx,
-                            timestamp,
-                            lock_backoff,
-                            killed.clone(),
-                            keyspace,
-                            false,
-                            lock_tracker,
-                            lock_resolver_rpc_context,
-                        );
+                    let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+                        rpc,
+                        keyspace,
+                        request,
+                        lock_resolver_rpc_context.rpc_interceptors.clone(),
+                    )
+                    .resolve_lock_for_read(
+                        resolve_locks_ctx,
+                        timestamp,
+                        lock_backoff,
+                        killed.clone(),
+                        keyspace,
+                        false,
+                        lock_tracker,
+                        lock_resolver_rpc_context,
+                    );
                     let plan_builder =
                         if replica_read.is_follower_read() || enable_load_based_replica_read {
                             plan_builder.retry_multi_region_with_replica_read_and_match_stores(
@@ -2938,11 +3026,16 @@ impl<PdC: PdClient> Transaction<PdC> {
         loop {
             request.wait_timeout = lock_wait_timeout.effective_wait_timeout_ms(lock_wait_start);
 
-            let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request.clone())
-                .preserve_shard()
-                .retry_multi_region_preserve_results(region_backoff.clone())
-                .with_killed(killed.clone())
-                .plan();
+            let plan = PlanBuilder::new_with_rpc_interceptors(
+                self.rpc.clone(),
+                self.keyspace,
+                request.clone(),
+                self.rpc_interceptors.clone(),
+            )
+            .preserve_shard()
+            .retry_multi_region_preserve_results(region_backoff.clone())
+            .with_killed(killed.clone())
+            .plan();
             let results = plan.execute().await?;
 
             let mut success = Vec::new();
@@ -2991,9 +3084,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 return Err(errors.swap_remove(0));
             }
 
-            let lock_resolver_rpc_context = self
-                .options
-                .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+            let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
 
             let resolve_result = super::resolve_locks_with_options(
                 self.resolve_locks_ctx.clone(),
@@ -3049,25 +3140,28 @@ impl<PdC: PdClient> Transaction<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
-        let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
-            .resolve_lock_in_context(
-                self.resolve_locks_ctx.clone(),
-                start_version,
-                lock_backoff,
-                killed.clone(),
-                self.keyspace,
-                lock_resolver_rpc_context,
-            )
-            .retry_multi_region(region_backoff)
-            .with_killed(killed)
-            .extract_error()
-            .plan();
+        let plan = PlanBuilder::new_with_rpc_interceptors(
+            self.rpc.clone(),
+            self.keyspace,
+            req,
+            lock_resolver_rpc_context.rpc_interceptors.clone(),
+        )
+        .resolve_lock_in_context(
+            self.resolve_locks_ctx.clone(),
+            start_version,
+            lock_backoff,
+            killed.clone(),
+            self.keyspace,
+            lock_resolver_rpc_context,
+        )
+        .retry_multi_region(region_backoff)
+        .with_killed(killed)
+        .extract_error()
+        .plan();
         plan.execute().await?;
 
         for key in keys {
@@ -3132,6 +3226,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
         let rpc = self.rpc.clone();
+        let rpc_interceptors = self.rpc_interceptors.clone();
         let heartbeat_interval = match self.options.heartbeat_option {
             HeartbeatOption::NoHeartbeat => DEFAULT_HEARTBEAT_INTERVAL,
             HeartbeatOption::FixedTime(heartbeat_interval) => heartbeat_interval,
@@ -3163,11 +3258,16 @@ impl<PdC: PdClient> Transaction<PdC> {
                     primary_key.clone(),
                     start_instant.elapsed().as_millis() as u64 + MAX_TTL,
                 );
-                let plan = PlanBuilder::new(rpc.clone(), keyspace, request)
-                    .retry_multi_region(region_backoff.clone())
-                    .with_killed(killed.clone())
-                    .merge(CollectSingle)
-                    .plan();
+                let plan = PlanBuilder::new_with_rpc_interceptors(
+                    rpc.clone(),
+                    keyspace,
+                    request,
+                    rpc_interceptors.clone(),
+                )
+                .retry_multi_region(region_backoff.clone())
+                .with_killed(killed.clone())
+                .merge(CollectSingle)
+                .plan();
                 plan.execute().await?;
             }
             Ok::<(), Error>(())
@@ -4157,6 +4257,7 @@ impl TransactionOptions {
             context,
             resource_group_tag_set: self.resource_group_tag.is_some(),
             resource_group_tagger,
+            rpc_interceptors: Default::default(),
         }
     }
 
@@ -4246,6 +4347,8 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     resolve_locks_ctx: ResolveLocksContext,
     options: TransactionOptions,
     #[new(default)]
+    rpc_interceptors: RpcInterceptors,
+    #[new(default)]
     vars: Variables,
     #[new(default)]
     resource_group_tagger: Option<ResourceGroupTagger>,
@@ -4321,6 +4424,14 @@ impl<PdC: PdClient> Committer<PdC> {
             .scaled_max_attempts(self.vars.backoff_weight_factor())
     }
 
+    fn lock_resolver_rpc_context(&self) -> LockResolverRpcContext {
+        let mut ctx = self
+            .options
+            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        ctx.rpc_interceptors = self.rpc_interceptors.clone();
+        ctx
+    }
+
     #[cfg(test)]
     async fn commit(self) -> Result<Option<Timestamp>> {
         let (res, _mode_info) = self.commit_with_mode_info().await;
@@ -4374,7 +4485,7 @@ impl<PdC: PdClient> Committer<PdC> {
             }
         };
 
-        let info_after_prewrite = CommitModeInfo {
+        let _info_after_prewrite = CommitModeInfo {
             has_tried_async_commit,
             has_tried_one_pc,
             is_async_commit: self.options.async_commit,
@@ -4385,7 +4496,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 Err(Error::StringError(
                     "failpoint: after-prewrite return error".to_owned(),
                 )),
-                info_after_prewrite,
+                _info_after_prewrite,
             )
         });
 
@@ -4550,29 +4661,32 @@ impl<PdC: PdClient> Committer<PdC> {
                 }
             }
 
-            let lock_resolver_rpc_context = self
-                .options
-                .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+            let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
             let flush_lock_backoff = self.lock_backoff();
             let flush_region_backoff = self.region_backoff();
             let flush_killed = self.vars.killed.clone();
-            let flush_plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, flush_request)
-                .resolve_lock_in_context(
-                    self.resolve_locks_ctx.clone(),
-                    self.start_version.clone(),
-                    flush_lock_backoff,
-                    flush_killed.clone(),
-                    self.keyspace,
-                    lock_resolver_rpc_context,
-                )
-                .retry_multi_region_with_concurrency(
-                    flush_region_backoff,
-                    pipelined.flush_concurrency(),
-                )
-                .with_killed(flush_killed)
-                .merge(CollectError)
-                .extract_error()
-                .plan();
+            let flush_plan = PlanBuilder::new_with_rpc_interceptors(
+                self.rpc.clone(),
+                self.keyspace,
+                flush_request,
+                self.rpc_interceptors.clone(),
+            )
+            .resolve_lock_in_context(
+                self.resolve_locks_ctx.clone(),
+                self.start_version.clone(),
+                flush_lock_backoff,
+                flush_killed.clone(),
+                self.keyspace,
+                lock_resolver_rpc_context,
+            )
+            .retry_multi_region_with_concurrency(
+                flush_region_backoff,
+                pipelined.flush_concurrency(),
+            )
+            .with_killed(flush_killed)
+            .merge(CollectError)
+            .extract_error()
+            .plan();
             let start = Instant::now();
             let flush_result = flush_plan.execute().await;
             if let Some(ewma) = pipelined_ewma.as_ref() {
@@ -4623,13 +4737,19 @@ impl<PdC: PdClient> Committer<PdC> {
         let resolve_backoff = self.region_backoff();
         let resolve_killed = self.vars.killed.clone();
         let resolve_concurrency = pipelined.resolve_lock_concurrency();
+        let resolve_rpc_interceptors = self.rpc_interceptors.clone();
         tokio::spawn(async move {
-            let plan = PlanBuilder::new(resolve_pd, resolve_keyspace, resolve_request)
-                .retry_multi_region_with_concurrency(resolve_backoff, resolve_concurrency)
-                .with_killed(resolve_killed)
-                .merge(CollectError)
-                .extract_error()
-                .plan();
+            let plan = PlanBuilder::new_with_rpc_interceptors(
+                resolve_pd,
+                resolve_keyspace,
+                resolve_request,
+                resolve_rpc_interceptors,
+            )
+            .retry_multi_region_with_concurrency(resolve_backoff, resolve_concurrency)
+            .with_killed(resolve_killed)
+            .merge(CollectError)
+            .extract_error()
+            .plan();
             if let Err(err) = plan.execute().await {
                 log::warn!("Failed to resolve pipelined locks: {}", err);
             }
@@ -4719,36 +4839,44 @@ impl<PdC: PdClient> Committer<PdC> {
         let killed = self.vars.killed.clone();
         let response = match self.options.prewrite_encounter_lock_policy {
             PrewriteEncounterLockPolicy::TryResolve => {
-                let lock_resolver_rpc_context = self
-                    .options
-                    .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+                let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
                 let lock_backoff = self.lock_backoff();
                 let region_backoff = self.region_backoff();
-                let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-                    .resolve_lock_with_pessimistic_region_in_context(
-                        self.resolve_locks_ctx.clone(),
-                        self.start_version.clone(),
-                        lock_backoff,
-                        killed.clone(),
-                        self.keyspace,
-                        true,
-                        lock_resolver_rpc_context,
-                    )
-                    .retry_multi_region(region_backoff)
-                    .with_killed(killed.clone())
-                    .merge(CollectError)
-                    .extract_error()
-                    .plan();
+                let plan = PlanBuilder::new_with_rpc_interceptors(
+                    self.rpc.clone(),
+                    self.keyspace,
+                    request,
+                    self.rpc_interceptors.clone(),
+                )
+                .resolve_lock_with_pessimistic_region_in_context(
+                    self.resolve_locks_ctx.clone(),
+                    self.start_version.clone(),
+                    lock_backoff,
+                    killed.clone(),
+                    self.keyspace,
+                    true,
+                    lock_resolver_rpc_context,
+                )
+                .retry_multi_region(region_backoff)
+                .with_killed(killed.clone())
+                .merge(CollectError)
+                .extract_error()
+                .plan();
                 plan.execute().await?
             }
             PrewriteEncounterLockPolicy::NoResolve => {
                 let region_backoff = self.region_backoff();
-                let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-                    .retry_multi_region(region_backoff)
-                    .with_killed(killed.clone())
-                    .merge(CollectError)
-                    .extract_error()
-                    .plan();
+                let plan = PlanBuilder::new_with_rpc_interceptors(
+                    self.rpc.clone(),
+                    self.keyspace,
+                    request,
+                    self.rpc_interceptors.clone(),
+                )
+                .retry_multi_region(region_backoff)
+                .with_killed(killed.clone())
+                .merge(CollectError)
+                .extract_error()
+                .plan();
                 plan.execute().await?
             }
         };
@@ -4911,25 +5039,28 @@ impl<PdC: PdClient> Committer<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
-        let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
-            .resolve_lock_in_context(
-                self.resolve_locks_ctx.clone(),
-                self.start_version.clone(),
-                lock_backoff,
-                killed.clone(),
-                self.keyspace,
-                lock_resolver_rpc_context,
-            )
-            .retry_multi_region(region_backoff)
-            .with_killed(killed)
-            .extract_error()
-            .plan();
+        let plan = PlanBuilder::new_with_rpc_interceptors(
+            self.rpc.clone(),
+            self.keyspace,
+            req,
+            self.rpc_interceptors.clone(),
+        )
+        .resolve_lock_in_context(
+            self.resolve_locks_ctx.clone(),
+            self.start_version.clone(),
+            lock_backoff,
+            killed.clone(),
+            self.keyspace,
+            lock_resolver_rpc_context,
+        )
+        .retry_multi_region(region_backoff)
+        .with_killed(killed)
+        .extract_error()
+        .plan();
         plan.execute()
             .inspect_err(|e| {
                 debug!(
@@ -5022,9 +5153,7 @@ impl<PdC: PdClient> Committer<PdC> {
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let mutations_len = self.mutations.len();
         let primary_only = mutations_len == 1;
         #[cfg(not(feature = "integration-tests"))]
@@ -5076,19 +5205,24 @@ impl<PdC: PdClient> Committer<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
-        let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
-            .resolve_lock_in_context(
-                self.resolve_locks_ctx.clone(),
-                start_version,
-                lock_backoff,
-                killed.clone(),
-                self.keyspace,
-                lock_resolver_rpc_context,
-            )
-            .retry_multi_region(region_backoff)
-            .with_killed(killed)
-            .extract_error()
-            .plan();
+        let plan = PlanBuilder::new_with_rpc_interceptors(
+            self.rpc,
+            self.keyspace,
+            req,
+            self.rpc_interceptors.clone(),
+        )
+        .resolve_lock_in_context(
+            self.resolve_locks_ctx.clone(),
+            start_version,
+            lock_backoff,
+            killed.clone(),
+            self.keyspace,
+            lock_resolver_rpc_context,
+        )
+        .retry_multi_region(region_backoff)
+        .with_killed(killed)
+        .extract_error()
+        .plan();
         plan.execute().await?;
         Ok(())
     }
@@ -5101,14 +5235,12 @@ impl<PdC: PdClient> Committer<PdC> {
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let keys = self
             .mutations
             .into_iter()
             .map(|mutation| mutation.key.into());
         let start_version = self.start_version.clone();
-        let lock_resolver_rpc_context = self
-            .options
-            .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         match self.options.kind.clone() {
             TransactionKind::Optimistic => {
                 let mut req = new_batch_rollback_request(keys, start_version.clone());
@@ -5120,19 +5252,24 @@ impl<PdC: PdClient> Committer<PdC> {
                         ctx.resource_group_tag = tag;
                     }
                 }
-                let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
-                    .resolve_lock_in_context(
-                        self.resolve_locks_ctx.clone(),
-                        start_version.clone(),
-                        lock_backoff,
-                        killed.clone(),
-                        self.keyspace,
-                        lock_resolver_rpc_context.clone(),
-                    )
-                    .retry_multi_region(region_backoff)
-                    .with_killed(killed)
-                    .extract_error()
-                    .plan();
+                let plan = PlanBuilder::new_with_rpc_interceptors(
+                    self.rpc,
+                    self.keyspace,
+                    req,
+                    self.rpc_interceptors.clone(),
+                )
+                .resolve_lock_in_context(
+                    self.resolve_locks_ctx.clone(),
+                    start_version.clone(),
+                    lock_backoff,
+                    killed.clone(),
+                    self.keyspace,
+                    lock_resolver_rpc_context.clone(),
+                )
+                .retry_multi_region(region_backoff)
+                .with_killed(killed)
+                .extract_error()
+                .plan();
                 plan.execute().await?;
             }
             TransactionKind::Pessimistic(for_update_ts) => {
@@ -5146,19 +5283,24 @@ impl<PdC: PdClient> Committer<PdC> {
                         ctx.resource_group_tag = tag;
                     }
                 }
-                let plan = PlanBuilder::new(self.rpc, self.keyspace, req)
-                    .resolve_lock_in_context(
-                        self.resolve_locks_ctx.clone(),
-                        start_version.clone(),
-                        lock_backoff,
-                        killed.clone(),
-                        self.keyspace,
-                        lock_resolver_rpc_context.clone(),
-                    )
-                    .retry_multi_region(region_backoff)
-                    .with_killed(killed)
-                    .extract_error()
-                    .plan();
+                let plan = PlanBuilder::new_with_rpc_interceptors(
+                    self.rpc,
+                    self.keyspace,
+                    req,
+                    self.rpc_interceptors.clone(),
+                )
+                .resolve_lock_in_context(
+                    self.resolve_locks_ctx.clone(),
+                    start_version.clone(),
+                    lock_backoff,
+                    killed.clone(),
+                    self.keyspace,
+                    lock_resolver_rpc_context.clone(),
+                )
+                .retry_multi_region(region_backoff)
+                .with_killed(killed)
+                .extract_error()
+                .plan();
                 plan.execute().await?;
             }
         }
@@ -5248,6 +5390,77 @@ mod tests {
     use crate::StoreLabel;
     use crate::Transaction;
     use crate::TransactionOptions;
+
+    struct RecordingInterceptor {
+        name: &'static str,
+        id: &'static str,
+        events: Arc<Mutex<Vec<String>>>,
+        expected_target: Option<&'static str>,
+        expected_label: Option<&'static str>,
+        set_priority: Option<CommandPriority>,
+    }
+
+    impl RecordingInterceptor {
+        fn new(
+            name: &'static str,
+            id: &'static str,
+            events: Arc<Mutex<Vec<String>>>,
+            expected_target: Option<&'static str>,
+            expected_label: Option<&'static str>,
+            set_priority: Option<CommandPriority>,
+        ) -> Self {
+            Self {
+                name,
+                id,
+                events,
+                expected_target,
+                expected_label,
+                set_priority,
+            }
+        }
+    }
+
+    impl crate::RpcInterceptor for RecordingInterceptor {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn before(&self, request: &mut crate::RpcRequest<'_>) {
+            if let Some(target) = self.expected_target {
+                assert_eq!(request.target(), target);
+            }
+            if let Some(label) = self.expected_label {
+                assert_eq!(request.label(), label);
+            }
+            if let Some(priority) = self.set_priority {
+                request.set_priority(priority);
+            }
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("before:{}:{}", self.id, request.label()));
+        }
+
+        fn after(&self, request: &crate::RpcRequest<'_>, result: crate::RpcCallResult<'_>) {
+            if let Some(target) = self.expected_target {
+                assert_eq!(request.target(), target);
+            }
+            if let Some(label) = self.expected_label {
+                assert_eq!(request.label(), label);
+            }
+
+            let result = match result {
+                crate::RpcCallResult::Ok => "ok",
+                crate::RpcCallResult::Err(_) => "err",
+            };
+            self.events.lock().unwrap().push(format!(
+                "after:{}:{}:{}",
+                self.id,
+                request.label(),
+                result
+            ));
+        }
+    }
 
     #[test]
     fn test_pipelined_txn_options_validation() {
@@ -8409,6 +8622,182 @@ mod tests {
         assert_eq!(
             *commit_resource_group_name.lock().unwrap(),
             resource_group_name
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_interceptor_onion_order_and_target() {
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let events_cloned = events.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::StringError("unexpected request".to_owned()));
+                };
+                let ctx = req.context.as_ref().expect("context");
+                assert_eq!(ctx.priority, CommandPriority::High as i32);
+
+                events_cloned
+                    .lock()
+                    .unwrap()
+                    .push("dispatch:kv_get".to_owned());
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.value = b"v".to_vec();
+                resp.not_found = false;
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.add_rpc_interceptor(RecordingInterceptor::new(
+            "a",
+            "a",
+            events.clone(),
+            Some("mock://41"),
+            Some("kv_get"),
+            Some(CommandPriority::High),
+        ));
+        txn.add_rpc_interceptor(RecordingInterceptor::new(
+            "b",
+            "b",
+            events.clone(),
+            Some("mock://41"),
+            Some("kv_get"),
+            None,
+        ));
+
+        let value = txn.get(vec![1_u8]).await.unwrap();
+        assert_eq!(value, Some(b"v".to_vec()));
+
+        assert_eq!(
+            events.lock().unwrap().clone(),
+            vec![
+                "before:a:kv_get".to_owned(),
+                "before:b:kv_get".to_owned(),
+                "dispatch:kv_get".to_owned(),
+                "after:b:kv_get:ok".to_owned(),
+                "after:a:kv_get:ok".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_interceptor_add_dedup_by_name_last_wins() {
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::GetRequest>().is_none() {
+                    return Err(Error::StringError("unexpected request".to_owned()));
+                }
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.add_rpc_interceptor(RecordingInterceptor::new(
+            "dup",
+            "first",
+            events.clone(),
+            None,
+            None,
+            None,
+        ));
+        txn.add_rpc_interceptor(RecordingInterceptor::new(
+            "dup",
+            "second",
+            events.clone(),
+            None,
+            None,
+            None,
+        ));
+
+        txn.get(vec![1_u8]).await.unwrap();
+        assert_eq!(
+            events.lock().unwrap().clone(),
+            vec![
+                "before:second:kv_get".to_owned(),
+                "after:second:kv_get:ok".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_interceptor_applies_to_commit_requests() {
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let events_cloned = events.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(ctx.priority, CommandPriority::High as i32);
+                    events_cloned
+                        .lock()
+                        .unwrap()
+                        .push("dispatch:kv_prewrite".to_owned());
+                    return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(ctx.priority, CommandPriority::High as i32);
+                    events_cloned
+                        .lock()
+                        .unwrap()
+                        .push("dispatch:kv_commit".to_owned());
+                    return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_rpc_interceptor(RecordingInterceptor::new(
+            "rec",
+            "rec",
+            events.clone(),
+            Some("mock://41"),
+            None,
+            Some(CommandPriority::High),
+        ));
+
+        txn.put(vec![1_u8], b"v".to_vec()).await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert_eq!(
+            events.lock().unwrap().clone(),
+            vec![
+                "before:rec:kv_prewrite".to_owned(),
+                "dispatch:kv_prewrite".to_owned(),
+                "after:rec:kv_prewrite:ok".to_owned(),
+                "before:rec:kv_commit".to_owned(),
+                "dispatch:kv_commit".to_owned(),
+                "after:rec:kv_commit:ok".to_owned(),
+            ]
         );
     }
 

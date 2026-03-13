@@ -115,6 +115,7 @@ mod region;
 mod region_cache;
 mod replica_read;
 mod request_context;
+mod rpc_interceptor;
 mod safe_ts;
 mod stats;
 mod store;
@@ -173,6 +174,12 @@ pub use crate::request_context::DiskFullOpt;
 pub use crate::request_context::IsolationLevel;
 #[doc(inline)]
 pub use crate::request_context::RequestSource;
+#[doc(inline)]
+pub use crate::rpc_interceptor::RpcCallResult;
+#[doc(inline)]
+pub use crate::rpc_interceptor::RpcInterceptor;
+#[doc(inline)]
+pub use crate::rpc_interceptor::RpcRequest;
 #[doc(inline)]
 pub use crate::timestamp::Timestamp;
 #[doc(inline)]

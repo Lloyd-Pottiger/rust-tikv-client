@@ -8,6 +8,7 @@ use super::plan::PreserveShard;
 use super::Keyspace;
 use crate::backoff::Backoff;
 use crate::pd::PdClient;
+use crate::request::plan::DispatchWithInterceptor;
 use crate::request::plan::ResolveLockInContext;
 use crate::request::plan::{
     CleanupLocks, HasKvContext, RetryableAllStores, RetryableStores,
@@ -28,6 +29,7 @@ use crate::request::ResolveLockForRead;
 use crate::request::RetryableMultiRegion;
 use crate::request::Shardable;
 use crate::request::{DefaultProcessor, StoreRequest};
+use crate::rpc_interceptor::RpcInterceptors;
 use crate::store::HasKeyErrors;
 use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
@@ -66,6 +68,25 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
             plan: Dispatch {
                 request,
                 kv_client: None,
+            },
+            phantom: PhantomData,
+        }
+    }
+
+    pub(crate) fn new_with_rpc_interceptors(
+        pd_client: Arc<PdC>,
+        keyspace: Keyspace,
+        mut request: Req,
+        rpc_interceptors: RpcInterceptors,
+    ) -> PlanBuilder<PdC, DispatchWithInterceptor<Req>, NoTarget> {
+        request.set_api_version(keyspace.api_version());
+        PlanBuilder {
+            pd_client,
+            plan: DispatchWithInterceptor {
+                request,
+                kv_client: None,
+                store_address: None,
+                rpc_interceptors,
             },
             phantom: PhantomData,
         }
@@ -446,6 +467,23 @@ impl<PdC: PdClient, R: KvRequest> PlanBuilder<PdC, Dispatch<R>, NoTarget> {
         store: RegionStore,
     ) -> Result<PlanBuilder<PdC, Dispatch<R>, Targetted>> {
         set_single_region_store(self.plan, store, self.pd_client)
+    }
+}
+
+impl<PdC: PdClient, R: KvRequest> PlanBuilder<PdC, DispatchWithInterceptor<R>, NoTarget> {
+    /// Target the request at a single region; caller supplies the store to target.
+    pub async fn single_region_with_store(
+        mut self,
+        store: RegionStore,
+    ) -> Result<PlanBuilder<PdC, DispatchWithInterceptor<R>, Targetted>> {
+        self.plan.request.set_leader(&store.region_with_leader)?;
+        self.plan.kv_client = Some(store.client);
+        self.plan.store_address = Some(store.store_address);
+        Ok(PlanBuilder {
+            plan: self.plan,
+            pd_client: self.pd_client,
+            phantom: PhantomData,
+        })
     }
 }
 

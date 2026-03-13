@@ -47,6 +47,31 @@ impl SyncTransaction {
         self.inner.vars()
     }
 
+    /// Set an RPC interceptor for this transaction.
+    ///
+    /// This maps to client-go `KVTxn.SetRPCInterceptor`.
+    pub fn set_rpc_interceptor<I>(&mut self, interceptor: I)
+    where
+        I: crate::RpcInterceptor,
+    {
+        self.inner.set_rpc_interceptor(interceptor);
+    }
+
+    /// Add an RPC interceptor.
+    ///
+    /// This maps to client-go `KVTxn.AddRPCInterceptor`.
+    pub fn add_rpc_interceptor<I>(&mut self, interceptor: I)
+    where
+        I: crate::RpcInterceptor,
+    {
+        self.inner.add_rpc_interceptor(interceptor);
+    }
+
+    /// Clear all configured RPC interceptors.
+    pub fn clear_rpc_interceptors(&mut self) {
+        self.inner.clear_rpc_interceptors();
+    }
+
     /// Set a callback invoked when [`SyncTransaction::commit`] finishes.
     ///
     /// The callback receives:

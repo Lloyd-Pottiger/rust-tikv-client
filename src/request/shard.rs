@@ -8,6 +8,7 @@ use super::plan::PreserveShard;
 use crate::pd::PdClient;
 use crate::region::RegionWithLeader;
 use crate::request::plan::CleanupLocks;
+use crate::request::plan::DispatchWithInterceptor;
 use crate::request::plan::ResolveLockInContext;
 use crate::request::Dispatch;
 use crate::request::KvRequest;
@@ -136,7 +137,51 @@ impl<Req: KvRequest + Shardable> Shardable for Dispatch<Req> {
     }
 }
 
+impl<Req: KvRequest + Shardable> Shardable for DispatchWithInterceptor<Req> {
+    type Shard = Req::Shard;
+
+    fn shards(
+        &self,
+        pd_client: &Arc<impl PdClient>,
+    ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+        self.request.shards(pd_client)
+    }
+
+    fn apply_shard(&mut self, shard: Self::Shard) {
+        self.request.apply_shard(shard);
+    }
+
+    fn clone_then_apply_shard(&self, shard: Self::Shard) -> Self
+    where
+        Self: Sized + Clone,
+    {
+        DispatchWithInterceptor {
+            request: self.request.clone_then_apply_shard(shard),
+            kv_client: self.kv_client.clone(),
+            store_address: self.store_address.clone(),
+            rpc_interceptors: self.rpc_interceptors.clone(),
+        }
+    }
+
+    fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        let is_retry_request = self.kv_client.is_some();
+        self.kv_client = Some(store.client.clone());
+        self.store_address = Some(store.store_address.clone());
+        self.request.apply_store(store)?;
+        if is_retry_request {
+            self.request.set_is_retry_request(true);
+        }
+        Ok(())
+    }
+}
+
 impl<Req: KvRequest + NextBatch> NextBatch for Dispatch<Req> {
+    fn next_batch(&mut self, range: (Vec<u8>, Vec<u8>)) {
+        self.request.next_batch(range);
+    }
+}
+
+impl<Req: KvRequest + NextBatch> NextBatch for DispatchWithInterceptor<Req> {
     fn next_batch(&mut self, range: (Vec<u8>, Vec<u8>)) {
         self.request.next_batch(range);
     }

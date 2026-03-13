@@ -31,6 +31,7 @@ use crate::Result;
 pub struct RegionStore {
     pub region_with_leader: RegionWithLeader,
     pub client: Arc<dyn KvClient + Send + Sync>,
+    pub store_address: String,
 }
 
 #[derive(new, Clone)]

@@ -29,6 +29,7 @@ use crate::request::Collect;
 use crate::request::CollectSingle;
 use crate::request::Keyspace;
 use crate::request::Plan;
+use crate::rpc_interceptor::RpcInterceptors;
 use crate::store::RegionStore;
 use crate::store::Request;
 use crate::timestamp::TimestampExt;
@@ -616,25 +617,29 @@ async fn resolve_lock_with_retry(
         if resolve_lite {
             request.keys = vec![key.clone()];
         }
-        let plan_builder =
-            match crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
-                .single_region_with_store(store.clone())
-                .await
-            {
-                Ok(plan_builder) => plan_builder,
-                Err(Error::LeaderNotFound { region }) => {
-                    pd_client.invalidate_region_cache(region.clone()).await;
-                    match backoff.next_delay_duration() {
-                        Some(duration) => {
-                            check_killed(&killed)?;
-                            sleep(duration).await;
-                            continue;
-                        }
-                        None => return Err(Error::LeaderNotFound { region }),
+        let plan_builder = match crate::request::PlanBuilder::new_with_rpc_interceptors(
+            pd_client.clone(),
+            keyspace,
+            request,
+            rpc_context.rpc_interceptors.clone(),
+        )
+        .single_region_with_store(store.clone())
+        .await
+        {
+            Ok(plan_builder) => plan_builder,
+            Err(Error::LeaderNotFound { region }) => {
+                pd_client.invalidate_region_cache(region.clone()).await;
+                match backoff.next_delay_duration() {
+                    Some(duration) => {
+                        check_killed(&killed)?;
+                        sleep(duration).await;
+                        continue;
                     }
+                    None => return Err(Error::LeaderNotFound { region }),
                 }
-                Err(err) => return Err(err),
-            };
+            }
+            Err(err) => return Err(err),
+        };
         let plan = plan_builder.extract_error().plan();
         match plan.execute().await {
             Ok(_) => {
@@ -708,10 +713,15 @@ async fn rollback_pessimistic_lock(
         for_update_ts,
     );
     rpc_context.apply_to_request(&mut request);
-    let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
-        .retry_multi_region(DEFAULT_REGION_BACKOFF)
-        .extract_error()
-        .plan();
+    let plan = crate::request::PlanBuilder::new_with_rpc_interceptors(
+        pd_client.clone(),
+        keyspace,
+        request,
+        rpc_context.rpc_interceptors.clone(),
+    )
+    .retry_multi_region(DEFAULT_REGION_BACKOFF)
+    .extract_error()
+    .plan();
     let _ = plan.execute().await?;
     Ok(())
 }
@@ -740,25 +750,29 @@ async fn rollback_pessimistic_lock_with_retry(
             for_update_ts,
         );
         rpc_context.apply_to_request(&mut request);
-        let plan_builder =
-            match crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
-                .single_region_with_store(store.clone())
-                .await
-            {
-                Ok(plan_builder) => plan_builder,
-                Err(Error::LeaderNotFound { region }) => {
-                    pd_client.invalidate_region_cache(region.clone()).await;
-                    match backoff.next_delay_duration() {
-                        Some(duration) => {
-                            check_killed(&killed)?;
-                            sleep(duration).await;
-                            continue;
-                        }
-                        None => return Err(Error::LeaderNotFound { region }),
+        let plan_builder = match crate::request::PlanBuilder::new_with_rpc_interceptors(
+            pd_client.clone(),
+            keyspace,
+            request,
+            rpc_context.rpc_interceptors.clone(),
+        )
+        .single_region_with_store(store.clone())
+        .await
+        {
+            Ok(plan_builder) => plan_builder,
+            Err(Error::LeaderNotFound { region }) => {
+                pd_client.invalidate_region_cache(region.clone()).await;
+                match backoff.next_delay_duration() {
+                    Some(duration) => {
+                        check_killed(&killed)?;
+                        sleep(duration).await;
+                        continue;
                     }
+                    None => return Err(Error::LeaderNotFound { region }),
                 }
-                Err(err) => return Err(err),
-            };
+            }
+            Err(err) => return Err(err),
+        };
         let plan = plan_builder.extract_error().plan();
         match plan.execute().await {
             Ok(_) => return Ok(Some(ver_id)),
@@ -913,6 +927,7 @@ pub(crate) struct LockResolverRpcContext {
     pub(crate) context: Option<kvrpcpb::Context>,
     pub(crate) resource_group_tag_set: bool,
     pub(crate) resource_group_tagger: Option<ResourceGroupTagger>,
+    pub(crate) rpc_interceptors: RpcInterceptors,
 }
 
 impl LockResolverRpcContext {
@@ -1677,12 +1692,17 @@ impl LockResolver {
             is_txn_file,
         );
         self.rpc_context.apply_to_request(&mut req);
-        let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, req)
-            .retry_multi_region(DEFAULT_REGION_BACKOFF)
-            .merge(CollectSingle)
-            .extract_error()
-            .post_process_default()
-            .plan();
+        let plan = crate::request::PlanBuilder::new_with_rpc_interceptors(
+            pd_client.clone(),
+            keyspace,
+            req,
+            self.rpc_context.rpc_interceptors.clone(),
+        )
+        .retry_multi_region(DEFAULT_REGION_BACKOFF)
+        .merge(CollectSingle)
+        .extract_error()
+        .post_process_default()
+        .plan();
         let mut status: TransactionStatus = match plan.execute().await {
             Ok(status) => status,
             Err(Error::ExtractedErrors(errors)) | Err(Error::MultipleKeyErrors(errors)) => {
@@ -1721,11 +1741,16 @@ impl LockResolver {
         let expected_keys = keys.len();
         let mut req = new_check_secondary_locks_request(keys, txn_id);
         self.rpc_context.apply_to_request(&mut req);
-        let plan = crate::request::PlanBuilder::new(pd_client.clone(), keyspace, req)
-            .retry_multi_region(DEFAULT_REGION_BACKOFF)
-            .extract_error()
-            .merge(Collect)
-            .plan();
+        let plan = crate::request::PlanBuilder::new_with_rpc_interceptors(
+            pd_client.clone(),
+            keyspace,
+            req,
+            self.rpc_context.rpc_interceptors.clone(),
+        )
+        .retry_multi_region(DEFAULT_REGION_BACKOFF)
+        .extract_error()
+        .merge(Collect)
+        .plan();
         let mut secondary_status = plan.execute().await?;
         secondary_status.missing_lock = secondary_status.locked_keys < expected_keys;
         if let Some(commit_ts) = secondary_status.commit_ts.as_ref() {
@@ -1753,24 +1778,28 @@ impl LockResolver {
             let ver_id = store.region_with_leader.ver_id();
             let mut request = requests::new_batch_resolve_lock_request(txn_infos.clone());
             self.rpc_context.apply_to_request(&mut request);
-            let plan_builder =
-                match crate::request::PlanBuilder::new(pd_client.clone(), keyspace, request)
-                    .single_region_with_store(store.clone())
-                    .await
-                {
-                    Ok(plan_builder) => plan_builder,
-                    Err(Error::LeaderNotFound { region }) => {
-                        pd_client.invalidate_region_cache(region.clone()).await;
-                        match backoff.next_delay_duration() {
-                            Some(duration) => {
-                                sleep(duration).await;
-                                continue;
-                            }
-                            None => return Err(Error::LeaderNotFound { region }),
+            let plan_builder = match crate::request::PlanBuilder::new_with_rpc_interceptors(
+                pd_client.clone(),
+                keyspace,
+                request,
+                self.rpc_context.rpc_interceptors.clone(),
+            )
+            .single_region_with_store(store.clone())
+            .await
+            {
+                Ok(plan_builder) => plan_builder,
+                Err(Error::LeaderNotFound { region }) => {
+                    pd_client.invalidate_region_cache(region.clone()).await;
+                    match backoff.next_delay_duration() {
+                        Some(duration) => {
+                            sleep(duration).await;
+                            continue;
                         }
+                        None => return Err(Error::LeaderNotFound { region }),
                     }
-                    Err(err) => return Err(err),
-                };
+                }
+                Err(err) => return Err(err),
+            };
             let plan = plan_builder.extract_error().plan();
             match plan.execute().await {
                 Ok(_) => return Ok(ver_id),
@@ -2172,6 +2201,7 @@ mod tests {
             context: Some(template),
             resource_group_tag_set: true,
             resource_group_tagger: None,
+            rpc_interceptors: Default::default(),
         };
         rpc_context.apply_to_kv_context("kv_check_txn_status", &mut ctx);
 
@@ -2225,6 +2255,7 @@ mod tests {
                 tagger_calls_captured.fetch_add(1, Ordering::SeqCst);
                 label.as_bytes().to_vec()
             })),
+            rpc_interceptors: Default::default(),
         };
 
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
@@ -2341,6 +2372,7 @@ mod tests {
                 tagger_calls_captured.fetch_add(1, Ordering::SeqCst);
                 b"tagger".to_vec()
             })),
+            rpc_interceptors: Default::default(),
         };
 
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
@@ -2415,6 +2447,7 @@ mod tests {
                 tagger_calls_captured.fetch_add(1, Ordering::SeqCst);
                 label.as_bytes().to_vec()
             })),
+            rpc_interceptors: Default::default(),
         };
 
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
