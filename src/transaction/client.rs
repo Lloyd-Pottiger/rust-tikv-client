@@ -21,6 +21,8 @@ use crate::request::Plan;
 use crate::safe_ts::SafeTsCache;
 use crate::timestamp::TimestampExt;
 use crate::transaction::lock::ResolveLocksOptions;
+use crate::transaction::lowering::new_get_lock_wait_history_request;
+use crate::transaction::lowering::new_get_lock_wait_info_request;
 use crate::transaction::lowering::new_scan_lock_request;
 use crate::transaction::lowering::new_unsafe_destroy_range_request;
 use crate::transaction::BoundLockResolver;
@@ -39,6 +41,13 @@ use crate::Result;
 /// future release even if the wire format is compatible.
 #[doc(inline)]
 pub use crate::proto::kvrpcpb::LockInfo as ProtoLockInfo;
+
+/// Protobuf-generated lock waiting entry returned by TiKV.
+///
+/// This type is generated from TiKV's protobuf definitions and may change in a
+/// future release even if the wire format is compatible.
+#[doc(inline)]
+pub use crate::proto::deadlock::WaitForEntry as ProtoWaitForEntry;
 
 /// The TiKV transactional `Client` is used to interact with TiKV using transactional requests.
 ///
@@ -629,6 +638,36 @@ impl<PdC: PdClient> Client<PdC> {
         plan.execute().await
     }
 
+    /// Get current lock waiting status from all TiKV stores.
+    ///
+    /// This is a store-level request (not tied to a specific region). The returned entries are a
+    /// snapshot assembled by querying all stores and concatenating their results.
+    ///
+    /// Returns an error if any store request fails.
+    pub async fn lock_wait_info(&self) -> Result<Vec<ProtoWaitForEntry>> {
+        let req = new_get_lock_wait_info_request();
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .all_stores(DEFAULT_STORE_BACKOFF)
+            .merge(crate::request::Collect)
+            .plan();
+        plan.execute().await
+    }
+
+    /// Get lock waiting history from all TiKV stores.
+    ///
+    /// This is a store-level request (not tied to a specific region). The returned entries are a
+    /// snapshot assembled by querying all stores and concatenating their results.
+    ///
+    /// Returns an error if any store request fails.
+    pub async fn lock_wait_history(&self) -> Result<Vec<ProtoWaitForEntry>> {
+        let req = new_get_lock_wait_history_request();
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .all_stores(DEFAULT_STORE_BACKOFF)
+            .merge(crate::request::Collect)
+            .plan();
+        plan.execute().await
+    }
+
     fn new_transaction(
         &self,
         timestamp: Timestamp,
@@ -721,6 +760,97 @@ mod tests {
 
         assert_eq!(pd_client.get_timestamp_call_count(), 0);
         assert_eq!(get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_lock_wait_info_and_history_collect_entries_from_all_stores() {
+        let info_calls = Arc::new(AtomicUsize::new(0));
+        let history_calls = Arc::new(AtomicUsize::new(0));
+        let info_calls_cloned = info_calls.clone();
+        let history_calls_cloned = history_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req
+                    .downcast_ref::<kvrpcpb::GetLockWaitInfoRequest>()
+                    .is_some()
+                {
+                    let call_index = info_calls_cloned.fetch_add(1, Ordering::SeqCst) as u64;
+                    let entry = crate::proto::deadlock::WaitForEntry {
+                        txn: call_index + 1,
+                        wait_for_txn: 42,
+                        key_hash: 0,
+                        key: Vec::new(),
+                        resource_group_tag: Vec::new(),
+                        wait_time: 0,
+                    };
+                    return Ok(Box::new(kvrpcpb::GetLockWaitInfoResponse {
+                        region_error: None,
+                        error: "".to_owned(),
+                        entries: vec![entry],
+                    }) as Box<dyn Any>);
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::GetLockWaitHistoryRequest>()
+                    .is_some()
+                {
+                    let call_index = history_calls_cloned.fetch_add(1, Ordering::SeqCst) as u64;
+                    let entry = crate::proto::deadlock::WaitForEntry {
+                        txn: call_index + 101,
+                        wait_for_txn: 42,
+                        key_hash: 0,
+                        key: Vec::new(),
+                        resource_group_tag: Vec::new(),
+                        wait_time: 0,
+                    };
+                    return Ok(Box::new(kvrpcpb::GetLockWaitHistoryResponse {
+                        region_error: None,
+                        error: "".to_owned(),
+                        entries: vec![entry],
+                    }) as Box<dyn Any>);
+                }
+
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                address: "mock://1".to_owned(),
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                address: "mock://2".to_owned(),
+                ..Default::default()
+            })
+            .await;
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let mut info = client.lock_wait_info().await.unwrap();
+        info.sort_by_key(|e| e.txn);
+        assert_eq!(info.len(), 2);
+        assert_eq!(info[0].txn, 1);
+        assert_eq!(info[1].txn, 2);
+        assert_eq!(info_calls.load(Ordering::SeqCst), 2);
+
+        let mut history = client.lock_wait_history().await.unwrap();
+        history.sort_by_key(|e| e.txn);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].txn, 101);
+        assert_eq!(history[1].txn, 102);
+        assert_eq!(history_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

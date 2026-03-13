@@ -10,6 +10,7 @@
 
 pub use client::Client;
 pub use client::ProtoLockInfo;
+pub use client::ProtoWaitForEntry;
 pub(crate) use lock::resolve_locks_for_read;
 pub(crate) use lock::resolve_locks_with_options;
 pub(crate) use lock::HasLocks;

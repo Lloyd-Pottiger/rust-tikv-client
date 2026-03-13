@@ -219,6 +219,8 @@ pub use crate::transaction::PrewriteEncounterLockPolicy;
 #[doc(inline)]
 pub use crate::transaction::ProtoLockInfo;
 #[doc(inline)]
+pub use crate::transaction::ProtoWaitForEntry;
+#[doc(inline)]
 pub use crate::transaction::SchemaLeaseChecker;
 #[doc(inline)]
 pub use crate::transaction::Snapshot;

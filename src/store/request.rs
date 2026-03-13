@@ -142,6 +142,16 @@ impl_request!(
     unsafe_destroy_range,
     "unsafe_destroy_range"
 );
+impl_request!(
+    GetLockWaitInfoRequest,
+    get_lock_wait_info,
+    "get_lock_wait_info"
+);
+impl_request!(
+    GetLockWaitHistoryRequest,
+    get_lock_wait_history,
+    "get_lock_wait_history"
+);
 
 #[async_trait]
 impl Request for kvrpcpb::StoreSafeTsRequest {

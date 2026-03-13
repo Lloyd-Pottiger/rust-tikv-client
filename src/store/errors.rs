@@ -65,6 +65,8 @@ has_region_error!(kvrpcpb::RawBatchScanResponse);
 has_region_error!(kvrpcpb::RawCasResponse);
 has_region_error!(kvrpcpb::RawCoprocessorResponse);
 has_region_error!(kvrpcpb::RawChecksumResponse);
+has_region_error!(kvrpcpb::GetLockWaitInfoResponse);
+has_region_error!(kvrpcpb::GetLockWaitHistoryResponse);
 
 macro_rules! has_key_error {
     ($type:ty) => {
@@ -115,6 +117,8 @@ has_str_error!(kvrpcpb::RawChecksumResponse);
 has_str_error!(kvrpcpb::ImportResponse);
 has_str_error!(kvrpcpb::DeleteRangeResponse);
 has_str_error!(kvrpcpb::UnsafeDestroyRangeResponse);
+has_str_error!(kvrpcpb::GetLockWaitInfoResponse);
+has_str_error!(kvrpcpb::GetLockWaitHistoryResponse);
 
 impl HasRegionError for kvrpcpb::StoreSafeTsResponse {
     fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {

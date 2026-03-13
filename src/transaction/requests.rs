@@ -1366,6 +1366,56 @@ impl Merge<kvrpcpb::UnsafeDestroyRangeResponse> for Collect {
     }
 }
 
+pub fn new_get_lock_wait_info_request() -> kvrpcpb::GetLockWaitInfoRequest {
+    kvrpcpb::GetLockWaitInfoRequest::default()
+}
+
+impl KvRequest for kvrpcpb::GetLockWaitInfoRequest {
+    type Response = kvrpcpb::GetLockWaitInfoResponse;
+}
+
+impl StoreRequest for kvrpcpb::GetLockWaitInfoRequest {
+    fn apply_store(&mut self, _store: &Store) {}
+}
+
+impl HasLocks for kvrpcpb::GetLockWaitInfoResponse {}
+
+impl Merge<kvrpcpb::GetLockWaitInfoResponse> for Collect {
+    type Out = Vec<crate::proto::deadlock::WaitForEntry>;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::GetLockWaitInfoResponse>>) -> Result<Self::Out> {
+        input
+            .into_iter()
+            .flat_map_ok(|resp| resp.entries.into_iter())
+            .collect()
+    }
+}
+
+pub fn new_get_lock_wait_history_request() -> kvrpcpb::GetLockWaitHistoryRequest {
+    kvrpcpb::GetLockWaitHistoryRequest::default()
+}
+
+impl KvRequest for kvrpcpb::GetLockWaitHistoryRequest {
+    type Response = kvrpcpb::GetLockWaitHistoryResponse;
+}
+
+impl StoreRequest for kvrpcpb::GetLockWaitHistoryRequest {
+    fn apply_store(&mut self, _store: &Store) {}
+}
+
+impl HasLocks for kvrpcpb::GetLockWaitHistoryResponse {}
+
+impl Merge<kvrpcpb::GetLockWaitHistoryResponse> for Collect {
+    type Out = Vec<crate::proto::deadlock::WaitForEntry>;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::GetLockWaitHistoryResponse>>) -> Result<Self::Out> {
+        input
+            .into_iter()
+            .flat_map_ok(|resp| resp.entries.into_iter())
+            .collect()
+    }
+}
+
 impl KvRequest for kvrpcpb::StoreSafeTsRequest {
     type Response = kvrpcpb::StoreSafeTsResponse;
 }
@@ -1454,6 +1504,78 @@ mod tests {
             .merge(Vec::<crate::Result<kvrpcpb::StoreSafeTsResponse>>::new())
             .unwrap();
         assert_eq!(merged, 0);
+    }
+
+    #[test]
+    fn test_merge_lock_wait_info_collects_entries_across_stores() {
+        let merged = crate::request::Collect
+            .merge(vec![
+                Ok(kvrpcpb::GetLockWaitInfoResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                    entries: vec![crate::proto::deadlock::WaitForEntry {
+                        txn: 1,
+                        wait_for_txn: 2,
+                        key_hash: 3,
+                        key: b"k1".to_vec(),
+                        resource_group_tag: b"tag1".to_vec(),
+                        wait_time: 4,
+                    }],
+                }),
+                Ok(kvrpcpb::GetLockWaitInfoResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                    entries: vec![crate::proto::deadlock::WaitForEntry {
+                        txn: 10,
+                        wait_for_txn: 20,
+                        key_hash: 30,
+                        key: b"k2".to_vec(),
+                        resource_group_tag: b"tag2".to_vec(),
+                        wait_time: 40,
+                    }],
+                }),
+            ])
+            .unwrap();
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].txn, 1);
+        assert_eq!(merged[1].txn, 10);
+    }
+
+    #[test]
+    fn test_merge_lock_wait_history_collects_entries_across_stores() {
+        let merged = crate::request::Collect
+            .merge(vec![
+                Ok(kvrpcpb::GetLockWaitHistoryResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                    entries: vec![crate::proto::deadlock::WaitForEntry {
+                        txn: 100,
+                        wait_for_txn: 200,
+                        key_hash: 300,
+                        key: b"k1".to_vec(),
+                        resource_group_tag: b"tag1".to_vec(),
+                        wait_time: 400,
+                    }],
+                }),
+                Ok(kvrpcpb::GetLockWaitHistoryResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                    entries: vec![crate::proto::deadlock::WaitForEntry {
+                        txn: 1000,
+                        wait_for_txn: 2000,
+                        key_hash: 3000,
+                        key: b"k2".to_vec(),
+                        resource_group_tag: b"tag2".to_vec(),
+                        wait_time: 4000,
+                    }],
+                }),
+            ])
+            .unwrap();
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].txn, 100);
+        assert_eq!(merged[1].txn, 1000);
     }
 
     #[test]

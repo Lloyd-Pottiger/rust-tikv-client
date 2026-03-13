@@ -218,3 +218,11 @@ pub fn new_unsafe_destroy_range_request(range: BoundRange) -> kvrpcpb::UnsafeDes
     let (start_key, end_key) = range.into_keys();
     requests::new_unsafe_destroy_range_request(start_key.into(), end_key.unwrap_or_default().into())
 }
+
+pub fn new_get_lock_wait_info_request() -> kvrpcpb::GetLockWaitInfoRequest {
+    requests::new_get_lock_wait_info_request()
+}
+
+pub fn new_get_lock_wait_history_request() -> kvrpcpb::GetLockWaitHistoryRequest {
+    requests::new_get_lock_wait_history_request()
+}
