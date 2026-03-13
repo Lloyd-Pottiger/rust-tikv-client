@@ -216,3 +216,145 @@ fn compute_min_safe_ts(store_safe_ts: &HashMap<StoreId, u64>, store_ids: &[Store
         min_safe_ts
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::SafeTsCache;
+    use crate::mock::MockKvClient;
+    use crate::pd::PdClient;
+    use crate::proto::keyspacepb;
+    use crate::proto::kvrpcpb;
+    use crate::proto::metapb;
+    use crate::region::{RegionId, RegionVerId, RegionWithLeader, StoreId};
+    use crate::request::Keyspace;
+    use crate::store::{RegionStore, Store};
+    use crate::{Error, Result, Timestamp};
+
+    #[derive(Clone)]
+    struct SafeTsPdClient {
+        stores: Vec<Store>,
+    }
+
+    #[async_trait]
+    impl PdClient for SafeTsPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            _region: RegionWithLeader,
+        ) -> Result<RegionStore> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_key(&self, _key: &crate::Key) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<bool> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn all_stores(&self) -> Result<Vec<Store>> {
+            Ok(self.stores.clone())
+        }
+
+        async fn all_stores_for_safe_ts(&self) -> Result<Vec<Store>> {
+            Ok(self.stores.clone())
+        }
+
+        async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {}
+
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+    }
+
+    fn store_for_safe_ts(
+        store_id: StoreId,
+        labels: Vec<metapb::StoreLabel>,
+        safe_ts: u64,
+    ) -> Store {
+        let kv_client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::StoreSafeTsRequest>().is_some() {
+                let resp = kvrpcpb::StoreSafeTsResponse { safe_ts };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            Err(Error::Unimplemented)
+        });
+
+        Store::new(
+            metapb::Store {
+                id: store_id,
+                labels,
+                ..Default::default()
+            },
+            Arc::new(kv_client),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_min_safe_ts_with_txn_scope_includes_tiflash_store() -> Result<()> {
+        let tikv_dc1 = store_for_safe_ts(
+            1,
+            vec![metapb::StoreLabel {
+                key: "zone".to_owned(),
+                value: "dc1".to_owned(),
+            }],
+            100,
+        );
+        let tikv_dc2 = store_for_safe_ts(
+            2,
+            vec![metapb::StoreLabel {
+                key: "zone".to_owned(),
+                value: "dc2".to_owned(),
+            }],
+            10,
+        );
+        let tiflash_dc2 = store_for_safe_ts(
+            3,
+            vec![
+                metapb::StoreLabel {
+                    key: "engine".to_owned(),
+                    value: "tiflash".to_owned(),
+                },
+                metapb::StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "dc2".to_owned(),
+                },
+            ],
+            42,
+        );
+
+        let pd_client = Arc::new(SafeTsPdClient {
+            stores: vec![tikv_dc1, tikv_dc2, tiflash_dc2],
+        });
+        let safe_ts = SafeTsCache::new(pd_client, Keyspace::Disable);
+        safe_ts.refresh().await?;
+
+        assert_eq!(safe_ts.min_safe_ts().await?, 10);
+        assert_eq!(safe_ts.min_safe_ts_with_txn_scope("dc1").await?, 100);
+        assert_eq!(safe_ts.min_safe_ts_with_txn_scope("dc2").await?, 10);
+        assert_eq!(safe_ts.min_safe_ts_with_txn_scope("unknown").await?, 0);
+
+        Ok(())
+    }
+}
