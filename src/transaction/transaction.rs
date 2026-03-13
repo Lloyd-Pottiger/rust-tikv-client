@@ -13074,8 +13074,7 @@ mod tests {
         let err = txn
             .lock_keys(vec![b"k1".to_vec()])
             .await
-            .err()
-            .expect("expected error");
+            .expect_err("expected error");
         assert!(
             matches!(err, Error::StringError(msg) if msg == "txn 5 retrying aggressive locking with for_update_ts (101) less than previous expected_for_update_ts (200)")
         );

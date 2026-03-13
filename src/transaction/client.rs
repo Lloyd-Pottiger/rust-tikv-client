@@ -34,6 +34,7 @@ use crate::transaction::lowering::new_unsafe_destroy_range_request;
 use crate::transaction::BoundLockResolver;
 use crate::transaction::LockResolver;
 use crate::transaction::ResolveLocksContext;
+use crate::transaction::ResolveLocksForReadResult;
 use crate::transaction::ResolveLocksResult;
 use crate::transaction::Snapshot;
 use crate::transaction::Transaction;
@@ -662,6 +663,31 @@ impl<PdC: PdClient> Client<PdC> {
                 locks.encode_keyspace(self.keyspace, KeyMode::Txn),
                 timestamp,
                 pessimistic_region_resolve,
+            )
+            .await?;
+        resolve_result.live_locks = resolve_result.live_locks.truncate_keyspace(self.keyspace);
+        Ok(resolve_result)
+    }
+
+    /// Resolves locks for read and returns any that remain live.
+    ///
+    /// This method mirrors client-go `LockResolver.ResolveLocksForRead` and uses a read-optimized
+    /// lock-resolve strategy. Non-pessimistic lock cleanup is performed asynchronously in a
+    /// background task.
+    pub async fn resolve_locks_for_read(
+        &self,
+        locks: Vec<ProtoLockInfo>,
+        timestamp: Timestamp,
+        force_resolve_lock_lite: bool,
+    ) -> Result<ResolveLocksForReadResult> {
+        use crate::request::TruncateKeyspace;
+
+        let lock_resolver = self.bound_lock_resolver();
+        let mut resolve_result = lock_resolver
+            .resolve_locks_for_read(
+                locks.encode_keyspace(self.keyspace, KeyMode::Txn),
+                timestamp,
+                force_resolve_lock_lite,
             )
             .await?;
         resolve_result.live_locks = resolve_result.live_locks.truncate_keyspace(self.keyspace);
@@ -2071,6 +2097,86 @@ mod tests {
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(resolve_result.live_locks.len(), 1);
         assert_eq!(resolve_result.ms_before_txn_expired, 100);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_for_read_wrapper_encodes_and_truncates_lock_keys() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+
+        let keyspace_id = 0x010203;
+        let mut expected_encoded_key = vec![b'x', 0x01, 0x02, 0x03];
+        expected_encoded_key.extend_from_slice(b"k1");
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+
+                    let ctx = req
+                        .context
+                        .as_ref()
+                        .expect("check txn status request must have context");
+                    assert_eq!(ctx.api_version, kvrpcpb::ApiVersion::V2 as i32);
+                    assert_eq!(req.primary_key, expected_encoded_key);
+                    assert_eq!(req.caller_start_ts, 42);
+                    assert_eq!(req.current_ts, 100);
+                    assert!(
+                        !req.rollback_if_not_exist,
+                        "resolve locks for read should not request rollback for non-existing locks"
+                    );
+
+                    let mut lock_info = kvrpcpb::LockInfo::default();
+                    lock_info.key = expected_encoded_key.clone();
+                    lock_info.primary_lock = expected_encoded_key.clone();
+                    lock_info.lock_version = 7;
+                    lock_info.lock_ttl = 100;
+                    lock_info.txn_size = 20;
+                    lock_info.lock_type = kvrpcpb::Op::Put as i32;
+
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        lock_ttl: 100,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        lock_info: Some(lock_info),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            }))
+            .with_tso_sequence(100),
+        );
+
+        let keyspace = Keyspace::Enable { keyspace_id };
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = b"k1".to_vec();
+        lock.primary_lock = b"k1".to_vec();
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.txn_size = 20;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let resolve_result = client
+            .resolve_locks_for_read(vec![lock], Timestamp::from_version(42), false)
+            .await
+            .unwrap();
+
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_result.live_locks.len(), 1);
+        assert_eq!(resolve_result.live_locks[0].key, b"k1".to_vec());
+        assert_eq!(resolve_result.live_locks[0].primary_lock, b"k1".to_vec());
+        assert_eq!(resolve_result.ms_before_txn_expired, 100);
+        assert!(resolve_result.resolved_locks.is_empty());
+        assert!(resolve_result.committed_locks.is_empty());
     }
 
     #[tokio::test]

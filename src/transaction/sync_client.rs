@@ -2,7 +2,7 @@ use crate::{
     request::plan::CleanupLocksResult,
     transaction::{
         client::Client, sync_snapshot::SyncSnapshot, sync_transaction::SyncTransaction,
-        ResolveLocksOptions, ResolveLocksResult,
+        ResolveLocksForReadResult, ResolveLocksOptions, ResolveLocksResult,
     },
     BoundRange, Config, Error, Result, Timestamp, TransactionOptions,
 };
@@ -332,6 +332,23 @@ impl SyncTransactionClient {
             &self.runtime,
             self.client
                 .resolve_locks_once(locks, timestamp, pessimistic_region_resolve),
+        )
+    }
+
+    /// Resolves locks for read and returns any that remain live.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::resolve_locks_for_read`](crate::TransactionClient::resolve_locks_for_read).
+    pub fn resolve_locks_for_read(
+        &self,
+        locks: Vec<crate::transaction::ProtoLockInfo>,
+        timestamp: Timestamp,
+        force_resolve_lock_lite: bool,
+    ) -> Result<ResolveLocksForReadResult> {
+        safe_block_on(
+            &self.runtime,
+            self.client
+                .resolve_locks_for_read(locks, timestamp, force_resolve_lock_lite),
         )
     }
 
