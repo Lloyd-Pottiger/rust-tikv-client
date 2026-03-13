@@ -2,7 +2,7 @@ use crate::{
     request::plan::CleanupLocksResult,
     transaction::{
         client::Client, sync_snapshot::SyncSnapshot, sync_transaction::SyncTransaction,
-        ResolveLocksOptions,
+        ResolveLocksOptions, ResolveLocksResult,
     },
     BoundRange, Config, Error, Result, Timestamp, TransactionOptions,
 };
@@ -315,6 +315,23 @@ impl SyncTransactionClient {
         safe_block_on(
             &self.runtime,
             self.client.resolve_locks(locks, timestamp, backoff),
+        )
+    }
+
+    /// Performs a one-shot lock resolve attempt and returns the outcome.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::resolve_locks_once`](crate::TransactionClient::resolve_locks_once).
+    pub fn resolve_locks_once(
+        &self,
+        locks: Vec<crate::transaction::ProtoLockInfo>,
+        timestamp: Timestamp,
+        pessimistic_region_resolve: bool,
+    ) -> Result<ResolveLocksResult> {
+        safe_block_on(
+            &self.runtime,
+            self.client
+                .resolve_locks_once(locks, timestamp, pessimistic_region_resolve),
         )
     }
 

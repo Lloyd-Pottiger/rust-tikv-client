@@ -34,6 +34,7 @@ use crate::transaction::lowering::new_unsafe_destroy_range_request;
 use crate::transaction::BoundLockResolver;
 use crate::transaction::LockResolver;
 use crate::transaction::ResolveLocksContext;
+use crate::transaction::ResolveLocksResult;
 use crate::transaction::Snapshot;
 use crate::transaction::Transaction;
 use crate::transaction::TransactionOptions;
@@ -640,6 +641,31 @@ impl<PdC: PdClient> Client<PdC> {
             )
             .await?;
         Ok(live_locks.truncate_keyspace(self.keyspace))
+    }
+
+    /// Performs a one-shot lock resolve attempt and returns the outcome.
+    ///
+    /// Unlike [`Client::resolve_locks`], this method does not perform the caller-side sleep loop.
+    /// The returned [`ResolveLocksResult::ms_before_txn_expired`] can be used to decide how long
+    /// to backoff/sleep before retrying.
+    pub async fn resolve_locks_once(
+        &self,
+        locks: Vec<ProtoLockInfo>,
+        timestamp: Timestamp,
+        pessimistic_region_resolve: bool,
+    ) -> Result<ResolveLocksResult> {
+        use crate::request::TruncateKeyspace;
+
+        let lock_resolver = self.bound_lock_resolver();
+        let mut resolve_result = lock_resolver
+            .resolve_locks_once(
+                locks.encode_keyspace(self.keyspace, KeyMode::Txn),
+                timestamp,
+                pessimistic_region_resolve,
+            )
+            .await?;
+        resolve_result.live_locks = resolve_result.live_locks.truncate_keyspace(self.keyspace);
+        Ok(resolve_result)
     }
 
     /// Cleans up all keys in a range and quickly reclaim disk space.
@@ -1920,6 +1946,68 @@ mod tests {
             pd_client.get_timestamp_dc_locations(),
             vec!["dc1".to_owned(), "dc1".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_once_delegates_to_bound_lock_resolver() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        commit_version: 50,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.start_version, 7);
+                    assert_eq!(req.commit_version, 50);
+                    assert!(
+                        req.keys.is_empty(),
+                        "non-lite resolve should not send key list"
+                    );
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()) as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.txn_size = 20;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let resolve_result = client
+            .resolve_locks_once(vec![lock], Timestamp::from_version(42), false)
+            .await
+            .unwrap();
+
+        assert!(resolve_result.live_locks.is_empty());
+        assert_eq!(resolve_result.ms_before_txn_expired, 0);
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
