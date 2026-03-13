@@ -1941,7 +1941,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let should_flush = self
             .pipelined
             .as_ref()
-            .expect("pipelined state must exist when pipelined options are set")
+            .ok_or_else(|| {
+                crate::internal_err!("pipelined txn options are set but pipelined state is missing")
+            })?
             .should_flush(force, mutation_count, write_size);
         if !should_flush {
             return Ok(false);
@@ -1951,12 +1953,18 @@ impl<PdC: PdClient> Transaction<PdC> {
         let is_flushing = self
             .pipelined
             .as_ref()
-            .expect("pipelined state must exist when pipelined options are set")
+            .ok_or_else(|| {
+                crate::internal_err!("pipelined txn options are set but pipelined state is missing")
+            })?
             .is_flushing();
         if is_flushing {
             self.pipelined
                 .as_mut()
-                .expect("pipelined state must exist when pipelined options are set")
+                .ok_or_else(|| {
+                    crate::internal_err!(
+                        "pipelined txn options are set but pipelined state is missing"
+                    )
+                })?
                 .flush_wait()
                 .await?;
         }
@@ -1978,10 +1986,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         debug_assert!(!mutations.is_empty());
 
         let (primary_key, generation, flush_ewma) = {
-            let state = self
-                .pipelined
-                .as_mut()
-                .expect("pipelined state must exist when pipelined options are set");
+            let state = self.pipelined.as_mut().ok_or_else(|| {
+                crate::internal_err!("pipelined txn options are set but pipelined state is missing")
+            })?;
             let primary_key = state.primary_key_or_init(&mutations)?;
             state.record_flushed_mutations(&mutations);
             state.record_flushing_puts(&mutations);
@@ -2055,7 +2062,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         });
         self.pipelined
             .as_mut()
-            .expect("pipelined state must exist when pipelined options are set")
+            .ok_or_else(|| {
+                crate::internal_err!("pipelined txn options are set but pipelined state is missing")
+            })?
             .flushing = Some(flush_handle);
 
         Ok(true)
@@ -2233,10 +2242,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
 
         let primary_key = if self.options.pipelined_txn.is_some() {
-            let state = self
-                .pipelined
-                .as_mut()
-                .expect("pipelined state must exist when pipelined options are set");
+            let state = self.pipelined.as_mut().ok_or_else(|| {
+                crate::internal_err!("pipelined txn options are set but pipelined state is missing")
+            })?;
             // Initialize the pipelined primary key if this is the first (commit-time) flush.
             if state.primary_key.is_none() {
                 let _ = state.primary_key_or_init(&mutations)?;
@@ -5345,6 +5353,70 @@ mod tests {
             txn.flush(false).await,
             Err(Error::StringError(msg)) if msg == "flush is only supported for pipelined transactions"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_flush_returns_internal_error_when_state_missing() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            Err(Error::StringError("unexpected request".to_owned()))
+        })));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined_txn(PipelinedTxnOptions::new(1, 1, 0.0).unwrap())
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        txn.pipelined = None;
+
+        let err = txn
+            .flush(true)
+            .await
+            .expect_err("expected missing pipelined state to return error");
+        match err {
+            Error::InternalError { message } => {
+                assert!(message
+                    .contains("pipelined txn options are set but pipelined state is missing"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_commit_returns_internal_error_when_state_missing() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            Err(Error::StringError("unexpected request".to_owned()))
+        })));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined_txn(PipelinedTxnOptions::new(1, 1, 0.0).unwrap())
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+        txn.pipelined = None;
+
+        let err = txn
+            .commit()
+            .await
+            .expect_err("expected missing pipelined state to return error");
+        match err {
+            Error::InternalError { message } => {
+                assert!(message
+                    .contains("pipelined txn options are set but pipelined state is missing"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
