@@ -90,6 +90,31 @@ impl SyncTransactionClient {
         Ok(Self { client, runtime })
     }
 
+    /// Create a synchronous transactional [`SyncTransactionClient`] that uses API V2 without adding
+    /// or removing any API V2 keyspace/key-mode prefix, with a custom configuration.
+    ///
+    /// This is intended for **server-side embedding** use cases. `config.keyspace` must be unset.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::new_with_config_api_v2_no_prefix`](crate::TransactionClient::new_with_config_api_v2_no_prefix).
+    pub fn new_with_config_api_v2_no_prefix<S: Into<String>>(
+        pd_endpoints: Vec<S>,
+        config: Config,
+    ) -> Result<Self> {
+        check_nested_runtime()?;
+
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?,
+        );
+        let client = runtime.block_on(Client::new_with_config_api_v2_no_prefix(
+            pd_endpoints,
+            config,
+        ))?;
+        Ok(Self { client, runtime })
+    }
+
     /// Returns the TiKV cluster ID.
     ///
     /// This is a synchronous version of [`TransactionClient::cluster_id`](crate::TransactionClient::cluster_id).
@@ -275,6 +300,21 @@ impl SyncTransactionClient {
         safe_block_on(
             &self.runtime,
             self.client.cleanup_locks(range, safepoint, options),
+        )
+    }
+
+    /// Resolves the given locks and returns any that remain live.
+    ///
+    /// This is a synchronous version of [`TransactionClient::resolve_locks`](crate::TransactionClient::resolve_locks).
+    pub fn resolve_locks(
+        &self,
+        locks: Vec<crate::transaction::ProtoLockInfo>,
+        timestamp: Timestamp,
+        backoff: crate::Backoff,
+    ) -> Result<Vec<crate::transaction::ProtoLockInfo>> {
+        safe_block_on(
+            &self.runtime,
+            self.client.resolve_locks(locks, timestamp, backoff),
         )
     }
 
