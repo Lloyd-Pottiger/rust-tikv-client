@@ -56,7 +56,8 @@ impl RegionWithLeader {
 
     pub fn ver_id(&self) -> RegionVerId {
         let region = &self.region;
-        let epoch = region.region_epoch.as_ref().unwrap();
+        let default_epoch = metapb::RegionEpoch::default();
+        let epoch = region.region_epoch.as_ref().unwrap_or(&default_epoch);
         RegionVerId {
             id: region.id,
             conf_ver: epoch.conf_ver,
@@ -76,5 +77,46 @@ impl RegionWithLeader {
                 region: self.ver_id(),
             })
             .map(|s| s.store_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_region_with_leader_ver_id_handles_missing_epoch() {
+        let region = RegionWithLeader::default();
+        assert_eq!(
+            region.ver_id(),
+            RegionVerId {
+                id: 0,
+                conf_ver: 0,
+                ver: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn test_region_with_leader_ver_id_uses_epoch_when_present() {
+        let mut region = metapb::Region::default();
+        region.id = 42;
+        region.region_epoch = Some(metapb::RegionEpoch {
+            conf_ver: 7,
+            version: 9,
+        });
+
+        let region = RegionWithLeader {
+            region,
+            leader: None,
+        };
+        assert_eq!(
+            region.ver_id(),
+            RegionVerId {
+                id: 42,
+                conf_ver: 7,
+                ver: 9,
+            }
+        );
     }
 }
