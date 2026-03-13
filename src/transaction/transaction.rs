@@ -3058,6 +3058,17 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         }
 
+        fn contains_already_exist_error(error: &Error) -> bool {
+            match error {
+                Error::KeyError(key_error) => key_error.already_exist.is_some(),
+                Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
+                    errors.iter().any(contains_already_exist_error)
+                }
+                Error::PessimisticLockError { inner, .. } => contains_already_exist_error(inner),
+                _ => false,
+            }
+        }
+
         self.options.apply_write_context(&mut request.context);
         if self.options.resource_group_tag.is_none() {
             if let Some(tagger) = self.resource_group_tagger.as_ref() {
@@ -3117,6 +3128,10 @@ impl<PdC: PdClient> Transaction<PdC> {
                     for_update_ts.clone(),
                 )
                 .await?;
+            }
+
+            if errors.iter().any(contains_already_exist_error) {
+                return Err(Error::DuplicateKeyInsertion);
             }
 
             if let Some(deadlock) = errors.iter().find_map(extract_deadlock_error) {
@@ -11405,6 +11420,83 @@ mod tests {
             }
             other => panic!("expected deadlock error, got {other:?}"),
         }
+
+        assert_eq!(lock_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(check_txn_status_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pessimistic_lock_already_exists_returns_error() {
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_requests = Arc::new(AtomicUsize::new(0));
+        let timestamp_calls = Arc::new(AtomicUsize::new(0));
+
+        let lock_requests_captured = lock_requests.clone();
+        let check_txn_status_requests_captured = check_txn_status_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req
+                .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
+                .is_some()
+            {
+                lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                let resp = kvrpcpb::PessimisticLockResponse {
+                    errors: vec![kvrpcpb::KeyError {
+                        already_exist: Some(kvrpcpb::AlreadyExist { key: vec![1] }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if req
+                .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                .is_some()
+            {
+                check_txn_status_requests_captured.fetch_add(1, Ordering::SeqCst);
+                panic!("check_txn_status must not be invoked for already-exist errors");
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls,
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let request = crate::transaction::lowering::new_pessimistic_lock_request(
+            std::iter::once(Key::from(vec![1u8])),
+            Key::from(vec![1u8]),
+            Timestamp::default(),
+            100,
+            Timestamp::default(),
+            false,
+            true,
+        );
+
+        let err = txn
+            .execute_pessimistic_lock_request(
+                request,
+                Timestamp::default(),
+                false,
+                crate::LockWaitTimeout::Default,
+                Instant::now(),
+            )
+            .await
+            .expect_err("expected already-exist error");
+        assert!(matches!(err, Error::DuplicateKeyInsertion));
 
         assert_eq!(lock_requests.load(Ordering::SeqCst), 1);
         assert_eq!(check_txn_status_requests.load(Ordering::SeqCst), 0);
