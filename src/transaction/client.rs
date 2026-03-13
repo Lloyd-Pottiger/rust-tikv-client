@@ -2011,6 +2011,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_locks_once_returns_ttl_for_live_lock() {
+        let check_txn_status_count = Arc::new(AtomicUsize::new(0));
+        let check_txn_status_count_captured = check_txn_status_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    check_txn_status_count_captured.fetch_add(1, Ordering::SeqCst);
+
+                    let mut lock_info = kvrpcpb::LockInfo::default();
+                    lock_info.key = vec![1];
+                    lock_info.primary_lock = vec![2];
+                    lock_info.lock_version = 7;
+                    lock_info.lock_ttl = 100;
+                    lock_info.txn_size = 20;
+                    lock_info.lock_type = kvrpcpb::Op::Put as i32;
+
+                    let resp = kvrpcpb::CheckTxnStatusResponse {
+                        lock_ttl: 100,
+                        action: kvrpcpb::Action::NoAction as i32,
+                        lock_info: Some(lock_info),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if req.is::<kvrpcpb::ResolveLockRequest>() {
+                    panic!(
+                        "resolve_locks_once should not issue resolve-lock cleanup for live locks"
+                    );
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = vec![1];
+        lock.primary_lock = vec![2];
+        lock.lock_version = 7;
+        lock.lock_ttl = 100;
+        lock.txn_size = 20;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let resolve_result = client
+            .resolve_locks_once(vec![lock], Timestamp::from_version(42), false)
+            .await
+            .unwrap();
+
+        assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resolve_result.live_locks.len(), 1);
+        assert_eq!(resolve_result.ms_before_txn_expired, 100);
+    }
+
+    #[tokio::test]
     async fn test_resolve_locks_delegates_to_bound_lock_resolver() {
         let check_txn_status_count = Arc::new(AtomicUsize::new(0));
         let resolve_lock_count = Arc::new(AtomicUsize::new(0));
