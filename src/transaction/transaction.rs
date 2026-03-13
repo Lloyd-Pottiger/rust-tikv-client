@@ -1171,6 +1171,36 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
     }
 
+    /// Create a `get for share` request.
+    ///
+    /// This is similar to [`Transaction::get_for_update`], but acquires a shared pessimistic lock
+    /// (`SharedPessimisticLock`) for pessimistic transactions, similar to `SELECT ... LOCK IN SHARE
+    /// MODE` in TiDB.
+    pub async fn get_for_share(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
+        debug!("invoking transactional get_for_share request");
+        self.check_allow_operation().await?;
+        if !self.is_pessimistic() {
+            let key = key.into();
+            self.lock_keys_in_share_mode(iter::once(key.clone()))
+                .await?;
+            self.get(key).await
+        } else {
+            let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
+            let mut pairs = self
+                .pessimistic_lock_in_share_mode_with_wait_timeout(
+                    iter::once(key),
+                    true,
+                    self.options.lock_wait_timeout,
+                )
+                .await?;
+            debug_assert!(pairs.len() <= 1);
+            match pairs.pop() {
+                Some(pair) => Ok(Some(pair.1)),
+                None => Ok(None),
+            }
+        }
+    }
+
     /// Check whether a key exists.
     ///
     /// # Examples
@@ -1602,6 +1632,34 @@ impl<PdC: PdClient> Transaction<PdC> {
                 .map(move |k| k.into().encode_keyspace(keyspace, KeyMode::Txn));
             let pairs = self
                 .pessimistic_lock(keys, true)
+                .await?
+                .truncate_keyspace(keyspace);
+            Ok(pairs)
+        }
+    }
+
+    /// Create a new 'batch get for share' request.
+    ///
+    /// This is similar to [`Transaction::batch_get_for_update`], but acquires shared pessimistic
+    /// locks (`SharedPessimisticLock`) for pessimistic transactions.
+    pub async fn batch_get_for_share(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+    ) -> Result<Vec<KvPair>> {
+        debug!("invoking transactional batch_get_for_share request");
+        self.check_allow_operation().await?;
+        if !self.is_pessimistic() {
+            let keys: Vec<Key> = keys.into_iter().map(|k| k.into()).collect();
+            self.lock_keys_in_share_mode(keys.clone()).await?;
+            Ok(self.batch_get(keys).await?.collect())
+        } else {
+            let keyspace = self.keyspace;
+            let lock_wait_timeout = self.options.lock_wait_timeout;
+            let keys = keys
+                .into_iter()
+                .map(move |k| k.into().encode_keyspace(keyspace, KeyMode::Txn));
+            let pairs = self
+                .pessimistic_lock_in_share_mode_with_wait_timeout(keys, true, lock_wait_timeout)
                 .await?
                 .truncate_keyspace(keyspace);
             Ok(pairs)
@@ -10476,6 +10534,141 @@ mod tests {
             }
             err => panic!("unexpected error: {err:?}"),
         }
+
+        assert_eq!(lock_requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_for_share_sends_shared_pessimistic_lock_and_returns_value() {
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let lock_requests_captured = lock_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                let attempt = lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.mutations.len(), 1);
+                match attempt {
+                    0 => {
+                        assert_eq!(req.mutations[0].key, b"k2".to_vec());
+                        assert_eq!(req.mutations[0].op, kvrpcpb::Op::PessimisticLock as i32);
+                        assert!(!req.return_values);
+                        return Ok(
+                            Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>
+                        );
+                    }
+                    1 => {
+                        assert_eq!(req.mutations[0].key, b"k1".to_vec());
+                        assert_eq!(
+                            req.mutations[0].op,
+                            kvrpcpb::Op::SharedPessimisticLock as i32
+                        );
+                        assert!(req.return_values);
+                        let resp = kvrpcpb::PessimisticLockResponse {
+                            values: vec![b"v1".to_vec()],
+                            not_founds: vec![false],
+                            ..Default::default()
+                        };
+                        return Ok(Box::new(resp) as Box<dyn Any>);
+                    }
+                    _ => panic!("unexpected lock request count {attempt}"),
+                }
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.lock_keys(vec![b"k2".to_vec()]).await.unwrap();
+        let value = txn
+            .get_for_share(b"k1".to_vec())
+            .await
+            .unwrap()
+            .expect("expected value for get_for_share");
+        assert_eq!(value, b"v1".to_vec());
+
+        let mutations = txn.buffer.to_proto_mutations();
+        assert!(mutations.iter().any(|mutation| {
+            mutation.key == b"k1".to_vec() && mutation.op == kvrpcpb::Op::SharedLock as i32
+        }));
+
+        assert_eq!(lock_requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_for_share_sends_shared_pessimistic_lock_and_returns_values() {
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let lock_requests_captured = lock_requests.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                let attempt = lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                match attempt {
+                    0 => {
+                        assert_eq!(req.mutations.len(), 1);
+                        assert_eq!(req.mutations[0].key, b"k2".to_vec());
+                        assert_eq!(req.mutations[0].op, kvrpcpb::Op::PessimisticLock as i32);
+                        assert!(!req.return_values);
+                        return Ok(
+                            Box::<kvrpcpb::PessimisticLockResponse>::default() as Box<dyn Any>
+                        );
+                    }
+                    1 => {
+                        assert_eq!(req.mutations.len(), 2);
+                        for mutation in &req.mutations {
+                            assert_eq!(mutation.op, kvrpcpb::Op::SharedPessimisticLock as i32);
+                        }
+                        assert!(req.return_values);
+
+                        let resp = kvrpcpb::PessimisticLockResponse {
+                            values: vec![b"v1".to_vec(), b"v3".to_vec()],
+                            not_founds: vec![false, false],
+                            ..Default::default()
+                        };
+                        return Ok(Box::new(resp) as Box<dyn Any>);
+                    }
+                    _ => panic!("unexpected lock request count {attempt}"),
+                }
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.lock_keys(vec![b"k2".to_vec()]).await.unwrap();
+        let pairs = txn
+            .batch_get_for_share(vec![b"k1".to_vec(), b"k3".to_vec()])
+            .await
+            .unwrap();
+        assert!(pairs.contains(&crate::KvPair::new(b"k1".to_vec(), b"v1".to_vec())));
+        assert!(pairs.contains(&crate::KvPair::new(b"k3".to_vec(), b"v3".to_vec())));
 
         assert_eq!(lock_requests.load(Ordering::SeqCst), 2);
     }

@@ -268,6 +268,11 @@ impl SyncTransaction {
         safe_block_on(&self.runtime, self.inner.get_for_update(key))
     }
 
+    /// Get the value associated with the given key, and lock the key in share mode.
+    pub fn get_for_share(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
+        safe_block_on(&self.runtime, self.inner.get_for_share(key))
+    }
+
     /// Check if the given key exists.
     pub fn key_exists(&mut self, key: impl Into<Key>) -> Result<bool> {
         safe_block_on(&self.runtime, self.inner.key_exists(key))
@@ -287,6 +292,14 @@ impl SyncTransaction {
         keys: impl IntoIterator<Item = impl Into<Key>>,
     ) -> Result<Vec<KvPair>> {
         safe_block_on(&self.runtime, self.inner.batch_get_for_update(keys))
+    }
+
+    /// Get the values associated with the given keys, and lock the keys in share mode.
+    pub fn batch_get_for_share(
+        &mut self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+    ) -> Result<Vec<KvPair>> {
+        safe_block_on(&self.runtime, self.inner.batch_get_for_share(keys))
     }
 
     /// Scan a range and return the key-value pairs.
