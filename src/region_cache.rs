@@ -130,11 +130,59 @@ impl RegionCacheMap {
 }
 
 pub struct RegionCache<Client = RetryClient<Cluster>> {
-    region_cache: RwLock<RegionCacheMap>,
-    store_cache: RwLock<HashMap<StoreId, Store>>,
+    region_cache: Arc<RwLock<RegionCacheMap>>,
+    store_cache: Arc<RwLock<HashMap<StoreId, Store>>>,
     inner_client: Arc<Client>,
     region_cache_ttl_ms: u64,
     region_cache_ttl_jitter_ms: u64,
+}
+
+struct OnMyWayIdGuard {
+    id: RegionId,
+    notify: Arc<Notify>,
+    region_cache: Arc<RwLock<RegionCacheMap>>,
+    active: bool,
+}
+
+impl OnMyWayIdGuard {
+    fn new(id: RegionId, notify: Arc<Notify>, region_cache: Arc<RwLock<RegionCacheMap>>) -> Self {
+        Self {
+            id,
+            notify,
+            region_cache,
+            active: true,
+        }
+    }
+
+    async fn finish(mut self) {
+        let mut guard = self.region_cache.write().await;
+        guard.on_my_way_id.remove(&self.id);
+        drop(guard);
+        self.notify.notify_waiters();
+        self.active = false;
+    }
+}
+
+impl Drop for OnMyWayIdGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        let id = self.id;
+        let notify = self.notify.clone();
+        let region_cache = self.region_cache.clone();
+        handle.spawn(async move {
+            let mut guard = region_cache.write().await;
+            guard.on_my_way_id.remove(&id);
+            drop(guard);
+            notify.notify_waiters();
+        });
+    }
 }
 
 impl<Client> RegionCache<Client> {
@@ -144,8 +192,8 @@ impl<Client> RegionCache<Client> {
         region_cache_ttl_jitter: Duration,
     ) -> RegionCache<Client> {
         RegionCache {
-            region_cache: RwLock::new(RegionCacheMap::new()),
-            store_cache: RwLock::new(HashMap::new()),
+            region_cache: Arc::new(RwLock::new(RegionCacheMap::new())),
+            store_cache: Arc::new(RwLock::new(HashMap::new())),
             inner_client,
             region_cache_ttl_ms: duration_to_millis_saturating(region_cache_ttl),
             region_cache_ttl_jitter_ms: duration_to_millis_saturating(region_cache_ttl_jitter),
@@ -276,17 +324,19 @@ impl<C: RetryClientTrait> RegionCache<C> {
             region_cache_guard.on_my_way_id.insert(id, notify.clone());
         }
 
-        let region = self.inner_client.clone().get_region_by_id(id).await?;
-        self.add_region(region.clone()).await;
+        let cleanup_guard = OnMyWayIdGuard::new(id, notify.clone(), self.region_cache.clone());
 
-        // notify others
-        {
-            let mut region_cache_guard = self.region_cache.write().await;
-            notify.notify_waiters();
-            region_cache_guard.on_my_way_id.remove(&id);
-        }
+        let result = match self.inner_client.clone().get_region_by_id(id).await {
+            Ok(region) => {
+                self.add_region(region.clone()).await;
+                Ok(region)
+            }
+            Err(err) => Err(err),
+        };
 
-        Ok(region)
+        cleanup_guard.finish().await;
+
+        result
     }
 
     async fn read_through_store_by_id(&self, id: StoreId) -> Result<Store> {
@@ -680,6 +730,23 @@ mod test {
         assert_eq!(retry_client.get_region_count.load(SeqCst), 2);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_region_by_id_does_not_deadlock_when_read_through_fails() {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let (r1, r2) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(cache.get_region_by_id(42), cache.get_region_by_id(42))
+        })
+        .await
+        .expect("get_region_by_id should not hang on read-through errors");
+        assert!(r1.is_err());
+        assert!(r2.is_err());
+
+        let guard = cache.region_cache.read().await;
+        assert!(guard.on_my_way_id.is_empty());
     }
 
     #[tokio::test]
