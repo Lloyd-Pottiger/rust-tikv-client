@@ -41,6 +41,14 @@ pub struct Config {
     ///
     /// The minimum value is 50ms (matching client-go).
     pub grpc_keepalive_timeout: Duration,
+    /// gRPC initial HTTP2 stream window size, in bytes (client-go `GrpcInitialWindowSize`).
+    ///
+    /// Set to `0` to use `tonic`/`hyper`'s defaults.
+    pub grpc_initial_window_size: u32,
+    /// gRPC initial HTTP2 connection window size, in bytes (client-go `GrpcInitialConnWindowSize`).
+    ///
+    /// Set to `0` to use `tonic`/`hyper`'s defaults.
+    pub grpc_initial_conn_window_size: u32,
     pub keyspace: Option<String>,
     pub resolve_lock_lite_threshold: u64,
     /// How often to refresh TiKV store health feedback (slow score).
@@ -64,6 +72,8 @@ pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
 const DEFAULT_GRPC_KEEPALIVE_TIME: Duration = Duration::from_secs(10);
 const DEFAULT_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_GRPC_INITIAL_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
+const DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
 const MIN_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) const DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
 
@@ -78,6 +88,8 @@ impl Default for Config {
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
+            grpc_initial_window_size: DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
+            grpc_initial_conn_window_size: DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE,
             keyspace: None,
             resolve_lock_lite_threshold: DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD,
             health_feedback_update_interval: Duration::ZERO,
@@ -185,6 +197,24 @@ impl Config {
         self
     }
 
+    /// Set the gRPC initial HTTP2 stream window size (in bytes).
+    ///
+    /// Set to `0` to use `tonic`/`hyper`'s defaults.
+    #[must_use]
+    pub fn with_grpc_initial_window_size(mut self, size: u32) -> Self {
+        self.grpc_initial_window_size = size;
+        self
+    }
+
+    /// Set the gRPC initial HTTP2 connection window size (in bytes).
+    ///
+    /// Set to `0` to use `tonic`/`hyper`'s defaults.
+    #[must_use]
+    pub fn with_grpc_initial_conn_window_size(mut self, size: u32) -> Self {
+        self.grpc_initial_conn_window_size = size;
+        self
+    }
+
     /// Set to use default keyspace.
     ///
     /// Server should enable `storage.api-version = 2` to use this feature.
@@ -239,10 +269,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_config_default_grpc_keepalive() {
+    fn test_config_default_grpc_keepalive_and_window_sizes() {
         let config = Config::default();
         assert_eq!(config.grpc_keepalive_time, Duration::from_secs(10));
         assert_eq!(config.grpc_keepalive_timeout, Duration::from_secs(3));
+        assert_eq!(config.grpc_initial_window_size, 1 << 27);
+        assert_eq!(config.grpc_initial_conn_window_size, 1 << 27);
         config.validate().unwrap();
     }
 

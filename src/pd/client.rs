@@ -858,7 +858,11 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             } else {
                 SecurityManager::default()
             })
-            .with_grpc_keepalive(config.grpc_keepalive_time, config.grpc_keepalive_timeout),
+            .with_grpc_keepalive(config.grpc_keepalive_time, config.grpc_keepalive_timeout)
+            .with_grpc_initial_window_sizes(
+                config.grpc_initial_window_size,
+                config.grpc_initial_conn_window_size,
+            ),
         );
 
         let pd = Arc::new(pd(security_mgr.clone()).await?);
@@ -1123,7 +1127,9 @@ pub mod test {
     async fn test_pd_rpc_client_applies_grpc_keepalive_config() {
         let config = Config::default()
             .with_grpc_keepalive_time(Duration::from_secs(1))
-            .with_grpc_keepalive_timeout(Duration::from_secs(2));
+            .with_grpc_keepalive_timeout(Duration::from_secs(2))
+            .with_grpc_initial_window_size(123)
+            .with_grpc_initial_conn_window_size(456);
 
         let seen_configs = Arc::new(Mutex::new(Vec::new()));
         let seen_configs_pd = Arc::clone(&seen_configs);
@@ -1135,14 +1141,14 @@ pub mod test {
                 seen_configs_kv
                     .lock()
                     .unwrap()
-                    .push(sm.grpc_keepalive_config());
+                    .push((sm.grpc_keepalive_config(), sm.grpc_window_sizes()));
                 MockKvConnect
             },
             |sm| {
                 seen_configs_pd
                     .lock()
                     .unwrap()
-                    .push(sm.grpc_keepalive_config());
+                    .push((sm.grpc_keepalive_config(), sm.grpc_window_sizes()));
                 futures::future::ok(RetryClient::new_with_cluster(
                     sm,
                     config.timeout,
@@ -1157,11 +1163,9 @@ pub mod test {
 
         let seen_configs = seen_configs.lock().unwrap();
         assert_eq!(seen_configs.len(), 2);
-        assert!(seen_configs
-            .iter()
-            .copied()
-            .all(|(time, timeout)| time == Duration::from_secs(1)
-                && timeout == Duration::from_secs(2)));
+        assert!(seen_configs.iter().copied().all(|(keepalive, windows)| {
+            keepalive == (Duration::from_secs(1), Duration::from_secs(2)) && windows == (123, 456)
+        }));
     }
 
     #[tokio::test]

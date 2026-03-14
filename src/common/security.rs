@@ -54,10 +54,14 @@ pub struct SecurityManager {
     key: PathBuf,
     grpc_keepalive_time: Duration,
     grpc_keepalive_timeout: Duration,
+    grpc_initial_window_size: u32,
+    grpc_initial_conn_window_size: u32,
 }
 
 const DEFAULT_GRPC_KEEPALIVE_TIME: Duration = Duration::from_secs(10);
 const DEFAULT_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_GRPC_INITIAL_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
+const DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
 
 impl Default for SecurityManager {
     fn default() -> Self {
@@ -67,6 +71,8 @@ impl Default for SecurityManager {
             key: PathBuf::new(),
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
+            grpc_initial_window_size: DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
+            grpc_initial_conn_window_size: DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE,
         }
     }
 }
@@ -86,6 +92,8 @@ impl SecurityManager {
             key: key_path,
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
+            grpc_initial_window_size: DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
+            grpc_initial_conn_window_size: DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE,
         })
     }
 
@@ -95,9 +103,23 @@ impl SecurityManager {
         self
     }
 
+    pub(crate) fn with_grpc_initial_window_sizes(mut self, stream: u32, connection: u32) -> Self {
+        self.grpc_initial_window_size = stream;
+        self.grpc_initial_conn_window_size = connection;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn grpc_keepalive_config(&self) -> (Duration, Duration) {
         (self.grpc_keepalive_time, self.grpc_keepalive_timeout)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn grpc_window_sizes(&self) -> (u32, u32) {
+        (
+            self.grpc_initial_window_size,
+            self.grpc_initial_conn_window_size,
+        )
     }
 
     /// Connect to gRPC server using TLS connection. If TLS is not configured, use normal connection.
@@ -142,6 +164,13 @@ impl SecurityManager {
     fn endpoint(&self, addr: String) -> Result<Endpoint> {
         let mut endpoint = Channel::from_shared(addr)?
             .tcp_keepalive(Some(Duration::from_secs(10)))
+            .initial_stream_window_size(
+                (self.grpc_initial_window_size != 0).then_some(self.grpc_initial_window_size),
+            )
+            .initial_connection_window_size(
+                (self.grpc_initial_conn_window_size != 0)
+                    .then_some(self.grpc_initial_conn_window_size),
+            )
             .keep_alive_while_idle(false);
 
         if self.grpc_keepalive_time != Duration::ZERO {
@@ -171,6 +200,7 @@ mod tests {
             mgr.grpc_keepalive_config(),
             (Duration::from_secs(10), Duration::from_secs(3))
         );
+        assert_eq!(mgr.grpc_window_sizes(), (1 << 27, 1 << 27));
     }
 
     #[test]
@@ -203,5 +233,11 @@ mod tests {
             mgr.grpc_keepalive_config(),
             (Duration::from_secs(1), Duration::from_secs(2))
         );
+    }
+
+    #[test]
+    fn test_security_manager_with_grpc_window_sizes_overrides() {
+        let mgr = SecurityManager::default().with_grpc_initial_window_sizes(1, 2);
+        assert_eq!(mgr.grpc_window_sizes(), (1, 2));
     }
 }
