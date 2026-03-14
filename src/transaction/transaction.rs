@@ -2219,6 +2219,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// The returned boolean indicates whether a flush was triggered.
     pub async fn flush(&mut self, force: bool) -> Result<bool> {
         self.check_allow_operation().await?;
+        self.options.validate()?;
         self.vars.check_killed()?;
 
         let Some(pipelined) = self.options.pipelined_txn else {
@@ -2713,6 +2714,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         ) {
             return Err(Error::OperationAfterCommitError);
         }
+
+        self.options.validate()?;
 
         let mut flush_wait_ms = 0i64;
         if let Some(state) = self.pipelined.as_mut() {
@@ -5029,6 +5032,15 @@ impl TransactionOptions {
         self.txn_scope.as_deref()
     }
 
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.pipelined_txn.is_some() && (self.try_one_pc || self.async_commit) {
+            return Err(Error::StringError(
+                "pipelined txn does not support async-commit or 1pc".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Enable a pipelined DML transaction with default parameters.
     ///
     /// This maps to client-go `tikv.WithDefaultPipelinedTxn`.
@@ -6827,6 +6839,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pipelined_flush_rejects_async_commit_and_one_pc() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            Err(Error::StringError("unexpected request".to_owned()))
+        })));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .use_async_commit()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        assert!(matches!(
+            txn.flush(true).await,
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            Err(Error::StringError("unexpected request".to_owned()))
+        })));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .try_one_pc()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        assert!(matches!(
+            txn.flush(true).await,
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
+    }
+
+    #[tokio::test]
     async fn test_pipelined_flush_returns_internal_error_when_state_missing() {
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
             Err(Error::StringError("unexpected request".to_owned()))
@@ -7495,7 +7550,11 @@ mod tests {
                 .heartbeat_option(HeartbeatOption::NoHeartbeat),
             Keyspace::Disable,
         );
-        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        assert!(matches!(
+            txn.put(vec![1u8], b"v1".to_vec()).await,
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
         assert!(matches!(
             txn.commit().await,
             Err(Error::StringError(msg))
@@ -7514,7 +7573,11 @@ mod tests {
                 .heartbeat_option(HeartbeatOption::NoHeartbeat),
             Keyspace::Disable,
         );
-        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        assert!(matches!(
+            txn.put(vec![1u8], b"v1".to_vec()).await,
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
         assert!(matches!(
             txn.commit().await,
             Err(Error::StringError(msg))

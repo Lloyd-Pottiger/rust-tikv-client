@@ -402,6 +402,7 @@ impl<PdC: PdClient> Client<PdC> {
         options: TransactionOptions,
     ) -> Result<Transaction<PdC>> {
         debug!("creating new customized transaction");
+        options.validate()?;
         let txn_scope = options
             .txn_scope_as_deref()
             .map(|txn_scope| txn_scope.to_owned());
@@ -427,6 +428,7 @@ impl<PdC: PdClient> Client<PdC> {
             "creating new customized transaction with txn_scope={}",
             txn_scope
         );
+        options.validate()?;
         let timestamp = self.current_timestamp_with_txn_scope(txn_scope).await?;
         Ok(self.new_transaction(timestamp, options.txn_scope(txn_scope)))
     }
@@ -1275,6 +1277,7 @@ mod tests {
     use crate::transaction::HeartbeatOption;
     use crate::transaction::ResolveLocksContext;
     use crate::Backoff;
+    use crate::Error;
     use crate::Timestamp;
     use crate::TransactionOptions;
 
@@ -2528,6 +2531,100 @@ mod tests {
             pd_client.get_timestamp_dc_locations(),
             vec!["dc1".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn test_begin_with_options_rejects_pipelined_with_async_commit_or_one_pc() {
+        let pd_client = Arc::new(MockPdClient::default());
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let err = client
+            .begin_with_options(
+                TransactionOptions::new_optimistic()
+                    .pipelined()
+                    .use_async_commit()
+                    .drop_check(crate::CheckLevel::None),
+            )
+            .await
+            .err()
+            .expect("pipelined txn should reject async-commit");
+        assert!(matches!(
+            err,
+            Error::StringError(msg)
+                if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+
+        let err = client
+            .begin_with_options(
+                TransactionOptions::new_optimistic()
+                    .pipelined()
+                    .try_one_pc()
+                    .drop_check(crate::CheckLevel::None),
+            )
+            .await
+            .err()
+            .expect("pipelined txn should reject 1pc");
+        assert!(matches!(
+            err,
+            Error::StringError(msg)
+                if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_begin_with_start_timestamp_rejects_pipelined_with_async_commit_or_one_pc() {
+        let pd_client = Arc::new(MockPdClient::default());
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let mut txn = client.begin_with_start_timestamp(
+            Timestamp::from_version(5),
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .use_async_commit()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+        );
+        assert!(matches!(
+            txn.commit().await,
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+
+        let mut txn = client.begin_with_start_timestamp(
+            Timestamp::from_version(5),
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .try_one_pc()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+        );
+        assert!(matches!(
+            txn.commit().await,
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
     }
 
     #[tokio::test]
