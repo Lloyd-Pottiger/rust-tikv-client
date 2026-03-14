@@ -615,9 +615,9 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
             return Err(Error::RegionError(Box::new(region_error)));
         }
 
-        let feedback = resp.health_feedback.ok_or_else(|| {
-            Error::StringError("GetHealthFeedback response missing health_feedback".to_owned())
-        })?;
+        let Some(feedback) = resp.health_feedback else {
+            return Err(Error::Unimplemented);
+        };
         if feedback.slow_score >= HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD {
             self.mark_store_slow(feedback.store_id, HEALTH_FEEDBACK_SLOW_STORE_TTL);
         }
@@ -1378,7 +1378,7 @@ pub mod test {
         }));
 
         let err = client.get_health_feedback(store_id).await.unwrap_err();
-        assert!(matches!(err, Error::StringError(_)), "err={err:?}");
+        assert!(matches!(err, Error::Unimplemented), "err={err:?}");
     }
 
     #[tokio::test]
