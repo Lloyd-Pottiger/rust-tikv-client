@@ -1360,44 +1360,40 @@ async fn txn_pessimistic_delete() -> Result<()> {
 
     // The transaction will lock the keys and must release the locks on commit,
     // even when values are not written to the DB.
+    let commit_key1 = vec![1];
+    let commit_key2 = vec![2];
+    let commit_key3 = vec![3];
     let mut txn = client.begin_pessimistic().await?;
-    txn.put(vec![1], vec![42]).await?;
-    txn.delete(vec![1]).await?;
-    // FIXME
-    //
-    // A behavior change in TiKV 7.1 introduced in tikv/tikv#14293.
-    //
-    // An insert can return AlreadyExist error when the key exists.
-    // We comment this line to allow the test to pass so that we can release v0.2
-    // Should be addressed alter.
-    // txn.insert(vec![2], vec![42]).await?;
-    txn.delete(vec![2]).await?;
-    txn.put(vec![3], vec![42]).await?;
+    txn.put(commit_key1.clone(), vec![42]).await?;
+    txn.delete(commit_key1.clone()).await?;
+    txn.insert(commit_key2.clone(), vec![42]).await?;
+    txn.delete(commit_key2.clone()).await?;
+    txn.put(commit_key3.clone(), vec![42]).await?;
     txn.commit().await?;
 
     // Check that the keys are not locked.
     let mut txn2 = client.begin_optimistic().await?;
-    txn2.put(vec![1], vec![42]).await?;
-    txn2.put(vec![2], vec![42]).await?;
-    txn2.put(vec![3], vec![42]).await?;
+    txn2.put(commit_key1, vec![42]).await?;
+    txn2.put(commit_key2, vec![42]).await?;
+    txn2.put(commit_key3, vec![42]).await?;
     txn2.commit().await?;
 
     // As before, but rollback instead of commit.
+    let rollback_key1 = vec![4];
+    let rollback_key2 = vec![5];
+    let rollback_key3 = vec![6];
     let mut txn = client.begin_pessimistic().await?;
-    txn.put(vec![1], vec![42]).await?;
-    txn.delete(vec![1]).await?;
-    txn.delete(vec![2]).await?;
-    // Same with upper comment.
-    //
-    // txn.insert(vec![2], vec![42]).await?;
-    txn.delete(vec![2]).await?;
-    txn.put(vec![3], vec![42]).await?;
+    txn.put(rollback_key1.clone(), vec![42]).await?;
+    txn.delete(rollback_key1.clone()).await?;
+    txn.insert(rollback_key2.clone(), vec![42]).await?;
+    txn.delete(rollback_key2.clone()).await?;
+    txn.put(rollback_key3.clone(), vec![42]).await?;
     txn.rollback().await?;
 
     let mut txn2 = client.begin_optimistic().await?;
-    txn2.put(vec![1], vec![42]).await?;
-    txn2.put(vec![2], vec![42]).await?;
-    txn2.put(vec![3], vec![42]).await?;
+    txn2.put(rollback_key1, vec![42]).await?;
+    txn2.put(rollback_key2, vec![42]).await?;
+    txn2.put(rollback_key3, vec![42]).await?;
     txn2.commit().await?;
 
     Ok(())
