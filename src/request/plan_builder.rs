@@ -247,7 +247,6 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         self,
         ctx: ResolveLocksContext,
         options: ResolveLocksOptions,
-        backoff: Backoff,
         keyspace: Keyspace,
     ) -> PlanBuilder<PdC, CleanupLocks<P, PdC>, Ph>
     where
@@ -261,7 +260,6 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
                 ctx,
                 options,
                 store: None,
-                backoff,
                 pd_client: self.pd_client,
                 keyspace,
             },

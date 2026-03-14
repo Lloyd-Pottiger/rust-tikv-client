@@ -852,7 +852,7 @@ impl<PdC: PdClient> Client<PdC> {
         let req = new_scan_lock_request(range, safepoint, options.batch_size);
         let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
             .preserve_shard()
-            .cleanup_locks(ctx.clone(), options, backoff.clone(), self.keyspace)
+            .cleanup_locks(ctx.clone(), options, self.keyspace)
             .retry_multi_region(backoff)
             .extract_error()
             .merge(crate::request::Collect)

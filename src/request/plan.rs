@@ -2383,7 +2383,6 @@ pub struct CleanupLocks<P: Plan, PdC: PdClient> {
     pub store: Option<RegionStore>,
     pub pd_client: Arc<PdC>,
     pub keyspace: Keyspace,
-    pub backoff: Backoff,
 }
 
 impl<P: Plan, PdC: PdClient> Clone for CleanupLocks<P, PdC> {
@@ -2395,7 +2394,6 @@ impl<P: Plan, PdC: PdClient> Clone for CleanupLocks<P, PdC> {
             store: None,
             pd_client: self.pd_client.clone(),
             keyspace: self.keyspace,
-            backoff: self.backoff.clone(),
         }
     }
 }
@@ -2507,11 +2505,6 @@ where
                     return Err(e);
                 }
             }
-
-            // TODO: improve backoff
-            // if self.backoff.is_none() {
-            //     return Err(Error::ResolveLockError);
-            // }
         }
 
         Ok(result)
@@ -4018,7 +4011,6 @@ mod test {
             store: None,
             pd_client: Arc::new(MockPdClient::default()),
             keyspace: Keyspace::Disable,
-            backoff: Backoff::no_backoff(),
         };
 
         let err = plan.execute().await.unwrap_err();
@@ -4028,6 +4020,38 @@ mod test {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_cleanup_locks_clone_resets_store() {
+        #[derive(Clone)]
+        struct NoopPlan;
+
+        #[async_trait]
+        impl Plan for NoopPlan {
+            type Result = ();
+
+            async fn execute(&self) -> Result<Self::Result> {
+                Ok(())
+            }
+        }
+
+        let plan = CleanupLocks {
+            inner: NoopPlan,
+            ctx: ResolveLocksContext::default(),
+            options: ResolveLocksOptions::default(),
+            store: Some(RegionStore::new(
+                MockPdClient::region1(),
+                Arc::new(MockKvClient::default()),
+                "mock://41".to_owned(),
+            )),
+            pd_client: Arc::new(MockPdClient::default()),
+            keyspace: Keyspace::Disable,
+        };
+        let cloned = plan.clone();
+
+        assert!(plan.store.is_some());
+        assert!(cloned.store.is_none());
     }
 
     #[test]
@@ -4494,7 +4518,6 @@ mod test {
             )),
             pd_client: Arc::new(MockPdClient::default()),
             keyspace: Keyspace::Disable,
-            backoff: Backoff::no_backoff(),
         };
 
         let result = plan.execute().await?;
@@ -4672,7 +4695,6 @@ mod test {
             store: Some(store),
             pd_client,
             keyspace: Keyspace::Disable,
-            backoff: Backoff::no_backoff(),
         };
 
         let result = plan.execute().await?;
