@@ -2627,6 +2627,10 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
         if res.is_ok() {
             self.set_status(TransactionStatus::Committed);
+        } else {
+            // Stop the background heartbeat task. On commit failure the transaction remains in
+            // `StartedCommit`, which would otherwise keep sending heartbeats indefinitely.
+            self.stop_auto_heartbeat();
         }
         res
     }
@@ -2669,6 +2673,29 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Err(Error::OperationAfterCommitError);
         }
 
+        // Stop the background heartbeat task early. Pipelined transactions may broadcast status
+        // after successful heartbeats; once rollback starts, we don't want further heartbeats to
+        // keep the transaction alive.
+        self.stop_auto_heartbeat();
+
+        if let Some(state) = self.pipelined.as_mut() {
+            // Match client-go: wait for in-flight pipelined flushes to finish on rollback to avoid
+            // racing with the flush task.
+            state.flush_wait().await?;
+        }
+
+        let pipelined_flushed_range = self.pipelined.as_ref().and_then(|state| {
+            state
+                .flushed_range_start
+                .clone()
+                .zip(state.flushed_range_end.clone())
+        });
+        let pipelined_resolve_concurrency = self
+            .options
+            .pipelined_txn
+            .as_ref()
+            .map(PipelinedTxnOptions::resolve_lock_concurrency);
+
         let primary_key = self.buffer.get_primary_key();
         let mutations = self.buffer.to_proto_mutations();
         let mut committer = Committer::new(
@@ -2688,31 +2715,44 @@ impl<PdC: PdClient> Transaction<PdC> {
         committer.schema_ver = self.schema_ver;
         committer.schema_lease_checker = self.schema_lease_checker.clone();
 
-        let pipelined_has_flushed_range = self
-            .pipelined
-            .as_ref()
-            .map(PipelinedState::has_flushed_range)
-            .unwrap_or(false);
         let res = committer.rollback().await;
 
         if res.is_ok() {
             self.set_status(TransactionStatus::Rolledback);
-            if pipelined_has_flushed_range {
-                let rpc = self.rpc.clone();
-                let start_ts = self.timestamp.version();
-                let status = kvrpcpb::TxnStatus {
-                    start_ts,
-                    min_commit_ts: start_ts.saturating_add(1),
-                    commit_ts: 0,
-                    rolled_back: true,
-                    is_completed: false,
-                };
-                tokio::spawn(async move {
-                    if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
-                        debug!("broadcast_txn_status_to_all_stores failed: {err}");
-                    }
-                });
-            }
+        }
+        if let (Some((range_start, range_end)), Some(resolve_concurrency)) =
+            (pipelined_flushed_range, pipelined_resolve_concurrency)
+        {
+            let rpc = self.rpc.clone();
+            let start_ts = self.timestamp.version();
+            let status = kvrpcpb::TxnStatus {
+                start_ts,
+                min_commit_ts: start_ts.saturating_add(1),
+                commit_ts: 0,
+                rolled_back: true,
+                is_completed: false,
+            };
+            tokio::spawn(async move {
+                if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
+                    debug!("broadcast_txn_status_to_all_stores failed: {err}");
+                }
+            });
+
+            spawn_pipelined_resolve_locks_and_broadcast_completion(
+                self.rpc.clone(),
+                self.keyspace,
+                self.rpc_interceptors.clone(),
+                self.options.clone(),
+                self.resource_group_tagger.clone(),
+                start_ts,
+                0,
+                true,
+                range_start,
+                range_end,
+                self.region_backoff(),
+                self.vars.killed.clone(),
+                resolve_concurrency,
+            );
         }
         res
     }
@@ -4132,6 +4172,7 @@ const PIPELINED_MIN_FLUSH_KEYS: u64 = 10_000;
 const PIPELINED_MIN_FLUSH_MEM_SIZE: u64 = 16 * 1024 * 1024; // 16MB
 const PIPELINED_FORCE_FLUSH_MEM_SIZE_THRESHOLD: u64 = 128 * 1024 * 1024; // 128MB
 const PIPELINED_FLUSH_EWMA_AGE: f64 = 10.0;
+const PIPELINED_BROADCAST_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 fn pipelined_min_flush_keys() -> u64 {
     fail_point!("pipelined_memdb_min_flush_keys", |val| {
@@ -4155,6 +4196,14 @@ fn pipelined_force_flush_mem_size_threshold() -> u64 {
             .unwrap_or(PIPELINED_FORCE_FLUSH_MEM_SIZE_THRESHOLD)
     });
     PIPELINED_FORCE_FLUSH_MEM_SIZE_THRESHOLD
+}
+
+fn pipelined_broadcast_grace_period() -> Duration {
+    fail_point!("pipelined_broadcast_grace_period_ms", |val| {
+        val.map(|val| Duration::from_millis(val.parse::<u64>().unwrap()))
+            .unwrap_or(PIPELINED_BROADCAST_GRACE_PERIOD)
+    });
+    PIPELINED_BROADCAST_GRACE_PERIOD
 }
 
 #[derive(Debug, Default)]
@@ -4364,6 +4413,78 @@ async fn throttle_pipelined_flush(ewma: Arc<Mutex<FlushDurationEwma>>, write_thr
     }
 
     tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+}
+
+fn spawn_pipelined_resolve_locks_and_broadcast_completion<PdC: PdClient + 'static>(
+    rpc: Arc<PdC>,
+    keyspace: Keyspace,
+    rpc_interceptors: RpcInterceptors,
+    options: TransactionOptions,
+    resource_group_tagger: Option<ResourceGroupTagger>,
+    start_ts: u64,
+    commit_ts: u64,
+    rolled_back: bool,
+    range_start: Key,
+    range_end: Key,
+    region_backoff: Backoff,
+    killed: Option<Arc<atomic::AtomicU32>>,
+    resolve_concurrency: usize,
+) {
+    let resolve_status = if rolled_back { "rollback" } else { "commit" };
+
+    let mut resolve_request = ResolveLockRangeRequest::new(
+        super::requests::new_resolve_lock_request(start_ts, commit_ts, false),
+        range_start,
+        range_end,
+    );
+    options.apply_write_context(&mut resolve_request.inner_mut().context);
+    if let Some(ctx) = resolve_request.inner_mut().context.as_mut() {
+        ctx.request_source = PIPELINED_REQUEST_SOURCE.to_owned();
+    }
+    if options.resource_group_tag.is_none() {
+        if let Some(tagger) = resource_group_tagger.as_ref() {
+            let tag = (tagger)(resolve_request.label());
+            let ctx = resolve_request
+                .inner_mut()
+                .context
+                .get_or_insert_with(kvrpcpb::Context::default);
+            ctx.resource_group_tag = tag;
+        }
+    }
+
+    tokio::spawn(async move {
+        let plan = PlanBuilder::new_with_rpc_interceptors(
+            rpc.clone(),
+            keyspace,
+            resolve_request,
+            rpc_interceptors,
+        )
+        .retry_multi_region_with_concurrency(region_backoff, resolve_concurrency)
+        .with_killed(killed)
+        .merge(CollectError)
+        .extract_error()
+        .plan();
+        if let Err(err) = plan.execute().await {
+            log::warn!(
+                "Failed to resolve pipelined locks ({resolve_status}): {}",
+                err
+            );
+            return;
+        }
+
+        tokio::time::sleep(pipelined_broadcast_grace_period()).await;
+
+        let status = kvrpcpb::TxnStatus {
+            start_ts,
+            min_commit_ts: 0,
+            commit_ts,
+            rolled_back,
+            is_completed: true,
+        };
+        if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
+            debug!("broadcast_txn_status_to_all_stores failed: {err}");
+        }
+    });
 }
 
 /// Optimistic or pessimistic transaction.
@@ -5488,67 +5609,97 @@ impl<PdC: PdClient> Committer<PdC> {
                 };
                 ewma.observe(sample_ms);
             }
-            let _flush_responses = flush_result?;
+            if let Err(err) = flush_result {
+                let start_ts = self.start_version.version();
+                let rpc = self.rpc.clone();
+                let status = kvrpcpb::TxnStatus {
+                    start_ts,
+                    min_commit_ts: start_ts.saturating_add(1),
+                    commit_ts: 0,
+                    rolled_back: true,
+                    is_completed: false,
+                };
+                tokio::spawn(async move {
+                    if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
+                        debug!("broadcast_txn_status_to_all_stores failed: {err}");
+                    }
+                });
+
+                spawn_pipelined_resolve_locks_and_broadcast_completion(
+                    self.rpc.clone(),
+                    self.keyspace,
+                    self.rpc_interceptors.clone(),
+                    self.options.clone(),
+                    self.resource_group_tagger.clone(),
+                    start_ts,
+                    0,
+                    true,
+                    range_start.clone(),
+                    range_end.clone(),
+                    self.region_backoff(),
+                    self.vars.killed.clone(),
+                    pipelined.resolve_lock_concurrency(),
+                );
+                return Err(err);
+            }
         }
 
         let commit_ts = match self.commit_primary_with_retry().await {
             Ok(commit_ts) => commit_ts,
             Err(e) => {
-                return if self.undetermined {
-                    Err(Error::UndeterminedError(Box::new(e)))
-                } else {
-                    Err(e)
+                if self.undetermined {
+                    return Err(Error::UndeterminedError(Box::new(e)));
+                }
+
+                let start_ts = self.start_version.version();
+                let rpc = self.rpc.clone();
+                let status = kvrpcpb::TxnStatus {
+                    start_ts,
+                    min_commit_ts: start_ts.saturating_add(1),
+                    commit_ts: 0,
+                    rolled_back: true,
+                    is_completed: false,
                 };
+                tokio::spawn(async move {
+                    if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
+                        debug!("broadcast_txn_status_to_all_stores failed: {err}");
+                    }
+                });
+
+                spawn_pipelined_resolve_locks_and_broadcast_completion(
+                    self.rpc.clone(),
+                    self.keyspace,
+                    self.rpc_interceptors.clone(),
+                    self.options.clone(),
+                    self.resource_group_tagger.clone(),
+                    start_ts,
+                    0,
+                    true,
+                    range_start.clone(),
+                    range_end.clone(),
+                    self.region_backoff(),
+                    self.vars.killed.clone(),
+                    pipelined.resolve_lock_concurrency(),
+                );
+                return Err(e);
             }
         };
 
-        let mut resolve_request = ResolveLockRangeRequest::new(
-            super::requests::new_resolve_lock_request(
-                self.start_version.version(),
-                commit_ts.version(),
-                false,
-            ),
+        spawn_pipelined_resolve_locks_and_broadcast_completion(
+            self.rpc.clone(),
+            self.keyspace,
+            self.rpc_interceptors.clone(),
+            self.options.clone(),
+            self.resource_group_tagger.clone(),
+            self.start_version.version(),
+            commit_ts.version(),
+            false,
             range_start,
             range_end,
+            self.region_backoff(),
+            self.vars.killed.clone(),
+            pipelined.resolve_lock_concurrency(),
         );
-        self.options
-            .apply_write_context(&mut resolve_request.inner_mut().context);
-        if let Some(ctx) = resolve_request.inner_mut().context.as_mut() {
-            ctx.request_source = PIPELINED_REQUEST_SOURCE.to_owned();
-        }
-        if self.options.resource_group_tag.is_none() {
-            if let Some(tagger) = self.resource_group_tagger.as_ref() {
-                let tag = (tagger)(resolve_request.label());
-                let ctx = resolve_request
-                    .inner_mut()
-                    .context
-                    .get_or_insert_with(kvrpcpb::Context::default);
-                ctx.resource_group_tag = tag;
-            }
-        }
-
-        let resolve_pd = self.rpc.clone();
-        let resolve_keyspace = self.keyspace;
-        let resolve_backoff = self.region_backoff();
-        let resolve_killed = self.vars.killed.clone();
-        let resolve_concurrency = pipelined.resolve_lock_concurrency();
-        let resolve_rpc_interceptors = self.rpc_interceptors.clone();
-        tokio::spawn(async move {
-            let plan = PlanBuilder::new_with_rpc_interceptors(
-                resolve_pd,
-                resolve_keyspace,
-                resolve_request,
-                resolve_rpc_interceptors,
-            )
-            .retry_multi_region_with_concurrency(resolve_backoff, resolve_concurrency)
-            .with_killed(resolve_killed)
-            .merge(CollectError)
-            .extract_error()
-            .plan();
-            if let Err(err) = plan.execute().await {
-                log::warn!("Failed to resolve pipelined locks: {}", err);
-            }
-        });
 
         Ok(Some(commit_ts))
     }
@@ -6731,11 +6882,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipelined_commit_uses_flush_and_resolve_lock_range() {
+        let scenario = FailScenario::setup();
+        fail::cfg("pipelined_broadcast_grace_period_ms", "return(0)").unwrap();
+
         let flushed = Arc::new(Mutex::new(Vec::<kvrpcpb::FlushRequest>::new()));
         let committed = Arc::new(Mutex::new(Vec::<kvrpcpb::CommitRequest>::new()));
         let resolved = Arc::new(Mutex::new(Vec::<kvrpcpb::ResolveLockRequest>::new()));
 
         let (resolve_tx, mut resolve_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+        let broadcasts = Arc::new(AtomicUsize::new(0));
+        let broadcasts_captured = broadcasts.clone();
+        let broadcast_notified = Arc::new(tokio::sync::Notify::new());
+        let broadcast_notified_captured = broadcast_notified.clone();
 
         let flushed_cloned = flushed.clone();
         let committed_cloned = committed.clone();
@@ -6756,10 +6915,44 @@ mod tests {
                     let _ = resolve_tx.send(());
                     return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()) as Box<dyn Any>);
                 }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>() {
+                    assert!(
+                        req.context.is_some(),
+                        "BroadcastTxnStatusRequest should populate context"
+                    );
+                    assert_eq!(req.txn_status.len(), 1);
+                    let status = &req.txn_status[0];
+                    assert_eq!(status.start_ts, 5);
+                    assert_eq!(status.min_commit_ts, 0);
+                    assert_eq!(status.commit_ts, 100);
+                    assert!(!status.rolled_back);
+                    assert!(status.is_completed);
+
+                    let count = broadcasts_captured.fetch_add(1, Ordering::SeqCst) + 1;
+                    if count == 2 {
+                        broadcast_notified_captured.notify_one();
+                    }
+                    return Ok(
+                        Box::<kvrpcpb::BroadcastTxnStatusResponse>::default() as Box<dyn Any>
+                    );
+                }
                 Err(Error::StringError("unexpected request".to_owned()))
             }))
             .with_tso_sequence(100),
         );
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                ..Default::default()
+            })
+            .await;
 
         let start_ts = Timestamp::from_version(5);
         let options = TransactionOptions::new_optimistic()
@@ -6784,6 +6977,11 @@ mod tests {
         })
         .await
         .expect("timed out waiting for pipelined resolve-lock");
+
+        tokio::time::timeout(Duration::from_secs(2), broadcast_notified.notified())
+            .await
+            .expect("completion broadcast should be dispatched to all stores");
+        assert_eq!(broadcasts.load(Ordering::SeqCst), 2);
 
         let flushed = flushed.lock().unwrap().clone();
         assert_eq!(flushed.len(), 2, "expected one flush per region");
@@ -6815,6 +7013,111 @@ mod tests {
                 "pipelined_flush"
             );
         }
+
+        scenario.teardown();
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_commit_failure_resolves_flushed_locks_and_broadcasts_completion() {
+        use tokio::sync::Notify;
+
+        let scenario = FailScenario::setup();
+        fail::cfg("pipelined_broadcast_grace_period_ms", "return(0)").unwrap();
+
+        let initial_broadcasts = Arc::new(AtomicUsize::new(0));
+        let initial_broadcasts_captured = initial_broadcasts.clone();
+        let completed_broadcasts = Arc::new(AtomicUsize::new(0));
+        let completed_broadcasts_captured = completed_broadcasts.clone();
+        let resolved = Arc::new(AtomicUsize::new(0));
+        let resolved_captured = resolved.clone();
+        let notified = Arc::new(Notify::new());
+        let notified_captured = notified.clone();
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    return Err(Error::StringError("commit primary failed".to_owned()));
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    assert_eq!(req.start_version, 5);
+                    assert_eq!(req.commit_version, 0);
+                    assert_eq!(
+                        req.context.as_ref().unwrap().request_source,
+                        "pipelined_flush"
+                    );
+                    resolved_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>() {
+                    assert!(
+                        req.context.is_some(),
+                        "BroadcastTxnStatusRequest should populate context"
+                    );
+                    assert_eq!(req.txn_status.len(), 1);
+                    let status = &req.txn_status[0];
+                    assert_eq!(status.start_ts, 5);
+                    assert_eq!(status.commit_ts, 0);
+                    assert!(status.rolled_back);
+
+                    if status.is_completed {
+                        assert_eq!(status.min_commit_ts, 0);
+                        let count =
+                            completed_broadcasts_captured.fetch_add(1, Ordering::SeqCst) + 1;
+                        if count == 2 {
+                            notified_captured.notify_one();
+                        }
+                    } else {
+                        assert_eq!(status.min_commit_ts, 6);
+                        initial_broadcasts_captured.fetch_add(1, Ordering::SeqCst);
+                    }
+                    return Ok(
+                        Box::<kvrpcpb::BroadcastTxnStatusResponse>::default() as Box<dyn Any>
+                    );
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            }))
+            .with_tso_sequence(100),
+        );
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                ..Default::default()
+            })
+            .await;
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        txn.put(vec![11u8], b"v2".to_vec()).await.unwrap();
+
+        txn.commit().await.expect_err("commit primary should fail");
+
+        tokio::time::timeout(Duration::from_secs(2), notified.notified())
+            .await
+            .expect("completion broadcast should be dispatched to all stores");
+        assert_eq!(initial_broadcasts.load(Ordering::SeqCst), 2);
+        assert_eq!(completed_broadcasts.load(Ordering::SeqCst), 2);
+        assert_eq!(resolved.load(Ordering::SeqCst), 2);
+
+        scenario.teardown();
     }
 
     #[tokio::test]
@@ -10200,13 +10503,30 @@ mod tests {
     ) {
         use tokio::sync::Notify;
 
-        let broadcasts = Arc::new(AtomicUsize::new(0));
-        let broadcasts_captured = broadcasts.clone();
+        let scenario = FailScenario::setup();
+        fail::cfg("pipelined_broadcast_grace_period_ms", "return(0)").unwrap();
+
+        let initial_broadcasts = Arc::new(AtomicUsize::new(0));
+        let initial_broadcasts_captured = initial_broadcasts.clone();
+        let completed_broadcasts = Arc::new(AtomicUsize::new(0));
+        let completed_broadcasts_captured = completed_broadcasts.clone();
+        let resolved = Arc::new(AtomicUsize::new(0));
+        let resolved_captured = resolved.clone();
         let notified = Arc::new(Notify::new());
         let notified_captured = notified.clone();
 
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    assert_eq!(req.start_version, 5);
+                    assert_eq!(req.commit_version, 0);
+                    assert_eq!(
+                        req.context.as_ref().unwrap().request_source,
+                        "pipelined_flush"
+                    );
+                    resolved_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
                 if let Some(req) = req.downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>() {
                     assert!(
                         req.context.is_some(),
@@ -10215,14 +10535,19 @@ mod tests {
                     assert_eq!(req.txn_status.len(), 1);
                     let status = &req.txn_status[0];
                     assert_eq!(status.start_ts, 5);
-                    assert_eq!(status.min_commit_ts, 6);
                     assert_eq!(status.commit_ts, 0);
                     assert!(status.rolled_back);
-                    assert!(!status.is_completed);
 
-                    let count = broadcasts_captured.fetch_add(1, Ordering::SeqCst) + 1;
-                    if count == 2 {
-                        notified_captured.notify_one();
+                    if status.is_completed {
+                        assert_eq!(status.min_commit_ts, 0);
+                        let count =
+                            completed_broadcasts_captured.fetch_add(1, Ordering::SeqCst) + 1;
+                        if count == 2 {
+                            notified_captured.notify_one();
+                        }
+                    } else {
+                        assert_eq!(status.min_commit_ts, 6);
+                        initial_broadcasts_captured.fetch_add(1, Ordering::SeqCst);
                     }
                     return Ok(
                         Box::<kvrpcpb::BroadcastTxnStatusResponse>::default() as Box<dyn Any>
@@ -10267,8 +10592,12 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(2), notified.notified())
             .await
-            .expect("broadcast should be dispatched to all stores");
-        assert_eq!(broadcasts.load(Ordering::SeqCst), 2);
+            .expect("completion broadcast should be dispatched to all stores");
+        assert_eq!(initial_broadcasts.load(Ordering::SeqCst), 2);
+        assert_eq!(completed_broadcasts.load(Ordering::SeqCst), 2);
+        assert_eq!(resolved.load(Ordering::SeqCst), 1);
+
+        scenario.teardown();
     }
 
     #[derive(Clone)]
