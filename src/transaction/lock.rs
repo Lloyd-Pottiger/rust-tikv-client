@@ -477,6 +477,9 @@ pub(crate) async fn resolve_locks_with_options(
     let mut ms_before_txn_expired: Option<i64> = None;
     let mut lock_resolver = LockResolver::new(ctx);
     lock_resolver.rpc_context = rpc_context;
+    if let Some(callback) = lock_resolver.rpc_context.meet_lock_callback.as_ref() {
+        callback(&locks);
+    }
 
     // records the commit version of each primary lock (representing the status of the transaction)
     let mut commit_versions: HashMap<u64, u64> = HashMap::new();
@@ -717,6 +720,9 @@ pub(crate) async fn resolve_locks_for_read(
     let mut committed_locks = Vec::new();
     let mut lock_resolver = LockResolver::new(ctx);
     lock_resolver.rpc_context = rpc_context;
+    if let Some(callback) = lock_resolver.rpc_context.meet_lock_callback.as_ref() {
+        callback(&locks);
+    }
     let mut resolved_async_commit_txns: HashSet<u64> = HashSet::new();
 
     for lock in locks {
@@ -1281,6 +1287,7 @@ pub struct ResolveLocksOptions {
 }
 
 type ResourceGroupTagger = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
+type MeetLockCallback = Arc<dyn Fn(&[kvrpcpb::LockInfo]) + Send + Sync + 'static>;
 
 #[derive(Clone, Default)]
 pub(crate) struct LockResolverRpcContext {
@@ -1289,6 +1296,7 @@ pub(crate) struct LockResolverRpcContext {
     pub(crate) resource_group_tagger: Option<ResourceGroupTagger>,
     pub(crate) resolve_lock_detail: Option<Arc<ResolveLockDetailCollector>>,
     pub(crate) rpc_interceptors: RpcInterceptors,
+    pub(crate) meet_lock_callback: Option<MeetLockCallback>,
 }
 
 impl LockResolverRpcContext {
@@ -1421,6 +1429,24 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
     /// Cancels background cleanup tasks spawned by [`BoundLockResolver::resolve_locks_for_read`].
     pub async fn close(&self) {
         self.inner.close().await;
+    }
+
+    /// Sets a callback invoked when the resolver sees locks.
+    ///
+    /// This is intended for test instrumentation and mirrors client-go
+    /// `LockResolverProbe.SetMeetLockCallback`.
+    #[doc(hidden)]
+    pub fn set_meet_lock_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&[kvrpcpb::LockInfo]) + Send + Sync + 'static,
+    {
+        self.inner.set_meet_lock_callback(callback);
+    }
+
+    /// Clears the meet-lock callback.
+    #[doc(hidden)]
+    pub fn clear_meet_lock_callback(&mut self) {
+        self.inner.clear_meet_lock_callback();
     }
 
     /// Records the locks being resolved for a given `caller_start_ts` and returns a token.
@@ -1604,6 +1630,24 @@ impl LockResolver {
 
     pub(crate) fn set_rpc_context(&mut self, rpc_context: LockResolverRpcContext) {
         self.rpc_context = rpc_context;
+    }
+
+    /// Sets a callback invoked when the resolver sees locks.
+    ///
+    /// This is intended for test instrumentation and mirrors client-go
+    /// `LockResolverProbe.SetMeetLockCallback`.
+    #[doc(hidden)]
+    pub fn set_meet_lock_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&[kvrpcpb::LockInfo]) + Send + Sync + 'static,
+    {
+        self.rpc_context.meet_lock_callback = Some(Arc::new(callback));
+    }
+
+    /// Clears the meet-lock callback.
+    #[doc(hidden)]
+    pub fn clear_meet_lock_callback(&mut self) {
+        self.rpc_context.meet_lock_callback = None;
     }
 
     /// Records the locks being resolved for a given `caller_start_ts` and returns a token.
@@ -2685,6 +2729,7 @@ mod tests {
             resource_group_tagger: None,
             resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
+            meet_lock_callback: None,
         };
         rpc_context.apply_to_kv_context("kv_check_txn_status", &mut ctx);
 
@@ -2740,6 +2785,7 @@ mod tests {
             })),
             resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
+            meet_lock_callback: None,
         };
 
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
@@ -2858,6 +2904,7 @@ mod tests {
             })),
             resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
+            meet_lock_callback: None,
         };
 
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
@@ -2934,6 +2981,7 @@ mod tests {
             })),
             resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
+            meet_lock_callback: None,
         };
 
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
@@ -2999,6 +3047,56 @@ mod tests {
         );
         assert!(!status.missing_lock);
         assert_eq!(tagger_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_meet_lock_callback_invoked_for_resolve_paths() {
+        let callback_calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls_captured = callback_calls.clone();
+
+        let mut lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        lock_resolver.set_meet_lock_callback(move |locks| {
+            callback_calls_captured.fetch_add(1, Ordering::SeqCst);
+            assert!(locks.is_empty(), "expected empty lock list");
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                panic!(
+                    "unexpected TiKV request when no locks are provided: {:?}",
+                    req.type_id()
+                );
+            },
+        )));
+
+        let timestamp = Timestamp::from_version(1);
+        let result = lock_resolver
+            .resolve_locks_once(
+                Vec::new(),
+                timestamp.clone(),
+                pd_client.clone(),
+                Keyspace::Disable,
+                false,
+            )
+            .await
+            .expect("resolve_locks_once should succeed with empty lock list");
+        assert!(result.live_locks.is_empty());
+        assert_eq!(result.ms_before_txn_expired, 0);
+
+        let result = lock_resolver
+            .resolve_locks_for_read(Vec::new(), timestamp, pd_client, Keyspace::Disable, false)
+            .await
+            .expect("resolve_locks_for_read should succeed with empty lock list");
+        assert!(result.live_locks.is_empty());
+        assert!(result.resolved_locks.is_empty());
+        assert!(result.committed_locks.is_empty());
+        assert_eq!(result.ms_before_txn_expired, 0);
+
+        assert_eq!(
+            callback_calls.load(Ordering::SeqCst),
+            2,
+            "expected callback to be invoked once per resolve path"
+        );
     }
 
     #[tokio::test]

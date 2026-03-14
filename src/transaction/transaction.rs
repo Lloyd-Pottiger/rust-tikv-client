@@ -5430,6 +5430,7 @@ impl TransactionOptions {
             resource_group_tagger,
             resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
+            meet_lock_callback: None,
         }
     }
 
