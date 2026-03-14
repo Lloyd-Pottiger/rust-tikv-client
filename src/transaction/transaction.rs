@@ -4072,6 +4072,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 plan.execute().await?;
 
                 if broadcast_pipelined_txn_status {
+                    let rpc = rpc.clone();
                     let status = kvrpcpb::TxnStatus {
                         start_ts: start_ts.version(),
                         min_commit_ts: start_ts.version().saturating_add(1),
@@ -4079,9 +4080,12 @@ impl<PdC: PdClient> Transaction<PdC> {
                         rolled_back: false,
                         is_completed: false,
                     };
-                    if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
-                        debug!("broadcast_txn_status_to_all_stores failed: {err}");
-                    }
+                    tokio::spawn(async move {
+                        if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await
+                        {
+                            debug!("broadcast_txn_status_to_all_stores failed: {err}");
+                        }
+                    });
                 }
             }
             Ok::<(), Error>(())
