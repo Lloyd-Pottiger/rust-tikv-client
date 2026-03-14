@@ -96,6 +96,13 @@ impl Cluster {
             .await
     }
 
+    pub async fn get_min_ts(&mut self, timeout: Duration) -> Result<Timestamp> {
+        let req = pd_request!(self.id, pdpb::GetMinTsRequest);
+        let resp = req.send(&mut self.client, timeout).await?;
+        resp.timestamp
+            .ok_or_else(|| internal_err!("GetMinTsResponse missing timestamp"))
+    }
+
     pub async fn update_safepoint(
         &mut self,
         safepoint: u64,
@@ -449,6 +456,16 @@ impl PdMessage for pdpb::GetAllStoresRequest {
 }
 
 #[async_trait]
+impl PdMessage for pdpb::GetMinTsRequest {
+    type Client = pdpb::pd_client::PdClient<Channel>;
+    type Response = pdpb::GetMinTsResponse;
+
+    async fn rpc(req: Request<Self>, client: &mut Self::Client) -> GrpcResult<Self::Response> {
+        Ok(client.get_min_ts(req).await?.into_inner())
+    }
+}
+
+#[async_trait]
 impl PdMessage for pdpb::UpdateGcSafePointRequest {
     type Client = pdpb::pd_client::PdClient<Channel>;
     type Response = pdpb::UpdateGcSafePointResponse;
@@ -491,6 +508,12 @@ impl PdResponse for pdpb::GetAllStoresResponse {
 }
 
 impl PdResponse for pdpb::UpdateGcSafePointResponse {
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+impl PdResponse for pdpb::GetMinTsResponse {
     fn header(&self) -> Option<&pdpb::ResponseHeader> {
         self.header.as_ref()
     }

@@ -80,6 +80,15 @@ pub trait PdClient: Send + Sync + 'static {
         self.get_timestamp().await
     }
 
+    /// Retrieve a minimum [`Timestamp`] from all TSO keyspace groups.
+    ///
+    /// This maps to client-go `pd.Client.GetMinTS` (and `KVStore.CurrentAllTSOKeyspaceGroupMinTs`).
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+        Err(Error::Unimplemented)
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
@@ -480,6 +489,10 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
             .clone()
             .get_timestamp_with_dc_location(dc_location)
             .await
+    }
+
+    async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+        self.pd.clone().get_min_ts().await
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {

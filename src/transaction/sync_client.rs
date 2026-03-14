@@ -230,6 +230,17 @@ impl SyncTransactionClient {
         )
     }
 
+    /// Retrieve a minimum [`Timestamp`] from all TSO keyspace groups.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::current_all_tso_keyspace_group_min_ts`](crate::TransactionClient::current_all_tso_keyspace_group_min_ts).
+    pub fn current_all_tso_keyspace_group_min_ts(&self) -> Result<Timestamp> {
+        safe_block_on(
+            &self.runtime,
+            self.client.current_all_tso_keyspace_group_min_ts(),
+        )
+    }
+
     /// Generate a timestamp representing the time `prev_seconds` seconds ago.
     ///
     /// This is a synchronous version of [`TransactionClient::stale_timestamp`](crate::TransactionClient::stale_timestamp).

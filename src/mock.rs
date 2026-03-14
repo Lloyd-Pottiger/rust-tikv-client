@@ -91,6 +91,8 @@ pub struct MockPdClient {
     store_meta_by_id_calls: Arc<AtomicUsize>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
     get_timestamp_calls: Arc<AtomicUsize>,
+    #[new(value = "Arc::new(AtomicUsize::new(0))")]
+    get_min_ts_calls: Arc<AtomicUsize>,
     #[new(value = "Mutex::new(Vec::new())")]
     get_timestamp_dc_locations: Mutex<Vec<String>>,
     #[new(value = "Mutex::new(HashMap::new())")]
@@ -105,6 +107,10 @@ pub struct MockPdClient {
     tso_version: Arc<AtomicU64>,
     #[new(value = "false")]
     use_tso_sequence: bool,
+    #[new(value = "Arc::new(AtomicU64::new(0))")]
+    min_ts_version: Arc<AtomicU64>,
+    #[new(value = "false")]
+    use_min_ts: bool,
 }
 
 #[async_trait]
@@ -146,6 +152,10 @@ impl MockPdClient {
         self.get_timestamp_calls.load(Ordering::SeqCst)
     }
 
+    pub fn get_min_ts_call_count(&self) -> usize {
+        self.get_min_ts_calls.load(Ordering::SeqCst)
+    }
+
     pub fn get_timestamp_dc_locations(&self) -> Vec<String> {
         let locations = match self.get_timestamp_dc_locations.lock() {
             Ok(guard) => guard,
@@ -173,6 +183,12 @@ impl MockPdClient {
     pub fn with_tso_sequence(mut self, start_version: u64) -> MockPdClient {
         self.use_tso_sequence = true;
         self.tso_version.store(start_version, Ordering::SeqCst);
+        self
+    }
+
+    pub fn with_min_ts_version(mut self, version: u64) -> MockPdClient {
+        self.use_min_ts = true;
+        self.min_ts_version.store(version, Ordering::SeqCst);
         self
     }
 
@@ -452,6 +468,17 @@ impl PdClient for MockPdClient {
         if self.use_tso_sequence {
             let version = self.tso_version.fetch_add(1, Ordering::SeqCst);
             Ok(Timestamp::from_version(version))
+        } else {
+            Ok(Timestamp::default())
+        }
+    }
+
+    async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+        self.get_min_ts_calls.fetch_add(1, Ordering::SeqCst);
+        if self.use_min_ts {
+            Ok(Timestamp::from_version(
+                self.min_ts_version.load(Ordering::SeqCst),
+            ))
         } else {
             Ok(Timestamp::default())
         }

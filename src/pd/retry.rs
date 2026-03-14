@@ -56,6 +56,10 @@ pub trait RetryClientTrait {
         self.get_timestamp().await
     }
 
+    async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+        Err(Error::Unimplemented)
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
@@ -104,6 +108,10 @@ macro_rules! retry_core {
 
             match stats.done(res) {
                 Ok(r) => return Ok(r),
+                Err(Error::Unimplemented) => return Err(Error::Unimplemented),
+                Err(Error::GrpcAPI(status)) if status.code() == tonic::Code::Unimplemented => {
+                    return Err(Error::Unimplemented);
+                }
                 Err(e) => last_err = Err(e),
             }
 
@@ -227,6 +235,12 @@ impl RetryClientTrait for RetryClient<Cluster> {
     ) -> Result<Timestamp> {
         retry!(self, "get_timestamp_with_dc_location", |cluster| {
             cluster.get_timestamp_with_dc_location(dc_location.clone())
+        })
+    }
+
+    async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+        retry_mut!(self, "get_min_ts", |cluster| async {
+            cluster.get_min_ts(self.timeout).await
         })
     }
 

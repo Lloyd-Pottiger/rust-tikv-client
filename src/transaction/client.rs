@@ -462,6 +462,13 @@ impl<PdC: PdClient> Client<PdC> {
         Ok(timestamp)
     }
 
+    /// Retrieve a minimum [`Timestamp`] from all TSO keyspace groups.
+    ///
+    /// This maps to client-go `KVStore.CurrentAllTSOKeyspaceGroupMinTs`.
+    pub async fn current_all_tso_keyspace_group_min_ts(&self) -> Result<Timestamp> {
+        PdClient::get_min_ts(self.pd.clone()).await
+    }
+
     /// Generate a timestamp representing the time `prev_seconds` seconds ago.
     ///
     /// This is intended for staleness reads: when combined with
@@ -1771,6 +1778,55 @@ mod tests {
             pd_client.get_timestamp_dc_locations(),
             vec!["".to_owned(), "".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn test_current_all_tso_keyspace_group_min_ts_delegates_to_pd_get_min_ts() {
+        let min_version = 123u64 << 18;
+        let pd_client = Arc::new(MockPdClient::default().with_min_ts_version(min_version));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let ts = client
+            .current_all_tso_keyspace_group_min_ts()
+            .await
+            .unwrap();
+        assert_eq!(pd_client.get_min_ts_call_count(), 1);
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+        assert_eq!(ts.version(), min_version);
+    }
+
+    #[tokio::test]
+    async fn test_current_all_tso_keyspace_group_min_ts_does_not_record_last_tso() {
+        let start_version = 10_000u64 << 18;
+        let min_version = 123u64 << 18;
+        let pd_client = Arc::new(
+            MockPdClient::default()
+                .with_tso_sequence(start_version)
+                .with_min_ts_version(min_version),
+        );
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let _ = client
+            .current_all_tso_keyspace_group_min_ts()
+            .await
+            .unwrap();
+        let _ = client.stale_timestamp(5).await.unwrap();
+
+        assert_eq!(pd_client.get_min_ts_call_count(), 1);
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
     }
 
     #[tokio::test]
