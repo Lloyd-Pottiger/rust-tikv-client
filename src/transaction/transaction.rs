@@ -1968,6 +1968,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                 .await?;
         }
         self.buffer.put(key, value.into());
+        if self.options.pipelined_txn.is_some() {
+            let _ = self.flush(false).await?;
+        }
         Ok(())
     }
 
@@ -2116,6 +2119,9 @@ impl<PdC: PdClient> Transaction<PdC> {
             .await?;
         }
         self.buffer.insert(key, value.into());
+        if self.options.pipelined_txn.is_some() {
+            let _ = self.flush(false).await?;
+        }
         Ok(())
     }
 
@@ -2145,6 +2151,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                 .await?;
         }
         self.buffer.delete(key);
+        if self.options.pipelined_txn.is_some() {
+            let _ = self.flush(false).await?;
+        }
         Ok(())
     }
 
@@ -2189,6 +2198,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                 self.buffer.mutate(m);
             }
         }
+        if self.options.pipelined_txn.is_some() {
+            let _ = self.flush(false).await?;
+        }
         Ok(())
     }
 
@@ -2199,7 +2211,6 @@ impl<PdC: PdClient> Transaction<PdC> {
     ///
     /// The returned boolean indicates whether a flush was triggered.
     pub async fn flush(&mut self, force: bool) -> Result<bool> {
-        debug!("invoking transactional flush");
         self.check_allow_operation().await?;
         self.vars.check_killed()?;
 
@@ -2225,6 +2236,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         if !should_flush {
             return Ok(false);
         }
+        debug!(
+            "triggering transactional flush (force={force}, mutation_count={mutation_count}, write_size={write_size})"
+        );
 
         // If the mutable buffer is too large, block until the previous flush finishes.
         let is_flushing = self
@@ -6521,7 +6535,10 @@ mod tests {
     use async_trait::async_trait;
     use fail::FailScenario;
 
-    use super::{AssertionLevel, PessimisticLockMode, PrewriteEncounterLockPolicy};
+    use super::{
+        AssertionLevel, PessimisticLockMode, PrewriteEncounterLockPolicy, PIPELINED_MIN_FLUSH_KEYS,
+        PIPELINED_MIN_FLUSH_MEM_SIZE,
+    };
 
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
@@ -6714,6 +6731,68 @@ mod tests {
             "pipelined_flush"
         );
         assert_eq!(flushed[0].assertion_level, AssertionLevel::Strict as i32);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_auto_flush_triggers_flush_when_thresholds_met() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_assertion_level(AssertionLevel::Strict);
+
+        let value_len = usize::try_from(PIPELINED_MIN_FLUSH_MEM_SIZE / PIPELINED_MIN_FLUSH_KEYS)
+            .unwrap()
+            .saturating_add(1);
+        let value = vec![0u8; value_len];
+
+        for i in 0..PIPELINED_MIN_FLUSH_KEYS {
+            txn.put((i as u32).to_be_bytes().to_vec(), value.clone())
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            txn.pipelined
+                .as_ref()
+                .expect("pipelined state must exist")
+                .generation,
+            1
+        );
+
+        {
+            let pipelined = txn.pipelined.as_mut().expect("pipelined state must exist");
+            pipelined
+                .flushing
+                .as_ref()
+                .expect("expected auto flush to spawn task")
+                .abort();
+        }
+
+        let err = txn
+            .flush_wait()
+            .await
+            .expect_err("expected aborted flush to return error");
+        match err {
+            Error::InternalError { message } => {
+                assert!(message.contains("pipelined flush task failed"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
