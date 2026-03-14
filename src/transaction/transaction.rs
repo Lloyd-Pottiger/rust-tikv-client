@@ -200,7 +200,11 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     commit_ts_upper_bound_check: Option<CommitTsUpperBoundCheck>,
     keyspace: Keyspace,
     txn_latches: Option<Arc<TxnLocalLatches>>,
-    is_heartbeat_started: bool,
+    /// The generation id of the currently running auto-heartbeat task (`0` means no task).
+    ///
+    /// This is separate from `heartbeat_generation` (the cancellation generation counter) to avoid
+    /// races where an old heartbeat task clears a newer task's started flag.
+    heartbeat_running_generation: Arc<AtomicU64>,
     heartbeat_generation: Arc<AtomicU64>,
     start_instant: Instant,
 }
@@ -385,7 +389,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             commit_ts_upper_bound_check: None,
             keyspace,
             txn_latches,
-            is_heartbeat_started: false,
+            heartbeat_running_generation: Arc::new(AtomicU64::new(0)),
             heartbeat_generation: Arc::new(AtomicU64::new(0)),
             start_instant: std::time::Instant::now(),
         }
@@ -4197,7 +4201,8 @@ impl<PdC: PdClient> Transaction<PdC> {
     fn stop_auto_heartbeat(&mut self) {
         self.heartbeat_generation
             .fetch_add(1, atomic::Ordering::SeqCst);
-        self.is_heartbeat_started = false;
+        self.heartbeat_running_generation
+            .store(0, atomic::Ordering::SeqCst);
     }
 
     /// Checks if the transaction can perform arbitrary operations.
@@ -4242,7 +4247,12 @@ impl<PdC: PdClient> Transaction<PdC> {
 
     async fn start_auto_heartbeat(&mut self) -> Result<()> {
         debug!("starting auto_heartbeat");
-        if !self.options.heartbeat_option.is_auto_heartbeat() || self.is_heartbeat_started {
+        if !self.options.heartbeat_option.is_auto_heartbeat()
+            || self
+                .heartbeat_running_generation
+                .load(atomic::Ordering::SeqCst)
+                != 0
+        {
             return Ok(());
         }
 
@@ -4259,12 +4269,14 @@ impl<PdC: PdClient> Transaction<PdC> {
             .heartbeat_generation
             .fetch_add(1, atomic::Ordering::SeqCst)
             .wrapping_add(1);
-        self.is_heartbeat_started = true;
+        self.heartbeat_running_generation
+            .store(heartbeat_generation_id, atomic::Ordering::SeqCst);
 
         let status = self.status.clone();
         let start_ts = self.timestamp.clone();
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
+        let heartbeat_running_generation = self.heartbeat_running_generation.clone();
         let heartbeat_generation = self.heartbeat_generation.clone();
         let rpc = self.rpc.clone();
         let rpc_interceptors = self.rpc_interceptors.clone();
@@ -4335,10 +4347,16 @@ impl<PdC: PdClient> Transaction<PdC> {
             Ok::<(), Error>(())
         };
 
-        tokio::spawn(async {
+        tokio::spawn(async move {
             if let Err(err) = heartbeat_task.await {
                 log::error!("Error: While sending heartbeat. {}", err);
             }
+            let _ = heartbeat_running_generation.compare_exchange(
+                heartbeat_generation_id,
+                0,
+                atomic::Ordering::SeqCst,
+                atomic::Ordering::SeqCst,
+            );
         });
         Ok(())
     }
@@ -10986,7 +11004,60 @@ mod tests {
             .await
             .expect_err("auto heartbeat requires a primary key");
         assert!(matches!(err, Error::InternalError { .. }));
-        assert!(!txn.is_heartbeat_started);
+        assert_eq!(txn.heartbeat_running_generation.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_auto_heartbeat_resets_running_state_after_failure() {
+        use tokio::sync::Notify;
+
+        let heartbeat_calls = Arc::new(AtomicUsize::new(0));
+        let heartbeat_calls_captured = heartbeat_calls.clone();
+
+        let notified = Arc::new(Notify::new());
+        let notified_captured = notified.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::TxnHeartBeatRequest>().is_some() {
+                    heartbeat_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    notified_captured.notify_one();
+                    return Err(Error::StringError("heartbeat failed".to_owned()));
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_millis(10)))
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put("k".to_owned(), "v").await.unwrap();
+        txn.start_auto_heartbeat().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), notified.notified())
+            .await
+            .expect("heartbeat should fire");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while txn.heartbeat_running_generation.load(Ordering::SeqCst) != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("running heartbeat state should reset");
+
+        txn.start_auto_heartbeat().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), notified.notified())
+            .await
+            .expect("heartbeat should restart");
+
+        assert_eq!(heartbeat_calls.load(Ordering::SeqCst), 2);
     }
 
     #[rstest::rstest]
