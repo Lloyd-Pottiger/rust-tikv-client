@@ -140,6 +140,108 @@ pub struct ResolveLocksForReadResult {
     pub committed_locks: Vec<u64>,
 }
 
+/// A decoded lock returned by TiKV.
+///
+/// This is a thin wrapper around [`kvrpcpb::LockInfo`] that provides convenient accessors and
+/// helper predicates, mirroring client-go `txnkv.Lock` and `txnkv.NewLock`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lock {
+    inner: kvrpcpb::LockInfo,
+}
+
+impl Lock {
+    #[must_use]
+    pub fn new(inner: kvrpcpb::LockInfo) -> Lock {
+        Lock { inner }
+    }
+
+    #[must_use]
+    pub fn as_proto(&self) -> &kvrpcpb::LockInfo {
+        &self.inner
+    }
+
+    #[must_use]
+    pub fn into_proto(self) -> kvrpcpb::LockInfo {
+        self.inner
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &[u8] {
+        &self.inner.key
+    }
+
+    #[must_use]
+    pub fn primary(&self) -> &[u8] {
+        &self.inner.primary_lock
+    }
+
+    /// The transaction start TS (`lock_version`) of this lock.
+    #[must_use]
+    pub fn txn_id(&self) -> u64 {
+        self.inner.lock_version
+    }
+
+    #[must_use]
+    pub fn ttl(&self) -> u64 {
+        self.inner.lock_ttl
+    }
+
+    #[must_use]
+    pub fn txn_size(&self) -> u64 {
+        self.inner.txn_size
+    }
+
+    #[must_use]
+    pub fn lock_type(&self) -> i32 {
+        self.inner.lock_type
+    }
+
+    #[must_use]
+    pub fn use_async_commit(&self) -> bool {
+        self.inner.use_async_commit
+    }
+
+    #[must_use]
+    pub fn lock_for_update_ts(&self) -> u64 {
+        self.inner.lock_for_update_ts
+    }
+
+    #[must_use]
+    pub fn min_commit_ts(&self) -> u64 {
+        self.inner.min_commit_ts
+    }
+
+    /// Returns `true` if this lock is pessimistic (`PessimisticLock` or `SharedPessimisticLock`).
+    #[must_use]
+    pub fn is_pessimistic(&self) -> bool {
+        is_pessimistic_lock(self.inner.lock_type)
+    }
+
+    /// Returns `true` if this lock is a shared-lock wrapper (`SharedLock`).
+    #[must_use]
+    pub fn is_shared(&self) -> bool {
+        is_shared_lock(self.inner.lock_type)
+    }
+}
+
+impl AsRef<kvrpcpb::LockInfo> for Lock {
+    fn as_ref(&self) -> &kvrpcpb::LockInfo {
+        self.as_proto()
+    }
+}
+
+impl From<kvrpcpb::LockInfo> for Lock {
+    fn from(lock: kvrpcpb::LockInfo) -> Lock {
+        Lock::new(lock)
+    }
+}
+
+impl From<Lock> for kvrpcpb::LockInfo {
+    fn from(lock: Lock) -> kvrpcpb::LockInfo {
+        lock.into_proto()
+    }
+}
+
 #[derive(Debug, Default)]
 struct ReadLockTrackerState {
     resolved_locks: HashSet<u64>,
@@ -2025,6 +2127,51 @@ mod tests {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::errorpb;
+
+    #[test]
+    fn test_lock_wrapper_accessors_and_predicates() {
+        let mut proto = kvrpcpb::LockInfo::default();
+        proto.key = b"k".to_vec();
+        proto.primary_lock = b"p".to_vec();
+        proto.lock_version = 42;
+        proto.lock_ttl = 10;
+        proto.txn_size = 16;
+        proto.use_async_commit = true;
+        proto.lock_for_update_ts = 7;
+        proto.min_commit_ts = 8;
+
+        proto.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+        let lock = Lock::new(proto.clone());
+
+        assert_eq!(lock.key(), b"k");
+        assert_eq!(lock.primary(), b"p");
+        assert_eq!(lock.txn_id(), 42);
+        assert_eq!(lock.ttl(), 10);
+        assert_eq!(lock.txn_size(), 16);
+        assert!(lock.use_async_commit());
+        assert_eq!(lock.lock_for_update_ts(), 7);
+        assert_eq!(lock.min_commit_ts(), 8);
+        assert!(lock.is_pessimistic());
+        assert!(!lock.is_shared());
+        assert_eq!(lock.as_proto(), &proto);
+
+        let proto_roundtrip: kvrpcpb::LockInfo = lock.clone().into();
+        assert_eq!(proto_roundtrip, proto);
+    }
+
+    #[test]
+    fn test_lock_wrapper_shared_predicates() {
+        let mut proto = kvrpcpb::LockInfo::default();
+        proto.lock_type = kvrpcpb::Op::SharedPessimisticLock as i32;
+        let lock = Lock::new(proto.clone());
+        assert!(lock.is_pessimistic());
+        assert!(!lock.is_shared());
+
+        proto.lock_type = kvrpcpb::Op::SharedLock as i32;
+        let lock = Lock::new(proto);
+        assert!(!lock.is_pessimistic());
+        assert!(lock.is_shared());
+    }
 
     #[tokio::test]
     async fn test_resolve_locks_context_resolved_cache_is_bounded_fifo() {
