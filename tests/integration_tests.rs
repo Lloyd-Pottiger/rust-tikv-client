@@ -192,6 +192,73 @@ async fn txn_pessimistic() -> Result<()> {
 
 #[tokio::test]
 #[serial]
+async fn txn_pipelined_get_after_flush_reads_remote_buffer() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+        )
+        .await?;
+
+    let key = b"key1".to_vec();
+    let value = b"value1".to_vec();
+    txn.put(key.clone(), value.clone()).await?;
+
+    assert!(txn.flush(true).await?);
+    txn.flush_wait().await?;
+
+    assert_eq!(txn.get(key.clone()).await?, Some(value.clone()));
+    txn.commit().await?;
+
+    let mut txn = client.begin_optimistic().await?;
+    assert_eq!(txn.get(key).await?, Some(value));
+    txn.rollback().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_pipelined_insert_after_flush_detects_duplicate() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+        )
+        .await?;
+
+    let key = b"key1".to_vec();
+    txn.put(key.clone(), b"value1".to_vec()).await?;
+
+    assert!(txn.flush(true).await?);
+    txn.flush_wait().await?;
+
+    let err = txn
+        .insert(key, b"value2".to_vec())
+        .await
+        .expect_err("expected insert to fail on duplicate key");
+    assert!(matches!(err, Error::DuplicateKeyInsertion));
+
+    txn.commit().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn txn_split_batch() -> Result<()> {
     init().await?;
 
