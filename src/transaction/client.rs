@@ -10,6 +10,7 @@ use log::debug;
 use log::info;
 use tokio::sync::RwLock;
 
+use super::latches::TxnLocalLatches;
 use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF};
 use crate::config::Config;
 use crate::pd::PdClient;
@@ -99,6 +100,7 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
     safe_ts: SafeTsCache<PdC>,
     last_tsos: Arc<RwLock<HashMap<String, LastTso>>>,
     low_resolution_ts_update_interval_ms: Arc<AtomicU64>,
+    txn_latches: Option<Arc<TxnLocalLatches>>,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +124,7 @@ impl<PdC: PdClient> Clone for Client<PdC> {
             safe_ts: self.safe_ts.clone(),
             last_tsos: self.last_tsos.clone(),
             low_resolution_ts_update_interval_ms: self.low_resolution_ts_update_interval_ms.clone(),
+            txn_latches: self.txn_latches.clone(),
         }
     }
 }
@@ -175,6 +178,7 @@ impl Client {
         debug!("creating new transactional client");
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let health_feedback_update_interval = config.health_feedback_update_interval;
+        let txn_local_latches_capacity = config.txn_local_latches_capacity;
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
         crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
         let keyspace = match config.keyspace {
@@ -186,6 +190,8 @@ impl Client {
             }
             None => Keyspace::Disable,
         };
+        let txn_latches = (txn_local_latches_capacity > 0)
+            .then(|| Arc::new(TxnLocalLatches::new(txn_local_latches_capacity)));
         Ok(Client {
             safe_ts: SafeTsCache::new(pd.clone(), keyspace),
             pd,
@@ -193,6 +199,7 @@ impl Client {
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms: default_low_resolution_ts_update_interval_ms(),
+            txn_latches,
         })
     }
 
@@ -213,8 +220,11 @@ impl Client {
         debug!("creating new transactional client (api-v2-no-prefix)");
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let health_feedback_update_interval = config.health_feedback_update_interval;
+        let txn_local_latches_capacity = config.txn_local_latches_capacity;
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
         crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
+        let txn_latches = (txn_local_latches_capacity > 0)
+            .then(|| Arc::new(TxnLocalLatches::new(txn_local_latches_capacity)));
         Ok(Client {
             safe_ts: SafeTsCache::new(pd.clone(), Keyspace::ApiV2NoPrefix),
             pd,
@@ -222,6 +232,7 @@ impl Client {
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms: default_low_resolution_ts_update_interval_ms(),
+            txn_latches,
         })
     }
 
@@ -1247,6 +1258,7 @@ impl<PdC: PdClient> Client<PdC> {
             options,
             self.keyspace,
             self.resolve_locks_ctx.clone(),
+            self.txn_latches.clone(),
         )
     }
 }
@@ -1294,6 +1306,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         assert!(Arc::ptr_eq(&client.pd_client(), &pd_client));
@@ -1335,6 +1348,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut transaction = client.begin_with_start_timestamp(
@@ -1437,6 +1451,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut info = client.lock_wait_info().await.unwrap();
@@ -1577,6 +1592,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         client.register_lock_observer(1).await.unwrap();
@@ -1648,6 +1664,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         assert_eq!(
@@ -1698,6 +1715,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let completed = client.delete_range(vec![1]..vec![11], 2).await.unwrap();
@@ -1729,6 +1747,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let err = client.delete_range(vec![1]..vec![2], 0).await.unwrap_err();
@@ -1822,6 +1841,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let res = client.compact(101, 202, start_key_raw).await.unwrap();
@@ -1914,6 +1934,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let res = client.compact(303, 404, crate::Key::EMPTY).await.unwrap();
@@ -1966,6 +1987,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let res = client.compact(1, 2, crate::Key::EMPTY).await.unwrap();
@@ -2016,6 +2038,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let res = client.tiflash_system_table("select 1").await.unwrap();
@@ -2073,6 +2096,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let res = client.tiflash_system_table("select 42").await.unwrap();
@@ -2096,6 +2120,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let _ts = client.current_timestamp_with_txn_scope("").await.unwrap();
@@ -2124,6 +2149,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let ts = client
@@ -2152,6 +2178,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let _ = client
@@ -2175,6 +2202,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         client.set_external_timestamp(42).await.unwrap();
@@ -2197,6 +2225,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         client.validate_read_ts(u64::MAX, false).await.unwrap();
@@ -2214,6 +2243,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let err = client
@@ -2236,6 +2266,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let cached = Timestamp {
@@ -2274,6 +2305,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let err = client
@@ -2296,6 +2328,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let err = client
@@ -2316,6 +2349,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
         client
             .set_low_resolution_timestamp_update_interval(Duration::from_secs(10))
@@ -2355,6 +2389,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
         client
             .set_low_resolution_timestamp_update_interval(Duration::from_secs(1))
@@ -2391,6 +2426,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         {
@@ -2434,6 +2470,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let stale = client.stale_timestamp(5).await.unwrap();
@@ -2482,6 +2519,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut transaction = client
@@ -2515,6 +2553,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let _txn = client
@@ -2545,6 +2584,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let err = client
@@ -2594,6 +2634,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut txn = client.begin_with_start_timestamp(
@@ -2664,6 +2705,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut txn = client
@@ -2738,6 +2780,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         assert_eq!(client.min_safe_ts_with_txn_scope("dc1").await.unwrap(), 42);
@@ -2806,6 +2849,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut txn = client
@@ -2860,6 +2904,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut txn = client
@@ -2923,6 +2968,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut lock = kvrpcpb::LockInfo::default();
@@ -2989,6 +3035,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut lock = kvrpcpb::LockInfo::default();
@@ -3068,6 +3115,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut lock = kvrpcpb::LockInfo::default();
@@ -3135,6 +3183,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let mut lock = kvrpcpb::LockInfo::default();
@@ -3219,6 +3268,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let region_ids = client
@@ -3257,6 +3307,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         client
@@ -3286,6 +3337,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let err = client
@@ -3323,6 +3375,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         assert!(client.check_region_in_scattering(42).await.unwrap());
@@ -3356,6 +3409,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let new_safe_point = client
@@ -3393,6 +3447,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let new_safe_point = client
@@ -3418,6 +3473,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let min_safe_point = client
@@ -3444,6 +3500,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let min_safe_point = client
@@ -3470,6 +3527,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let new_safe_point = client.update_gc_safe_point_v2(7, 9).await.unwrap();
@@ -3574,6 +3632,7 @@ mod tests {
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
         };
 
         let new_safe_point = client

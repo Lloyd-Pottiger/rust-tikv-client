@@ -39,6 +39,13 @@ pub struct Config {
     ///
     /// Defaults to disabled (`0s`).
     pub health_feedback_update_interval: Duration,
+    /// Enable transaction local latches (client-side commit latches).
+    ///
+    /// When non-zero, the transactional client serializes optimistic transaction commits on
+    /// overlapping keys to reduce write conflicts (client-go `TxnLocalLatches.Capacity`).
+    ///
+    /// Defaults to disabled (`0`).
+    pub txn_local_latches_capacity: usize,
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -58,6 +65,7 @@ impl Default for Config {
             keyspace: None,
             resolve_lock_lite_threshold: DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD,
             health_feedback_update_interval: Duration::ZERO,
+            txn_local_latches_capacity: 0,
         }
     }
 }
@@ -164,6 +172,15 @@ impl Config {
     #[must_use]
     pub fn with_health_feedback_update_interval(mut self, interval: Duration) -> Self {
         self.health_feedback_update_interval = interval;
+        self
+    }
+
+    /// Enable transaction local latches (client-side commit latches).
+    ///
+    /// Set to `0` to disable (default).
+    #[must_use]
+    pub fn with_txn_local_latches_capacity(mut self, capacity: usize) -> Self {
+        self.txn_local_latches_capacity = capacity;
         self
     }
 }

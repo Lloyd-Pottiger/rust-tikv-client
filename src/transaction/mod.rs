@@ -37,6 +37,7 @@ pub use vars::Variables;
 
 mod buffer;
 mod client;
+mod latches;
 mod lock;
 pub mod lowering;
 mod requests;

@@ -307,6 +307,12 @@ pub enum Error {
     /// Write conflict detected when committing or prewriting a transaction.
     #[error("{0}")]
     WriteConflict(WriteConflictError),
+    /// Write conflict detected by transaction local latches.
+    ///
+    /// This mirrors client-go `ErrWriteConflictInLatch` and indicates that the transaction should
+    /// be retried with a new start timestamp.
+    #[error("write conflict in latch (start_ts={start_ts})")]
+    WriteConflictInLatch { start_ts: u64 },
     /// Assertion failed detected when committing or prewriting a transaction.
     #[error("{0}")]
     AssertionFailed(AssertionFailedError),

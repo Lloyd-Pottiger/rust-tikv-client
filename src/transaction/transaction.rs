@@ -15,6 +15,7 @@ use serde_derive::Serialize;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
+use super::latches::TxnLocalLatches;
 use super::lock::ResolveLockDetailCollector;
 use super::requests::CollectPessimisticLock;
 use super::requests::ResolveLockRangeRequest;
@@ -196,6 +197,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     commit_wait_until_tso_timeout: Duration,
     commit_ts_upper_bound_check: Option<CommitTsUpperBoundCheck>,
     keyspace: Keyspace,
+    txn_latches: Option<Arc<TxnLocalLatches>>,
     is_heartbeat_started: bool,
     heartbeat_generation: Arc<AtomicU64>,
     start_instant: Instant,
@@ -296,6 +298,7 @@ async fn get_timestamp_for_txn_scope<PdC: PdClient>(
 fn is_write_conflict_error(error: &Error) -> bool {
     match error {
         Error::WriteConflict(_) => true,
+        Error::WriteConflictInLatch { .. } => true,
         Error::MultipleKeyErrors(errors) | Error::ExtractedErrors(errors) => {
             errors.iter().any(is_write_conflict_error)
         }
@@ -324,6 +327,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             options,
             keyspace,
             ResolveLocksContext::default(),
+            None,
         )
     }
 
@@ -333,6 +337,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         options: TransactionOptions,
         keyspace: Keyspace,
         resolve_locks_ctx: ResolveLocksContext,
+        txn_latches: Option<Arc<TxnLocalLatches>>,
     ) -> Transaction<PdC> {
         let status = if options.read_only {
             TransactionStatus::ReadOnly
@@ -373,6 +378,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             commit_wait_until_tso_timeout: DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT,
             commit_ts_upper_bound_check: None,
             keyspace,
+            txn_latches,
             is_heartbeat_started: false,
             heartbeat_generation: Arc::new(AtomicU64::new(0)),
             start_instant: std::time::Instant::now(),
@@ -2753,7 +2759,36 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         };
 
-        self.start_auto_heartbeat().await?;
+        let mut latch_guard = if matches!(self.options.kind, TransactionKind::Optimistic)
+            && self.options.pipelined_txn.is_none()
+        {
+            match self.txn_latches.clone() {
+                Some(latches) => {
+                    let latch_keys = mutations
+                        .iter()
+                        .map(|mutation| mutation.key.clone())
+                        .collect();
+                    Some(latches.lock(self.timestamp.version(), latch_keys).await)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        if latch_guard.as_ref().is_some_and(|guard| guard.is_stale()) {
+            let start_ts = latch_guard.as_ref().unwrap().start_ts();
+            let guard = latch_guard.take().unwrap();
+            guard.unlock().await;
+            return Err(Error::WriteConflictInLatch { start_ts });
+        }
+
+        if let Err(err) = self.start_auto_heartbeat().await {
+            if let Some(guard) = latch_guard.take() {
+                guard.unlock().await;
+            }
+            return Err(err);
+        }
 
         let mut committer = Committer::new(
             primary_key,
@@ -2783,6 +2818,13 @@ impl<PdC: PdClient> Transaction<PdC> {
         committer.commit_wait_until_tso_timeout = self.commit_wait_until_tso_timeout;
         committer.commit_ts_upper_bound_check = self.commit_ts_upper_bound_check.clone();
         let (res, mode_info) = committer.commit_with_mode_info().await;
+
+        if let Some(guard) = latch_guard {
+            if let Ok(Some(commit_ts)) = &res {
+                guard.set_commit_ts(commit_ts.version());
+            }
+            guard.unlock().await;
+        }
 
         if let Some(callback) = self.commit_callback.as_ref() {
             let commit_ts = match &res {
@@ -8006,6 +8048,7 @@ mod tests {
             TransactionOptions::new_optimistic().read_only(),
             Keyspace::Disable,
             resolve_locks_ctx.clone(),
+            None,
         );
         let value1 = snapshot1.get(b"k1".to_vec()).await.unwrap();
         assert_eq!(value1, Some(b"v1".to_vec()));
@@ -8016,6 +8059,7 @@ mod tests {
             TransactionOptions::new_optimistic().read_only(),
             Keyspace::Disable,
             resolve_locks_ctx,
+            None,
         );
         let value2 = snapshot2.get(b"k2".to_vec()).await.unwrap();
         assert_eq!(value2, Some(b"v2".to_vec()));
