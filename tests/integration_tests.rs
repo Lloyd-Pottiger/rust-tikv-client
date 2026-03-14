@@ -133,8 +133,7 @@ async fn txn_crud() -> Result<()> {
     // Read again from TiKV
     let mut snapshot = client.snapshot(
         client.current_timestamp().await?,
-        // TODO needed because pessimistic does not check locks (#235)
-        TransactionOptions::new_optimistic(),
+        TransactionOptions::new_pessimistic(),
     );
     let batch_get_res: HashMap<Key, Value> = snapshot
         .batch_get(vec!["foo".to_owned(), "bar".to_owned()])
