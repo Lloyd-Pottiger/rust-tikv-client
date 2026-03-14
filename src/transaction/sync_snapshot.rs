@@ -1,7 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
     BoundRange, CommandPriority, IsolationLevel, Key, KvPair, ReplicaReadType, ResolveLockDetail,
-    Result, Snapshot, SnapshotCacheEntry, StoreLabel, Value, Variables,
+    Result, Snapshot, SnapshotCacheEntry, StoreLabel, Timestamp, Value, Variables,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,6 +108,13 @@ impl SyncSnapshot {
     #[must_use]
     pub fn resolve_lock_detail(&self) -> ResolveLockDetail {
         self.inner.resolve_lock_detail()
+    }
+
+    /// Set the snapshot timestamp.
+    ///
+    /// This maps to client-go `KVSnapshot.SetSnapshotTS`.
+    pub fn set_snapshot_ts(&mut self, timestamp: Timestamp) -> Result<()> {
+        self.inner.set_snapshot_ts(timestamp)
     }
 
     /// Get the snapshot cache hit count.

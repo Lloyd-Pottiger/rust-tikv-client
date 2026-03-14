@@ -544,6 +544,20 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.task_id = task_id;
     }
 
+    pub(crate) fn set_snapshot_ts(&mut self, timestamp: Timestamp) -> Result<()> {
+        if !self.options.read_only {
+            return Err(Error::StringError(
+                "set_snapshot_ts is only supported for read-only snapshots".to_owned(),
+            ));
+        }
+
+        self.timestamp = timestamp;
+        self.commit_ts = None;
+        self.buffer = Buffer::new(self.is_pessimistic());
+        self.read_lock_tracker = ReadLockTracker::default();
+        Ok(())
+    }
+
     /// Set server-side maximum execution duration for read requests.
     ///
     /// This option writes to `kvrpcpb::Context.max_execution_duration_ms`.

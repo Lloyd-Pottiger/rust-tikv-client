@@ -15,6 +15,7 @@ use crate::KvPair;
 use crate::ReplicaReadType;
 use crate::Result;
 use crate::StoreLabel;
+use crate::Timestamp;
 use crate::Transaction;
 use crate::Value;
 use std::collections::{HashMap, HashSet};
@@ -63,6 +64,11 @@ impl SnapshotCache {
 
     fn snapshot(&self) -> HashMap<Key, SnapshotCacheEntry> {
         self.cached.clone()
+    }
+
+    fn clear(&mut self) {
+        self.cached.clear();
+        self.cached_size_bytes = 0;
     }
 
     fn get(&mut self, key: &Key, require_commit_ts: bool) -> Option<SnapshotCacheEntry> {
@@ -181,6 +187,19 @@ impl<PdC: PdClient> Snapshot<PdC> {
     #[must_use]
     pub fn resolve_lock_detail(&self) -> ResolveLockDetail {
         self.transaction.resolve_lock_detail()
+    }
+
+    /// Set the snapshot timestamp.
+    ///
+    /// This maps to client-go `KVSnapshot.SetSnapshotTS`.
+    ///
+    /// This resets snapshot-local caches, including:
+    /// - the snapshot cache (`SnapCache*`), and
+    /// - the resolved-lock tracking used by resolve-locks-for-read.
+    pub fn set_snapshot_ts(&mut self, timestamp: Timestamp) -> Result<()> {
+        self.transaction.set_snapshot_ts(timestamp)?;
+        self.cache.clear();
+        Ok(())
     }
 
     /// Get the snapshot cache hit count.
@@ -791,5 +810,63 @@ mod tests {
         assert_eq!(batch_get_calls.load(Ordering::SeqCst), 1);
         assert_eq!(snapshot.snap_cache_hit_count(), 3);
         assert_eq!(snapshot.snap_cache_size(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_set_snapshot_ts_clears_snapshot_cache() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls_cloned = get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                assert!(!req.need_commit_ts);
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = false;
+                resp.value = b"v".to_vec();
+                resp.commit_ts = 0;
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        assert_eq!(
+            snapshot.get(b"k".to_vec()).await.unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(
+            snapshot.get(b"k".to_vec()).await.unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(get_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot.snap_cache_hit_count(), 1);
+        assert_eq!(snapshot.snap_cache_size(), 1);
+
+        snapshot
+            .set_snapshot_ts(Timestamp::from_version(11))
+            .expect("set_snapshot_ts");
+        assert_eq!(snapshot.snap_cache_hit_count(), 1);
+        assert_eq!(snapshot.snap_cache_size(), 0);
+
+        assert_eq!(
+            snapshot.get(b"k".to_vec()).await.unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(get_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(snapshot.snap_cache_hit_count(), 1);
+        assert_eq!(snapshot.snap_cache_size(), 1);
     }
 }
