@@ -207,11 +207,15 @@ pub use crate::transaction::lowering as transaction_lowering;
 #[doc(inline)]
 pub use crate::transaction::AssertionLevel;
 #[doc(inline)]
+pub use crate::transaction::BoundLockResolver;
+#[doc(inline)]
 pub use crate::transaction::CheckLevel;
 #[doc(inline)]
 pub use crate::transaction::Client as TransactionClient;
 #[doc(inline)]
 pub use crate::transaction::Lock;
+#[doc(inline)]
+pub use crate::transaction::LockResolver;
 #[doc(inline)]
 pub use crate::transaction::LockWaitTimeout;
 #[doc(inline)]
@@ -226,6 +230,16 @@ pub use crate::transaction::ProtoLockInfo;
 pub use crate::transaction::ProtoTiFlashSystemTableResponse;
 #[doc(inline)]
 pub use crate::transaction::ProtoWaitForEntry;
+#[doc(inline)]
+pub use crate::transaction::ResolveLocksContext;
+#[doc(inline)]
+pub use crate::transaction::ResolveLocksForReadResult;
+#[doc(inline)]
+pub use crate::transaction::ResolveLocksOptions;
+#[doc(inline)]
+pub use crate::transaction::ResolveLocksResult;
+#[doc(inline)]
+pub use crate::transaction::ResolvingLock;
 #[doc(inline)]
 pub use crate::transaction::SchemaLeaseChecker;
 #[doc(inline)]
