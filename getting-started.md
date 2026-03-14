@@ -38,6 +38,18 @@ let value = txn.get("key".to_owned()).await?;
 txn.commit().await?;
 ```
 
+### Configuration
+
+Both clients accept a `Config` via `new_with_config`. For example, enable transaction local latches
+(optimistic commits only):
+
+```rust
+use tikv_client::{Config, TransactionClient};
+
+let config = Config::default().with_txn_local_latches_capacity(1024);
+let txn_client = TransactionClient::new_with_config(vec!["127.0.0.1:2379"], config).await?;
+```
+
 Stale reads (replica reads) are supported on read-only snapshots; see `examples/stale_read.rs` for a runnable example.
 
 ### RPC interceptors

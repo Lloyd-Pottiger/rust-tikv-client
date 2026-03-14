@@ -50,6 +50,16 @@ let value = txn.get("key".to_owned()).await?;
 txn.commit().await?;
 ```
 
+You can configure the client via `Config`, for example enabling transaction local latches
+(optimistic commits only):
+
+```rust
+use tikv_client::{Config, TransactionClient};
+
+let config = Config::default().with_txn_local_latches_capacity(1024);
+let txn_client = TransactionClient::new_with_config(vec!["127.0.0.1:2379"], config).await?;
+```
+
 You can also begin a transaction with an explicit start timestamp (no PD TSO fetch), or ask PD for
 TSO in a specific transaction scope (`txn_scope`/`dc_location`):
 
