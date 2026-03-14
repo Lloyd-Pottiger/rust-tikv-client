@@ -229,15 +229,15 @@ impl Client {
     pub fn cluster_id(&self) -> u64 {
         self.pd.cluster_id()
     }
-
-    /// Returns a handle to the underlying PD RPC client.
-    #[must_use]
-    pub fn pd_client(&self) -> Arc<PdRpcClient> {
-        self.pd.clone()
-    }
 }
 
 impl<PdC: PdClient> Client<PdC> {
+    /// Returns a handle to the underlying PD client.
+    #[must_use]
+    pub fn pd_client(&self) -> Arc<PdC> {
+        self.pd.clone()
+    }
+
     fn canonicalize_txn_scope(txn_scope: &str) -> String {
         if txn_scope.is_empty() || txn_scope == "global" {
             String::new()
@@ -1279,6 +1279,22 @@ mod tests {
     use crate::TransactionOptions;
 
     use super::Client;
+
+    #[test]
+    fn test_pd_client_accessor_returns_inner_pd_handle() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        assert!(Arc::ptr_eq(&client.pd_client(), &pd_client));
+    }
 
     #[tokio::test]
     async fn test_begin_with_start_timestamp_uses_provided_start_ts_without_pd_tso() {
