@@ -4764,11 +4764,14 @@ pub struct TransactionOptions {
 ///
 /// This maps to client-go `TxnOptions.PipelinedTxn`.
 ///
-/// When enabled, buffered mutations can be flushed to TiKV during transaction execution via
-/// [`Transaction::flush`] (asynchronous) and [`Transaction::flush_wait`]. Reads (`get`/`batch_get`)
-/// remain usable while a flush is in-flight: they first consult the in-memory flushing buffer,
-/// then use `BufferBatchGet` to read the transaction's flushed locks (client-go
-/// `BatchGetBufferTier`), and fall back to normal snapshot reads for missing keys.
+/// When enabled, buffered mutations are automatically flushed to TiKV in the background once the
+/// in-memory mutation buffer grows large enough (client-go parity). You can also trigger a flush
+/// explicitly via [`Transaction::flush`] (asynchronous) and wait for completion via
+/// [`Transaction::flush_wait`].
+///
+/// Reads (`get`/`batch_get`) remain usable while a flush is in-flight: they first consult the
+/// in-memory flushing buffer, then use `BufferBatchGet` to read the transaction's flushed locks
+/// (client-go `BatchGetBufferTier`), and fall back to normal snapshot reads for missing keys.
 ///
 /// Range scans (`scan*`) are not supported for pipelined transactions (client-go parity:
 /// `PipelinedMemDB` does not support iterators).
