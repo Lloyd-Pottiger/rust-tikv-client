@@ -1,7 +1,9 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use log::debug;
@@ -95,12 +97,19 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
     resolve_locks_ctx: ResolveLocksContext,
     safe_ts: SafeTsCache<PdC>,
     last_tsos: Arc<RwLock<HashMap<String, LastTso>>>,
+    low_resolution_ts_update_interval_ms: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Debug)]
 struct LastTso {
     tso: Timestamp,
     arrival: Instant,
+}
+
+const DEFAULT_LOW_RESOLUTION_TS_UPDATE_INTERVAL_MS: u64 = 2_000;
+
+fn default_low_resolution_ts_update_interval_ms() -> Arc<AtomicU64> {
+    Arc::new(AtomicU64::new(DEFAULT_LOW_RESOLUTION_TS_UPDATE_INTERVAL_MS))
 }
 
 impl<PdC: PdClient> Clone for Client<PdC> {
@@ -111,6 +120,7 @@ impl<PdC: PdClient> Clone for Client<PdC> {
             resolve_locks_ctx: self.resolve_locks_ctx.clone(),
             safe_ts: self.safe_ts.clone(),
             last_tsos: self.last_tsos.clone(),
+            low_resolution_ts_update_interval_ms: self.low_resolution_ts_update_interval_ms.clone(),
         }
     }
 }
@@ -179,6 +189,7 @@ impl Client {
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms: default_low_resolution_ts_update_interval_ms(),
         })
     }
 
@@ -205,6 +216,7 @@ impl Client {
             keyspace: Keyspace::ApiV2NoPrefix,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms: default_low_resolution_ts_update_interval_ms(),
         })
     }
 
@@ -537,6 +549,58 @@ impl<PdC: PdClient> Client<PdC> {
                 "cannot set read timestamp to a future time, readTS: {read_ts}, currentTS: {current_version}"
             )))
         }
+    }
+
+    /// Set the refresh interval for low resolution timestamps.
+    ///
+    /// This maps to client-go `Oracle.SetLowResolutionTimestampUpdateInterval`.
+    pub fn set_low_resolution_timestamp_update_interval(
+        &self,
+        update_interval: Duration,
+    ) -> Result<()> {
+        if update_interval.is_zero() {
+            return Err(crate::Error::StringError(
+                "updateInterval must be > 0".to_owned(),
+            ));
+        }
+
+        let interval_ms = update_interval.as_millis().max(1);
+        let interval_ms = u64::try_from(interval_ms)
+            .map_err(|_| crate::Error::StringError("updateInterval is too large".to_owned()))?;
+        self.low_resolution_ts_update_interval_ms
+            .store(interval_ms, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Retrieve a low resolution timestamp for the global txn scope.
+    ///
+    /// This maps to client-go `Oracle.GetLowResolutionTimestamp`.
+    pub async fn low_resolution_timestamp(&self) -> Result<Timestamp> {
+        self.low_resolution_timestamp_with_txn_scope("").await
+    }
+
+    /// Retrieve a low resolution timestamp for the given transaction scope.
+    ///
+    /// This maps to client-go `Oracle.GetLowResolutionTimestamp`.
+    pub async fn low_resolution_timestamp_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+    ) -> Result<Timestamp> {
+        let dc_location = Self::canonicalize_txn_scope(txn_scope.as_ref());
+        let interval_ms = self
+            .low_resolution_ts_update_interval_ms
+            .load(Ordering::Relaxed)
+            .max(1);
+        let update_interval = Duration::from_millis(interval_ms);
+
+        if let Some(last_tso) = self.last_tsos.read().await.get(&dc_location) {
+            if last_tso.arrival.elapsed() <= update_interval {
+                return Ok(last_tso.tso.clone());
+            }
+        }
+
+        self.current_timestamp_with_txn_scope(txn_scope.as_ref())
+            .await
     }
 
     /// Generate a timestamp representing the time `prev_seconds` seconds ago.
@@ -1096,6 +1160,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let mut transaction = client.begin_with_start_timestamp(
@@ -1196,6 +1262,8 @@ mod tests {
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let mut info = client.lock_wait_info().await.unwrap();
@@ -1334,6 +1402,8 @@ mod tests {
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         client.register_lock_observer(1).await.unwrap();
@@ -1403,6 +1473,8 @@ mod tests {
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         assert_eq!(
@@ -1451,6 +1523,8 @@ mod tests {
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let completed = client.delete_range(vec![1]..vec![11], 2).await.unwrap();
@@ -1480,6 +1554,8 @@ mod tests {
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let err = client.delete_range(vec![1]..vec![2], 0).await.unwrap_err();
@@ -1571,6 +1647,8 @@ mod tests {
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let res = client.compact(101, 202, start_key_raw).await.unwrap();
@@ -1661,6 +1739,8 @@ mod tests {
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let res = client.compact(303, 404, crate::Key::EMPTY).await.unwrap();
@@ -1711,6 +1791,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let res = client.compact(1, 2, crate::Key::EMPTY).await.unwrap();
@@ -1759,6 +1841,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let res = client.tiflash_system_table("select 1").await.unwrap();
@@ -1814,6 +1898,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let res = client.tiflash_system_table("select 42").await.unwrap();
@@ -1835,6 +1921,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let _ts = client.current_timestamp_with_txn_scope("").await.unwrap();
@@ -1861,6 +1949,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let ts = client
@@ -1887,6 +1977,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let _ = client
@@ -1908,6 +2000,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         client.set_external_timestamp(42).await.unwrap();
@@ -1928,6 +2022,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         client.validate_read_ts(u64::MAX, false).await.unwrap();
@@ -1943,6 +2039,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let err = client
@@ -1963,6 +2061,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let cached = Timestamp {
@@ -1999,6 +2099,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let err = client
@@ -2007,6 +2109,101 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("future time"));
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
+    }
+
+    #[test]
+    fn test_set_low_resolution_timestamp_update_interval_rejects_zero() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let err = client
+            .set_low_resolution_timestamp_update_interval(Duration::ZERO)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("updateInterval must be > 0"));
+    }
+
+    #[tokio::test]
+    async fn test_low_resolution_timestamp_uses_cached_last_tso_without_fetching_pd_timestamp() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+        client
+            .set_low_resolution_timestamp_update_interval(Duration::from_secs(10))
+            .unwrap();
+
+        let cached = Timestamp {
+            physical: 10_000,
+            logical: 7,
+            ..Default::default()
+        };
+        let cached_version = cached.version();
+        {
+            let mut last_tsos = client.last_tsos.write().await;
+            last_tsos.insert(
+                String::new(),
+                super::LastTso {
+                    tso: cached,
+                    arrival: Instant::now(),
+                },
+            );
+        }
+
+        let ts = client.low_resolution_timestamp().await.unwrap();
+        assert_eq!(ts.version(), cached_version);
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_low_resolution_timestamp_refreshes_when_cache_stale() {
+        let start_version = 10_000u64 << 18;
+        let pd_client = Arc::new(MockPdClient::default().with_tso_sequence(start_version));
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+        client
+            .set_low_resolution_timestamp_update_interval(Duration::from_secs(1))
+            .unwrap();
+
+        {
+            let mut last_tsos = client.last_tsos.write().await;
+            last_tsos.insert(
+                String::new(),
+                super::LastTso {
+                    tso: Timestamp {
+                        physical: 10_000,
+                        logical: 7,
+                        ..Default::default()
+                    },
+                    arrival: Instant::now() - Duration::from_secs(10),
+                },
+            );
+        }
+
+        let ts = client.low_resolution_timestamp().await.unwrap();
+        assert_eq!(ts.version(), start_version);
         assert_eq!(pd_client.get_timestamp_call_count(), 1);
     }
 
@@ -2019,6 +2216,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         {
@@ -2060,6 +2259,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let stale = client.stale_timestamp(5).await.unwrap();
@@ -2106,6 +2307,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let mut transaction = client
@@ -2137,6 +2340,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let _txn = client
@@ -2190,6 +2395,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let mut txn = client
@@ -2262,6 +2469,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         assert_eq!(client.min_safe_ts_with_txn_scope("dc1").await.unwrap(), 42);
@@ -2328,6 +2537,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let mut txn = client
@@ -2380,6 +2591,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let mut txn = client
@@ -2441,6 +2654,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let mut lock = kvrpcpb::LockInfo::default();
@@ -2505,6 +2720,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let mut lock = kvrpcpb::LockInfo::default();
@@ -2582,6 +2799,8 @@ mod tests {
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let mut lock = kvrpcpb::LockInfo::default();
@@ -2647,6 +2866,8 @@ mod tests {
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
             last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
         };
 
         let mut lock = kvrpcpb::LockInfo::default();

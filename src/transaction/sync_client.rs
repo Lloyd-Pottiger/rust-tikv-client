@@ -285,6 +285,41 @@ impl SyncTransactionClient {
         )
     }
 
+    /// Set the refresh interval for low resolution timestamps.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::set_low_resolution_timestamp_update_interval`](crate::TransactionClient::set_low_resolution_timestamp_update_interval).
+    pub fn set_low_resolution_timestamp_update_interval(
+        &self,
+        update_interval: std::time::Duration,
+    ) -> Result<()> {
+        self.client
+            .set_low_resolution_timestamp_update_interval(update_interval)
+    }
+
+    /// Retrieve a low resolution timestamp for the global txn scope.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::low_resolution_timestamp`](crate::TransactionClient::low_resolution_timestamp).
+    pub fn low_resolution_timestamp(&self) -> Result<Timestamp> {
+        safe_block_on(&self.runtime, self.client.low_resolution_timestamp())
+    }
+
+    /// Retrieve a low resolution timestamp for the given transaction scope.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::low_resolution_timestamp_with_txn_scope`](crate::TransactionClient::low_resolution_timestamp_with_txn_scope).
+    pub fn low_resolution_timestamp_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+    ) -> Result<Timestamp> {
+        safe_block_on(
+            &self.runtime,
+            self.client
+                .low_resolution_timestamp_with_txn_scope(txn_scope),
+        )
+    }
+
     /// Generate a timestamp representing the time `prev_seconds` seconds ago.
     ///
     /// This is a synchronous version of [`TransactionClient::stale_timestamp`](crate::TransactionClient::stale_timestamp).
