@@ -259,6 +259,38 @@ async fn txn_pipelined_insert_after_flush_detects_duplicate() -> Result<()> {
 
 #[tokio::test]
 #[serial]
+async fn txn_pipelined_rollback_after_flush_discards_writes() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+        )
+        .await?;
+
+    let key = b"key1".to_vec();
+    txn.put(key.clone(), b"value1".to_vec()).await?;
+
+    assert!(txn.flush(true).await?);
+    txn.flush_wait().await?;
+
+    txn.rollback().await?;
+
+    let mut txn = client.begin_optimistic().await?;
+    assert_eq!(txn.get(key).await?, None);
+    txn.rollback().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn txn_split_batch() -> Result<()> {
     init().await?;
 
