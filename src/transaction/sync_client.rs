@@ -493,6 +493,32 @@ impl SyncTransactionClient {
         )
     }
 
+    /// Wait for a scatter-region PD operator to finish for the given region.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::wait_scatter_region_finish`](crate::TransactionClient::wait_scatter_region_finish).
+    pub fn wait_scatter_region_finish(
+        &self,
+        region_id: u64,
+        backoff: crate::Backoff,
+    ) -> Result<()> {
+        safe_block_on(
+            &self.runtime,
+            self.client.wait_scatter_region_finish(region_id, backoff),
+        )
+    }
+
+    /// Check whether a region is currently in scattering (`scatter-region` operator is running).
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::check_region_in_scattering`](crate::TransactionClient::check_region_in_scattering).
+    pub fn check_region_in_scattering(&self, region_id: u64) -> Result<bool> {
+        safe_block_on(
+            &self.runtime,
+            self.client.check_region_in_scattering(region_id),
+        )
+    }
+
     /// Compact a specified key range on TiFlash stores.
     ///
     /// This is a synchronous version of [`TransactionClient::compact`](crate::TransactionClient::compact).

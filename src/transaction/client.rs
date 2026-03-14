@@ -934,6 +934,53 @@ impl<PdC: PdClient> Client<PdC> {
         Ok(region_ids)
     }
 
+    /// Wait for a scatter-region PD operator to finish for the given region.
+    ///
+    /// This mirrors client-go `KVStore.WaitScatterRegionFinish`.
+    ///
+    /// The provided `backoff` controls how long to wait before giving up. When the backoff is
+    /// exhausted and the scatter operator is still running, this returns an error.
+    pub async fn wait_scatter_region_finish(
+        &self,
+        region_id: u64,
+        mut backoff: Backoff,
+    ) -> Result<()> {
+        let mut last_err = None;
+
+        loop {
+            match self.pd.clone().get_operator(region_id).await {
+                Ok(resp) => {
+                    let is_scatter_region = resp.desc == b"scatter-region";
+                    let is_running =
+                        resp.status == crate::proto::pdpb::OperatorStatus::Running as i32;
+                    if !is_scatter_region || !is_running {
+                        return Ok(());
+                    }
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                }
+            }
+
+            let Some(delay) = backoff.next_delay_duration() else {
+                return Err(last_err.unwrap_or_else(|| {
+                    crate::Error::StringError("wait scatter region timeout".to_owned())
+                }));
+            };
+
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    /// Check whether a region is currently in scattering (`scatter-region` operator is running).
+    ///
+    /// This mirrors client-go `KVStore.CheckRegionInScattering`.
+    pub async fn check_region_in_scattering(&self, region_id: u64) -> Result<bool> {
+        let resp = self.pd.clone().get_operator(region_id).await?;
+        Ok(resp.desc == b"scatter-region"
+            && resp.status == crate::proto::pdpb::OperatorStatus::Running as i32)
+    }
+
     /// Cleans up all keys in a range and quickly reclaim disk space.
     ///
     /// The range can span over multiple regions.
@@ -3009,5 +3056,102 @@ mod tests {
             pd_client.scatter_regions_calls(),
             vec![(vec![100], Some("7".to_owned()))]
         );
+    }
+
+    #[tokio::test]
+    async fn test_wait_scatter_region_finish_polls_until_operator_finishes() {
+        use crate::proto::pdpb;
+
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.push_get_operator_response(pdpb::GetOperatorResponse {
+            desc: b"scatter-region".to_vec(),
+            status: pdpb::OperatorStatus::Running as i32,
+            ..Default::default()
+        });
+        pd_client.push_get_operator_response(pdpb::GetOperatorResponse {
+            desc: b"scatter-region".to_vec(),
+            status: pdpb::OperatorStatus::Success as i32,
+            ..Default::default()
+        });
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        client
+            .wait_scatter_region_finish(42, Backoff::no_jitter_backoff(0, 0, 2))
+            .await
+            .unwrap();
+
+        assert_eq!(pd_client.get_operator_calls(), vec![42, 42]);
+    }
+
+    #[tokio::test]
+    async fn test_wait_scatter_region_finish_returns_timeout_when_backoff_exhausted() {
+        use crate::proto::pdpb;
+
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.push_get_operator_response(pdpb::GetOperatorResponse {
+            desc: b"scatter-region".to_vec(),
+            status: pdpb::OperatorStatus::Running as i32,
+            ..Default::default()
+        });
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let err = client
+            .wait_scatter_region_finish(42, Backoff::no_backoff())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, crate::Error::StringError(msg) if msg == "wait scatter region timeout")
+        );
+        assert_eq!(pd_client.get_operator_calls(), vec![42]);
+    }
+
+    #[tokio::test]
+    async fn test_check_region_in_scattering_returns_true_only_for_running_scatter_operator() {
+        use crate::proto::pdpb;
+
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.push_get_operator_response(pdpb::GetOperatorResponse {
+            desc: b"scatter-region".to_vec(),
+            status: pdpb::OperatorStatus::Running as i32,
+            ..Default::default()
+        });
+        pd_client.push_get_operator_response(pdpb::GetOperatorResponse {
+            desc: b"scatter-region".to_vec(),
+            status: pdpb::OperatorStatus::Success as i32,
+            ..Default::default()
+        });
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        assert!(client.check_region_in_scattering(42).await.unwrap());
+        assert!(!client.check_region_in_scattering(42).await.unwrap());
+        assert_eq!(pd_client.get_operator_calls(), vec![42, 42]);
     }
 }
