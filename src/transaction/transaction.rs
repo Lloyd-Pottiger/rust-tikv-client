@@ -5107,6 +5107,11 @@ impl TransactionOptions {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        if self.pipelined_txn.is_some() && matches!(self.kind, TransactionKind::Pessimistic(_)) {
+            return Err(Error::StringError(
+                "pipelined txn does not support pessimistic mode".to_owned(),
+            ));
+        }
         if self.pipelined_txn.is_some() && (self.try_one_pc || self.async_commit) {
             return Err(Error::StringError(
                 "pipelined txn does not support async-commit or 1pc".to_owned(),
@@ -5119,7 +5124,7 @@ impl TransactionOptions {
     ///
     /// This maps to client-go `tikv.WithDefaultPipelinedTxn`.
     ///
-    /// Note: pipelined transactions do not support async-commit or 1PC.
+    /// Note: pipelined transactions do not support async-commit, 1PC, or pessimistic mode.
     #[must_use]
     pub fn pipelined(mut self) -> TransactionOptions {
         self.pipelined_txn = Some(PipelinedTxnOptions::default());
@@ -5128,7 +5133,7 @@ impl TransactionOptions {
 
     /// Enable a pipelined DML transaction with custom parameters.
     ///
-    /// Note: pipelined transactions do not support async-commit or 1PC.
+    /// Note: pipelined transactions do not support async-commit, 1PC, or pessimistic mode.
     #[must_use]
     pub fn pipelined_txn(mut self, options: PipelinedTxnOptions) -> TransactionOptions {
         self.pipelined_txn = Some(options);

@@ -2696,6 +2696,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_begin_with_options_rejects_pipelined_pessimistic() {
+        let pd_client = Arc::new(MockPdClient::default());
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let err = client
+            .begin_with_options(
+                TransactionOptions::new_pessimistic()
+                    .pipelined()
+                    .drop_check(crate::CheckLevel::None),
+            )
+            .await
+            .err()
+            .expect("pipelined txn should reject pessimistic mode");
+        assert!(matches!(
+            err,
+            Error::StringError(msg) if msg == "pipelined txn does not support pessimistic mode"
+        ));
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+    }
+
+    #[tokio::test]
     async fn test_begin_with_start_timestamp_rejects_pipelined_with_async_commit_or_one_pc() {
         let pd_client = Arc::new(MockPdClient::default());
 
@@ -2738,6 +2770,37 @@ mod tests {
             txn.commit().await,
             Err(Error::StringError(msg))
                 if msg == "pipelined txn does not support async-commit or 1pc"
+        ));
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_begin_with_start_timestamp_rejects_pipelined_pessimistic() {
+        let pd_client = Arc::new(MockPdClient::default());
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let mut txn = client.begin_with_start_timestamp(
+            Timestamp::from_version(5),
+            TransactionOptions::new_pessimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(crate::CheckLevel::None),
+        );
+        assert!(matches!(
+            txn.commit().await,
+            Err(Error::StringError(msg))
+                if msg == "pipelined txn does not support pessimistic mode"
         ));
         assert_eq!(pd_client.get_timestamp_call_count(), 0);
     }
