@@ -219,6 +219,16 @@ impl Lock {
         self.inner.min_commit_ts
     }
 
+    #[must_use]
+    pub fn secondaries(&self) -> &[Vec<u8>] {
+        &self.inner.secondaries
+    }
+
+    #[must_use]
+    pub fn is_txn_file(&self) -> bool {
+        self.inner.is_txn_file
+    }
+
     /// Returns `true` if this lock is pessimistic (`PessimisticLock` or `SharedPessimisticLock`).
     #[must_use]
     pub fn is_pessimistic(&self) -> bool {
@@ -247,6 +257,47 @@ impl From<kvrpcpb::LockInfo> for Lock {
 impl From<Lock> for kvrpcpb::LockInfo {
     fn from(lock: Lock) -> kvrpcpb::LockInfo {
         lock.into_proto()
+    }
+}
+
+impl std::fmt::Display for Lock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let lock_type = match self.inner.lock_type {
+            x if x == kvrpcpb::Op::Put as i32 => kvrpcpb::Op::Put.as_str_name().to_owned(),
+            x if x == kvrpcpb::Op::Del as i32 => kvrpcpb::Op::Del.as_str_name().to_owned(),
+            x if x == kvrpcpb::Op::Lock as i32 => kvrpcpb::Op::Lock.as_str_name().to_owned(),
+            x if x == kvrpcpb::Op::Rollback as i32 => {
+                kvrpcpb::Op::Rollback.as_str_name().to_owned()
+            }
+            x if x == kvrpcpb::Op::Insert as i32 => kvrpcpb::Op::Insert.as_str_name().to_owned(),
+            x if x == kvrpcpb::Op::PessimisticLock as i32 => {
+                kvrpcpb::Op::PessimisticLock.as_str_name().to_owned()
+            }
+            x if x == kvrpcpb::Op::CheckNotExists as i32 => {
+                kvrpcpb::Op::CheckNotExists.as_str_name().to_owned()
+            }
+            x if x == kvrpcpb::Op::SharedLock as i32 => {
+                kvrpcpb::Op::SharedLock.as_str_name().to_owned()
+            }
+            x if x == kvrpcpb::Op::SharedPessimisticLock as i32 => {
+                kvrpcpb::Op::SharedPessimisticLock.as_str_name().to_owned()
+            }
+            other => format!("unknown({other})"),
+        };
+
+        write!(
+            f,
+            "key: {}, primary: {}, txnStartTS: {}, lockForUpdateTS:{}, minCommitTs:{}, ttl: {}, type: {}, UseAsyncCommit: {}, txnSize: {}",
+            format_key_for_log(&self.inner.key),
+            format_key_for_log(&self.inner.primary_lock),
+            self.inner.lock_version,
+            self.inner.lock_for_update_ts,
+            self.inner.min_commit_ts,
+            self.inner.lock_ttl,
+            lock_type,
+            self.inner.use_async_commit,
+            self.inner.txn_size,
+        )
     }
 }
 
@@ -2178,6 +2229,8 @@ mod tests {
         proto.use_async_commit = true;
         proto.lock_for_update_ts = 7;
         proto.min_commit_ts = 8;
+        proto.secondaries = vec![b"s1".to_vec(), b"s2".to_vec()];
+        proto.is_txn_file = true;
 
         proto.lock_type = kvrpcpb::Op::PessimisticLock as i32;
         let lock = new_lock(proto.clone());
@@ -2190,12 +2243,34 @@ mod tests {
         assert!(lock.use_async_commit());
         assert_eq!(lock.lock_for_update_ts(), 7);
         assert_eq!(lock.min_commit_ts(), 8);
+        assert_eq!(lock.secondaries(), &[b"s1".to_vec(), b"s2".to_vec()]);
+        assert!(lock.is_txn_file());
         assert!(lock.is_pessimistic());
         assert!(!lock.is_shared());
         assert_eq!(lock.as_proto(), &proto);
 
         let proto_roundtrip: kvrpcpb::LockInfo = lock.clone().into();
         assert_eq!(proto_roundtrip, proto);
+    }
+
+    #[test]
+    fn test_lock_wrapper_display_includes_key_len_prefix() {
+        let mut proto = kvrpcpb::LockInfo::default();
+        proto.key = vec![9; 20];
+        proto.primary_lock = vec![10; 1];
+        proto.lock_version = 1;
+        proto.lock_for_update_ts = 2;
+        proto.min_commit_ts = 3;
+        proto.lock_ttl = 4;
+        proto.lock_type = kvrpcpb::Op::Put as i32;
+        proto.txn_size = 5;
+        let lock = new_lock(proto);
+
+        let display = lock.to_string();
+        assert!(display.contains("len=20"), "display={display}");
+        assert!(display.contains("txnStartTS: 1"), "display={display}");
+        assert!(display.contains("ttl: 4"), "display={display}");
+        assert!(display.contains("type: Put"), "display={display}");
     }
 
     #[test]
