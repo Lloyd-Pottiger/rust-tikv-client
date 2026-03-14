@@ -2687,10 +2687,32 @@ impl<PdC: PdClient> Transaction<PdC> {
         committer.resource_group_tagger = self.resource_group_tagger.clone();
         committer.schema_ver = self.schema_ver;
         committer.schema_lease_checker = self.schema_lease_checker.clone();
+
+        let pipelined_has_flushed_range = self
+            .pipelined
+            .as_ref()
+            .map(PipelinedState::has_flushed_range)
+            .unwrap_or(false);
         let res = committer.rollback().await;
 
         if res.is_ok() {
             self.set_status(TransactionStatus::Rolledback);
+            if pipelined_has_flushed_range {
+                let rpc = self.rpc.clone();
+                let start_ts = self.timestamp.version();
+                let status = kvrpcpb::TxnStatus {
+                    start_ts,
+                    min_commit_ts: start_ts.saturating_add(1),
+                    commit_ts: 0,
+                    rolled_back: true,
+                    is_completed: false,
+                };
+                tokio::spawn(async move {
+                    if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
+                        debug!("broadcast_txn_status_to_all_stores failed: {err}");
+                    }
+                });
+            }
         }
         res
     }
@@ -10170,6 +10192,82 @@ mod tests {
             .expect("broadcast should be dispatched to all stores");
 
         txn.stop_auto_heartbeat();
+        assert_eq!(broadcasts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_rollback_broadcasts_txn_status_to_all_stores_when_flushed_range_present(
+    ) {
+        use tokio::sync::Notify;
+
+        let broadcasts = Arc::new(AtomicUsize::new(0));
+        let broadcasts_captured = broadcasts.clone();
+        let notified = Arc::new(Notify::new());
+        let notified_captured = notified.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>() {
+                    assert!(
+                        req.context.is_some(),
+                        "BroadcastTxnStatusRequest should populate context"
+                    );
+                    assert_eq!(req.txn_status.len(), 1);
+                    let status = &req.txn_status[0];
+                    assert_eq!(status.start_ts, 5);
+                    assert_eq!(status.min_commit_ts, 6);
+                    assert_eq!(status.commit_ts, 0);
+                    assert!(status.rolled_back);
+                    assert!(!status.is_completed);
+
+                    let count = broadcasts_captured.fetch_add(1, Ordering::SeqCst) + 1;
+                    if count == 2 {
+                        notified_captured.notify_one();
+                    }
+                    return Ok(
+                        Box::<kvrpcpb::BroadcastTxnStatusResponse>::default() as Box<dyn Any>
+                    );
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                ..Default::default()
+            })
+            .await;
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.pipelined
+            .as_mut()
+            .expect("pipelined state must exist")
+            .flushed_range_start = Some(Key::from(b"a".to_vec()));
+        txn.pipelined
+            .as_mut()
+            .expect("pipelined state must exist")
+            .flushed_range_end = Some(Key::from(b"z".to_vec()));
+
+        txn.rollback().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), notified.notified())
+            .await
+            .expect("broadcast should be dispatched to all stores");
         assert_eq!(broadcasts.load(Ordering::SeqCst), 2);
     }
 
