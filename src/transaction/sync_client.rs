@@ -409,6 +409,30 @@ impl SyncTransactionClient {
         )
     }
 
+    /// Get the PD GC safe point.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::get_gc_safe_point`](crate::TransactionClient::get_gc_safe_point).
+    pub fn get_gc_safe_point(&self) -> Result<u64> {
+        safe_block_on(&self.runtime, self.client.get_gc_safe_point())
+    }
+
+    /// Get the PD GC safe point (V2) for a given keyspace.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::get_gc_safe_point_v2`](crate::TransactionClient::get_gc_safe_point_v2).
+    pub fn get_gc_safe_point_v2(&self, keyspace_id: u32) -> Result<u64> {
+        safe_block_on(&self.runtime, self.client.get_gc_safe_point_v2(keyspace_id))
+    }
+
+    /// Check if it is safe to read using the given `start_ts`.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::check_visibility`](crate::TransactionClient::check_visibility).
+    pub fn check_visibility(&self, start_ts: u64) -> Result<()> {
+        safe_block_on(&self.runtime, self.client.check_visibility(start_ts))
+    }
+
     /// Request garbage collection (GC) of the TiKV cluster.
     ///
     /// This is a synchronous version of [`TransactionClient::gc`](crate::TransactionClient::gc).

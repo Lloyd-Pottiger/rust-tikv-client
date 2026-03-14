@@ -733,6 +733,51 @@ impl<PdC: PdClient> Client<PdC> {
             .await
     }
 
+    /// Get the PD GC safe point.
+    ///
+    /// This maps to client-go `pd.Client.GetGCSafePoint`.
+    ///
+    /// On success, returns PD's `safe_point`.
+    pub async fn get_gc_safe_point(&self) -> Result<u64> {
+        self.pd.clone().get_gc_safe_point().await
+    }
+
+    /// Get the PD GC safe point (V2) for a given keyspace.
+    ///
+    /// This maps to client-go `pd.Client.GetGCSafePointV2`.
+    ///
+    /// On success, returns PD's `safe_point`.
+    pub async fn get_gc_safe_point_v2(&self, keyspace_id: u32) -> Result<u64> {
+        self.pd.clone().get_gc_safe_point_v2(keyspace_id).await
+    }
+
+    /// Check if it is safe to read using the given `start_ts`.
+    ///
+    /// This maps to client-go `KVStore.CheckVisibility`.
+    ///
+    /// When the provided `start_ts` falls behind the current GC safe point, this returns
+    /// [`Error::TxnAbortedByGc`].
+    pub async fn check_visibility(&self, start_ts: u64) -> Result<()> {
+        let safe_point = match self.keyspace {
+            Keyspace::Enable { keyspace_id } => {
+                match self.pd.clone().get_gc_safe_point_v2(keyspace_id).await {
+                    Ok(safe_point) => safe_point,
+                    Err(crate::Error::Unimplemented) => self.pd.clone().get_gc_safe_point().await?,
+                    Err(err) => return Err(err),
+                }
+            }
+            _ => self.pd.clone().get_gc_safe_point().await?,
+        };
+
+        if start_ts < safe_point {
+            return Err(crate::Error::TxnAbortedByGc {
+                start_ts,
+                safe_point,
+            });
+        }
+        Ok(())
+    }
+
     /// Request garbage collection (GC) of the TiKV cluster.
     ///
     /// GC deletes MVCC records whose timestamp is lower than the given `safepoint`. We must guarantee
@@ -3535,6 +3580,100 @@ mod tests {
         assert_eq!(pd_client.update_gc_safe_point_v2_calls(), vec![(7, 9)]);
     }
 
+    #[tokio::test]
+    async fn test_get_gc_safe_point_calls_pd() {
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.push_get_gc_safe_point_response(100);
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let safe_point = client.get_gc_safe_point().await.unwrap();
+        assert_eq!(safe_point, 100);
+        assert_eq!(pd_client.get_gc_safe_point_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_gc_safe_point_v2_calls_pd() {
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.push_get_gc_safe_point_v2_response(100);
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let safe_point = client.get_gc_safe_point_v2(7).await.unwrap();
+        assert_eq!(safe_point, 100);
+        assert_eq!(pd_client.get_gc_safe_point_v2_calls(), vec![7]);
+    }
+
+    #[tokio::test]
+    async fn test_check_visibility_returns_txn_aborted_by_gc_when_start_ts_is_too_old() {
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.push_get_gc_safe_point_response(50);
+        pd_client.push_get_gc_safe_point_response(50);
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        client.check_visibility(100).await.unwrap();
+
+        let err = client.check_visibility(40).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::TxnAbortedByGc {
+                start_ts: 40,
+                safe_point: 50
+            }
+        ));
+        assert_eq!(pd_client.get_gc_safe_point_call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_check_visibility_uses_gc_safe_point_v2_when_keyspace_enabled() {
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.push_get_gc_safe_point_v2_response(50);
+
+        let keyspace = Keyspace::Enable { keyspace_id: 7 };
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        client.check_visibility(100).await.unwrap();
+        assert_eq!(pd_client.get_gc_safe_point_v2_calls(), vec![7]);
+        assert_eq!(pd_client.get_gc_safe_point_call_count(), 0);
+    }
+
     #[derive(Clone)]
     struct UnimplementedGcSafePointV2PdClient {
         inner: Arc<MockPdClient>,
@@ -3571,6 +3710,10 @@ mod tests {
 
         async fn get_timestamp(self: Arc<Self>) -> crate::Result<crate::Timestamp> {
             self.inner.clone().get_timestamp().await
+        }
+
+        async fn get_gc_safe_point(self: Arc<Self>) -> crate::Result<u64> {
+            self.inner.clone().get_gc_safe_point().await
         }
 
         async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> crate::Result<u64> {
@@ -3643,5 +3786,32 @@ mod tests {
         assert_eq!(inner.update_safepoint_calls(), vec![9]);
         assert!(inner.update_gc_safe_point_v2_calls().is_empty());
         assert!(scan_lock_calls.load(Ordering::SeqCst) > 0);
+    }
+
+    #[tokio::test]
+    async fn test_check_visibility_falls_back_to_gc_safe_point_when_gc_safe_point_v2_unimplemented()
+    {
+        let inner = Arc::new(MockPdClient::default());
+        inner.push_get_gc_safe_point_response(50);
+
+        let pd_client = Arc::new(UnimplementedGcSafePointV2PdClient {
+            inner: inner.clone(),
+        });
+
+        let keyspace = Keyspace::Enable { keyspace_id: 7 };
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client,
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        client.check_visibility(100).await.unwrap();
+        assert_eq!(inner.get_gc_safe_point_call_count(), 1);
+        assert!(inner.get_gc_safe_point_v2_calls().is_empty());
     }
 }
