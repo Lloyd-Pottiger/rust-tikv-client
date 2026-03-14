@@ -5,10 +5,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fail::fail_point;
+use futures::stream;
 use tonic::transport::Channel;
 use tonic::IntoRequest;
+use tonic::IntoStreamingRequest;
 
 use crate::proto::kvrpcpb;
+use crate::proto::tikvpb;
 use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::store::RegionWithLeader;
 use crate::Error;
@@ -343,14 +346,72 @@ impl Request for kvrpcpb::GetHealthFeedbackRequest {
         client: &TikvClient<Channel>,
         timeout: Duration,
     ) -> Result<Box<dyn Any>> {
-        let mut req = self.clone().into_request();
-        req.set_timeout(timeout);
-        client
-            .clone()
-            .get_health_feedback(req)
-            .await
-            .map(|r| Box::new(r.into_inner()) as Box<dyn Any>)
-            .map_err(Error::GrpcAPI)
+        let dispatch_with_batch = async {
+            let batch_request = tikvpb::BatchCommandsRequest {
+                requests: vec![tikvpb::batch_commands_request::Request {
+                    cmd: Some(
+                        tikvpb::batch_commands_request::request::Cmd::GetHealthFeedback(
+                            self.clone(),
+                        ),
+                    ),
+                }],
+                request_ids: vec![0],
+            };
+            let request_stream = stream::iter(vec![batch_request]);
+            let mut req = request_stream.into_streaming_request();
+            req.set_timeout(timeout);
+            let mut resp_stream = client
+                .clone()
+                .batch_commands(req)
+                .await
+                .map_err(Error::GrpcAPI)?
+                .into_inner();
+            let resp = resp_stream
+                .message()
+                .await
+                .map_err(Error::GrpcAPI)?
+                .ok_or_else(|| {
+                    Error::StringError("batch_commands finished without response".to_owned())
+                })?;
+
+            let mut health_feedback = resp.health_feedback;
+            if health_feedback.is_none() {
+                for response in resp.responses {
+                    let Some(cmd) = response.cmd else {
+                        continue;
+                    };
+                    if let tikvpb::batch_commands_response::response::Cmd::GetHealthFeedback(
+                        inner,
+                    ) = cmd
+                    {
+                        health_feedback = inner.health_feedback;
+                        break;
+                    }
+                }
+            }
+            Ok::<_, Error>(health_feedback)
+        };
+
+        let health_feedback = match dispatch_with_batch.await {
+            Ok(feedback) => feedback,
+            Err(Error::GrpcAPI(status)) if status.code() == tonic::Code::Unimplemented => {
+                let mut req = self.clone().into_request();
+                req.set_timeout(timeout);
+                return client
+                    .clone()
+                    .get_health_feedback(req)
+                    .await
+                    .map(|r| Box::new(r.into_inner()) as Box<dyn Any>)
+                    .map_err(Error::GrpcAPI);
+            }
+            Err(err) => return Err(err),
+        };
+
+        let resp = kvrpcpb::GetHealthFeedbackResponse {
+            region_error: None,
+            health_feedback,
+        };
+        Ok(Box::new(resp) as Box<dyn Any>)
     }
 
     fn label(&self) -> &'static str {
