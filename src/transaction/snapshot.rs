@@ -245,7 +245,9 @@ impl<PdC: PdClient> Snapshot<PdC> {
     ///
     /// This maps to client-go `KVSnapshot.CleanCache` (primarily for testing/debugging).
     pub fn clean_cache(&mut self, keys: impl IntoIterator<Item = impl Into<Key>>) {
-        self.cache.clean(keys.into_iter().map(Into::into));
+        let keys: Vec<Key> = keys.into_iter().map(Into::into).collect();
+        self.cache.clean(keys.clone());
+        self.transaction.clean_snapshot_read_cache(keys);
     }
 
     /// Set an RPC interceptor for this snapshot.
@@ -746,6 +748,46 @@ mod tests {
         assert_eq!(get_calls.load(Ordering::SeqCst), 1);
         assert_eq!(snapshot.snap_cache_hit_count(), 1);
         assert_eq!(snapshot.snap_cache_size(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_clean_cache_clears_transaction_read_cache() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls_cloned = get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(_req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = false;
+                resp.value = b"v".to_vec();
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        snapshot.get(b"k".to_vec()).await.unwrap();
+        snapshot.get(b"k".to_vec()).await.unwrap();
+        assert_eq!(get_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot.snap_cache_size(), 1);
+
+        snapshot.clean_cache(vec![b"k".to_vec()]);
+        assert_eq!(snapshot.snap_cache_size(), 0);
+
+        snapshot.get(b"k".to_vec()).await.unwrap();
+        assert_eq!(get_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

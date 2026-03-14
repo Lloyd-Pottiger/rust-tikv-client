@@ -596,6 +596,10 @@ impl<PdC: PdClient> Transaction<PdC> {
         Ok(())
     }
 
+    pub(crate) fn clean_snapshot_read_cache(&mut self, keys: impl IntoIterator<Item = Key>) {
+        self.buffer.clean_cached_reads(keys);
+    }
+
     /// Set server-side maximum execution duration for read requests.
     ///
     /// This option writes to `kvrpcpb::Context.max_execution_duration_ms`.

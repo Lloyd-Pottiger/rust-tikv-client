@@ -173,6 +173,27 @@ impl Buffer {
         Ok(results)
     }
 
+    pub(crate) fn clean_cached_reads(&mut self, keys: impl IntoIterator<Item = Key>) {
+        for key in keys {
+            let Entry::Occupied(mut occupied) = self.entry_map.entry(key) else {
+                continue;
+            };
+
+            match occupied.get_mut() {
+                BufferEntry::Cached(_) => {
+                    occupied.remove();
+                }
+                BufferEntry::Locked(_kind, cached_value) => {
+                    // Keep the lock, but drop the cached read result.
+                    if cached_value.is_some() {
+                        *cached_value = None;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Run `f` to fetch entries in `range` from TiKV. Combine them with mutations in local buffer. Returns the results.
     pub async fn scan_and_fetch<F, Fut>(
         &mut self,
