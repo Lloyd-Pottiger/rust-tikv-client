@@ -30,6 +30,9 @@ pub struct Config {
     /// drained.
     pub tso_max_pending_count: usize,
     pub grpc_max_decoding_message_size: usize,
+    /// The maximum number of gRPC connections established with each TiKV server (client-go
+    /// `GrpcConnectionCount`).
+    pub grpc_connection_count: usize,
     /// After a duration of this time without RPC activity, the client pings the server to see if
     /// the transport is still alive (client-go `GrpcKeepAliveTime`).
     ///
@@ -70,6 +73,7 @@ pub struct Config {
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
+const DEFAULT_GRPC_CONNECTION_COUNT: usize = 4;
 const DEFAULT_GRPC_KEEPALIVE_TIME: Duration = Duration::from_secs(10);
 const DEFAULT_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_GRPC_INITIAL_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
@@ -86,6 +90,7 @@ impl Default for Config {
             timeout: DEFAULT_REQUEST_TIMEOUT,
             tso_max_pending_count: DEFAULT_TSO_MAX_PENDING_COUNT,
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
+            grpc_connection_count: DEFAULT_GRPC_CONNECTION_COUNT,
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
             grpc_initial_window_size: DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
@@ -104,6 +109,11 @@ impl Config {
     /// This is called internally by client constructors, and can also be called by users to catch
     /// invalid configurations early.
     pub fn validate(&self) -> crate::Result<()> {
+        if self.grpc_connection_count == 0 {
+            return Err(crate::Error::StringError(
+                "grpc-connection-count should be greater than 0".to_owned(),
+            ));
+        }
         if self.grpc_keepalive_timeout < MIN_GRPC_KEEPALIVE_TIMEOUT {
             return Err(crate::Error::StringError(format!(
                 "grpc-keepalive-timeout should be at least {MIN_GRPC_KEEPALIVE_TIMEOUT:?}, but got {:?}",
@@ -175,6 +185,15 @@ impl Config {
     #[must_use]
     pub fn with_grpc_max_decoding_message_size(mut self, size: usize) -> Self {
         self.grpc_max_decoding_message_size = size;
+        self
+    }
+
+    /// Set the maximum number of gRPC connections established with each TiKV server.
+    ///
+    /// Values less than 1 are treated as 1.
+    #[must_use]
+    pub fn with_grpc_connection_count(mut self, count: usize) -> Self {
+        self.grpc_connection_count = count.max(1);
         self
     }
 
@@ -275,12 +294,21 @@ mod tests {
         assert_eq!(config.grpc_keepalive_timeout, Duration::from_secs(3));
         assert_eq!(config.grpc_initial_window_size, 1 << 27);
         assert_eq!(config.grpc_initial_conn_window_size, 1 << 27);
+        assert_eq!(config.grpc_connection_count, 4);
         config.validate().unwrap();
     }
 
     #[test]
     fn test_config_validate_grpc_keepalive_timeout_min() {
         let config = Config::default().with_grpc_keepalive_timeout(Duration::from_millis(49));
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, crate::Error::StringError(_)));
+    }
+
+    #[test]
+    fn test_config_validate_grpc_connection_count_min() {
+        let mut config = Config::default();
+        config.grpc_connection_count = 0;
         let err = config.validate().unwrap_err();
         assert!(matches!(err, crate::Error::StringError(_)));
     }

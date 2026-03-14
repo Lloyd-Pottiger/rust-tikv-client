@@ -1,6 +1,8 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -503,10 +505,46 @@ pub trait PdClient: Send + Sync + 'static {
 
 /// This client converts requests for the logical TiKV cluster into requests
 /// for a single TiKV store using PD and internal logic.
+#[derive(Clone)]
+struct KvClientPool<C> {
+    inner: Arc<KvClientPoolInner<C>>,
+}
+
+struct KvClientPoolInner<C> {
+    clients: Vec<C>,
+    next: AtomicUsize,
+}
+
+impl<C> KvClientPool<C> {
+    fn new(clients: Vec<C>) -> Self {
+        debug_assert!(!clients.is_empty());
+        KvClientPool {
+            inner: Arc::new(KvClientPoolInner {
+                clients,
+                next: AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    fn pick(&self) -> C
+    where
+        C: Clone,
+    {
+        let idx = self.inner.next.fetch_add(1, Ordering::Relaxed);
+        self.inner.clients[idx % self.inner.clients.len()].clone()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.clients.len()
+    }
+}
+
 pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl = Cluster> {
     pd: Arc<RetryClient<Cl>>,
     kv_connect: KvC,
-    kv_client_cache: Arc<RwLock<HashMap<String, KvC::KvClient>>>,
+    grpc_connection_count: usize,
+    kv_client_cache: Arc<RwLock<HashMap<String, KvClientPool<KvC::KvClient>>>>,
     slow_store_until: Mutex<HashMap<StoreId, Instant>>,
     store_estimated_wait_until: Mutex<HashMap<StoreId, Instant>>,
     enable_codec: bool,
@@ -848,6 +886,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
     {
         config.validate()?;
 
+        let grpc_connection_count = config.grpc_connection_count;
         let resolve_lock_lite_threshold = config.resolve_lock_lite_threshold;
         let (pd_http_client, pd_http_use_https) = build_pd_http_client(&config);
         let security_mgr = Arc::new(
@@ -871,6 +910,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             pd: pd.clone(),
             kv_client_cache,
             kv_connect: kv_connect(security_mgr),
+            grpc_connection_count,
             slow_store_until: Mutex::new(HashMap::new()),
             store_estimated_wait_until: Mutex::new(HashMap::new()),
             enable_codec,
@@ -883,20 +923,23 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
     }
 
     async fn kv_client(&self, address: &str) -> Result<KvC::KvClient> {
-        if let Some(client) = self.kv_client_cache.read().await.get(address) {
-            return Ok(client.clone());
+        if let Some(pool) = self.kv_client_cache.read().await.get(address) {
+            return Ok(pool.pick());
         };
         info!("connect to tikv endpoint: {:?}", address);
-        match self.kv_connect.connect(address).await {
-            Ok(client) => {
-                self.kv_client_cache
-                    .write()
-                    .await
-                    .insert(address.to_owned(), client.clone());
-                Ok(client)
-            }
-            Err(e) => Err(e),
+
+        let mut clients = Vec::with_capacity(self.grpc_connection_count);
+        for _ in 0..self.grpc_connection_count {
+            clients.push(self.kv_connect.connect(address).await?);
         }
+
+        let pool = KvClientPool::new(clients);
+        let selected = pool.pick();
+        self.kv_client_cache
+            .write()
+            .await
+            .insert(address.to_owned(), pool);
+        Ok(selected)
     }
 }
 
@@ -1086,6 +1129,7 @@ pub mod test {
 
     use super::*;
     use crate::mock::*;
+    use crate::store::Request;
 
     #[tokio::test]
     async fn test_kv_client_caching() {
@@ -1099,6 +1143,65 @@ pub mod test {
         let kv3 = client.kv_client(addr2).await.unwrap();
         assert!(kv1.addr != kv2.addr);
         assert_eq!(kv2.addr, kv3.addr);
+    }
+
+    #[derive(Clone)]
+    struct CountingKvClient {
+        id: usize,
+    }
+
+    #[async_trait]
+    impl KvClient for CountingKvClient {
+        async fn dispatch(&self, _req: &dyn Request) -> Result<Box<dyn Any>> {
+            Ok(Box::new(()))
+        }
+    }
+
+    struct CountingKvConnect {
+        connect_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl KvConnect for CountingKvConnect {
+        type KvClient = CountingKvClient;
+
+        async fn connect(&self, _address: &str) -> Result<Self::KvClient> {
+            let id = self.connect_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(CountingKvClient { id })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_kv_client_pool_round_robin() {
+        let config = Config::default().with_grpc_connection_count(3);
+        let client = PdRpcClient::new(
+            config.clone(),
+            |_| CountingKvConnect {
+                connect_calls: AtomicUsize::new(0),
+            },
+            |sm| {
+                futures::future::ok(RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    42,
+                    MockCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let c0 = client.kv_client("foo").await.unwrap();
+        let c1 = client.kv_client("foo").await.unwrap();
+        let c2 = client.kv_client("foo").await.unwrap();
+        let c3 = client.kv_client("foo").await.unwrap();
+        assert_eq!([c0.id, c1.id, c2.id, c3.id], [0, 1, 2, 0]);
+
+        assert_eq!(client.kv_connect.connect_calls.load(Ordering::Relaxed), 3);
+        let cache = client.kv_client_cache.read().await;
+        let pool = cache.get("foo").expect("kv client pool should be cached");
+        assert_eq!(pool.len(), 3);
     }
 
     #[tokio::test]
