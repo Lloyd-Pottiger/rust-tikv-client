@@ -483,6 +483,62 @@ impl<PdC: PdClient> Client<PdC> {
         PdClient::set_external_timestamp(self.pd.clone(), timestamp).await
     }
 
+    /// Validate that `read_ts` is safe to use for reads (i.e. it is not in the future).
+    ///
+    /// This maps to client-go `Oracle.ValidateReadTS` for the global txn scope.
+    pub async fn validate_read_ts(&self, read_ts: u64, is_stale_read: bool) -> Result<()> {
+        self.validate_read_ts_with_txn_scope("", read_ts, is_stale_read)
+            .await
+    }
+
+    /// Validate that `read_ts` is safe to use for reads for the given transaction scope.
+    ///
+    /// This maps to client-go `Oracle.ValidateReadTS(ctx, readTS, isStaleRead, opt)` where
+    /// `opt.TxnScope` is `txn_scope`.
+    pub async fn validate_read_ts_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+        read_ts: u64,
+        is_stale_read: bool,
+    ) -> Result<()> {
+        // Guard against a common misuse we have seen in client-go.
+        if read_ts >= i64::MAX as u64 && read_ts < u64::MAX {
+            return Err(crate::Error::StringError(format!(
+                "MaxInt64 <= readTS < MaxUint64, readTS={read_ts}"
+            )));
+        }
+
+        // `u64::MAX` is used as "latest" in some code paths, but it must not be used for stale reads.
+        if read_ts == u64::MAX {
+            if is_stale_read {
+                return Err(crate::Error::StringError(
+                    "cannot set read ts to max uint64 for stale read".to_owned(),
+                ));
+            }
+            return Ok(());
+        }
+
+        let dc_location = Self::canonicalize_txn_scope(txn_scope.as_ref());
+        if let Some(last_tso) = self.last_tsos.read().await.get(&dc_location) {
+            if read_ts <= last_tso.tso.version() {
+                return Ok(());
+            }
+        }
+
+        let current_ts = self
+            .current_timestamp_with_txn_scope(txn_scope.as_ref())
+            .await?;
+        let current_version = current_ts.version();
+
+        if read_ts <= current_version {
+            Ok(())
+        } else {
+            Err(crate::Error::StringError(format!(
+                "cannot set read timestamp to a future time, readTS: {read_ts}, currentTS: {current_version}"
+            )))
+        }
+    }
+
     /// Generate a timestamp representing the time `prev_seconds` seconds ago.
     ///
     /// This is intended for staleness reads: when combined with
@@ -1861,6 +1917,97 @@ mod tests {
         assert_eq!(pd_client.set_external_timestamp_call_count(), 1);
         assert_eq!(pd_client.get_external_timestamp_call_count(), 1);
         assert_eq!(pd_client.get_timestamp_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_validate_read_ts_allows_latest_for_non_stale_read() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        client.validate_read_ts(u64::MAX, false).await.unwrap();
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_validate_read_ts_rejects_latest_for_stale_read() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let err = client
+            .validate_read_ts(u64::MAX, true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max uint64"));
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_validate_read_ts_uses_cached_last_tso_without_fetching_pd_timestamp() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let cached = Timestamp {
+            physical: 10_000,
+            logical: 7,
+            ..Default::default()
+        };
+        let cached_version = cached.version();
+        {
+            let mut last_tsos = client.last_tsos.write().await;
+            last_tsos.insert(
+                String::new(),
+                super::LastTso {
+                    tso: cached,
+                    arrival: Instant::now(),
+                },
+            );
+        }
+
+        client
+            .validate_read_ts(cached_version, false)
+            .await
+            .unwrap();
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_validate_read_ts_rejects_future_ts() {
+        let start_version = 10_000u64 << 18;
+        let pd_client = Arc::new(MockPdClient::default().with_tso_sequence(start_version));
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        let err = client
+            .validate_read_ts(start_version + 1, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("future time"));
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
     }
 
     #[tokio::test]

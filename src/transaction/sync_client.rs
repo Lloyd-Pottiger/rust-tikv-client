@@ -257,6 +257,34 @@ impl SyncTransactionClient {
         safe_block_on(&self.runtime, self.client.set_external_timestamp(timestamp))
     }
 
+    /// Validate that `read_ts` is safe to use for reads (i.e. it is not in the future).
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::validate_read_ts`](crate::TransactionClient::validate_read_ts).
+    pub fn validate_read_ts(&self, read_ts: u64, is_stale_read: bool) -> Result<()> {
+        safe_block_on(
+            &self.runtime,
+            self.client.validate_read_ts(read_ts, is_stale_read),
+        )
+    }
+
+    /// Validate that `read_ts` is safe to use for reads for the given transaction scope.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::validate_read_ts_with_txn_scope`](crate::TransactionClient::validate_read_ts_with_txn_scope).
+    pub fn validate_read_ts_with_txn_scope(
+        &self,
+        txn_scope: impl AsRef<str>,
+        read_ts: u64,
+        is_stale_read: bool,
+    ) -> Result<()> {
+        safe_block_on(
+            &self.runtime,
+            self.client
+                .validate_read_ts_with_txn_scope(txn_scope, read_ts, is_stale_read),
+        )
+    }
+
     /// Generate a timestamp representing the time `prev_seconds` seconds ago.
     ///
     /// This is a synchronous version of [`TransactionClient::stale_timestamp`](crate::TransactionClient::stale_timestamp).
