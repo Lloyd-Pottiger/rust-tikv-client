@@ -19,6 +19,7 @@ pub(crate) use lock::HasLocks;
 pub(crate) use lock::LockResolverRpcContext;
 pub(crate) use lock::ReadLockTracker;
 pub use snapshot::Snapshot;
+pub use snapshot::SnapshotCacheEntry;
 pub use sync_client::SyncTransactionClient;
 pub use sync_snapshot::SyncSnapshot;
 pub use sync_transaction::SyncTransaction;

@@ -250,6 +250,8 @@ pub use crate::transaction::SchemaLeaseChecker;
 #[doc(inline)]
 pub use crate::transaction::Snapshot;
 #[doc(inline)]
+pub use crate::transaction::SnapshotCacheEntry;
+#[doc(inline)]
 pub use crate::transaction::SyncSnapshot;
 #[doc(inline)]
 pub use crate::transaction::SyncTransaction;

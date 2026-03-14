@@ -1,7 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
     BoundRange, CommandPriority, IsolationLevel, Key, KvPair, ReplicaReadType, ResolveLockDetail,
-    Result, Snapshot, StoreLabel, Value, Variables,
+    Result, Snapshot, SnapshotCacheEntry, StoreLabel, Value, Variables,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,6 +108,47 @@ impl SyncSnapshot {
     #[must_use]
     pub fn resolve_lock_detail(&self) -> ResolveLockDetail {
         self.inner.resolve_lock_detail()
+    }
+
+    /// Get the snapshot cache hit count.
+    ///
+    /// This maps to client-go `KVSnapshot.SnapCacheHitCount`.
+    #[must_use]
+    pub fn snap_cache_hit_count(&self) -> u64 {
+        self.inner.snap_cache_hit_count()
+    }
+
+    /// Get the number of entries currently stored in the snapshot cache.
+    ///
+    /// This maps to client-go `KVSnapshot.SnapCacheSize`.
+    #[must_use]
+    pub fn snap_cache_size(&self) -> usize {
+        self.inner.snap_cache_size()
+    }
+
+    /// Get a copy of the snapshot cache.
+    ///
+    /// This maps to client-go `KVSnapshot.SnapCache`.
+    #[must_use]
+    pub fn snap_cache(&self) -> std::collections::HashMap<Key, SnapshotCacheEntry> {
+        self.inner.snap_cache()
+    }
+
+    /// Update snapshot cache entries for further fast reads with the same keys.
+    ///
+    /// This maps to client-go `KVSnapshot.UpdateSnapshotCache`.
+    pub fn update_snapshot_cache(
+        &mut self,
+        entries: impl IntoIterator<Item = (impl Into<Key>, SnapshotCacheEntry)>,
+    ) {
+        self.inner.update_snapshot_cache(entries);
+    }
+
+    /// Remove the snapshot cache entries for the given keys.
+    ///
+    /// This maps to client-go `KVSnapshot.CleanCache`.
+    pub fn clean_cache(&mut self, keys: impl IntoIterator<Item = impl Into<Key>>) {
+        self.inner.clean_cache(keys);
     }
 
     /// Set an RPC interceptor for this snapshot.
