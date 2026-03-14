@@ -339,6 +339,13 @@ impl<PdC: PdClient> Transaction<PdC> {
         } else {
             TransactionStatus::Active
         };
+        let read_lock_tracker = if options.pipelined_txn.is_some() {
+            // Match client-go: pipelined reads skip locks with `lock.ts == start_ts` via resolved-locks.
+            // This prevents the transaction from trying to resolve its own flushed locks.
+            ReadLockTracker::new_with_resolved_locks([timestamp.version()])
+        } else {
+            ReadLockTracker::default()
+        };
         Transaction {
             status: Arc::new(AtomicU8::new(status as u8)),
             timestamp,
@@ -346,7 +353,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             buffer: Buffer::new(options.is_pessimistic()),
             aggressive_locking: None,
             for_update_ts_checks: HashMap::new(),
-            read_lock_tracker: ReadLockTracker::default(),
+            read_lock_tracker,
             pipelined: options
                 .pipelined_txn
                 .as_ref()

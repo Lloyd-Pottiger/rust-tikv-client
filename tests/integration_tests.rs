@@ -19,6 +19,9 @@ use rand::Rng;
 use serial_test::serial;
 use std::collections::HashMap;
 use std::iter;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tikv_client::backoff::DEFAULT_REGION_BACKOFF;
 use tikv_client::transaction::HeartbeatOption;
 use tikv_client::transaction::Mutation;
@@ -28,6 +31,8 @@ use tikv_client::Key;
 use tikv_client::KvPair;
 use tikv_client::RawClient;
 use tikv_client::Result;
+use tikv_client::RpcInterceptor;
+use tikv_client::RpcRequest;
 use tikv_client::TransactionClient;
 use tikv_client::TransactionOptions;
 use tikv_client::Value;
@@ -326,6 +331,154 @@ async fn txn_pipelined_batch_get_after_flush_merges_buffer_and_snapshot() -> Res
     assert_eq!(result.get(&Key::from(key2)), Some(&value2));
 
     txn.commit().await?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct BufferBatchGetCounter {
+    calls: Arc<AtomicUsize>,
+}
+
+impl RpcInterceptor for BufferBatchGetCounter {
+    fn name(&self) -> &str {
+        "buffer_batch_get_counter"
+    }
+
+    fn before(&self, request: &mut RpcRequest<'_>) {
+        if request.label() == "kv_buffer_batch_get" {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_pipelined_snapshot_get_skips_flushed_self_lock() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+        )
+        .await?;
+
+    let key = b"key1".to_vec();
+    txn.put(key.clone(), b"value1".to_vec()).await?;
+
+    assert!(txn.flush(true).await?);
+    txn.flush_wait().await?;
+
+    let start_ts = txn.start_timestamp();
+    let mut snapshot_txn = client.begin_with_start_timestamp(
+        start_ts,
+        TransactionOptions::new_optimistic()
+            .pipelined()
+            .heartbeat_option(HeartbeatOption::NoHeartbeat),
+    );
+
+    let snapshot_get = tokio::time::timeout(Duration::from_secs(3), snapshot_txn.get(key.clone()))
+        .await
+        .expect("snapshot get timed out")?;
+    assert_eq!(snapshot_get, None);
+
+    txn.commit().await?;
+
+    let mut verify = client.begin_optimistic().await?;
+    assert_eq!(verify.get(key).await?, Some(b"value1".to_vec()));
+    verify.rollback().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_pipelined_batch_get_caches_not_found_keys() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let interceptor = BufferBatchGetCounter {
+        calls: calls.clone(),
+    };
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+        )
+        .await?;
+    txn.set_rpc_interceptor(interceptor);
+
+    let key_low = b"key0".to_vec();
+    let key_high = b"key2".to_vec();
+    let missing = b"key1".to_vec();
+
+    txn.put(key_low, b"value0".to_vec()).await?;
+    txn.put(key_high, b"value2".to_vec()).await?;
+    assert!(txn.flush(true).await?);
+    txn.flush_wait().await?;
+
+    let result: Vec<_> = txn.batch_get(vec![missing.clone()]).await?.collect();
+    assert!(result.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    assert_eq!(txn.get(missing).await?, None);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "expected get to reuse batch_get not-found cache"
+    );
+
+    txn.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_pipelined_rollback_after_flush_cleans_up_locks() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+        )
+        .await?;
+
+    txn.put(b"key0".to_vec(), b"value0".to_vec()).await?;
+    txn.put(b"key2".to_vec(), b"value2".to_vec()).await?;
+    assert!(txn.flush(true).await?);
+    txn.flush_wait().await?;
+    txn.rollback().await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let safepoint = client.current_timestamp().await?;
+        let locks = client.scan_locks(&safepoint, .., 128).await?;
+        if locks.is_empty() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("pipelined rollback left {} locks behind", locks.len());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
     Ok(())
 }
 

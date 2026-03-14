@@ -375,6 +375,14 @@ pub(crate) struct ReadLockTracker {
 }
 
 impl ReadLockTracker {
+    pub(crate) fn new_with_resolved_locks(resolved_locks: impl IntoIterator<Item = u64>) -> Self {
+        let mut state = ReadLockTrackerState::default();
+        state.resolved_locks.extend(resolved_locks);
+        Self {
+            inner: Arc::new(RwLock::new(state)),
+        }
+    }
+
     pub(crate) async fn snapshot(&self) -> (Vec<u64>, Vec<u64>) {
         let state = self.inner.read().await;
         let resolved_locks = state.resolved_locks.iter().copied().collect();

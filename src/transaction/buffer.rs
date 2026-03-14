@@ -2,6 +2,7 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -153,14 +154,22 @@ impl Buffer {
             (cached_results, undetermined_keys)
         };
 
-        let fetched_results = f(Box::new(undetermined_keys)).await?;
+        let undetermined_keys: Vec<Key> = undetermined_keys.collect();
+        let fetched_results = f(Box::new(undetermined_keys.clone().into_iter())).await?;
+
+        let fetched_keys: HashSet<&Key> = fetched_results.iter().map(|pair| &pair.0).collect();
         for kvpair in &fetched_results {
             let key = kvpair.0.clone();
             let value = Some(kvpair.1.clone());
             self.update_cache(key, value);
         }
+        for key in undetermined_keys {
+            if !fetched_keys.contains(&key) {
+                self.update_cache(key, None);
+            }
+        }
 
-        let results = cached_results.chain(fetched_results);
+        let results = cached_results.chain(fetched_results.into_iter());
         Ok(results)
     }
 
