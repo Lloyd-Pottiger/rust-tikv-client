@@ -852,8 +852,8 @@ impl<PdC: PdClient> Client<PdC> {
         let req = new_scan_lock_request(range, safepoint, options.batch_size);
         let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
             .preserve_shard()
-            .cleanup_locks(ctx.clone(), options, backoff, self.keyspace)
-            .retry_multi_region(DEFAULT_REGION_BACKOFF)
+            .cleanup_locks(ctx.clone(), options, backoff.clone(), self.keyspace)
+            .retry_multi_region(backoff)
             .extract_error()
             .merge(crate::request::Collect)
             .plan();
@@ -1324,11 +1324,13 @@ mod tests {
 
     use crate::gc_safe_point::GcSafePointCache;
     use crate::mock::{MockKvClient, MockPdClient};
+    use crate::proto::errorpb;
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
     use crate::request::Keyspace;
     use crate::safe_ts::SafeTsCache;
     use crate::timestamp::TimestampExt;
+    use crate::transaction::lock::ResolveLocksOptions;
     use crate::transaction::HeartbeatOption;
     use crate::transaction::ResolveLocksContext;
     use crate::Backoff;
@@ -3544,6 +3546,61 @@ mod tests {
         assert_eq!(pd_client.update_safepoint_calls(), vec![9]);
         assert!(pd_client.update_gc_safe_point_v2_calls().is_empty());
         assert!(scan_lock_calls.load(Ordering::SeqCst) > 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_locks_uses_gc_backoff_for_region_retries() {
+        let scan_lock_calls = Arc::new(AtomicUsize::new(0));
+        let scan_lock_calls_captured = scan_lock_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let _req: &kvrpcpb::ScanLockRequest = req.downcast_ref().unwrap();
+                let call_index = scan_lock_calls_captured.fetch_add(1, Ordering::SeqCst);
+                if call_index < 11 {
+                    let resp = kvrpcpb::ScanLockResponse {
+                        region_error: Some(errorpb::Error {
+                            message: "not leader".to_owned(),
+                            not_leader: Some(errorpb::NotLeader {
+                                leader: Some(metapb::Peer {
+                                    store_id: 41,
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                Ok(Box::new(kvrpcpb::ScanLockResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let options = ResolveLocksOptions::default();
+        let result = client
+            .cleanup_locks(vec![1]..vec![2], &Timestamp::from_version(1), options)
+            .await
+            .unwrap();
+
+        // DEFAULT_REGION_BACKOFF caps multi-region retries at 10. This should continue retrying
+        // past that limit (GC-style backoff uses 50 attempts).
+        assert_eq!(scan_lock_calls.load(Ordering::SeqCst), 12);
+        assert_eq!(result.resolved_locks, 0);
     }
 
     #[tokio::test]
