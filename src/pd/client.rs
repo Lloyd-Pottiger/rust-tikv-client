@@ -846,16 +846,19 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         MakeKvC: FnOnce(Arc<SecurityManager>) -> KvC,
         MakePd: FnOnce(Arc<SecurityManager>) -> PdFut,
     {
+        config.validate()?;
+
         let resolve_lock_lite_threshold = config.resolve_lock_lite_threshold;
         let (pd_http_client, pd_http_use_https) = build_pd_http_client(&config);
         let security_mgr = Arc::new(
-            if let (Some(ca_path), Some(cert_path), Some(key_path)) =
+            (if let (Some(ca_path), Some(cert_path), Some(key_path)) =
                 (&config.ca_path, &config.cert_path, &config.key_path)
             {
                 SecurityManager::load(ca_path, cert_path, key_path)?
             } else {
                 SecurityManager::default()
-            },
+            })
+            .with_grpc_keepalive(config.grpc_keepalive_time, config.grpc_keepalive_timeout),
         );
 
         let pd = Arc::new(pd(security_mgr.clone()).await?);
@@ -1114,6 +1117,51 @@ pub mod test {
         .unwrap();
 
         assert_eq!(client.cluster_id(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_pd_rpc_client_applies_grpc_keepalive_config() {
+        let config = Config::default()
+            .with_grpc_keepalive_time(Duration::from_secs(1))
+            .with_grpc_keepalive_timeout(Duration::from_secs(2));
+
+        let seen_configs = Arc::new(Mutex::new(Vec::new()));
+        let seen_configs_pd = Arc::clone(&seen_configs);
+        let seen_configs_kv = Arc::clone(&seen_configs);
+
+        PdRpcClient::new(
+            config.clone(),
+            |sm| {
+                seen_configs_kv
+                    .lock()
+                    .unwrap()
+                    .push(sm.grpc_keepalive_config());
+                MockKvConnect
+            },
+            |sm| {
+                seen_configs_pd
+                    .lock()
+                    .unwrap()
+                    .push(sm.grpc_keepalive_config());
+                futures::future::ok(RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    42,
+                    MockCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let seen_configs = seen_configs.lock().unwrap();
+        assert_eq!(seen_configs.len(), 2);
+        assert!(seen_configs
+            .iter()
+            .copied()
+            .all(|(time, timeout)| time == Duration::from_secs(1)
+                && timeout == Duration::from_secs(2)));
     }
 
     #[tokio::test]

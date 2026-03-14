@@ -45,7 +45,6 @@ fn load_pem_file(tag: &str, path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Manages the TLS protocol
-#[derive(Default)]
 pub struct SecurityManager {
     /// The PEM encoding of the server’s CA certificates.
     ca: Vec<u8>,
@@ -53,6 +52,23 @@ pub struct SecurityManager {
     cert: Vec<u8>,
     /// The path to the file that contains the PEM encoding of the server’s private key.
     key: PathBuf,
+    grpc_keepalive_time: Duration,
+    grpc_keepalive_timeout: Duration,
+}
+
+const DEFAULT_GRPC_KEEPALIVE_TIME: Duration = Duration::from_secs(10);
+const DEFAULT_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(3);
+
+impl Default for SecurityManager {
+    fn default() -> Self {
+        SecurityManager {
+            ca: Vec::new(),
+            cert: Vec::new(),
+            key: PathBuf::new(),
+            grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
+            grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
+        }
+    }
 }
 
 impl SecurityManager {
@@ -68,7 +84,20 @@ impl SecurityManager {
             ca: load_pem_file("ca", ca_path.as_ref())?,
             cert: load_pem_file("certificate", cert_path.as_ref())?,
             key: key_path,
+            grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
+            grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
         })
+    }
+
+    pub(crate) fn with_grpc_keepalive(mut self, time: Duration, timeout: Duration) -> Self {
+        self.grpc_keepalive_time = time;
+        self.grpc_keepalive_timeout = timeout;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn grpc_keepalive_config(&self) -> (Duration, Duration) {
+        (self.grpc_keepalive_time, self.grpc_keepalive_timeout)
     }
 
     /// Connect to gRPC server using TLS connection. If TLS is not configured, use normal connection.
@@ -111,9 +140,16 @@ impl SecurityManager {
     }
 
     fn endpoint(&self, addr: String) -> Result<Endpoint> {
-        let endpoint = Channel::from_shared(addr)?
+        let mut endpoint = Channel::from_shared(addr)?
             .tcp_keepalive(Some(Duration::from_secs(10)))
-            .keep_alive_timeout(Duration::from_secs(3));
+            .keep_alive_while_idle(false);
+
+        if self.grpc_keepalive_time != Duration::ZERO {
+            endpoint = endpoint
+                .http2_keep_alive_interval(self.grpc_keepalive_time)
+                .keep_alive_timeout(self.grpc_keepalive_timeout);
+        }
+
         Ok(endpoint)
     }
 }
@@ -127,6 +163,15 @@ mod tests {
     use tempfile;
 
     use super::*;
+
+    #[test]
+    fn test_security_manager_grpc_keepalive_defaults() {
+        let mgr = SecurityManager::default();
+        assert_eq!(
+            mgr.grpc_keepalive_config(),
+            (Duration::from_secs(10), Duration::from_secs(3))
+        );
+    }
 
     #[test]
     fn test_security() {
@@ -148,5 +193,15 @@ mod tests {
         assert_eq!(mgr.cert, vec![1]);
         let key = load_pem_file("private key", &key_path).unwrap();
         assert_eq!(key, vec![2]);
+    }
+
+    #[test]
+    fn test_security_manager_with_grpc_keepalive_overrides() {
+        let mgr = SecurityManager::default()
+            .with_grpc_keepalive(Duration::from_secs(1), Duration::from_secs(2));
+        assert_eq!(
+            mgr.grpc_keepalive_config(),
+            (Duration::from_secs(1), Duration::from_secs(2))
+        );
     }
 }

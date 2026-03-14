@@ -30,6 +30,17 @@ pub struct Config {
     /// drained.
     pub tso_max_pending_count: usize,
     pub grpc_max_decoding_message_size: usize,
+    /// After a duration of this time without RPC activity, the client pings the server to see if
+    /// the transport is still alive (client-go `GrpcKeepAliveTime`).
+    ///
+    /// Set to `Duration::ZERO` to disable gRPC HTTP2 keepalive pings.
+    pub grpc_keepalive_time: Duration,
+    /// After having pinged for keepalive check, the client waits for this timeout for a response
+    /// and if no activity is seen even after that, the connection is closed (client-go
+    /// `GrpcKeepAliveTimeout`).
+    ///
+    /// The minimum value is 50ms (matching client-go).
+    pub grpc_keepalive_timeout: Duration,
     pub keyspace: Option<String>,
     pub resolve_lock_lite_threshold: u64,
     /// How often to refresh TiKV store health feedback (slow score).
@@ -51,6 +62,9 @@ pub struct Config {
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
+const DEFAULT_GRPC_KEEPALIVE_TIME: Duration = Duration::from_secs(10);
+const DEFAULT_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(3);
+const MIN_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) const DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
 
 impl Default for Config {
@@ -62,6 +76,8 @@ impl Default for Config {
             timeout: DEFAULT_REQUEST_TIMEOUT,
             tso_max_pending_count: DEFAULT_TSO_MAX_PENDING_COUNT,
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
+            grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
+            grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
             keyspace: None,
             resolve_lock_lite_threshold: DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD,
             health_feedback_update_interval: Duration::ZERO,
@@ -71,6 +87,20 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Validate the configuration.
+    ///
+    /// This is called internally by client constructors, and can also be called by users to catch
+    /// invalid configurations early.
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.grpc_keepalive_timeout < MIN_GRPC_KEEPALIVE_TIMEOUT {
+            return Err(crate::Error::StringError(format!(
+                "grpc-keepalive-timeout should be at least {MIN_GRPC_KEEPALIVE_TIMEOUT:?}, but got {:?}",
+                self.grpc_keepalive_timeout
+            )));
+        }
+        Ok(())
+    }
+
     /// Set the certificate authority, certificate, and key locations for clients.
     ///
     /// By default, this client will use an insecure connection over instead of one protected by
@@ -136,6 +166,25 @@ impl Config {
         self
     }
 
+    /// Set the gRPC HTTP2 keepalive ping interval.
+    ///
+    /// Set to `Duration::ZERO` to disable keepalive pings.
+    #[must_use]
+    pub fn with_grpc_keepalive_time(mut self, interval: Duration) -> Self {
+        self.grpc_keepalive_time = interval;
+        self
+    }
+
+    /// Set the gRPC HTTP2 keepalive ping timeout.
+    ///
+    /// The minimum supported value is 50ms (matching client-go). Use [`Config::validate`] to
+    /// verify a configuration before constructing a client.
+    #[must_use]
+    pub fn with_grpc_keepalive_timeout(mut self, timeout: Duration) -> Self {
+        self.grpc_keepalive_timeout = timeout;
+        self
+    }
+
     /// Set to use default keyspace.
     ///
     /// Server should enable `storage.api-version = 2` to use this feature.
@@ -182,5 +231,25 @@ impl Config {
     pub fn with_txn_local_latches_capacity(mut self, capacity: usize) -> Self {
         self.txn_local_latches_capacity = capacity;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_default_grpc_keepalive() {
+        let config = Config::default();
+        assert_eq!(config.grpc_keepalive_time, Duration::from_secs(10));
+        assert_eq!(config.grpc_keepalive_timeout, Duration::from_secs(3));
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_config_validate_grpc_keepalive_timeout_min() {
+        let config = Config::default().with_grpc_keepalive_timeout(Duration::from_millis(49));
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, crate::Error::StringError(_)));
     }
 }
