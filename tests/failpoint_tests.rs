@@ -580,6 +580,95 @@ async fn txn_resolve_locks_for_read_classifies_committed_and_resolved() -> Resul
 
 #[tokio::test]
 #[serial]
+async fn txn_resolve_locks_for_read_zero_min_commit_ts() -> Result<()> {
+    init().await?;
+    let scenario = FailScenario::setup();
+
+    // Keep the transaction in prewrite state.
+    fail::cfg("after-prewrite", "return").unwrap();
+    defer! {{
+        fail::cfg("after-prewrite", "off").unwrap();
+    }}
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let suffix: u64 = thread_rng().gen();
+    let key = format!("resolve-locks-for-read-zero-min-commit-ts-{suffix}").into_bytes();
+    let mut end_key = key.clone();
+    end_key.push(0);
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::Warn),
+        )
+        .await?;
+    txn.put(key.clone(), b"value".to_vec()).await?;
+    let start_ts = txn.start_ts();
+
+    // Port of client-go `TestZeroMinCommitTS`.
+    let failpoint = format!("return({start_ts})");
+    fail::cfg("mock_zero_min_commit_ts", &failpoint).unwrap();
+    defer! {{
+        fail::cfg("mock_zero_min_commit_ts", "off").unwrap();
+    }}
+
+    assert!(txn.commit().await.is_err());
+
+    let safepoint = client.current_timestamp().await?;
+    let locks = client
+        .scan_locks(&safepoint, key.clone()..end_key.clone(), 1024)
+        .await?;
+    let lock = locks
+        .into_iter()
+        .find(|lock| lock.key == key)
+        .expect("expected lock to be present after prewrite");
+    assert_eq!(lock.lock_version, start_ts);
+    assert_eq!(lock.min_commit_ts, 0);
+
+    let result = client
+        .resolve_locks_for_read(
+            vec![lock.clone()],
+            tikv_client::Timestamp::from_version(0),
+            true,
+        )
+        .await?;
+    assert!(result.resolved_locks.is_empty());
+    assert!(result.committed_locks.is_empty());
+    assert_eq!(result.live_locks.len(), 1);
+    assert!(result.ms_before_txn_expired > 0);
+
+    let result = client
+        .resolve_locks_for_read(
+            vec![lock.clone()],
+            tikv_client::Timestamp::from_version(u64::MAX),
+            true,
+        )
+        .await?;
+    assert_eq!(result.ms_before_txn_expired, 0);
+    assert!(result.live_locks.is_empty());
+    assert!(result.committed_locks.is_empty());
+    assert_eq!(result.resolved_locks, vec![start_ts]);
+
+    let mut force_cleanup = lock;
+    force_cleanup.lock_ttl = 0;
+    let start_version = client.current_timestamp().await?;
+    let live_locks = client
+        .resolve_locks(vec![force_cleanup], start_version, OPTIMISTIC_BACKOFF)
+        .await?;
+    assert!(live_locks.is_empty());
+    let remaining = wait_for_locks_count_in_range(&client, &key, &end_key, 0).await?;
+    assert_eq!(remaining, 0);
+
+    scenario.teardown();
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn txn_cleanup_2pc_locks() -> Result<()> {
     init().await?;
     let scenario = FailScenario::setup();

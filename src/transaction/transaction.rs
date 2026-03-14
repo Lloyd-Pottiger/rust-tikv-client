@@ -4454,6 +4454,21 @@ fn pipelined_broadcast_grace_period() -> Duration {
     PIPELINED_BROADCAST_GRACE_PERIOD
 }
 
+fn maybe_mock_zero_min_commit_ts(start_version: u64, min_commit_ts: u64) -> u64 {
+    fail_point!("mock_zero_min_commit_ts", |val| {
+        let inject = val
+            .and_then(|val| val.parse::<u64>().ok())
+            .map(|target_start_version| target_start_version == start_version)
+            .unwrap_or(true);
+        if inject {
+            0
+        } else {
+            min_commit_ts
+        }
+    });
+    min_commit_ts
+}
+
 #[derive(Debug, Default)]
 struct FlushDurationEwma {
     value_ms: f64,
@@ -6039,26 +6054,27 @@ impl<PdC: PdClient> Committer<PdC> {
         }
 
         let commit_ts_may_be_calculated = self.options.async_commit || self.options.try_one_pc;
+        let start_version = self.start_version.version();
+        let mut min_commit_ts = start_version.saturating_add(1);
+        if let TransactionKind::Pessimistic(for_update_ts) = &self.options.kind {
+            min_commit_ts = min_commit_ts.max(for_update_ts.version().saturating_add(1));
+        }
+
+        if commit_ts_may_be_calculated && !self.options.causal_consistency {
+            // Match client-go's default (linearizable) behavior: when using async-commit or 1PC,
+            // seed `min_commit_ts` from a fresh PD TSO so the final commit TS is guaranteed to be
+            // newer than any existing reader snapshot TS.
+            let latest_ts =
+                get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
+                    .await?;
+            min_commit_ts = min_commit_ts.max(latest_ts.version().saturating_add(1));
+        }
+
+        min_commit_ts = maybe_mock_zero_min_commit_ts(start_version, min_commit_ts);
+
+        request.min_commit_ts = min_commit_ts;
+
         if commit_ts_may_be_calculated {
-            let mut min_commit_ts = self.start_version.version().saturating_add(1);
-            if let TransactionKind::Pessimistic(for_update_ts) = &self.options.kind {
-                min_commit_ts = min_commit_ts.max(for_update_ts.version().saturating_add(1));
-            }
-
-            if !self.options.causal_consistency {
-                // Match client-go's default (linearizable) behavior: when using async-commit or
-                // 1PC, seed `min_commit_ts` from a fresh PD TSO so the final commit TS is
-                // guaranteed to be newer than any existing reader snapshot TS.
-                let latest_ts = get_timestamp_for_txn_scope(
-                    self.rpc.clone(),
-                    self.options.txn_scope.as_deref(),
-                )
-                .await?;
-                min_commit_ts = min_commit_ts.max(latest_ts.version().saturating_add(1));
-            }
-
-            request.min_commit_ts = min_commit_ts;
-
             let current_ts = self
                 .start_version
                 .version()
@@ -11736,7 +11752,7 @@ mod tests {
                 assert_eq!(req.start_version, start_version);
                 assert!(!req.use_async_commit);
                 assert!(!req.try_one_pc);
-                assert_eq!(req.min_commit_ts, 0);
+                assert_eq!(req.min_commit_ts, start_version.saturating_add(1));
                 assert_eq!(req.max_commit_ts, 0);
                 return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
             }

@@ -2896,8 +2896,9 @@ mod tests {
                 );
                 assert!(!req.try_one_pc, "local scope must not use 1pc");
                 assert_eq!(
-                    req.min_commit_ts, 0,
-                    "local scope must not seed min_commit_ts"
+                    req.min_commit_ts,
+                    start_version.saturating_add(1),
+                    "local scope should set min_commit_ts from start_ts"
                 );
                 assert_eq!(
                     req.max_commit_ts, 0,
