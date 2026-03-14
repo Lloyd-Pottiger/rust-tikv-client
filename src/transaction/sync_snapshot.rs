@@ -117,6 +117,14 @@ impl SyncSnapshot {
         self.inner.set_snapshot_ts(timestamp)
     }
 
+    /// Returns true if this snapshot is used by internal executions.
+    ///
+    /// This maps to client-go `KVSnapshot.IsInternal`.
+    #[must_use]
+    pub fn is_internal(&self) -> bool {
+        self.inner.is_internal()
+    }
+
     /// Get the snapshot cache hit count.
     ///
     /// This maps to client-go `KVSnapshot.SnapCacheHitCount`.

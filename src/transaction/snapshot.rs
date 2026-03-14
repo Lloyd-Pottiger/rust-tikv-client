@@ -414,6 +414,16 @@ impl<PdC: PdClient> Snapshot<PdC> {
         self.transaction.set_request_source(source);
     }
 
+    /// Returns true if this snapshot is used by internal executions.
+    ///
+    /// This maps to client-go `KVSnapshot.IsInternal`.
+    #[must_use]
+    pub fn is_internal(&self) -> bool {
+        self.transaction
+            .request_source()
+            .is_some_and(crate::request_context::is_internal_request_source)
+    }
+
     /// Get the value associated with the given key.
     pub async fn get(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         trace!("invoking get request on snapshot");
@@ -868,5 +878,29 @@ mod tests {
         assert_eq!(get_calls.load(Ordering::SeqCst), 2);
         assert_eq!(snapshot.snap_cache_hit_count(), 1);
         assert_eq!(snapshot.snap_cache_size(), 1);
+    }
+
+    #[test]
+    fn test_snapshot_is_internal_matches_request_source_prefix() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |_req: &dyn Any| Err(Error::Unimplemented),
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        assert!(!snapshot.is_internal());
+
+        snapshot.set_request_source("internal_gc");
+        assert!(snapshot.is_internal());
+
+        snapshot.set_request_source("external_gc");
+        assert!(!snapshot.is_internal());
     }
 }

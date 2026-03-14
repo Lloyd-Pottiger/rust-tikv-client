@@ -122,8 +122,7 @@ impl std::fmt::Display for RequestSource {
 /// Returns true if `request_source` represents an internal request.
 ///
 /// This matches client-go's `IsInternalRequest` behavior (checks for the `"internal"` prefix).
-#[cfg(test)]
-fn is_internal_request_source(request_source: &str) -> bool {
+pub(crate) fn is_internal_request_source(request_source: &str) -> bool {
     request_source.starts_with("internal")
 }
 

@@ -629,6 +629,10 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.request_source = Some(source.into());
     }
 
+    pub(crate) fn request_source(&self) -> Option<&str> {
+        self.options.request_source.as_deref()
+    }
+
     /// Set whether current operation is allowed in each TiKV disk usage level.
     ///
     /// This maps to client-go `KVTxn.SetDiskFullOpt` and writes to `kvrpcpb::Context.disk_full_opt`.
