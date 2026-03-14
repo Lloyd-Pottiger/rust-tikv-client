@@ -83,6 +83,15 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
+        Err(Error::Unimplemented)
+    }
+
+    async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
+        let _ = keyspace_id;
+        Err(Error::Unimplemented)
+    }
+
     async fn update_service_gc_safe_point(
         self: Arc<Self>,
         service_id: String,
@@ -330,6 +339,24 @@ impl RetryClientTrait for RetryClient<Cluster> {
     async fn get_operator(self: Arc<Self>, region_id: u64) -> Result<pdpb::GetOperatorResponse> {
         retry_mut!(self, "get_operator", |cluster| async {
             cluster.get_operator(region_id, self.timeout).await
+        })
+    }
+
+    async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
+        retry_mut!(self, "get_gc_safe_point", |cluster| async {
+            cluster
+                .get_gc_safe_point(self.timeout)
+                .await
+                .map(|resp| resp.safe_point)
+        })
+    }
+
+    async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
+        retry_mut!(self, "get_gc_safe_point_v2", |cluster| async {
+            cluster
+                .get_gc_safe_point_v2(keyspace_id, self.timeout)
+                .await
+                .map(|resp| resp.safe_point)
         })
     }
 

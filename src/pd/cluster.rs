@@ -120,6 +120,24 @@ impl Cluster {
         Ok(resp.timestamp)
     }
 
+    pub async fn get_gc_safe_point(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<pdpb::GetGcSafePointResponse> {
+        let req = pd_request!(self.id, pdpb::GetGcSafePointRequest);
+        req.send(&mut self.client, timeout).await
+    }
+
+    pub async fn get_gc_safe_point_v2(
+        &mut self,
+        keyspace_id: u32,
+        timeout: Duration,
+    ) -> Result<pdpb::GetGcSafePointV2Response> {
+        let mut req = pd_request!(self.id, pdpb::GetGcSafePointV2Request);
+        req.keyspace_id = keyspace_id;
+        req.send(&mut self.client, timeout).await
+    }
+
     pub async fn update_safepoint(
         &mut self,
         safepoint: u64,
@@ -569,6 +587,26 @@ impl PdMessage for pdpb::GetExternalTimestampRequest {
 }
 
 #[async_trait]
+impl PdMessage for pdpb::GetGcSafePointRequest {
+    type Client = pdpb::pd_client::PdClient<Channel>;
+    type Response = pdpb::GetGcSafePointResponse;
+
+    async fn rpc(req: Request<Self>, client: &mut Self::Client) -> GrpcResult<Self::Response> {
+        Ok(client.get_gc_safe_point(req).await?.into_inner())
+    }
+}
+
+#[async_trait]
+impl PdMessage for pdpb::GetGcSafePointV2Request {
+    type Client = pdpb::pd_client::PdClient<Channel>;
+    type Response = pdpb::GetGcSafePointV2Response;
+
+    async fn rpc(req: Request<Self>, client: &mut Self::Client) -> GrpcResult<Self::Response> {
+        Ok(client.get_gc_safe_point_v2(req).await?.into_inner())
+    }
+}
+
+#[async_trait]
 impl PdMessage for pdpb::UpdateGcSafePointRequest {
     type Client = pdpb::pd_client::PdClient<Channel>;
     type Response = pdpb::UpdateGcSafePointResponse;
@@ -679,6 +717,18 @@ impl PdResponse for pdpb::UpdateServiceGcSafePointResponse {
 }
 
 impl PdResponse for pdpb::UpdateServiceSafePointV2Response {
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+impl PdResponse for pdpb::GetGcSafePointResponse {
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+impl PdResponse for pdpb::GetGcSafePointV2Response {
     fn header(&self) -> Option<&pdpb::ResponseHeader> {
         self.header.as_ref()
     }

@@ -128,6 +128,14 @@ pub struct MockPdClient {
     get_operator_calls: Mutex<Vec<RegionId>>,
     #[new(value = "Mutex::new(VecDeque::new())")]
     get_operator_responses: Mutex<VecDeque<pdpb::GetOperatorResponse>>,
+    #[new(value = "Arc::new(AtomicUsize::new(0))")]
+    get_gc_safe_point_calls: Arc<AtomicUsize>,
+    #[new(value = "Mutex::new(VecDeque::new())")]
+    get_gc_safe_point_responses: Mutex<VecDeque<u64>>,
+    #[new(value = "Mutex::new(Vec::new())")]
+    get_gc_safe_point_v2_calls: Mutex<Vec<u32>>,
+    #[new(value = "Mutex::new(VecDeque::new())")]
+    get_gc_safe_point_v2_responses: Mutex<VecDeque<u64>>,
     #[new(value = "Mutex::new(Vec::new())")]
     update_service_gc_safe_point_calls: Mutex<Vec<(String, i64, u64)>>,
     #[new(value = "Mutex::new(VecDeque::new())")]
@@ -197,6 +205,10 @@ impl MockPdClient {
         self.set_external_timestamp_calls.load(Ordering::SeqCst)
     }
 
+    pub fn get_gc_safe_point_call_count(&self) -> usize {
+        self.get_gc_safe_point_calls.load(Ordering::SeqCst)
+    }
+
     pub fn scatter_regions_calls(&self) -> Vec<(Vec<RegionId>, Option<String>)> {
         let calls = match self.scatter_regions_calls.lock() {
             Ok(guard) => guard,
@@ -219,6 +231,30 @@ impl MockPdClient {
             Err(poisoned) => poisoned.into_inner(),
         };
         responses.push_back(resp);
+    }
+
+    pub fn push_get_gc_safe_point_response(&self, safe_point: u64) {
+        let mut responses = match self.get_gc_safe_point_responses.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        responses.push_back(safe_point);
+    }
+
+    pub fn get_gc_safe_point_v2_calls(&self) -> Vec<u32> {
+        let calls = match self.get_gc_safe_point_v2_calls.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        calls.clone()
+    }
+
+    pub fn push_get_gc_safe_point_v2_response(&self, safe_point: u64) {
+        let mut responses = match self.get_gc_safe_point_v2_responses.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        responses.push_back(safe_point);
     }
 
     pub fn update_service_gc_safe_point_calls(&self) -> Vec<(String, i64, u64)> {
@@ -696,6 +732,29 @@ impl PdClient for MockPdClient {
         Ok(resp)
     }
 
+    async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
+        self.get_gc_safe_point_calls.fetch_add(1, Ordering::SeqCst);
+        let mut responses = match self.get_gc_safe_point_responses.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Ok(responses.pop_front().unwrap_or_default())
+    }
+
+    async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
+        let mut calls = match self.get_gc_safe_point_v2_calls.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        calls.push(keyspace_id);
+
+        let mut responses = match self.get_gc_safe_point_v2_responses.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Ok(responses.pop_front().unwrap_or_default())
+    }
+
     async fn update_service_gc_safe_point(
         self: Arc<Self>,
         service_id: String,
@@ -841,6 +900,36 @@ mod tests {
         assert_eq!(resp.status, pdpb::OperatorStatus::Success as i32);
 
         assert_eq!(client.get_operator_calls(), vec![42, 43]);
+    }
+
+    #[tokio::test]
+    async fn test_mock_pd_client_get_gc_safe_point_records_calls_and_uses_queue() {
+        let client = Arc::new(MockPdClient::default());
+
+        client.push_get_gc_safe_point_response(100);
+
+        let safe_point = client.clone().get_gc_safe_point().await.unwrap();
+        assert_eq!(safe_point, 100);
+        assert_eq!(client.get_gc_safe_point_call_count(), 1);
+
+        let safe_point = client.clone().get_gc_safe_point().await.unwrap();
+        assert_eq!(safe_point, 0);
+        assert_eq!(client.get_gc_safe_point_call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_mock_pd_client_get_gc_safe_point_v2_records_calls_and_uses_queue() {
+        let client = Arc::new(MockPdClient::default());
+
+        client.push_get_gc_safe_point_v2_response(100);
+
+        let safe_point = client.clone().get_gc_safe_point_v2(7).await.unwrap();
+        assert_eq!(safe_point, 100);
+        assert_eq!(client.get_gc_safe_point_v2_calls(), vec![7]);
+
+        let safe_point = client.clone().get_gc_safe_point_v2(8).await.unwrap();
+        assert_eq!(safe_point, 0);
+        assert_eq!(client.get_gc_safe_point_v2_calls(), vec![7, 8]);
     }
 
     #[tokio::test]

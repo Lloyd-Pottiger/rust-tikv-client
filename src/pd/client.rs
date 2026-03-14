@@ -141,6 +141,29 @@ pub trait PdClient: Send + Sync + 'static {
         Err(Error::Unimplemented)
     }
 
+    /// Get the current PD GC safe point.
+    ///
+    /// This maps to client-go `pd.Client.GetGCSafePoint`.
+    ///
+    /// On success, returns PD's `safe_point`.
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
+        Err(Error::Unimplemented)
+    }
+
+    /// Get the current PD GC safe point (V2) for a given keyspace.
+    ///
+    /// This maps to client-go `pd.Client.GetGCSafePointV2`.
+    ///
+    /// On success, returns PD's `safe_point`.
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
+        let _ = keyspace_id;
+        Err(Error::Unimplemented)
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     /// Update the PD "service GC safe point" for a given service.
@@ -709,6 +732,14 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         region_id: RegionId,
     ) -> Result<pdpb::GetOperatorResponse> {
         self.pd.clone().get_operator(region_id).await
+    }
+
+    async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
+        self.pd.clone().get_gc_safe_point().await
+    }
+
+    async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
+        self.pd.clone().get_gc_safe_point_v2(keyspace_id).await
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {
