@@ -33,6 +33,7 @@ use crate::transaction::lowering::new_physical_scan_lock_request;
 use crate::transaction::lowering::new_register_lock_observer_request;
 use crate::transaction::lowering::new_remove_lock_observer_request;
 use crate::transaction::lowering::new_scan_lock_request;
+use crate::transaction::lowering::new_split_region_request;
 use crate::transaction::lowering::new_unsafe_destroy_range_request;
 use crate::transaction::BoundLockResolver;
 use crate::transaction::LockResolver;
@@ -887,6 +888,50 @@ impl<PdC: PdClient> Client<PdC> {
     ) -> Result<usize> {
         self.delete_range_inner(range.into(), true, concurrency)
             .await
+    }
+
+    /// Split regions by the provided split keys.
+    ///
+    /// When `scatter` is true, this will also ask PD to scatter the resulting regions. When
+    /// `table_id` is provided, it is passed as the PD scatter `group` (matching client-go
+    /// `WithGroup(fmt.Sprintf("%v", tableID))` behavior).
+    ///
+    /// Returns the region IDs reported by TiKV, which corresponds to `SplitRegionResponse.regions`
+    /// excluding the last region (matching client-go `KVStore.SplitRegions` behavior).
+    pub async fn split_regions(
+        &self,
+        split_keys: impl IntoIterator<Item = impl Into<Key>>,
+        scatter: bool,
+        table_id: Option<i64>,
+    ) -> Result<Vec<u64>> {
+        let mut split_keys = split_keys.into_iter().map(Into::into).collect::<Vec<_>>();
+        if split_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        split_keys = split_keys
+            .into_iter()
+            .map(|key| key.encode_keyspace(self.keyspace, KeyMode::Txn))
+            .collect();
+
+        let req = new_split_region_request(split_keys.into_iter(), false);
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .retry_multi_region(DEFAULT_REGION_BACKOFF)
+            .extract_error()
+            .merge(crate::request::Collect)
+            .plan();
+        let region_ids = plan.execute().await?;
+
+        if scatter && !region_ids.is_empty() {
+            let group = table_id.map(|id| id.to_string());
+            let _resp = self
+                .pd
+                .clone()
+                .scatter_regions(region_ids.clone(), group)
+                .await?;
+        }
+
+        Ok(region_ids)
     }
 
     /// Cleans up all keys in a range and quickly reclaim disk space.
@@ -2893,5 +2938,76 @@ mod tests {
 
         let lock_resolver = client.lock_resolver();
         assert!(lock_resolver.resolving().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_split_regions_encodes_keyspace_and_scatter_calls_pd() {
+        use crate::request::EncodeKeyspace;
+        use crate::request::KeyMode;
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xCAFE,
+        };
+        let expected_api_version = keyspace.api_version() as i32;
+
+        let split_key_raw = crate::Key::from(b"k1".to_vec());
+        let expected_split_key_encoded: Vec<u8> = split_key_raw
+            .clone()
+            .encode_keyspace(keyspace, KeyMode::Txn)
+            .into();
+
+        let split_calls = Arc::new(AtomicUsize::new(0));
+        let split_calls_cloned = split_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::SplitRegionRequest>() {
+                    split_calls_cloned.fetch_add(1, Ordering::SeqCst);
+
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(ctx.api_version, expected_api_version);
+                    assert_eq!(req.split_keys, vec![expected_split_key_encoded.clone()]);
+                    assert!(!req.is_raw_kv);
+
+                    let resp = kvrpcpb::SplitRegionResponse {
+                        regions: vec![
+                            metapb::Region {
+                                id: 100,
+                                ..Default::default()
+                            },
+                            metapb::Region {
+                                id: 200,
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let region_ids = client
+            .split_regions(vec![split_key_raw], true, Some(7))
+            .await
+            .unwrap();
+        assert_eq!(region_ids, vec![100]);
+        assert_eq!(split_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            pd_client.scatter_regions_calls(),
+            vec![(vec![100], Some("7".to_owned()))]
+        );
     }
 }

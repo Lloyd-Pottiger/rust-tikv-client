@@ -477,6 +477,22 @@ impl SyncTransactionClient {
         )
     }
 
+    /// Split regions by the provided split keys.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::split_regions`](crate::TransactionClient::split_regions).
+    pub fn split_regions(
+        &self,
+        split_keys: impl IntoIterator<Item = impl Into<crate::Key>>,
+        scatter: bool,
+        table_id: Option<i64>,
+    ) -> Result<Vec<u64>> {
+        safe_block_on(
+            &self.runtime,
+            self.client.split_regions(split_keys, scatter, table_id),
+        )
+    }
+
     /// Compact a specified key range on TiFlash stores.
     ///
     /// This is a synchronous version of [`TransactionClient::compact`](crate::TransactionClient::compact).
