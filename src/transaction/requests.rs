@@ -346,6 +346,88 @@ impl Shardable for ResolveLockRangeRequest {
     }
 }
 
+/// A resolve-lock request that resolves locks for an explicit set of keys.
+///
+/// `kvrpcpb::ResolveLockRequest` itself doesn't have to carry keys (non-lite mode), so it cannot
+/// always be sharded by region. This wrapper is intended for resolve-lock lite mode where keys are
+/// present and can be grouped and sharded by region.
+#[derive(Clone, Debug)]
+pub(crate) struct ResolveLockKeysRequest {
+    inner: kvrpcpb::ResolveLockRequest,
+}
+
+impl ResolveLockKeysRequest {
+    pub(crate) fn new(
+        inner: kvrpcpb::ResolveLockRequest,
+        keys: Vec<Vec<u8>>,
+    ) -> ResolveLockKeysRequest {
+        let mut inner = inner;
+        inner.keys = keys;
+        ResolveLockKeysRequest { inner }
+    }
+}
+
+#[async_trait]
+impl Request for ResolveLockKeysRequest {
+    async fn dispatch(
+        &self,
+        client: &crate::proto::tikvpb::tikv_client::TikvClient<tonic::transport::Channel>,
+        timeout: std::time::Duration,
+    ) -> Result<Box<dyn std::any::Any>> {
+        self.inner.dispatch(client, timeout).await
+    }
+
+    fn label(&self) -> &'static str {
+        self.inner.label()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        // Expose the inner request for dispatch hooks and tests.
+        self.inner.as_any()
+    }
+
+    fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()> {
+        self.inner.set_leader(leader)
+    }
+
+    fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion) {
+        self.inner.set_api_version(api_version)
+    }
+
+    fn set_is_retry_request(&mut self, is_retry_request: bool) {
+        self.inner.set_is_retry_request(is_retry_request)
+    }
+
+    fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.inner.context_mut()
+    }
+}
+
+impl KvRequest for ResolveLockKeysRequest {
+    type Response = kvrpcpb::ResolveLockResponse;
+}
+
+impl Shardable for ResolveLockKeysRequest {
+    type Shard = Vec<Vec<u8>>;
+
+    fn shards(
+        &self,
+        pd_client: &Arc<impl PdClient>,
+    ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+        let mut keys = self.inner.keys.clone();
+        keys.sort();
+        region_stream_for_keys(keys.into_iter(), pd_client.clone())
+    }
+
+    fn apply_shard(&mut self, shard: Self::Shard) {
+        self.inner.keys = shard;
+    }
+
+    fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        self.inner.set_leader(&store.region_with_leader)
+    }
+}
+
 pub fn new_prewrite_request(
     mutations: Vec<kvrpcpb::Mutation>,
     primary_lock: Vec<u8>,

@@ -104,6 +104,11 @@ fn empty_extracted_errors(operation: &str) -> Error {
 
 enum TxnStatusFromLock {
     Status(Arc<TransactionStatus>),
+    AsyncCommitResolved {
+        status: Arc<TransactionStatus>,
+        keys: Vec<Vec<u8>>,
+        commit_version: u64,
+    },
     PessimisticRollbackRequired,
 }
 
@@ -479,6 +484,7 @@ pub(crate) async fn resolve_locks_with_options(
     // pessimistic rollback region dedupe must not suppress normal resolve-lock dedupe.
     let mut clean_regions: HashMap<u64, HashSet<RegionVerId>> = HashMap::new();
     let mut pessimistic_clean_regions: HashMap<u64, HashSet<RegionVerId>> = HashMap::new();
+    let mut resolved_async_commit_txns: HashSet<u64> = HashSet::new();
     // We must check txn status for *all* locks, not only TTL-expired ones.
     //
     // TTL only indicates whether a lock is *possibly* orphaned; it does not mean the transaction
@@ -494,6 +500,9 @@ pub(crate) async fn resolve_locks_with_options(
             return Err(Error::StringError(
                 "misuse of resolve_locks: trying to resolve a shared lock directly".to_owned(),
             ));
+        }
+        if resolved_async_commit_txns.contains(&lock.lock_version) {
+            continue;
         }
         let region_ver_id = pd_client
             .region_for_key(&lock.key.clone().into())
@@ -530,8 +539,17 @@ pub(crate) async fn resolve_locks_with_options(
                         keyspace,
                     )
                     .await?;
+                let mut resolved_async_commit: Option<(Vec<Vec<u8>>, u64)> = None;
                 let status = match status {
                     TxnStatusFromLock::Status(status) => status,
+                    TxnStatusFromLock::AsyncCommitResolved {
+                        status,
+                        keys,
+                        commit_version,
+                    } => {
+                        resolved_async_commit = Some((keys, commit_version));
+                        status
+                    }
                     TxnStatusFromLock::PessimisticRollbackRequired => {
                         if pessimistic_region_resolve {
                             if let Some(cleaned_region) = rollback_pessimistic_lock_with_retry(
@@ -561,6 +579,25 @@ pub(crate) async fn resolve_locks_with_options(
                         continue;
                     }
                 };
+                if let Some((keys, commit_version)) = resolved_async_commit {
+                    // Match client-go `resolveAsyncCommitLock`: resolve the full async-commit
+                    // transaction (primary + secondaries) once the commit ts is determined.
+                    resolve_lock_keys_with_retry(
+                        keys,
+                        lock.lock_version,
+                        commit_version,
+                        lock.is_txn_file,
+                        &lock_resolver.rpc_context,
+                        pd_client.clone(),
+                        keyspace,
+                        lock_backoff.clone(),
+                        killed.clone(),
+                    )
+                    .await?;
+                    commit_versions.insert(lock.lock_version, commit_version);
+                    resolved_async_commit_txns.insert(lock.lock_version);
+                    continue;
+                }
                 match &status.kind {
                     TransactionStatusKind::Committed(ts) => {
                         let commit_version = ts.version();
@@ -680,6 +717,7 @@ pub(crate) async fn resolve_locks_for_read(
     let mut committed_locks = Vec::new();
     let mut lock_resolver = LockResolver::new(ctx);
     lock_resolver.rpc_context = rpc_context;
+    let mut resolved_async_commit_txns: HashSet<u64> = HashSet::new();
 
     for lock in locks {
         if is_shared_lock(lock.lock_type) {
@@ -702,8 +740,17 @@ pub(crate) async fn resolve_locks_for_read(
             )
             .await?;
 
+        let mut resolved_async_commit: Option<(Vec<Vec<u8>>, u64)> = None;
         let status = match status {
             TxnStatusFromLock::Status(status) => status,
+            TxnStatusFromLock::AsyncCommitResolved {
+                status,
+                keys,
+                commit_version,
+            } => {
+                resolved_async_commit = Some((keys, commit_version));
+                status
+            }
             TxnStatusFromLock::PessimisticRollbackRequired => {
                 rollback_pessimistic_lock(
                     &lock,
@@ -777,6 +824,45 @@ pub(crate) async fn resolve_locks_for_read(
                 keyspace,
             )
             .await?;
+            continue;
+        }
+
+        if resolved_async_commit_txns.contains(&lock.lock_version) {
+            continue;
+        }
+
+        if let Some((keys, commit_version)) = resolved_async_commit {
+            // Match client-go `resolveAsyncCommitLock`: resolve the full async-commit transaction
+            // in a background cleanup task for snapshot reads.
+            resolved_async_commit_txns.insert(lock.lock_version);
+
+            let start_version = lock.lock_version;
+            let is_txn_file = lock.is_txn_file;
+            let rpc_context = lock_resolver.rpc_context.clone();
+            let pd_client = pd_client.clone();
+            let lock_backoff = lock_backoff.clone();
+            let killed = killed.clone();
+
+            let task = tokio::spawn(async move {
+                if let Err(err) = resolve_lock_keys_with_retry(
+                    keys,
+                    start_version,
+                    commit_version,
+                    is_txn_file,
+                    &rpc_context,
+                    pd_client,
+                    keyspace,
+                    lock_backoff,
+                    killed,
+                )
+                .await
+                {
+                    warn!("async resolve_lock_for_read (async commit) failed: {err}");
+                }
+            });
+            if let Some(lock_tracker) = lock_tracker.as_ref() {
+                lock_tracker.track_cleanup_task(task).await;
+            }
             continue;
         }
 
@@ -926,6 +1012,46 @@ async fn resolve_lock_with_retry(
             Err(e) => return Err(e),
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resolve_lock_keys_with_retry(
+    keys: Vec<Vec<u8>>,
+    start_version: u64,
+    commit_version: u64,
+    is_txn_file: bool,
+    rpc_context: &LockResolverRpcContext,
+    pd_client: Arc<impl PdClient>,
+    keyspace: Keyspace,
+    backoff: Backoff,
+    killed: Option<Arc<AtomicU32>>,
+) -> Result<()> {
+    let mut keys = keys;
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let mut inner = requests::new_resolve_lock_request(start_version, commit_version, is_txn_file);
+    rpc_context.apply_to_request(&mut inner);
+
+    let req = requests::ResolveLockKeysRequest::new(inner, keys);
+    let plan = crate::request::PlanBuilder::new_with_rpc_interceptors(
+        pd_client.clone(),
+        keyspace,
+        req,
+        rpc_context.rpc_interceptors.clone(),
+    )
+    .retry_multi_region(backoff)
+    .with_killed(killed)
+    .plan();
+
+    let results = plan.execute().await?;
+    for result in results {
+        let _ = result?;
+    }
+    Ok(())
 }
 
 async fn rollback_pessimistic_lock(
@@ -2209,7 +2335,14 @@ impl LockResolver {
                                 .save_resolved(lock.lock_version, resolved_status.clone())
                                 .await;
                         }
-                        return Ok(TxnStatusFromLock::Status(resolved_status));
+                        let mut keys = primary_lock.secondaries;
+                        keys.push(lock.primary_lock.clone());
+                        keys.push(lock.key.clone());
+                        return Ok(TxnStatusFromLock::AsyncCommitResolved {
+                            status: resolved_status,
+                            keys,
+                            commit_version,
+                        });
                     }
 
                     return Ok(TxnStatusFromLock::Status(status));
@@ -3473,10 +3606,7 @@ mod tests {
                     resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(req.start_version, 7);
                     assert_eq!(req.commit_version, 200);
-                    assert!(
-                        req.keys.is_empty(),
-                        "non-lite resolve should not send key list"
-                    );
+                    assert_eq!(req.keys, vec![vec![1], vec![2], vec![3]]);
                     return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
                 }
                 panic!("unexpected request type: {:?}", req.type_id());
@@ -3549,10 +3679,7 @@ mod tests {
                     resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(req.start_version, 7);
                     assert_eq!(req.commit_version, 0);
-                    assert!(
-                        req.keys.is_empty(),
-                        "non-lite resolve should not send key list"
-                    );
+                    assert_eq!(req.keys, vec![vec![1], vec![2], vec![3]]);
                     return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
                 }
                 panic!("unexpected request type: {:?}", req.type_id());
@@ -4105,7 +4232,7 @@ mod tests {
                 .expect("resolve-lock request should report request metadata");
         assert_eq!(start_version, txn_id);
         assert_eq!(commit_version, 200);
-        assert_eq!(keys, vec![vec![1]]);
+        assert_eq!(keys, vec![vec![1], vec![2], vec![3]]);
 
         let resolved = ctx
             .get_resolved(txn_id)
