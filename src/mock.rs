@@ -16,6 +16,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use derive_new::new;
 use tokio::sync::RwLock;
+use tokio::time::sleep;
 
 use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
@@ -118,6 +119,8 @@ pub struct MockPdClient {
     get_external_timestamp_calls: Arc<AtomicUsize>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
     set_external_timestamp_calls: Arc<AtomicUsize>,
+    #[new(default)]
+    get_timestamp_delay: Duration,
 }
 
 #[async_trait]
@@ -198,6 +201,11 @@ impl MockPdClient {
     pub fn with_tso_sequence(mut self, start_version: u64) -> MockPdClient {
         self.use_tso_sequence = true;
         self.tso_version.store(start_version, Ordering::SeqCst);
+        self
+    }
+
+    pub fn with_get_timestamp_delay(mut self, delay: Duration) -> MockPdClient {
+        self.get_timestamp_delay = delay;
         self
     }
 
@@ -485,6 +493,9 @@ impl PdClient for MockPdClient {
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
         self.get_timestamp_calls.fetch_add(1, Ordering::SeqCst);
+        if self.get_timestamp_delay > Duration::from_millis(0) {
+            sleep(self.get_timestamp_delay).await;
+        }
         if self.use_tso_sequence {
             let version = self.tso_version.fetch_add(1, Ordering::SeqCst);
             Ok(Timestamp::from_version(version))
@@ -498,6 +509,9 @@ impl PdClient for MockPdClient {
         dc_location: String,
     ) -> Result<Timestamp> {
         self.get_timestamp_calls.fetch_add(1, Ordering::SeqCst);
+        if self.get_timestamp_delay > Duration::from_millis(0) {
+            sleep(self.get_timestamp_delay).await;
+        }
 
         let mut locations = match self.get_timestamp_dc_locations.lock() {
             Ok(guard) => guard,

@@ -1,8 +1,8 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
     transaction::Mutation, AssertionLevel, BoundRange, CommandPriority, DiskFullOpt, Error, Key,
-    KvPair, LockWaitTimeout, PrewriteEncounterLockPolicy, Result, SchemaLeaseChecker, Timestamp,
-    Transaction, Value, Variables,
+    KvPair, LockWaitTimeout, PrewriteEncounterLockPolicy, ResolveLockDetail, Result,
+    SchemaLeaseChecker, Timestamp, Transaction, Value, Variables,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,6 +45,14 @@ impl SyncTransaction {
     #[must_use]
     pub fn vars(&self) -> &Variables {
         self.inner.vars()
+    }
+
+    /// Get lock-resolution runtime stats accumulated by this transaction.
+    ///
+    /// This mirrors client-go `KVTxn.GetResolveLockDetail`.
+    #[must_use]
+    pub fn resolve_lock_detail(&self) -> ResolveLockDetail {
+        self.inner.resolve_lock_detail()
     }
 
     /// Set an RPC interceptor for this transaction.

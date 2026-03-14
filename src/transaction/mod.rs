@@ -44,6 +44,7 @@ pub use lock::new_lock;
 pub use lock::BoundLockResolver;
 pub use lock::Lock;
 pub use lock::LockResolver;
+pub use lock::ResolveLockDetail;
 pub use lock::ResolveLocksContext;
 pub use lock::ResolveLocksForReadResult;
 pub use lock::ResolveLocksOptions;

@@ -1,7 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
-    BoundRange, CommandPriority, IsolationLevel, Key, KvPair, ReplicaReadType, Result, Snapshot,
-    StoreLabel, Value, Variables,
+    BoundRange, CommandPriority, IsolationLevel, Key, KvPair, ReplicaReadType, ResolveLockDetail,
+    Result, Snapshot, StoreLabel, Value, Variables,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,6 +100,14 @@ impl SyncSnapshot {
     #[must_use]
     pub fn vars(&self) -> &Variables {
         self.inner.vars()
+    }
+
+    /// Get lock-resolution runtime stats accumulated by this snapshot.
+    ///
+    /// This maps to client-go `KVSnapshot.GetResolveLockDetail`.
+    #[must_use]
+    pub fn resolve_lock_detail(&self) -> ResolveLockDetail {
+        self.inner.resolve_lock_detail()
     }
 
     /// Set an RPC interceptor for this snapshot.

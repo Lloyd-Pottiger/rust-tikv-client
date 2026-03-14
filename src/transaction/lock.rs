@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fail::fail_point;
 use log::debug;
@@ -138,6 +138,59 @@ pub struct ResolveLocksForReadResult {
     pub live_locks: Vec<kvrpcpb::LockInfo>,
     pub resolved_locks: Vec<u64>,
     pub committed_locks: Vec<u64>,
+}
+
+/// Runtime stats for lock resolution.
+///
+/// This mirrors client-go `util.ResolveLockDetail` and currently tracks only the total
+/// wall-clock time spent resolving locks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ResolveLockDetail {
+    pub resolve_lock_time: Duration,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ResolveLockDetailCollector {
+    resolve_lock_time_ns: AtomicU64,
+}
+
+impl ResolveLockDetailCollector {
+    pub(crate) fn add_resolve_lock_time(&self, duration: Duration) {
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        self.resolve_lock_time_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self) -> ResolveLockDetail {
+        let nanos = self.resolve_lock_time_ns.load(Ordering::Relaxed);
+        ResolveLockDetail {
+            resolve_lock_time: Duration::from_nanos(nanos),
+        }
+    }
+}
+
+struct ResolveLockTimeGuard {
+    detail: Option<Arc<ResolveLockDetailCollector>>,
+    started_at: Instant,
+}
+
+impl ResolveLockTimeGuard {
+    fn new(detail: Option<Arc<ResolveLockDetailCollector>>) -> Self {
+        Self {
+            detail,
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl Drop for ResolveLockTimeGuard {
+    fn drop(&mut self) {
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        detail.add_resolve_lock_time(self.started_at.elapsed());
+    }
 }
 
 /// A decoded lock returned by TiKV.
@@ -398,6 +451,8 @@ pub(crate) async fn resolve_locks_with_options(
     killed: Option<Arc<AtomicU32>>,
     rpc_context: LockResolverRpcContext,
 ) -> Result<ResolveLocksResult> {
+    let _resolve_lock_time_guard =
+        ResolveLockTimeGuard::new(rpc_context.resolve_lock_detail.clone());
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
 
     debug!("resolving locks");
@@ -602,6 +657,8 @@ pub(crate) async fn resolve_locks_for_read(
     lock_tracker: Option<ReadLockTracker>,
     rpc_context: LockResolverRpcContext,
 ) -> Result<ResolveLocksForReadResult> {
+    let _resolve_lock_time_guard =
+        ResolveLockTimeGuard::new(rpc_context.resolve_lock_detail.clone());
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
 
     debug!("resolving locks for read");
@@ -1096,6 +1153,7 @@ pub(crate) struct LockResolverRpcContext {
     pub(crate) context: Option<kvrpcpb::Context>,
     pub(crate) resource_group_tag_set: bool,
     pub(crate) resource_group_tagger: Option<ResourceGroupTagger>,
+    pub(crate) resolve_lock_detail: Option<Arc<ResolveLockDetailCollector>>,
     pub(crate) rpc_interceptors: RpcInterceptors,
 }
 
@@ -2484,6 +2542,7 @@ mod tests {
             context: Some(template),
             resource_group_tag_set: true,
             resource_group_tagger: None,
+            resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
         };
         rpc_context.apply_to_kv_context("kv_check_txn_status", &mut ctx);
@@ -2538,6 +2597,7 @@ mod tests {
                 tagger_calls_captured.fetch_add(1, Ordering::SeqCst);
                 label.as_bytes().to_vec()
             })),
+            resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
         };
 
@@ -2655,6 +2715,7 @@ mod tests {
                 tagger_calls_captured.fetch_add(1, Ordering::SeqCst);
                 b"tagger".to_vec()
             })),
+            resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
         };
 
@@ -2730,6 +2791,7 @@ mod tests {
                 tagger_calls_captured.fetch_add(1, Ordering::SeqCst);
                 label.as_bytes().to_vec()
             })),
+            resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
         };
 

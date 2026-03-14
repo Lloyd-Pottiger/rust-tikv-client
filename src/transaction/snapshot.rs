@@ -3,6 +3,7 @@
 use derive_new::new;
 use log::{debug, trace};
 
+use crate::transaction::ResolveLockDetail;
 use crate::transaction::Variables;
 use crate::BoundRange;
 use crate::CommandPriority;
@@ -43,6 +44,14 @@ impl Snapshot {
     #[must_use]
     pub fn vars(&self) -> &Variables {
         self.transaction.vars()
+    }
+
+    /// Get lock-resolution runtime stats accumulated by this snapshot.
+    ///
+    /// This maps to client-go `KVSnapshot.GetResolveLockDetail`.
+    #[must_use]
+    pub fn resolve_lock_detail(&self) -> ResolveLockDetail {
+        self.transaction.resolve_lock_detail()
     }
 
     /// Set an RPC interceptor for this snapshot.

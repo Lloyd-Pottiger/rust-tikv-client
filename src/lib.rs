@@ -231,6 +231,8 @@ pub use crate::transaction::ProtoTiFlashSystemTableResponse;
 #[doc(inline)]
 pub use crate::transaction::ProtoWaitForEntry;
 #[doc(inline)]
+pub use crate::transaction::ResolveLockDetail;
+#[doc(inline)]
 pub use crate::transaction::ResolveLocksContext;
 #[doc(inline)]
 pub use crate::transaction::ResolveLocksForReadResult;

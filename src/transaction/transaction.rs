@@ -15,10 +15,12 @@ use serde_derive::Serialize;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
+use super::lock::ResolveLockDetailCollector;
 use super::requests::CollectPessimisticLock;
 use super::requests::ResolveLockRangeRequest;
 use super::LockResolverRpcContext;
 use super::ReadLockTracker;
+use super::ResolveLockDetail;
 use super::ResolveLocksContext;
 use super::Variables;
 use crate::backoff::Backoff;
@@ -181,6 +183,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     pipelined: Option<PipelinedState>,
     rpc: Arc<PdC>,
     resolve_locks_ctx: ResolveLocksContext,
+    resolve_lock_detail: Arc<ResolveLockDetailCollector>,
     options: TransactionOptions,
     rpc_interceptors: RpcInterceptors,
     vars: Variables,
@@ -350,6 +353,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 .map(|_| PipelinedState::new()),
             rpc,
             resolve_locks_ctx,
+            resolve_lock_detail: Arc::new(ResolveLockDetailCollector::default()),
             options,
             rpc_interceptors: Default::default(),
             vars: Variables::default(),
@@ -400,6 +404,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             .options
             .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         ctx.rpc_interceptors = self.rpc_interceptors.clone();
+        ctx.resolve_lock_detail = Some(self.resolve_lock_detail.clone());
         ctx
     }
 
@@ -662,6 +667,14 @@ impl<PdC: PdClient> Transaction<PdC> {
     #[must_use]
     pub fn vars(&self) -> &Variables {
         &self.vars
+    }
+
+    /// Get lock-resolution runtime stats accumulated by this transaction.
+    ///
+    /// This mirrors client-go `KVTxn.GetResolveLockDetail` and `KVSnapshot.GetResolveLockDetail`.
+    #[must_use]
+    pub fn resolve_lock_detail(&self) -> ResolveLockDetail {
+        self.resolve_lock_detail.snapshot()
     }
 
     /// Set the geographical scope of the transaction.
@@ -2592,6 +2605,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             committer.pipelined_flush_duration_ewma = Some(state.flush_duration_ewma.clone());
         }
         committer.resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        committer.resolve_lock_detail = Some(self.resolve_lock_detail.clone());
         committer.resource_group_tagger = self.resource_group_tagger.clone();
         committer.schema_ver = self.schema_ver;
         committer.schema_lease_checker = self.schema_lease_checker.clone();
@@ -2711,6 +2725,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         committer.rpc_interceptors = self.rpc_interceptors.clone();
         committer.vars = self.vars.clone();
         committer.resolve_locks_ctx = self.resolve_locks_ctx.clone();
+        committer.resolve_lock_detail = Some(self.resolve_lock_detail.clone());
         committer.resource_group_tagger = self.resource_group_tagger.clone();
         committer.schema_ver = self.schema_ver;
         committer.schema_lease_checker = self.schema_lease_checker.clone();
@@ -4419,6 +4434,7 @@ async fn throttle_pipelined_flush(ewma: Arc<Mutex<FlushDurationEwma>>, write_thr
     tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_pipelined_resolve_locks_and_broadcast_completion<PdC: PdClient + 'static>(
     rpc: Arc<PdC>,
     keyspace: Keyspace,
@@ -5171,6 +5187,7 @@ impl TransactionOptions {
             context,
             resource_group_tag_set: self.resource_group_tag.is_some(),
             resource_group_tagger,
+            resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
         }
     }
@@ -5259,6 +5276,8 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     rpc: Arc<PdC>,
     #[new(default)]
     resolve_locks_ctx: ResolveLocksContext,
+    #[new(default)]
+    resolve_lock_detail: Option<Arc<ResolveLockDetailCollector>>,
     options: TransactionOptions,
     #[new(default)]
     for_update_ts_constraints: HashMap<Key, u64>,
@@ -5345,6 +5364,7 @@ impl<PdC: PdClient> Committer<PdC> {
             .options
             .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         ctx.rpc_interceptors = self.rpc_interceptors.clone();
+        ctx.resolve_lock_detail = self.resolve_lock_detail.clone();
         ctx
     }
 
@@ -7229,6 +7249,67 @@ mod tests {
         let value = snapshot.get(b"k".to_vec()).await.unwrap();
         assert_eq!(value, Some(b"v".to_vec()));
         assert_eq!(get_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_lock_detail_records_time_for_snapshot_reads() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls_captured = get_calls.clone();
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::GetRequest>().is_some() {
+                    let attempt = get_calls_captured.fetch_add(1, Ordering::SeqCst);
+
+                    if attempt == 0 {
+                        let mut resp = kvrpcpb::GetResponse::default();
+                        let mut key_err = kvrpcpb::KeyError::default();
+                        let mut lock = kvrpcpb::LockInfo::default();
+                        lock.key = b"k".to_vec();
+                        lock.primary_lock = b"k".to_vec();
+                        lock.lock_version = 1;
+                        lock.lock_ttl = 100;
+                        lock.txn_size = 1;
+                        lock.lock_type = kvrpcpb::Op::Put as i32;
+                        key_err.locked = Some(lock);
+                        resp.error = Some(key_err);
+                        return Ok(Box::new(resp) as Box<dyn Any>);
+                    }
+
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    resp.value = b"v".to_vec();
+                    resp.not_found = false;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    let mut resp = kvrpcpb::CheckTxnStatusResponse::default();
+                    resp.action = kvrpcpb::Action::NoAction as i32;
+                    resp.commit_version = 5;
+                    resp.lock_ttl = 0;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type in resolve-lock-detail test");
+            }))
+            .with_get_timestamp_delay(Duration::from_millis(5)),
+        );
+
+        let mut snapshot = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+        );
+
+        let value = snapshot.get(b"k".to_vec()).await.unwrap();
+        assert_eq!(value, Some(b"v".to_vec()));
+
+        let detail = snapshot.resolve_lock_detail();
+        assert!(detail.resolve_lock_time >= Duration::from_millis(5));
     }
 
     #[tokio::test]
