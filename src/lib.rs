@@ -108,6 +108,7 @@ pub mod transaction;
 mod common;
 mod compat;
 mod config;
+mod gc_safe_point;
 mod kv;
 mod pd;
 mod proto;

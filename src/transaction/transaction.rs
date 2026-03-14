@@ -25,6 +25,7 @@ use super::ResolveLockDetail;
 use super::ResolveLocksContext;
 use super::Variables;
 use crate::backoff::Backoff;
+use crate::gc_safe_point::GcSafePointCache;
 use crate::kv::HexRepr;
 use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
@@ -184,6 +185,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     pipelined: Option<PipelinedState>,
     rpc: Arc<PdC>,
     resolve_locks_ctx: ResolveLocksContext,
+    gc_safe_point: GcSafePointCache<PdC>,
     resolve_lock_detail: Arc<ResolveLockDetailCollector>,
     options: TransactionOptions,
     rpc_interceptors: RpcInterceptors,
@@ -321,12 +323,14 @@ impl<PdC: PdClient> Transaction<PdC> {
         options: TransactionOptions,
         keyspace: Keyspace,
     ) -> Transaction<PdC> {
+        let gc_safe_point = GcSafePointCache::new(rpc.clone(), keyspace);
         Self::new_with_resolve_locks_ctx(
             timestamp,
             rpc,
             options,
             keyspace,
             ResolveLocksContext::default(),
+            gc_safe_point,
             None,
         )
     }
@@ -337,6 +341,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         options: TransactionOptions,
         keyspace: Keyspace,
         resolve_locks_ctx: ResolveLocksContext,
+        gc_safe_point: GcSafePointCache<PdC>,
         txn_latches: Option<Arc<TxnLocalLatches>>,
     ) -> Transaction<PdC> {
         let status = if options.read_only {
@@ -365,6 +370,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 .map(|_| PipelinedState::new()),
             rpc,
             resolve_locks_ctx,
+            gc_safe_point,
             resolve_lock_detail: Arc::new(ResolveLockDetailCollector::default()),
             options,
             rpc_interceptors: Default::default(),
@@ -984,6 +990,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     pub async fn get(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         trace!("invoking transactional get request");
         self.check_allow_operation().await?;
+        self.check_visibility().await?;
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
@@ -1170,6 +1177,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     ) -> Result<Option<(Value, u64)>> {
         trace!("invoking transactional get_with_commit_ts request");
         self.check_allow_operation().await?;
+        self.check_visibility().await?;
         if !self.options.read_only {
             return Err(Error::StringError(
                 "get_with_commit_ts is only supported for read-only snapshots".to_owned(),
@@ -1394,6 +1402,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     ) -> Result<impl Iterator<Item = KvPair>> {
         debug!("invoking transactional batch_get request");
         self.check_allow_operation().await?;
+        self.check_visibility().await?;
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let keyspace = self.keyspace;
@@ -1681,6 +1690,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     ) -> Result<impl Iterator<Item = (KvPair, u64)>> {
         debug!("invoking transactional batch_get_with_commit_ts request");
         self.check_allow_operation().await?;
+        self.check_visibility().await?;
         if !self.options.read_only {
             return Err(Error::StringError(
                 "batch_get_with_commit_ts is only supported for read-only snapshots".to_owned(),
@@ -3155,6 +3165,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         reverse: bool,
     ) -> Result<impl Iterator<Item = KvPair>> {
         self.check_allow_operation().await?;
+        self.check_visibility().await?;
         if self.options.pipelined_txn.is_some() {
             return Err(Error::StringError(
                 "scan is not supported for pipelined transactions".to_owned(),
@@ -4199,6 +4210,12 @@ impl<PdC: PdClient> Transaction<PdC> {
             | TransactionStatus::StartedRollback
             | TransactionStatus::Dropped => Err(Error::OperationAfterCommitError),
         }
+    }
+
+    async fn check_visibility(&self) -> Result<()> {
+        self.gc_safe_point
+            .check_visibility(self.timestamp.version())
+            .await
     }
 
     fn is_pessimistic(&self) -> bool {
@@ -6604,6 +6621,7 @@ mod tests {
         PIPELINED_MIN_FLUSH_MEM_SIZE,
     };
 
+    use crate::gc_safe_point::GcSafePointCache;
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::pd::PdClient;
@@ -6733,6 +6751,38 @@ mod tests {
             Err(Error::StringError(msg)) if msg.contains("invalid write throttle ratio")
         ));
         assert!(PipelinedTxnOptions::new(1, 1, 0.0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_checks_visibility_before_sending_requests() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |_req: &dyn Any| {
+                panic!("unexpected kv request when checking gc safe point visibility");
+            },
+        )));
+
+        let gc_safe_point = GcSafePointCache::new(pd_client.clone(), Keyspace::Disable);
+        gc_safe_point.observe_safe_point(50).await;
+
+        let resolve_locks_ctx = crate::transaction::ResolveLocksContext::default();
+        let mut snapshot = Transaction::new_with_resolve_locks_ctx(
+            Timestamp::from_version(40),
+            pd_client,
+            TransactionOptions::new_optimistic().read_only(),
+            Keyspace::Disable,
+            resolve_locks_ctx,
+            gc_safe_point,
+            None,
+        );
+
+        let err = snapshot.get(b"k".to_vec()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            Error::TxnAbortedByGc {
+                start_ts: 40,
+                safe_point: 50
+            }
+        ));
     }
 
     #[tokio::test]
@@ -8041,6 +8091,7 @@ mod tests {
         )));
 
         let resolve_locks_ctx = crate::transaction::ResolveLocksContext::default();
+        let gc_safe_point = GcSafePointCache::new(pd_client.clone(), Keyspace::Disable);
 
         let mut snapshot1 = Transaction::new_with_resolve_locks_ctx(
             Timestamp::from_version(10),
@@ -8048,6 +8099,7 @@ mod tests {
             TransactionOptions::new_optimistic().read_only(),
             Keyspace::Disable,
             resolve_locks_ctx.clone(),
+            gc_safe_point.clone(),
             None,
         );
         let value1 = snapshot1.get(b"k1".to_vec()).await.unwrap();
@@ -8059,6 +8111,7 @@ mod tests {
             TransactionOptions::new_optimistic().read_only(),
             Keyspace::Disable,
             resolve_locks_ctx,
+            gc_safe_point,
             None,
         );
         let value2 = snapshot2.get(b"k2".to_vec()).await.unwrap();

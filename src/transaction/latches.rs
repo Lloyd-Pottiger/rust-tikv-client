@@ -325,6 +325,7 @@ mod tests {
     use std::any::Any;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use crate::gc_safe_point::GcSafePointCache;
     use crate::mock::{MockKvClient, MockPdClient};
     use crate::request::Keyspace;
     use crate::timestamp::TimestampExt;
@@ -429,12 +430,14 @@ mod tests {
 
         let latches_for_txn = latches.clone();
         let handle = tokio::spawn(async move {
+            let gc_safe_point = GcSafePointCache::new(pd_client.clone(), Keyspace::Disable);
             let mut txn = Transaction::new_with_resolve_locks_ctx(
                 Timestamp::from_version(2),
                 pd_client,
                 TransactionOptions::new_optimistic().drop_check(crate::CheckLevel::None),
                 Keyspace::Disable,
                 ResolveLocksContext::default(),
+                gc_safe_point,
                 Some(latches_for_txn),
             );
             txn.put(b"k".to_vec(), b"v".to_vec()).await.unwrap();

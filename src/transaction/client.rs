@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 use super::latches::TxnLocalLatches;
 use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF};
 use crate::config::Config;
+use crate::gc_safe_point::GcSafePointCache;
 use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
 use crate::proto::pdpb::Timestamp;
@@ -98,6 +99,7 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
     keyspace: Keyspace,
     resolve_locks_ctx: ResolveLocksContext,
     safe_ts: SafeTsCache<PdC>,
+    gc_safe_point: GcSafePointCache<PdC>,
     last_tsos: Arc<RwLock<HashMap<String, LastTso>>>,
     low_resolution_ts_update_interval_ms: Arc<AtomicU64>,
     txn_latches: Option<Arc<TxnLocalLatches>>,
@@ -122,6 +124,7 @@ impl<PdC: PdClient> Clone for Client<PdC> {
             keyspace: self.keyspace,
             resolve_locks_ctx: self.resolve_locks_ctx.clone(),
             safe_ts: self.safe_ts.clone(),
+            gc_safe_point: self.gc_safe_point.clone(),
             last_tsos: self.last_tsos.clone(),
             low_resolution_ts_update_interval_ms: self.low_resolution_ts_update_interval_ms.clone(),
             txn_latches: self.txn_latches.clone(),
@@ -194,6 +197,7 @@ impl Client {
             .then(|| Arc::new(TxnLocalLatches::new(txn_local_latches_capacity)));
         Ok(Client {
             safe_ts: SafeTsCache::new(pd.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd.clone(), keyspace),
             pd,
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -227,6 +231,7 @@ impl Client {
             .then(|| Arc::new(TxnLocalLatches::new(txn_local_latches_capacity)));
         Ok(Client {
             safe_ts: SafeTsCache::new(pd.clone(), Keyspace::ApiV2NoPrefix),
+            gc_safe_point: GcSafePointCache::new(pd.clone(), Keyspace::ApiV2NoPrefix),
             pd,
             keyspace: Keyspace::ApiV2NoPrefix,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -758,24 +763,7 @@ impl<PdC: PdClient> Client<PdC> {
     /// When the provided `start_ts` falls behind the current GC safe point, this returns
     /// [`Error::TxnAbortedByGc`].
     pub async fn check_visibility(&self, start_ts: u64) -> Result<()> {
-        let safe_point = match self.keyspace {
-            Keyspace::Enable { keyspace_id } => {
-                match self.pd.clone().get_gc_safe_point_v2(keyspace_id).await {
-                    Ok(safe_point) => safe_point,
-                    Err(crate::Error::Unimplemented) => self.pd.clone().get_gc_safe_point().await?,
-                    Err(err) => return Err(err),
-                }
-            }
-            _ => self.pd.clone().get_gc_safe_point().await?,
-        };
-
-        if start_ts < safe_point {
-            return Err(crate::Error::TxnAbortedByGc {
-                start_ts,
-                safe_point,
-            });
-        }
-        Ok(())
+        self.gc_safe_point.check_visibility(start_ts).await
     }
 
     /// Request garbage collection (GC) of the TiKV cluster.
@@ -825,6 +813,7 @@ impl<PdC: PdClient> Client<PdC> {
             },
             _ => self.pd.clone().update_safepoint(requested).await?,
         };
+        self.gc_safe_point.observe_safe_point(new_safe_point).await;
         if new_safe_point != safepoint.version() {
             info!(
                 "new safepoint {} != user-specified safepoint {}",
@@ -1303,6 +1292,7 @@ impl<PdC: PdClient> Client<PdC> {
             options,
             self.keyspace,
             self.resolve_locks_ctx.clone(),
+            self.gc_safe_point.clone(),
             self.txn_latches.clone(),
         )
     }
@@ -1325,6 +1315,7 @@ mod tests {
     use std::time::Duration;
     use std::time::Instant;
 
+    use crate::gc_safe_point::GcSafePointCache;
     use crate::mock::{MockKvClient, MockPdClient};
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1345,6 +1336,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -1387,6 +1379,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -1490,6 +1483,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -1631,6 +1625,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -1703,6 +1698,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -1754,6 +1750,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -1786,6 +1783,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -1880,6 +1878,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -1973,6 +1972,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2026,6 +2026,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2077,6 +2078,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2135,6 +2137,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2159,6 +2162,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2188,6 +2192,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2217,6 +2222,7 @@ mod tests {
         );
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2241,6 +2247,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2264,6 +2271,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2282,6 +2290,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2305,6 +2314,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2344,6 +2354,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default().with_tso_sequence(start_version));
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2367,6 +2378,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2388,6 +2400,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2428,6 +2441,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default().with_tso_sequence(start_version));
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2465,6 +2479,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2509,6 +2524,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::default().with_tso_sequence(start_version));
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2558,6 +2574,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2592,6 +2609,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2623,6 +2641,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2673,6 +2692,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2744,6 +2764,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(start_version));
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2819,6 +2840,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client,
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2888,6 +2910,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(start_version));
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -2943,6 +2966,7 @@ mod tests {
         let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(start_version));
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3007,6 +3031,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3074,6 +3099,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3154,6 +3180,7 @@ mod tests {
         let keyspace = Keyspace::Enable { keyspace_id };
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3222,6 +3249,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3307,6 +3335,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3346,6 +3375,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3376,6 +3406,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3414,6 +3445,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3448,6 +3480,7 @@ mod tests {
         let keyspace = Keyspace::Enable { keyspace_id: 7 };
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3486,6 +3519,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3512,6 +3546,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3539,6 +3574,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3566,6 +3602,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3587,6 +3624,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3608,6 +3646,7 @@ mod tests {
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3626,10 +3665,10 @@ mod tests {
     async fn test_check_visibility_returns_txn_aborted_by_gc_when_start_ts_is_too_old() {
         let pd_client = Arc::new(MockPdClient::default());
         pd_client.push_get_gc_safe_point_response(50);
-        pd_client.push_get_gc_safe_point_response(50);
 
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3649,7 +3688,7 @@ mod tests {
                 safe_point: 50
             }
         ));
-        assert_eq!(pd_client.get_gc_safe_point_call_count(), 2);
+        assert_eq!(pd_client.get_gc_safe_point_call_count(), 1);
     }
 
     #[tokio::test]
@@ -3660,6 +3699,7 @@ mod tests {
         let keyspace = Keyspace::Enable { keyspace_id: 7 };
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client.clone(),
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3769,6 +3809,7 @@ mod tests {
         let keyspace = Keyspace::Enable { keyspace_id: 7 };
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client,
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
@@ -3801,6 +3842,7 @@ mod tests {
         let keyspace = Keyspace::Enable { keyspace_id: 7 };
         let client = Client {
             safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
             pd: pd_client,
             keyspace,
             resolve_locks_ctx: ResolveLocksContext::default(),
