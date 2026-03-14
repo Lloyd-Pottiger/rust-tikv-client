@@ -484,6 +484,54 @@ async fn txn_pipelined_rollback_after_flush_cleans_up_locks() -> Result<()> {
 
 #[tokio::test]
 #[serial]
+async fn txn_pipelined_commit_after_flush_cleans_up_locks() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let key0 = b"key0".to_vec();
+    let value0 = b"value0".to_vec();
+    let key2 = b"key2".to_vec();
+    let value2 = b"value2".to_vec();
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+        )
+        .await?;
+    txn.put(key0.clone(), value0.clone()).await?;
+    txn.put(key2.clone(), value2.clone()).await?;
+    assert!(txn.flush(true).await?);
+    txn.flush_wait().await?;
+    txn.commit().await?;
+
+    let mut verify = client.begin_optimistic().await?;
+    assert_eq!(verify.get(key0).await?, Some(value0));
+    assert_eq!(verify.get(key2).await?, Some(value2));
+    verify.rollback().await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let safepoint = client.current_timestamp().await?;
+        let locks = client.scan_locks(&safepoint, .., 128).await?;
+        if locks.is_empty() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("pipelined commit left {} locks behind", locks.len());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn txn_split_batch() -> Result<()> {
     init().await?;
 
