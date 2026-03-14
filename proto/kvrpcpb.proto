@@ -1644,3 +1644,22 @@ message HealthFeedback {
     // would be replaced by `SlowTrend` in the future.
     int32 slow_score = 3;
 }
+
+message BroadcastTxnStatusRequest {
+    Context context = 1;
+    repeated TxnStatus txn_status = 2;
+}
+
+message TxnStatus {
+    uint64 start_ts = 1;
+    // a non-zero min_commit_ts indicates the transaction is ongoing
+    uint64 min_commit_ts = 2;
+    // a non-zero commit_ts indicates the transaction is committed
+    uint64 commit_ts = 3;
+    bool rolled_back = 4;
+    // The txn has unlocked all keys, implying that it can be removed from txn_status_cache.
+    bool is_completed = 5;
+}
+
+message BroadcastTxnStatusResponse {
+}

@@ -320,3 +320,47 @@ impl Request for kvrpcpb::GetHealthFeedbackRequest {
         Some(self.context.get_or_insert(kvrpcpb::Context::default()))
     }
 }
+
+#[async_trait]
+impl Request for kvrpcpb::BroadcastTxnStatusRequest {
+    async fn dispatch(
+        &self,
+        client: &TikvClient<Channel>,
+        timeout: Duration,
+    ) -> Result<Box<dyn Any>> {
+        let mut req = self.clone().into_request();
+        req.set_timeout(timeout);
+        client
+            .clone()
+            .broadcast_txn_status(req)
+            .await
+            .map(|r| Box::new(r.into_inner()) as Box<dyn Any>)
+            .map_err(Error::GrpcAPI)
+    }
+
+    fn label(&self) -> &'static str {
+        "broadcast_txn_status"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn set_leader(&mut self, _leader: &RegionWithLeader) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion) {
+        let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+        ctx.api_version = api_version.into();
+    }
+
+    fn set_is_retry_request(&mut self, is_retry_request: bool) {
+        let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+        ctx.is_retry_request = is_retry_request;
+    }
+
+    fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        Some(self.context.get_or_insert(kvrpcpb::Context::default()))
+    }
+}

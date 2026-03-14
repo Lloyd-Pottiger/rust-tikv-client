@@ -11,6 +11,7 @@ use futures::prelude::*;
 use futures::stream::BoxStream;
 use log::debug;
 use log::info;
+use log::warn;
 use serde_derive::Deserialize;
 use tokio::sync::RwLock;
 
@@ -42,6 +43,7 @@ use crate::Timestamp;
 
 pub(crate) const HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD: i32 = 80;
 pub(crate) const HEALTH_FEEDBACK_SLOW_STORE_TTL: Duration = Duration::from_secs(15);
+pub(crate) const BROADCAST_TXN_STATUS_MAX_CONCURRENCY: usize = 10;
 
 /// The PdClient handles all the encoding stuff.
 ///
@@ -170,6 +172,55 @@ pub trait PdClient: Send + Sync + 'static {
     async fn get_health_feedback(&self, store_id: StoreId) -> Result<kvrpcpb::HealthFeedback> {
         let _ = store_id;
         Err(Error::Unimplemented)
+    }
+
+    /// Broadcast transaction status to all TiKV stores.
+    ///
+    /// This is best-effort: per-store errors are logged and ignored.
+    async fn broadcast_txn_status_to_all_stores(
+        &self,
+        txn_statuses: Vec<kvrpcpb::TxnStatus>,
+    ) -> Result<()> {
+        if txn_statuses.is_empty() {
+            return Ok(());
+        }
+
+        let stores = self.all_stores().await?;
+        let txn_statuses = Arc::new(txn_statuses);
+        futures::stream::iter(stores).for_each_concurrent(
+            Some(BROADCAST_TXN_STATUS_MAX_CONCURRENCY),
+            move |store| {
+                let txn_statuses = txn_statuses.clone();
+                async move {
+                    let mut req = kvrpcpb::BroadcastTxnStatusRequest::default();
+                    req.context = Some(kvrpcpb::Context::default());
+                    req.txn_status = (*txn_statuses).clone();
+
+                    match store.client.dispatch(&req).await {
+                        Ok(resp) => {
+                            if resp
+                                .downcast::<kvrpcpb::BroadcastTxnStatusResponse>()
+                                .is_err()
+                            {
+                                warn!(
+                                    "broadcast_txn_status got unexpected response type for store_id={}",
+                                    store.meta.id
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            warn!(
+                                "broadcast_txn_status failed for store_id={}: {}",
+                                store.meta.id, err
+                            );
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        Ok(())
     }
 
     /// Mark a store as "slow" for replica selection purposes.
@@ -1164,5 +1215,114 @@ pub mod test {
 
         let err = client.get_health_feedback(store_id).await.unwrap_err();
         assert!(matches!(err, Error::StringError(_)), "err={err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_txn_status_to_all_stores_sends_to_each_store() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_captured = calls.clone();
+
+        let client = MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            let req = req
+                .downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>()
+                .expect("BroadcastTxnStatusRequest");
+            calls_captured.fetch_add(1, Ordering::SeqCst);
+            assert!(req.context.is_some());
+            assert_eq!(req.txn_status.len(), 1);
+            assert_eq!(req.txn_status[0].start_ts, 5);
+            Ok(Box::new(kvrpcpb::BroadcastTxnStatusResponse::default()) as Box<dyn Any>)
+        }));
+
+        client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                ..Default::default()
+            })
+            .await;
+        client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                ..Default::default()
+            })
+            .await;
+
+        client
+            .broadcast_txn_status_to_all_stores(vec![kvrpcpb::TxnStatus {
+                start_ts: 5,
+                min_commit_ts: 6,
+                commit_ts: 0,
+                rolled_back: false,
+                is_completed: false,
+            }])
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_txn_status_to_all_stores_is_best_effort() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_captured = calls.clone();
+
+        let client = MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            req.downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>()
+                .expect("BroadcastTxnStatusRequest");
+            let call_index = calls_captured.fetch_add(1, Ordering::SeqCst);
+            if call_index == 0 {
+                return Err(Error::StringError("injected error".to_owned()));
+            }
+            Ok(Box::new(kvrpcpb::BroadcastTxnStatusResponse::default()) as Box<dyn Any>)
+        }));
+
+        client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                ..Default::default()
+            })
+            .await;
+        client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                ..Default::default()
+            })
+            .await;
+
+        client
+            .broadcast_txn_status_to_all_stores(vec![kvrpcpb::TxnStatus {
+                start_ts: 5,
+                min_commit_ts: 6,
+                commit_ts: 0,
+                rolled_back: false,
+                is_completed: false,
+            }])
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_txn_status_to_all_stores_empty_status_is_noop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_captured = calls.clone();
+
+        let client = MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            let _ = req;
+            calls_captured.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(kvrpcpb::BroadcastTxnStatusResponse::default()) as Box<dyn Any>)
+        }));
+
+        client
+            .broadcast_txn_status_to_all_stores(vec![])
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

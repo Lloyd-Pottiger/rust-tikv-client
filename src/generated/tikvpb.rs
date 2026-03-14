@@ -14,7 +14,7 @@ pub mod batch_commands_request {
     pub struct Request {
         #[prost(
             oneof = "request::Cmd",
-            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 39, 255"
+            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 39, 40, 255"
         )]
         pub cmd: ::core::option::Option<request::Cmd>,
     }
@@ -91,6 +91,8 @@ pub mod batch_commands_request {
             ),
             #[prost(message, tag = "39")]
             GetHealthFeedback(super::super::super::kvrpcpb::GetHealthFeedbackRequest),
+            #[prost(message, tag = "40")]
+            BroadcastTxnStatus(super::super::super::kvrpcpb::BroadcastTxnStatusRequest),
             /// For some test cases.
             #[prost(message, tag = "255")]
             Empty(super::super::BatchCommandsEmptyRequest),
@@ -117,7 +119,7 @@ pub mod batch_commands_response {
     pub struct Response {
         #[prost(
             oneof = "response::Cmd",
-            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 39, 255"
+            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 39, 40, 255"
         )]
         pub cmd: ::core::option::Option<response::Cmd>,
     }
@@ -194,6 +196,8 @@ pub mod batch_commands_response {
             ),
             #[prost(message, tag = "39")]
             GetHealthFeedback(super::super::super::kvrpcpb::GetHealthFeedbackResponse),
+            #[prost(message, tag = "40")]
+            BroadcastTxnStatus(super::super::super::kvrpcpb::BroadcastTxnStatusResponse),
             /// For some test cases.
             #[prost(message, tag = "255")]
             Empty(super::super::BatchCommandsEmptyResponse),
@@ -2044,6 +2048,34 @@ pub mod tikv_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("tikvpb.Tikv", "GetHealthFeedback"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// / Broadcast the transaction status to all TiKV nodes
+        pub async fn broadcast_txn_status(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                super::super::kvrpcpb::BroadcastTxnStatusRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::super::kvrpcpb::BroadcastTxnStatusResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/tikvpb.Tikv/BroadcastTxnStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("tikvpb.Tikv", "BroadcastTxnStatus"));
             self.inner.unary(req, path, codec).await
         }
     }

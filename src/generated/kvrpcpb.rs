@@ -2218,6 +2218,34 @@ pub struct HealthFeedback {
     #[prost(int32, tag = "3")]
     pub slow_score: i32,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BroadcastTxnStatusRequest {
+    #[prost(message, optional, tag = "1")]
+    pub context: ::core::option::Option<Context>,
+    #[prost(message, repeated, tag = "2")]
+    pub txn_status: ::prost::alloc::vec::Vec<TxnStatus>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TxnStatus {
+    #[prost(uint64, tag = "1")]
+    pub start_ts: u64,
+    /// a non-zero min_commit_ts indicates the transaction is ongoing
+    #[prost(uint64, tag = "2")]
+    pub min_commit_ts: u64,
+    /// a non-zero commit_ts indicates the transaction is committed
+    #[prost(uint64, tag = "3")]
+    pub commit_ts: u64,
+    #[prost(bool, tag = "4")]
+    pub rolled_back: bool,
+    /// The txn has unlocked all keys, implying that it can be removed from txn_status_cache.
+    #[prost(bool, tag = "5")]
+    pub is_completed: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BroadcastTxnStatusResponse {}
 /// Used to specify the behavior when a pessimistic lock request is woken up after waiting for another
 /// lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
