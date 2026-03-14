@@ -44,6 +44,10 @@ pub struct Config {
     pub grpc_connection_count: usize,
     /// gRPC compression type for TiKV channels (client-go `GrpcCompressionType`).
     pub grpc_compression_type: GrpcCompressionType,
+    /// Timeout for establishing gRPC connections (client-go `dialTimeout`).
+    ///
+    /// Set to `Duration::ZERO` to disable the connect timeout (use the system default).
+    pub grpc_connect_timeout: Duration,
     /// After a duration of this time without RPC activity, the client pings the server to see if
     /// the transport is still alive (client-go `GrpcKeepAliveTime`).
     ///
@@ -85,6 +89,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
 const DEFAULT_GRPC_CONNECTION_COUNT: usize = 4;
+const DEFAULT_GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_GRPC_KEEPALIVE_TIME: Duration = Duration::from_secs(10);
 const DEFAULT_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_GRPC_INITIAL_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
@@ -103,6 +108,7 @@ impl Default for Config {
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
             grpc_connection_count: DEFAULT_GRPC_CONNECTION_COUNT,
             grpc_compression_type: GrpcCompressionType::None,
+            grpc_connect_timeout: DEFAULT_GRPC_CONNECT_TIMEOUT,
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
             grpc_initial_window_size: DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
@@ -216,6 +222,15 @@ impl Config {
         self
     }
 
+    /// Set the timeout for establishing gRPC connections.
+    ///
+    /// Set to `Duration::ZERO` to disable the connect timeout (use the system default).
+    #[must_use]
+    pub fn with_grpc_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.grpc_connect_timeout = timeout;
+        self
+    }
+
     /// Set the gRPC HTTP2 keepalive ping interval.
     ///
     /// Set to `Duration::ZERO` to disable keepalive pings.
@@ -315,6 +330,7 @@ mod tests {
         assert_eq!(config.grpc_initial_conn_window_size, 1 << 27);
         assert_eq!(config.grpc_connection_count, 4);
         assert_eq!(config.grpc_compression_type, GrpcCompressionType::None);
+        assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
         config.validate().unwrap();
     }
 

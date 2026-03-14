@@ -56,8 +56,10 @@ pub struct SecurityManager {
     grpc_keepalive_timeout: Duration,
     grpc_initial_window_size: u32,
     grpc_initial_conn_window_size: u32,
+    grpc_connect_timeout: Duration,
 }
 
+const DEFAULT_GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_GRPC_KEEPALIVE_TIME: Duration = Duration::from_secs(10);
 const DEFAULT_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_GRPC_INITIAL_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
@@ -73,6 +75,7 @@ impl Default for SecurityManager {
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
             grpc_initial_window_size: DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
             grpc_initial_conn_window_size: DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE,
+            grpc_connect_timeout: DEFAULT_GRPC_CONNECT_TIMEOUT,
         }
     }
 }
@@ -94,6 +97,7 @@ impl SecurityManager {
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
             grpc_initial_window_size: DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
             grpc_initial_conn_window_size: DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE,
+            grpc_connect_timeout: DEFAULT_GRPC_CONNECT_TIMEOUT,
         })
     }
 
@@ -109,6 +113,11 @@ impl SecurityManager {
         self
     }
 
+    pub(crate) fn with_grpc_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.grpc_connect_timeout = timeout;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn grpc_keepalive_config(&self) -> (Duration, Duration) {
         (self.grpc_keepalive_time, self.grpc_keepalive_timeout)
@@ -120,6 +129,11 @@ impl SecurityManager {
             self.grpc_initial_window_size,
             self.grpc_initial_conn_window_size,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn grpc_connect_timeout(&self) -> Duration {
+        self.grpc_connect_timeout
     }
 
     /// Connect to gRPC server using TLS connection. If TLS is not configured, use normal connection.
@@ -173,6 +187,10 @@ impl SecurityManager {
             )
             .keep_alive_while_idle(false);
 
+        if self.grpc_connect_timeout != Duration::ZERO {
+            endpoint = endpoint.connect_timeout(self.grpc_connect_timeout);
+        }
+
         if self.grpc_keepalive_time != Duration::ZERO {
             endpoint = endpoint
                 .http2_keep_alive_interval(self.grpc_keepalive_time)
@@ -201,6 +219,7 @@ mod tests {
             (Duration::from_secs(10), Duration::from_secs(3))
         );
         assert_eq!(mgr.grpc_window_sizes(), (1 << 27, 1 << 27));
+        assert_eq!(mgr.grpc_connect_timeout(), Duration::from_secs(5));
     }
 
     #[test]
@@ -239,5 +258,11 @@ mod tests {
     fn test_security_manager_with_grpc_window_sizes_overrides() {
         let mgr = SecurityManager::default().with_grpc_initial_window_sizes(1, 2);
         assert_eq!(mgr.grpc_window_sizes(), (1, 2));
+    }
+
+    #[test]
+    fn test_security_manager_with_grpc_connect_timeout_overrides() {
+        let mgr = SecurityManager::default().with_grpc_connect_timeout(Duration::from_secs(1));
+        assert_eq!(mgr.grpc_connect_timeout(), Duration::from_secs(1));
     }
 }

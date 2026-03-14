@@ -902,7 +902,8 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             .with_grpc_initial_window_sizes(
                 config.grpc_initial_window_size,
                 config.grpc_initial_conn_window_size,
-            ),
+            )
+            .with_grpc_connect_timeout(config.grpc_connect_timeout),
         );
 
         let pd = Arc::new(pd(security_mgr.clone()).await?);
@@ -1233,7 +1234,8 @@ pub mod test {
             .with_grpc_keepalive_time(Duration::from_secs(1))
             .with_grpc_keepalive_timeout(Duration::from_secs(2))
             .with_grpc_initial_window_size(123)
-            .with_grpc_initial_conn_window_size(456);
+            .with_grpc_initial_conn_window_size(456)
+            .with_grpc_connect_timeout(Duration::from_secs(7));
 
         let seen_configs = Arc::new(Mutex::new(Vec::new()));
         let seen_configs_pd = Arc::clone(&seen_configs);
@@ -1242,17 +1244,19 @@ pub mod test {
         PdRpcClient::new(
             config.clone(),
             |sm| {
-                seen_configs_kv
-                    .lock()
-                    .unwrap()
-                    .push((sm.grpc_keepalive_config(), sm.grpc_window_sizes()));
+                seen_configs_kv.lock().unwrap().push((
+                    sm.grpc_keepalive_config(),
+                    sm.grpc_window_sizes(),
+                    sm.grpc_connect_timeout(),
+                ));
                 MockKvConnect
             },
             |sm| {
-                seen_configs_pd
-                    .lock()
-                    .unwrap()
-                    .push((sm.grpc_keepalive_config(), sm.grpc_window_sizes()));
+                seen_configs_pd.lock().unwrap().push((
+                    sm.grpc_keepalive_config(),
+                    sm.grpc_window_sizes(),
+                    sm.grpc_connect_timeout(),
+                ));
                 futures::future::ok(RetryClient::new_with_cluster(
                     sm,
                     config.timeout,
@@ -1267,9 +1271,14 @@ pub mod test {
 
         let seen_configs = seen_configs.lock().unwrap();
         assert_eq!(seen_configs.len(), 2);
-        assert!(seen_configs.iter().copied().all(|(keepalive, windows)| {
-            keepalive == (Duration::from_secs(1), Duration::from_secs(2)) && windows == (123, 456)
-        }));
+        assert!(seen_configs
+            .iter()
+            .copied()
+            .all(|(keepalive, windows, connect_timeout)| {
+                keepalive == (Duration::from_secs(1), Duration::from_secs(2))
+                    && windows == (123, 456)
+                    && connect_timeout == Duration::from_secs(7)
+            }));
     }
 
     #[tokio::test]
