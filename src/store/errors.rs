@@ -50,6 +50,7 @@ has_region_error!(kvrpcpb::TxnHeartBeatResponse);
 has_region_error!(kvrpcpb::CheckTxnStatusResponse);
 has_region_error!(kvrpcpb::CheckSecondaryLocksResponse);
 has_region_error!(kvrpcpb::DeleteRangeResponse);
+has_region_error!(kvrpcpb::SplitRegionResponse);
 has_region_error!(kvrpcpb::GcResponse);
 has_region_error!(kvrpcpb::UnsafeDestroyRangeResponse);
 has_region_error!(kvrpcpb::RawGetResponse);
@@ -196,6 +197,12 @@ impl HasKeyErrors for kvrpcpb::CompactResponse {
 }
 
 impl HasKeyErrors for kvrpcpb::TiFlashSystemTableResponse {
+    fn key_errors(&mut self) -> Option<Vec<Error>> {
+        None
+    }
+}
+
+impl HasKeyErrors for kvrpcpb::SplitRegionResponse {
     fn key_errors(&mut self) -> Option<Vec<Error>> {
         None
     }

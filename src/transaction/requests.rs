@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::stream::{self};
 use futures::StreamExt;
+use futures::TryStreamExt;
 
 use super::transaction::TXN_COMMIT_BATCH_SIZE;
 use crate::collect_single;
@@ -1367,6 +1368,93 @@ impl Merge<kvrpcpb::DeleteRangeResponse> for Collect {
     }
 }
 
+const SPLIT_REGION_BATCH_LIMIT: usize = 2048;
+
+pub fn new_split_region_request(
+    split_keys: Vec<Vec<u8>>,
+    is_raw_kv: bool,
+) -> kvrpcpb::SplitRegionRequest {
+    let mut req = kvrpcpb::SplitRegionRequest::default();
+    req.split_keys = split_keys;
+    req.is_raw_kv = is_raw_kv;
+    req
+}
+
+impl KvRequest for kvrpcpb::SplitRegionRequest {
+    type Response = kvrpcpb::SplitRegionResponse;
+}
+
+impl Shardable for kvrpcpb::SplitRegionRequest {
+    type Shard = Vec<Vec<u8>>;
+
+    fn shards(
+        &self,
+        pd_client: &Arc<impl PdClient>,
+    ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+        let mut keys = self.split_keys.clone();
+        keys.sort();
+
+        region_stream_for_keys(keys.into_iter(), pd_client.clone())
+            .map_ok(|(keys, region): (Vec<Vec<u8>>, RegionWithLeader)| {
+                let region_start = region.region.start_key.clone();
+                let keys = keys
+                    .into_iter()
+                    .filter(|key| key.as_slice() != region_start.as_slice())
+                    .collect::<Vec<_>>();
+                (keys, region)
+            })
+            .try_filter_map(|(keys, region)| async move {
+                if keys.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some((keys, region)))
+                }
+            })
+            .map_ok(|(keys, region)| {
+                let batches = keys
+                    .chunks(SPLIT_REGION_BATCH_LIMIT)
+                    .map(|chunk| chunk.to_vec())
+                    .collect::<Vec<_>>();
+                stream::iter(
+                    batches
+                        .into_iter()
+                        .map(move |batch| Ok((batch, region.clone()))),
+                )
+            })
+            .try_flatten()
+            .boxed()
+    }
+
+    fn apply_shard(&mut self, shard: Self::Shard) {
+        self.split_keys = shard;
+    }
+
+    fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        self.set_leader(&store.region_with_leader)
+    }
+}
+
+impl HasLocks for kvrpcpb::SplitRegionResponse {}
+
+impl Merge<kvrpcpb::SplitRegionResponse> for Collect {
+    type Out = Vec<u64>;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::SplitRegionResponse>>) -> Result<Self::Out> {
+        let mut region_ids = Vec::new();
+        for resp in input {
+            let mut resp = resp?;
+            if resp.regions.is_empty() {
+                continue;
+            }
+
+            let mut regions = std::mem::take(&mut resp.regions);
+            regions.pop();
+            region_ids.extend(regions.into_iter().map(|region| region.id));
+        }
+        Ok(region_ids)
+    }
+}
+
 pub fn new_unsafe_destroy_range_request(
     start_key: Vec<u8>,
     end_key: Vec<u8>,
@@ -2411,5 +2499,89 @@ mod tests {
 
         let locks = crate::transaction::HasLocks::take_locks(&mut resp);
         assert_eq!(locks, vec![embedded]);
+    }
+
+    #[tokio::test]
+    async fn test_split_region_request_shards_by_region_filters_region_start_keys() {
+        let req = super::new_split_region_request(
+            vec![
+                vec![10],
+                vec![1],
+                vec![9],
+                Vec::new(),
+                vec![11],
+                vec![250, 250],
+                vec![250, 250, 1],
+            ],
+            false,
+        );
+
+        let pd_client = Arc::new(MockPdClient::default());
+        let shards = req
+            .shards(&pd_client)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(shards.len(), 3);
+
+        assert_eq!(shards[0].0, vec![vec![1], vec![9]]);
+        assert_eq!(shards[0].1.id(), 1);
+
+        assert_eq!(shards[1].0, vec![vec![11]]);
+        assert_eq!(shards[1].1.id(), 2);
+
+        assert_eq!(shards[2].0, vec![vec![250, 250, 1]]);
+        assert_eq!(shards[2].1.id(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_split_region_request_shards_batches_by_limit() {
+        let mut keys = (0..=(super::SPLIT_REGION_BATCH_LIMIT as u16))
+            .map(|i| vec![250, 250, (i >> 8) as u8, (i & 0xff) as u8])
+            .collect::<Vec<_>>();
+        keys.reverse();
+
+        let req = super::new_split_region_request(keys, false);
+        let pd_client = Arc::new(MockPdClient::default());
+        let shards = req
+            .shards(&pd_client)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(shards.len(), 2);
+        assert_eq!(shards[0].0.len(), super::SPLIT_REGION_BATCH_LIMIT);
+        assert_eq!(shards[1].0.len(), 1);
+
+        assert_eq!(shards[0].1.id(), 3);
+        assert_eq!(shards[1].1.id(), 3);
+
+        assert_eq!(shards[0].0[0], vec![250, 250, 0, 0]);
+    }
+
+    #[test]
+    fn test_merge_split_region_returns_all_but_last_region_id() {
+        let merged = crate::request::Collect
+            .merge(vec![Ok(kvrpcpb::SplitRegionResponse {
+                regions: vec![
+                    crate::proto::metapb::Region {
+                        id: 1,
+                        ..Default::default()
+                    },
+                    crate::proto::metapb::Region {
+                        id: 2,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            })])
+            .unwrap();
+
+        assert_eq!(merged, vec![1]);
     }
 }

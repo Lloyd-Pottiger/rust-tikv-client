@@ -214,6 +214,13 @@ pub fn new_flush_request(
     )
 }
 
+pub fn new_split_region_request(
+    split_keys: impl Iterator<Item = Key>,
+    is_raw_kv: bool,
+) -> kvrpcpb::SplitRegionRequest {
+    requests::new_split_region_request(split_keys.map(Into::into).collect(), is_raw_kv)
+}
+
 pub fn new_unsafe_destroy_range_request(range: BoundRange) -> kvrpcpb::UnsafeDestroyRangeRequest {
     let (start_key, end_key) = range.into_keys();
     requests::new_unsafe_destroy_range_request(start_key.into(), end_key.unwrap_or_default().into())
