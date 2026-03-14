@@ -89,6 +89,25 @@ pub trait PdClient: Send + Sync + 'static {
         Err(Error::Unimplemented)
     }
 
+    /// Retrieve the PD external timestamp.
+    ///
+    /// This maps to client-go `Oracle.GetExternalTimestamp`.
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn get_external_timestamp(self: Arc<Self>) -> Result<u64> {
+        Err(Error::Unimplemented)
+    }
+
+    /// Set the PD external timestamp.
+    ///
+    /// This maps to client-go `Oracle.SetExternalTimestamp`.
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
+        let _ = timestamp;
+        Err(Error::Unimplemented)
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
@@ -493,6 +512,14 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
         self.pd.clone().get_min_ts().await
+    }
+
+    async fn get_external_timestamp(self: Arc<Self>) -> Result<u64> {
+        self.pd.clone().get_external_timestamp().await
+    }
+
+    async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
+        self.pd.clone().set_external_timestamp(timestamp).await
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {

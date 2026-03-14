@@ -60,6 +60,15 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    async fn get_external_timestamp(self: Arc<Self>) -> Result<u64> {
+        Err(Error::Unimplemented)
+    }
+
+    async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
+        let _ = timestamp;
+        Err(Error::Unimplemented)
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
@@ -241,6 +250,20 @@ impl RetryClientTrait for RetryClient<Cluster> {
     async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
         retry_mut!(self, "get_min_ts", |cluster| async {
             cluster.get_min_ts(self.timeout).await
+        })
+    }
+
+    async fn get_external_timestamp(self: Arc<Self>) -> Result<u64> {
+        retry_mut!(self, "get_external_timestamp", |cluster| async {
+            cluster.get_external_timestamp(self.timeout).await
+        })
+    }
+
+    async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
+        retry_mut!(self, "set_external_timestamp", |cluster| async {
+            cluster
+                .set_external_timestamp(timestamp, self.timeout)
+                .await
         })
     }
 

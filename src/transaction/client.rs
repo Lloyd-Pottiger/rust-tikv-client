@@ -469,6 +469,20 @@ impl<PdC: PdClient> Client<PdC> {
         PdClient::get_min_ts(self.pd.clone()).await
     }
 
+    /// Retrieve the PD external timestamp.
+    ///
+    /// This maps to client-go `Oracle.GetExternalTimestamp`.
+    pub async fn external_timestamp(&self) -> Result<u64> {
+        PdClient::get_external_timestamp(self.pd.clone()).await
+    }
+
+    /// Set the PD external timestamp.
+    ///
+    /// This maps to client-go `Oracle.SetExternalTimestamp`.
+    pub async fn set_external_timestamp(&self, timestamp: u64) -> Result<()> {
+        PdClient::set_external_timestamp(self.pd.clone(), timestamp).await
+    }
+
     /// Generate a timestamp representing the time `prev_seconds` seconds ago.
     ///
     /// This is intended for staleness reads: when combined with
@@ -1827,6 +1841,26 @@ mod tests {
 
         assert_eq!(pd_client.get_min_ts_call_count(), 1);
         assert_eq!(pd_client.get_timestamp_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_external_timestamp_delegates_to_pd_client() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+        };
+
+        client.set_external_timestamp(42).await.unwrap();
+        let ts = client.external_timestamp().await.unwrap();
+        assert_eq!(ts, 42);
+
+        assert_eq!(pd_client.set_external_timestamp_call_count(), 1);
+        assert_eq!(pd_client.get_external_timestamp_call_count(), 1);
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
     }
 
     #[tokio::test]

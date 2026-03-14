@@ -111,6 +111,12 @@ pub struct MockPdClient {
     min_ts_version: Arc<AtomicU64>,
     #[new(value = "false")]
     use_min_ts: bool,
+    #[new(value = "Arc::new(AtomicU64::new(0))")]
+    external_timestamp: Arc<AtomicU64>,
+    #[new(value = "Arc::new(AtomicUsize::new(0))")]
+    get_external_timestamp_calls: Arc<AtomicUsize>,
+    #[new(value = "Arc::new(AtomicUsize::new(0))")]
+    set_external_timestamp_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -154,6 +160,14 @@ impl MockPdClient {
 
     pub fn get_min_ts_call_count(&self) -> usize {
         self.get_min_ts_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn get_external_timestamp_call_count(&self) -> usize {
+        self.get_external_timestamp_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn set_external_timestamp_call_count(&self) -> usize {
+        self.set_external_timestamp_calls.load(Ordering::SeqCst)
     }
 
     pub fn get_timestamp_dc_locations(&self) -> Vec<String> {
@@ -482,6 +496,19 @@ impl PdClient for MockPdClient {
         } else {
             Ok(Timestamp::default())
         }
+    }
+
+    async fn get_external_timestamp(self: Arc<Self>) -> Result<u64> {
+        self.get_external_timestamp_calls
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(self.external_timestamp.load(Ordering::SeqCst))
+    }
+
+    async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
+        self.set_external_timestamp_calls
+            .fetch_add(1, Ordering::SeqCst);
+        self.external_timestamp.store(timestamp, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {

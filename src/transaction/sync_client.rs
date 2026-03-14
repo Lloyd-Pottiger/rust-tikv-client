@@ -241,6 +241,22 @@ impl SyncTransactionClient {
         )
     }
 
+    /// Retrieve the PD external timestamp.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::external_timestamp`](crate::TransactionClient::external_timestamp).
+    pub fn external_timestamp(&self) -> Result<u64> {
+        safe_block_on(&self.runtime, self.client.external_timestamp())
+    }
+
+    /// Set the PD external timestamp.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::set_external_timestamp`](crate::TransactionClient::set_external_timestamp).
+    pub fn set_external_timestamp(&self, timestamp: u64) -> Result<()> {
+        safe_block_on(&self.runtime, self.client.set_external_timestamp(timestamp))
+    }
+
     /// Generate a timestamp representing the time `prev_seconds` seconds ago.
     ///
     /// This is a synchronous version of [`TransactionClient::stale_timestamp`](crate::TransactionClient::stale_timestamp).

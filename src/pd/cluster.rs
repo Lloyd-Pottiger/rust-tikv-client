@@ -103,6 +103,23 @@ impl Cluster {
             .ok_or_else(|| internal_err!("GetMinTsResponse missing timestamp"))
     }
 
+    pub async fn set_external_timestamp(
+        &mut self,
+        timestamp: u64,
+        timeout: Duration,
+    ) -> Result<()> {
+        let mut req = pd_request!(self.id, pdpb::SetExternalTimestampRequest);
+        req.timestamp = timestamp;
+        let _resp = req.send(&mut self.client, timeout).await?;
+        Ok(())
+    }
+
+    pub async fn get_external_timestamp(&mut self, timeout: Duration) -> Result<u64> {
+        let req = pd_request!(self.id, pdpb::GetExternalTimestampRequest);
+        let resp = req.send(&mut self.client, timeout).await?;
+        Ok(resp.timestamp)
+    }
+
     pub async fn update_safepoint(
         &mut self,
         safepoint: u64,
@@ -466,6 +483,26 @@ impl PdMessage for pdpb::GetMinTsRequest {
 }
 
 #[async_trait]
+impl PdMessage for pdpb::SetExternalTimestampRequest {
+    type Client = pdpb::pd_client::PdClient<Channel>;
+    type Response = pdpb::SetExternalTimestampResponse;
+
+    async fn rpc(req: Request<Self>, client: &mut Self::Client) -> GrpcResult<Self::Response> {
+        Ok(client.set_external_timestamp(req).await?.into_inner())
+    }
+}
+
+#[async_trait]
+impl PdMessage for pdpb::GetExternalTimestampRequest {
+    type Client = pdpb::pd_client::PdClient<Channel>;
+    type Response = pdpb::GetExternalTimestampResponse;
+
+    async fn rpc(req: Request<Self>, client: &mut Self::Client) -> GrpcResult<Self::Response> {
+        Ok(client.get_external_timestamp(req).await?.into_inner())
+    }
+}
+
+#[async_trait]
 impl PdMessage for pdpb::UpdateGcSafePointRequest {
     type Client = pdpb::pd_client::PdClient<Channel>;
     type Response = pdpb::UpdateGcSafePointResponse;
@@ -514,6 +551,18 @@ impl PdResponse for pdpb::UpdateGcSafePointResponse {
 }
 
 impl PdResponse for pdpb::GetMinTsResponse {
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+impl PdResponse for pdpb::SetExternalTimestampResponse {
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+impl PdResponse for pdpb::GetExternalTimestampResponse {
     fn header(&self) -> Option<&pdpb::ResponseHeader> {
         self.header.as_ref()
     }
