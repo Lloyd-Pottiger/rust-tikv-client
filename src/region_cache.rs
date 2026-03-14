@@ -3,8 +3,14 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
+use rand::Rng;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
 
@@ -23,11 +29,82 @@ use crate::Result;
 
 const MAX_RETRY_WAITING_CONCURRENT_REQUEST: usize = 4;
 
+fn duration_to_millis_saturating(duration: Duration) -> u64 {
+    let millis = duration.as_millis();
+    if millis > u128::from(u64::MAX) {
+        u64::MAX
+    } else {
+        millis as u64
+    }
+}
+
+fn now_epoch_millis() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    if millis > u128::from(u64::MAX) {
+        u64::MAX
+    } else {
+        millis as u64
+    }
+}
+
+fn next_ttl_deadline_millis(now_ms: u64, ttl_ms: u64, jitter_ms: u64) -> u64 {
+    if ttl_ms == 0 {
+        return u64::MAX;
+    }
+
+    let jitter = if jitter_ms == 0 {
+        0
+    } else {
+        rand::thread_rng().gen_range(0..jitter_ms)
+    };
+    now_ms.saturating_add(ttl_ms).saturating_add(jitter)
+}
+
+fn check_and_maybe_extend_ttl(
+    ttl_deadline_ms: &AtomicU64,
+    now_ms: u64,
+    ttl_ms: u64,
+    jitter_ms: u64,
+) -> bool {
+    if ttl_ms == 0 {
+        return true;
+    }
+
+    let mut new_deadline = None;
+    loop {
+        let deadline = ttl_deadline_ms.load(Ordering::Acquire);
+        if now_ms > deadline {
+            return false;
+        }
+        // Only extend the TTL when the deadline is close enough to "now". This matches the
+        // client-go behavior of skipping updates while within the jitter window.
+        if deadline > now_ms.saturating_add(ttl_ms) {
+            return true;
+        }
+        let candidate = *new_deadline
+            .get_or_insert_with(|| next_ttl_deadline_millis(now_ms, ttl_ms, jitter_ms));
+        if ttl_deadline_ms
+            .compare_exchange(deadline, candidate, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
 struct RegionCacheMap {
     /// RegionVerID -> Region. It stores the concrete region caches.
-    /// RegionVerID is the unique identifer of a region *across time*.
-    // TODO: does it need TTL?
+    /// RegionVerID is the unique identifier of a region *across time*.
     ver_id_to_region: HashMap<RegionVerId, RegionWithLeader>,
+    /// RegionVerId -> TTL deadline (epoch milliseconds).
+    ///
+    /// This mirrors client-go's region cache TTL behavior: entries are considered expired after
+    /// being idle for roughly `region_cache_ttl` (plus `region_cache_ttl_jitter`), and refreshed
+    /// from PD on next use.
+    ver_id_to_ttl_deadline_ms: HashMap<RegionVerId, AtomicU64>,
     /// Start_key -> RegionVerID
     ///
     /// Invariant: there are no intersecting regions in the map at any time.
@@ -44,6 +121,7 @@ impl RegionCacheMap {
     fn new() -> RegionCacheMap {
         RegionCacheMap {
             ver_id_to_region: HashMap::new(),
+            ver_id_to_ttl_deadline_ms: HashMap::new(),
             key_to_ver_id: BTreeMap::new(),
             id_to_ver_id: HashMap::new(),
             on_my_way_id: HashMap::new(),
@@ -55,14 +133,22 @@ pub struct RegionCache<Client = RetryClient<Cluster>> {
     region_cache: RwLock<RegionCacheMap>,
     store_cache: RwLock<HashMap<StoreId, Store>>,
     inner_client: Arc<Client>,
+    region_cache_ttl_ms: u64,
+    region_cache_ttl_jitter_ms: u64,
 }
 
 impl<Client> RegionCache<Client> {
-    pub fn new(inner_client: Arc<Client>) -> RegionCache<Client> {
+    pub fn new_with_ttl(
+        inner_client: Arc<Client>,
+        region_cache_ttl: Duration,
+        region_cache_ttl_jitter: Duration,
+    ) -> RegionCache<Client> {
         RegionCache {
             region_cache: RwLock::new(RegionCacheMap::new()),
             store_cache: RwLock::new(HashMap::new()),
             inner_client,
+            region_cache_ttl_ms: duration_to_millis_saturating(region_cache_ttl),
+            region_cache_ttl_jitter_ms: duration_to_millis_saturating(region_cache_ttl_jitter),
         }
     }
 }
@@ -71,6 +157,7 @@ impl<C: RetryClientTrait> RegionCache<C> {
     // Retrieve cache entry by key. If there's no entry, query PD and update cache.
     pub async fn get_region_by_key(&self, key: &Key) -> Result<RegionWithLeader> {
         let region_cache_guard = self.region_cache.read().await;
+        let mut expired_ver_id: Option<RegionVerId> = None;
         let res = {
             region_cache_guard
                 .key_to_ver_id
@@ -85,11 +172,33 @@ impl<C: RetryClientTrait> RegionCache<C> {
                 .get(&candidate_region_ver_id)
             {
                 if region.contains(key) {
-                    return Ok(region.clone());
+                    if self.region_cache_ttl_ms == 0 {
+                        return Ok(region.clone());
+                    }
+
+                    let now_ms = now_epoch_millis();
+                    if let Some(ttl) = region_cache_guard
+                        .ver_id_to_ttl_deadline_ms
+                        .get(&candidate_region_ver_id)
+                    {
+                        if check_and_maybe_extend_ttl(
+                            ttl,
+                            now_ms,
+                            self.region_cache_ttl_ms,
+                            self.region_cache_ttl_jitter_ms,
+                        ) {
+                            return Ok(region.clone());
+                        }
+                    }
+
+                    expired_ver_id = Some(candidate_region_ver_id);
                 }
             }
         }
         drop(region_cache_guard);
+        if let Some(ver_id) = expired_ver_id {
+            self.invalidate_region_cache(ver_id).await;
+        }
         self.read_through_region_by_key(key.clone()).await
     }
 
@@ -97,11 +206,28 @@ impl<C: RetryClientTrait> RegionCache<C> {
     pub async fn get_region_by_id(&self, id: RegionId) -> Result<RegionWithLeader> {
         for _ in 0..=MAX_RETRY_WAITING_CONCURRENT_REQUEST {
             let region_cache_guard = self.region_cache.read().await;
+            let mut expired_ver_id: Option<RegionVerId> = None;
 
             // check cache
             if let Some(ver_id) = region_cache_guard.id_to_ver_id.get(&id) {
                 if let Some(region) = region_cache_guard.ver_id_to_region.get(ver_id) {
-                    return Ok(region.clone());
+                    if self.region_cache_ttl_ms == 0 {
+                        return Ok(region.clone());
+                    }
+
+                    let now_ms = now_epoch_millis();
+                    if let Some(ttl) = region_cache_guard.ver_id_to_ttl_deadline_ms.get(ver_id) {
+                        if check_and_maybe_extend_ttl(
+                            ttl,
+                            now_ms,
+                            self.region_cache_ttl_ms,
+                            self.region_cache_ttl_jitter_ms,
+                        ) {
+                            return Ok(region.clone());
+                        }
+                    }
+
+                    expired_ver_id = Some(ver_id.clone());
                 }
             }
 
@@ -109,6 +235,10 @@ impl<C: RetryClientTrait> RegionCache<C> {
             let notify = region_cache_guard.on_my_way_id.get(&id).cloned();
             let notified = notify.as_ref().map(|notify| notify.notified());
             drop(region_cache_guard);
+
+            if let Some(ver_id) = expired_ver_id {
+                self.invalidate_region_cache(ver_id).await;
+            }
 
             if let Some(n) = notified {
                 n.await;
@@ -169,6 +299,12 @@ impl<C: RetryClientTrait> RegionCache<C> {
         // This takes a write lock because we update multiple indices consistently. This runs on
         // region-cache update paths (e.g. cache miss), not the hot-path request routing.
         let mut cache = self.region_cache.write().await;
+        let now_ms = now_epoch_millis();
+        let ttl_deadline_ms = next_ttl_deadline_millis(
+            now_ms,
+            self.region_cache_ttl_ms,
+            self.region_cache_ttl_jitter_ms,
+        );
 
         let end_key = region.end_key();
         let mut to_be_removed: HashSet<RegionVerId> = HashSet::new();
@@ -205,6 +341,7 @@ impl<C: RetryClientTrait> RegionCache<C> {
 
         let mut stale_ver_ids = HashSet::new();
         for ver_id in to_be_removed {
+            cache.ver_id_to_ttl_deadline_ms.remove(&ver_id);
             match cache.ver_id_to_region.remove(&ver_id) {
                 Some(region_to_remove) => {
                     cache.key_to_ver_id.remove(&region_to_remove.start_key());
@@ -223,11 +360,15 @@ impl<C: RetryClientTrait> RegionCache<C> {
                 .id_to_ver_id
                 .retain(|_, ver_id| !stale_ver_ids.contains(ver_id));
         }
+        let ver_id = region.ver_id();
         cache
             .key_to_ver_id
-            .insert(region.start_key(), region.ver_id());
-        cache.id_to_ver_id.insert(region.id(), region.ver_id());
-        cache.ver_id_to_region.insert(region.ver_id(), region);
+            .insert(region.start_key(), ver_id.clone());
+        cache.id_to_ver_id.insert(region.id(), ver_id.clone());
+        cache.ver_id_to_region.insert(ver_id.clone(), region);
+        cache
+            .ver_id_to_ttl_deadline_ms
+            .insert(ver_id, AtomicU64::new(ttl_deadline_ms));
     }
 
     pub async fn update_leader(
@@ -246,13 +387,17 @@ impl<C: RetryClientTrait> RegionCache<C> {
 
     pub async fn invalidate_region_cache(&self, ver_id: crate::region::RegionVerId) {
         let mut cache = self.region_cache.write().await;
-        let region_entry = cache.ver_id_to_region.get(&ver_id);
-        if let Some(region) = region_entry {
-            let id = region.id();
-            let start_key = region.start_key();
-            cache.ver_id_to_region.remove(&ver_id);
-            cache.id_to_ver_id.remove(&id);
-            cache.key_to_ver_id.remove(&start_key);
+        cache.ver_id_to_ttl_deadline_ms.remove(&ver_id);
+        if let Some(region) = cache.ver_id_to_region.remove(&ver_id) {
+            cache.id_to_ver_id.remove(&region.id());
+            cache.key_to_ver_id.remove(&region.start_key());
+        } else {
+            cache
+                .key_to_ver_id
+                .retain(|_, cached_ver_id| cached_ver_id != &ver_id);
+            cache
+                .id_to_ver_id
+                .retain(|_, cached_ver_id| cached_ver_id != &ver_id);
         }
     }
 
@@ -336,6 +481,7 @@ mod test {
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use tokio::sync::Mutex;
@@ -429,7 +575,7 @@ mod test {
     #[tokio::test]
     async fn cache_is_used() -> Result<()> {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
         retry_client.regions.lock().await.insert(
             1,
             RegionWithLeader {
@@ -505,9 +651,41 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_region_cache_ttl_expires_and_refreshes() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(
+            retry_client.clone(),
+            Duration::from_millis(20),
+            Duration::ZERO,
+        );
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(1, region(1, vec![], vec![]));
+
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+
+        // First query reads through and initializes the cache.
+        cache.get_region_by_id(1).await?;
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 1);
+
+        // Should read from cache, without contacting PD again.
+        cache.get_region_by_id(1).await?;
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 1);
+
+        // Wait for the cache entry to expire, then ensure it is refreshed.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        cache.get_region_by_id(1).await?;
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_tolerate_inconsistent_cache_maps() -> Result<()> {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
 
         let region1 = region(1, vec![], vec![10]);
         retry_client.regions.lock().await.insert(1, region1.clone());
@@ -542,7 +720,7 @@ mod test {
     #[tokio::test]
     async fn test_add_disjoint_regions() {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
         let region1 = region(1, vec![], vec![10]);
         let region2 = region(2, vec![10], vec![20]);
         let region3 = region(3, vec![30], vec![]);
@@ -561,7 +739,7 @@ mod test {
     #[tokio::test]
     async fn test_add_intersecting_regions() {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
 
         cache.add_region(region(1, vec![], vec![10])).await;
         cache.add_region(region(2, vec![10], vec![20])).await;
@@ -599,7 +777,7 @@ mod test {
     #[tokio::test]
     async fn test_get_region_by_key() -> Result<()> {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
 
         let region1 = region(1, vec![], vec![10]);
         let region2 = region(2, vec![10], vec![20]);
@@ -663,7 +841,7 @@ mod test {
     #[tokio::test]
     async fn test_read_through_all_stores_for_safe_ts_includes_tiflash() -> Result<()> {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
 
         let tikv_store = metapb::Store {
             id: 1,
@@ -736,7 +914,7 @@ mod test {
     #[tokio::test]
     async fn test_invalidate_store_cache_forces_store_meta_refresh() -> Result<()> {
         let retry_client = Arc::new(MockRetryClient::default());
-        let cache = RegionCache::new(retry_client.clone());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
 
         let store_id = 1;
         let mut store = metapb::Store {

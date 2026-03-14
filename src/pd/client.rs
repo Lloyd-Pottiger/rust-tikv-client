@@ -916,7 +916,11 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             slow_store_until: Mutex::new(HashMap::new()),
             store_estimated_wait_until: Mutex::new(HashMap::new()),
             enable_codec,
-            region_cache: RegionCache::new(pd),
+            region_cache: RegionCache::new_with_ttl(
+                pd,
+                config.region_cache_ttl,
+                config.region_cache_ttl_jitter,
+            ),
             resolve_lock_lite_threshold,
             pd_http_client,
             pd_http_endpoints: Vec::new(),

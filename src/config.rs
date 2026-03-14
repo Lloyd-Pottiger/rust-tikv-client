@@ -69,6 +69,20 @@ pub struct Config {
     pub grpc_initial_conn_window_size: u32,
     pub keyspace: Option<String>,
     pub resolve_lock_lite_threshold: u64,
+    /// Time-to-live for cached region metadata (client-go `RegionCacheTTL`).
+    ///
+    /// When non-zero, cached region entries expire after roughly this duration of inactivity
+    /// (plus jitter) and will be refreshed from PD on next use.
+    ///
+    /// Set to `Duration::ZERO` to disable region cache TTL expiry.
+    pub region_cache_ttl: Duration,
+    /// Jitter added to region cache TTL expiry to avoid stampedes.
+    ///
+    /// When non-zero, the effective TTL is in
+    /// `[region_cache_ttl, region_cache_ttl + region_cache_ttl_jitter)`.
+    ///
+    /// Set to `Duration::ZERO` to disable jitter.
+    pub region_cache_ttl_jitter: Duration,
     /// How often to refresh TiKV store health feedback (slow score).
     ///
     /// When non-zero, the client periodically issues `GetHealthFeedback` to all stores and uses
@@ -96,6 +110,8 @@ const DEFAULT_GRPC_INITIAL_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
 const DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
 const MIN_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) const DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
+const DEFAULT_REGION_CACHE_TTL: Duration = Duration::from_secs(600);
+const DEFAULT_REGION_CACHE_TTL_JITTER: Duration = Duration::from_secs(60);
 
 impl Default for Config {
     fn default() -> Self {
@@ -115,6 +131,8 @@ impl Default for Config {
             grpc_initial_conn_window_size: DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE,
             keyspace: None,
             resolve_lock_lite_threshold: DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD,
+            region_cache_ttl: DEFAULT_REGION_CACHE_TTL,
+            region_cache_ttl_jitter: DEFAULT_REGION_CACHE_TTL_JITTER,
             health_feedback_update_interval: Duration::ZERO,
             txn_local_latches_capacity: 0,
         }
@@ -298,6 +316,24 @@ impl Config {
         self
     }
 
+    /// Set the region cache TTL for cached region metadata (client-go `RegionCacheTTL`).
+    ///
+    /// Set to `Duration::ZERO` to disable region cache TTL expiry.
+    #[must_use]
+    pub fn with_region_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.region_cache_ttl = ttl;
+        self
+    }
+
+    /// Set the jitter added to region cache TTL expiry.
+    ///
+    /// Set to `Duration::ZERO` to disable jitter.
+    #[must_use]
+    pub fn with_region_cache_ttl_jitter(mut self, jitter: Duration) -> Self {
+        self.region_cache_ttl_jitter = jitter;
+        self
+    }
+
     /// Set how often to refresh TiKV store health feedback (slow score).
     ///
     /// Set to `Duration::ZERO` to disable the background refresher (default).
@@ -331,6 +367,8 @@ mod tests {
         assert_eq!(config.grpc_connection_count, 4);
         assert_eq!(config.grpc_compression_type, GrpcCompressionType::None);
         assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.region_cache_ttl, Duration::from_secs(600));
+        assert_eq!(config.region_cache_ttl_jitter, Duration::from_secs(60));
         config.validate().unwrap();
     }
 
