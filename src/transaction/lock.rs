@@ -11,7 +11,7 @@ use fail::fail_point;
 use log::debug;
 use log::error;
 use log::warn;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 
 use crate::backoff::Backoff;
@@ -469,7 +469,7 @@ pub(crate) async fn resolve_locks_with_options(
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
 
     debug!("resolving locks");
-    let ts = pd_client.clone().get_timestamp().await?;
+    let ts = ctx.low_resolution_timestamp(pd_client.clone()).await?;
     let caller_start_ts = timestamp.version();
     let current_ts = ts.version();
 
@@ -710,7 +710,7 @@ pub(crate) async fn resolve_locks_for_read(
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
 
     debug!("resolving locks for read");
-    let ts = pd_client.clone().get_timestamp().await?;
+    let ts = ctx.low_resolution_timestamp(pd_client.clone()).await?;
     let caller_start_ts = timestamp.version();
     let current_ts = ts.version();
 
@@ -1187,6 +1187,39 @@ async fn rollback_pessimistic_lock_with_retry(
 }
 
 const RESOLVED_CACHE_SIZE: usize = 2048;
+const LOW_RESOLUTION_TS_CACHE_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+struct CachedLowResolutionTimestamp {
+    timestamp: Timestamp,
+    updated_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct LowResolutionTimestampCache {
+    inner: Mutex<Option<CachedLowResolutionTimestamp>>,
+}
+
+impl LowResolutionTimestampCache {
+    async fn get(&self, pd_client: Arc<impl PdClient>) -> Result<Timestamp> {
+        {
+            let guard = self.inner.lock().await;
+            if let Some(cached) = guard.as_ref() {
+                if cached.updated_at.elapsed() < LOW_RESOLUTION_TS_CACHE_INTERVAL {
+                    return Ok(cached.timestamp.clone());
+                }
+            }
+        }
+
+        let timestamp = pd_client.get_timestamp().await?;
+        let mut guard = self.inner.lock().await;
+        *guard = Some(CachedLowResolutionTimestamp {
+            timestamp: timestamp.clone(),
+            updated_at: Instant::now(),
+        });
+        Ok(timestamp)
+    }
+}
 
 #[derive(Default)]
 struct ResolvedTxnStatusCache {
@@ -1252,6 +1285,7 @@ pub struct ResolveLocksContext {
     resolved: Arc<RwLock<ResolvedTxnStatusCache>>,
     clean_regions: Arc<RwLock<HashMap<u64, HashSet<RegionVerId>>>>,
     resolving: Arc<RwLock<ResolvingLocksState>>,
+    low_resolution_ts: Arc<LowResolutionTimestampCache>,
 }
 
 #[derive(Default)]
@@ -1376,6 +1410,10 @@ impl ResolveLocksContext {
             .entry(txn_id)
             .or_insert_with(HashSet::new)
             .insert(region);
+    }
+
+    async fn low_resolution_timestamp(&self, pd_client: Arc<impl PdClient>) -> Result<Timestamp> {
+        self.low_resolution_ts.get(pd_client).await
     }
 }
 
@@ -1891,7 +1929,11 @@ impl LockResolver {
         primary: Vec<u8>,
         caller_start_ts: u64,
     ) -> Result<Arc<TransactionStatus>> {
-        let current_ts = pd_client.clone().get_timestamp().await?.version();
+        let current_ts = self
+            .ctx
+            .low_resolution_timestamp(pd_client.clone())
+            .await?
+            .version();
         self.check_txn_status(
             pd_client,
             keyspace,
@@ -2171,7 +2213,7 @@ impl LockResolver {
             Err(err) => return Err(err),
         };
 
-        let current = pd_client.clone().get_timestamp().await?;
+        let current = self.ctx.low_resolution_timestamp(pd_client.clone()).await?;
         status.check_ttl(current);
         let res = Arc::new(status);
         if res.is_cacheable() {
@@ -2392,7 +2434,7 @@ impl LockResolver {
                     return Ok(TxnStatusFromLock::Status(status));
                 }
                 Err(Error::TxnNotFound(txn_not_found)) => {
-                    let current = pd_client.clone().get_timestamp().await?;
+                    let current = self.ctx.low_resolution_timestamp(pd_client.clone()).await?;
                     if lock_until_expired_ms(lock.lock_version, lock.lock_ttl, current) <= 0 {
                         warn!(
                             "lock txn not found, lock has expired, lock {:?}, caller_start_ts {}, current_ts {}",
