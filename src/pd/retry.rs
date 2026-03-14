@@ -83,6 +83,16 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    async fn update_service_gc_safe_point(
+        self: Arc<Self>,
+        service_id: String,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        let _ = (service_id, ttl, safe_point);
+        Err(Error::Unimplemented)
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
@@ -300,6 +310,23 @@ impl RetryClientTrait for RetryClient<Cluster> {
     async fn get_operator(self: Arc<Self>, region_id: u64) -> Result<pdpb::GetOperatorResponse> {
         retry_mut!(self, "get_operator", |cluster| async {
             cluster.get_operator(region_id, self.timeout).await
+        })
+    }
+
+    async fn update_service_gc_safe_point(
+        self: Arc<Self>,
+        service_id: String,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        retry_mut!(self, "update_service_gc_safe_point", |cluster| {
+            let service_id = service_id.clone();
+            async {
+                cluster
+                    .update_service_gc_safe_point(service_id, ttl, safe_point, self.timeout)
+                    .await
+                    .map(|resp| resp.min_safe_point)
+            }
         })
     }
 

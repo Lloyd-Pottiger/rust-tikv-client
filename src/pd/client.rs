@@ -143,6 +143,23 @@ pub trait PdClient: Send + Sync + 'static {
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
+    /// Update the PD "service GC safe point" for a given service.
+    ///
+    /// This maps to client-go `pd.Client.UpdateServiceGCSafePoint`.
+    ///
+    /// On success, returns the PD-reported `min_safe_point` (the effective service GC safe point).
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn update_service_gc_safe_point(
+        self: Arc<Self>,
+        service_id: String,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        let _ = (service_id, ttl, safe_point);
+        Err(Error::Unimplemented)
+    }
+
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
 
     /// In transactional API, `key` is in raw format
@@ -662,6 +679,18 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {
         self.pd.clone().update_safepoint(safepoint).await
+    }
+
+    async fn update_service_gc_safe_point(
+        self: Arc<Self>,
+        service_id: String,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        self.pd
+            .clone()
+            .update_service_gc_safe_point(service_id, ttl, safe_point)
+            .await
     }
 
     async fn update_leader(&self, ver_id: RegionVerId, leader: metapb::Peer) -> Result<()> {

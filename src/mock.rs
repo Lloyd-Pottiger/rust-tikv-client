@@ -128,6 +128,10 @@ pub struct MockPdClient {
     get_operator_calls: Mutex<Vec<RegionId>>,
     #[new(value = "Mutex::new(VecDeque::new())")]
     get_operator_responses: Mutex<VecDeque<pdpb::GetOperatorResponse>>,
+    #[new(value = "Mutex::new(Vec::new())")]
+    update_service_gc_safe_point_calls: Mutex<Vec<(String, i64, u64)>>,
+    #[new(value = "Mutex::new(VecDeque::new())")]
+    update_service_gc_safe_point_responses: Mutex<VecDeque<u64>>,
 }
 
 #[async_trait]
@@ -203,6 +207,22 @@ impl MockPdClient {
             Err(poisoned) => poisoned.into_inner(),
         };
         responses.push_back(resp);
+    }
+
+    pub fn update_service_gc_safe_point_calls(&self) -> Vec<(String, i64, u64)> {
+        let calls = match self.update_service_gc_safe_point_calls.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        calls.clone()
+    }
+
+    pub fn push_update_service_gc_safe_point_response(&self, min_safe_point: u64) {
+        let mut responses = match self.update_service_gc_safe_point_responses.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        responses.push_back(min_safe_point);
     }
 
     pub fn get_timestamp_dc_locations(&self) -> Vec<String> {
@@ -616,6 +636,25 @@ impl PdClient for MockPdClient {
         Ok(resp)
     }
 
+    async fn update_service_gc_safe_point(
+        self: Arc<Self>,
+        service_id: String,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        let mut calls = match self.update_service_gc_safe_point_calls.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        calls.push((service_id, ttl, safe_point));
+
+        let mut responses = match self.update_service_gc_safe_point_responses.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Ok(responses.pop_front().unwrap_or(safe_point))
+    }
+
     async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
         Err(Error::Unimplemented)
     }
@@ -694,5 +733,30 @@ mod tests {
         assert_eq!(resp.status, pdpb::OperatorStatus::Success as i32);
 
         assert_eq!(client.get_operator_calls(), vec![42, 43]);
+    }
+
+    #[tokio::test]
+    async fn test_mock_pd_client_update_service_gc_safe_point_records_calls_and_uses_queue() {
+        let client = Arc::new(MockPdClient::default());
+
+        client.push_update_service_gc_safe_point_response(100);
+        let min_safe_point = client
+            .clone()
+            .update_service_gc_safe_point("service".to_owned(), 42, 7)
+            .await
+            .unwrap();
+
+        assert_eq!(min_safe_point, 100);
+        assert_eq!(
+            client.update_service_gc_safe_point_calls(),
+            vec![("service".to_owned(), 42, 7)]
+        );
+
+        let min_safe_point = client
+            .clone()
+            .update_service_gc_safe_point("service".to_owned(), 1, 5)
+            .await
+            .unwrap();
+        assert_eq!(min_safe_point, 5);
     }
 }

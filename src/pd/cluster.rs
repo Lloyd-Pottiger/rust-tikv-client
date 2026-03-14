@@ -130,6 +130,20 @@ impl Cluster {
         req.send(&mut self.client, timeout).await
     }
 
+    pub async fn update_service_gc_safe_point(
+        &mut self,
+        service_id: String,
+        ttl: i64,
+        safe_point: u64,
+        timeout: Duration,
+    ) -> Result<pdpb::UpdateServiceGcSafePointResponse> {
+        let mut req = pd_request!(self.id, pdpb::UpdateServiceGcSafePointRequest);
+        req.service_id = service_id.into_bytes();
+        req.ttl = ttl;
+        req.safe_point = safe_point;
+        req.send(&mut self.client, timeout).await
+    }
+
     pub async fn scatter_regions(
         &mut self,
         region_ids: Vec<u64>,
@@ -537,6 +551,16 @@ impl PdMessage for pdpb::UpdateGcSafePointRequest {
 }
 
 #[async_trait]
+impl PdMessage for pdpb::UpdateServiceGcSafePointRequest {
+    type Client = pdpb::pd_client::PdClient<Channel>;
+    type Response = pdpb::UpdateServiceGcSafePointResponse;
+
+    async fn rpc(req: Request<Self>, client: &mut Self::Client) -> GrpcResult<Self::Response> {
+        Ok(client.update_service_gc_safe_point(req).await?.into_inner())
+    }
+}
+
+#[async_trait]
 impl PdMessage for pdpb::ScatterRegionRequest {
     type Client = pdpb::pd_client::PdClient<Channel>;
     type Response = pdpb::ScatterRegionResponse;
@@ -589,6 +613,12 @@ impl PdResponse for pdpb::GetAllStoresResponse {
 }
 
 impl PdResponse for pdpb::UpdateGcSafePointResponse {
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+impl PdResponse for pdpb::UpdateServiceGcSafePointResponse {
     fn header(&self) -> Option<&pdpb::ResponseHeader> {
         self.header.as_ref()
     }
