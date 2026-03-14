@@ -128,6 +128,19 @@ pub trait PdClient: Send + Sync + 'static {
         Err(Error::Unimplemented)
     }
 
+    /// Get the current PD operator for a region.
+    ///
+    /// This maps to client-go `pd.Client.GetOperator` (used by `KVStore.WaitScatterRegionFinish`).
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn get_operator(
+        self: Arc<Self>,
+        region_id: RegionId,
+    ) -> Result<pdpb::GetOperatorResponse> {
+        let _ = region_id;
+        Err(Error::Unimplemented)
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
@@ -638,6 +651,13 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
             return Ok(pdpb::ScatterRegionResponse::default());
         }
         self.pd.clone().scatter_regions(region_ids, group).await
+    }
+
+    async fn get_operator(
+        self: Arc<Self>,
+        region_id: RegionId,
+    ) -> Result<pdpb::GetOperatorResponse> {
+        self.pd.clone().get_operator(region_id).await
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {

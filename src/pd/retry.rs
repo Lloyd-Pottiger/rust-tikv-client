@@ -78,6 +78,11 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    async fn get_operator(self: Arc<Self>, region_id: u64) -> Result<pdpb::GetOperatorResponse> {
+        let _ = region_id;
+        Err(Error::Unimplemented)
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
@@ -289,6 +294,12 @@ impl RetryClientTrait for RetryClient<Cluster> {
                     .scatter_regions(region_ids, group, self.timeout)
                     .await
             }
+        })
+    }
+
+    async fn get_operator(self: Arc<Self>, region_id: u64) -> Result<pdpb::GetOperatorResponse> {
+        retry_mut!(self, "get_operator", |cluster| async {
+            cluster.get_operator(region_id, self.timeout).await
         })
     }
 

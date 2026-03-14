@@ -6,7 +6,7 @@
 //! the system, in particular without requiring a TiKV or PD server, or RPC layer.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -124,6 +124,10 @@ pub struct MockPdClient {
     get_timestamp_delay: Duration,
     #[new(value = "Mutex::new(Vec::new())")]
     scatter_regions_calls: Mutex<Vec<(Vec<RegionId>, Option<String>)>>,
+    #[new(value = "Mutex::new(Vec::new())")]
+    get_operator_calls: Mutex<Vec<RegionId>>,
+    #[new(value = "Mutex::new(VecDeque::new())")]
+    get_operator_responses: Mutex<VecDeque<pdpb::GetOperatorResponse>>,
 }
 
 #[async_trait]
@@ -183,6 +187,22 @@ impl MockPdClient {
             Err(poisoned) => poisoned.into_inner(),
         };
         calls.clone()
+    }
+
+    pub fn get_operator_calls(&self) -> Vec<RegionId> {
+        let calls = match self.get_operator_calls.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        calls.clone()
+    }
+
+    pub fn push_get_operator_response(&self, resp: pdpb::GetOperatorResponse) {
+        let mut responses = match self.get_operator_responses.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        responses.push_back(resp);
     }
 
     pub fn get_timestamp_dc_locations(&self) -> Vec<String> {
@@ -575,6 +595,27 @@ impl PdClient for MockPdClient {
         Ok(pdpb::ScatterRegionResponse::default())
     }
 
+    async fn get_operator(
+        self: Arc<Self>,
+        region_id: RegionId,
+    ) -> Result<pdpb::GetOperatorResponse> {
+        let mut calls = match self.get_operator_calls.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        calls.push(region_id);
+
+        let mut responses = match self.get_operator_responses.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut resp = responses.pop_front().unwrap_or_default();
+        if resp.region_id == 0 {
+            resp.region_id = region_id;
+        }
+        Ok(resp)
+    }
+
     async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
         Err(Error::Unimplemented)
     }
@@ -613,6 +654,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::pd::PdClient;
+    use crate::proto::pdpb;
 
     use super::MockPdClient;
 
@@ -630,5 +672,27 @@ mod tests {
             client.scatter_regions_calls(),
             vec![(vec![1, 2], Some("group".to_owned()))]
         );
+    }
+
+    #[tokio::test]
+    async fn test_mock_pd_client_get_operator_records_calls_and_uses_queue() {
+        let client = Arc::new(MockPdClient::default());
+
+        client.push_get_operator_response(pdpb::GetOperatorResponse {
+            desc: b"scatter-region".to_vec(),
+            status: pdpb::OperatorStatus::Running as i32,
+            ..Default::default()
+        });
+
+        let resp = client.clone().get_operator(42).await.unwrap();
+        assert_eq!(resp.region_id, 42);
+        assert_eq!(resp.desc, b"scatter-region".to_vec());
+        assert_eq!(resp.status, pdpb::OperatorStatus::Running as i32);
+
+        let resp = client.clone().get_operator(43).await.unwrap();
+        assert_eq!(resp.region_id, 43);
+        assert_eq!(resp.status, pdpb::OperatorStatus::Success as i32);
+
+        assert_eq!(client.get_operator_calls(), vec![42, 43]);
     }
 }

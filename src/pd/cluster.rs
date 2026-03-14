@@ -144,6 +144,16 @@ impl Cluster {
         req.send(&mut self.client, timeout).await
     }
 
+    pub async fn get_operator(
+        &mut self,
+        region_id: u64,
+        timeout: Duration,
+    ) -> Result<pdpb::GetOperatorResponse> {
+        let mut req = pd_request!(self.id, pdpb::GetOperatorRequest);
+        req.region_id = region_id;
+        req.send(&mut self.client, timeout).await
+    }
+
     pub async fn load_keyspace(
         &mut self,
         keyspace: &str,
@@ -537,6 +547,16 @@ impl PdMessage for pdpb::ScatterRegionRequest {
 }
 
 #[async_trait]
+impl PdMessage for pdpb::GetOperatorRequest {
+    type Client = pdpb::pd_client::PdClient<Channel>;
+    type Response = pdpb::GetOperatorResponse;
+
+    async fn rpc(req: Request<Self>, client: &mut Self::Client) -> GrpcResult<Self::Response> {
+        Ok(client.get_operator(req).await?.into_inner())
+    }
+}
+
+#[async_trait]
 impl PdMessage for keyspacepb::LoadKeyspaceRequest {
     type Client = keyspacepb::keyspace_client::KeyspaceClient<Channel>;
     type Response = keyspacepb::LoadKeyspaceResponse;
@@ -575,6 +595,12 @@ impl PdResponse for pdpb::UpdateGcSafePointResponse {
 }
 
 impl PdResponse for pdpb::ScatterRegionResponse {
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+impl PdResponse for pdpb::GetOperatorResponse {
     fn header(&self) -> Option<&pdpb::ResponseHeader> {
         self.header.as_ref()
     }
