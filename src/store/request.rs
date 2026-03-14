@@ -4,6 +4,7 @@ use std::any::Any;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use fail::fail_point;
 use tonic::transport::Channel;
 use tonic::IntoRequest;
 
@@ -112,7 +113,64 @@ impl_request!(
     kv_pessimistic_rollback,
     "kv_pessimistic_rollback"
 );
-impl_request!(ResolveLockRequest, kv_resolve_lock, "kv_resolve_lock");
+#[async_trait]
+impl Request for kvrpcpb::ResolveLockRequest {
+    async fn dispatch(
+        &self,
+        client: &TikvClient<Channel>,
+        timeout: Duration,
+    ) -> Result<Box<dyn Any>> {
+        fail_point!("kv_resolve_lock_region_error", |_| {
+            let resp = kvrpcpb::ResolveLockResponse {
+                region_error: Some(crate::proto::errorpb::Error::default()),
+                ..Default::default()
+            };
+            Ok(Box::new(resp) as Box<dyn Any>)
+        });
+
+        let mut req = self.clone().into_request();
+        req.set_timeout(timeout);
+        client
+            .clone()
+            .kv_resolve_lock(req)
+            .await
+            .map(|r| Box::new(r.into_inner()) as Box<dyn Any>)
+            .map_err(Error::GrpcAPI)
+    }
+
+    fn label(&self) -> &'static str {
+        "kv_resolve_lock"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()> {
+        let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+        let leader_peer = leader.leader.as_ref().ok_or(Error::LeaderNotFound {
+            region: leader.ver_id(),
+        })?;
+        ctx.region_id = leader.region.id;
+        ctx.region_epoch = leader.region.region_epoch.clone();
+        ctx.peer = Some(leader_peer.clone());
+        Ok(())
+    }
+
+    fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion) {
+        let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+        ctx.api_version = api_version.into();
+    }
+
+    fn set_is_retry_request(&mut self, is_retry_request: bool) {
+        let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
+        ctx.is_retry_request = is_retry_request;
+    }
+
+    fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        Some(self.context.get_or_insert(kvrpcpb::Context::default()))
+    }
+}
 impl_request!(ScanLockRequest, kv_scan_lock, "kv_scan_lock");
 impl_request!(
     PessimisticLockRequest,

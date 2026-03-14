@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use derive_new::new;
-use fail::fail_point;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
@@ -62,15 +61,6 @@ pub struct KvRpcClient {
 #[async_trait]
 impl KvClient for KvRpcClient {
     async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any>> {
-        if request.label() == "kv_resolve_lock" {
-            fail_point!("kv_resolve_lock_region_error", |_| {
-                let resp = crate::proto::kvrpcpb::ResolveLockResponse {
-                    region_error: Some(crate::proto::errorpb::Error::default()),
-                    ..Default::default()
-                };
-                Ok(Box::new(resp) as Box<dyn Any>)
-            });
-        }
         request.dispatch(&self.rpc_client, self.timeout).await
     }
 }
