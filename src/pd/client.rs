@@ -23,6 +23,7 @@ use crate::pd::RetryClient;
 use crate::proto::keyspacepb;
 use crate::proto::kvrpcpb;
 use crate::proto::metapb;
+use crate::proto::pdpb;
 use crate::region::RegionId;
 use crate::region::RegionVerId;
 use crate::region::RegionWithLeader;
@@ -110,6 +111,20 @@ pub trait PdClient: Send + Sync + 'static {
     /// The default implementation returns [`Error::Unimplemented`].
     async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
         let _ = timestamp;
+        Err(Error::Unimplemented)
+    }
+
+    /// Scatter regions in PD.
+    ///
+    /// This maps to client-go `pd.Client.ScatterRegions` (used by `KVStore.SplitRegions`).
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn scatter_regions(
+        self: Arc<Self>,
+        region_ids: Vec<RegionId>,
+        group: Option<String>,
+    ) -> Result<pdpb::ScatterRegionResponse> {
+        let _ = (region_ids, group);
         Err(Error::Unimplemented)
     }
 
@@ -612,6 +627,17 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
         self.pd.clone().set_external_timestamp(timestamp).await
+    }
+
+    async fn scatter_regions(
+        self: Arc<Self>,
+        region_ids: Vec<RegionId>,
+        group: Option<String>,
+    ) -> Result<pdpb::ScatterRegionResponse> {
+        if region_ids.is_empty() {
+            return Ok(pdpb::ScatterRegionResponse::default());
+        }
+        self.pd.clone().scatter_regions(region_ids, group).await
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {

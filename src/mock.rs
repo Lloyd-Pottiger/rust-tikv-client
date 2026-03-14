@@ -25,6 +25,7 @@ use crate::proto::keyspacepb;
 use crate::proto::kvrpcpb;
 use crate::proto::metapb::RegionEpoch;
 use crate::proto::metapb::{self};
+use crate::proto::pdpb;
 use crate::region::RegionId;
 use crate::region::RegionVerId;
 use crate::region::RegionWithLeader;
@@ -121,6 +122,8 @@ pub struct MockPdClient {
     set_external_timestamp_calls: Arc<AtomicUsize>,
     #[new(default)]
     get_timestamp_delay: Duration,
+    #[new(value = "Mutex::new(Vec::new())")]
+    scatter_regions_calls: Mutex<Vec<(Vec<RegionId>, Option<String>)>>,
 }
 
 #[async_trait]
@@ -172,6 +175,14 @@ impl MockPdClient {
 
     pub fn set_external_timestamp_call_count(&self) -> usize {
         self.set_external_timestamp_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn scatter_regions_calls(&self) -> Vec<(Vec<RegionId>, Option<String>)> {
+        let calls = match self.scatter_regions_calls.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        calls.clone()
     }
 
     pub fn get_timestamp_dc_locations(&self) -> Vec<String> {
@@ -551,6 +562,19 @@ impl PdClient for MockPdClient {
         Ok(())
     }
 
+    async fn scatter_regions(
+        self: Arc<Self>,
+        region_ids: Vec<RegionId>,
+        group: Option<String>,
+    ) -> Result<pdpb::ScatterRegionResponse> {
+        let mut calls = match self.scatter_regions_calls.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        calls.push((region_ids, group));
+        Ok(pdpb::ScatterRegionResponse::default())
+    }
+
     async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
         Err(Error::Unimplemented)
     }
@@ -581,5 +605,30 @@ impl PdClient for MockPdClient {
 
     async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
         Err(Error::Unimplemented)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::pd::PdClient;
+
+    use super::MockPdClient;
+
+    #[tokio::test]
+    async fn test_mock_pd_client_scatter_regions_records_calls() {
+        let client = Arc::new(MockPdClient::default());
+
+        client
+            .clone()
+            .scatter_regions(vec![1, 2], Some("group".to_owned()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.scatter_regions_calls(),
+            vec![(vec![1, 2], Some("group".to_owned()))]
+        );
     }
 }

@@ -69,6 +69,15 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    async fn scatter_regions(
+        self: Arc<Self>,
+        region_ids: Vec<u64>,
+        group: Option<String>,
+    ) -> Result<pdpb::ScatterRegionResponse> {
+        let _ = (region_ids, group);
+        Err(Error::Unimplemented)
+    }
+
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
@@ -264,6 +273,22 @@ impl RetryClientTrait for RetryClient<Cluster> {
             cluster
                 .set_external_timestamp(timestamp, self.timeout)
                 .await
+        })
+    }
+
+    async fn scatter_regions(
+        self: Arc<Self>,
+        region_ids: Vec<u64>,
+        group: Option<String>,
+    ) -> Result<pdpb::ScatterRegionResponse> {
+        retry_mut!(self, "scatter_regions", |cluster| {
+            let region_ids = region_ids.clone();
+            let group = group.clone();
+            async {
+                cluster
+                    .scatter_regions(region_ids, group, self.timeout)
+                    .await
+            }
         })
     }
 
