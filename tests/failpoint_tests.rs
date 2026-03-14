@@ -10,6 +10,7 @@ use common::*;
 use fail::FailScenario;
 use log::info;
 use rand::thread_rng;
+use rand::Rng;
 use serial_test::serial;
 use tikv_client::transaction::Client;
 use tikv_client::transaction::HeartbeatOption;
@@ -19,6 +20,7 @@ use tikv_client::CheckLevel;
 use tikv_client::Config;
 use tikv_client::Result;
 use tikv_client::RetryOptions;
+use tikv_client::TimestampExt;
 use tikv_client::TransactionClient;
 use tikv_client::TransactionOptions;
 
@@ -321,6 +323,151 @@ async fn txn_resolve_locks() -> Result<()> {
     assert!(live_locks.is_empty());
     assert_eq!(count_locks(&client).await?, 0);
     must_rollbacked(&client, keys).await;
+
+    scenario.teardown();
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_resolve_locks_for_read_classifies_committed_and_resolved() -> Result<()> {
+    init().await?;
+    let scenario = FailScenario::setup();
+
+    fail::cfg("before-commit-secondary", "return(0)").unwrap();
+    defer! {{
+        fail::cfg("before-commit-secondary", "off").unwrap();
+    }}
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let mut rng = thread_rng();
+    let suffix: u64 = rng.gen();
+
+    // Case 1: commit_ts <= read_start_ts => committed lock is accessible.
+    let primary_visible = format!("resolve-locks-for-read-visible-{suffix}-primary").into_bytes();
+    let secondary_visible =
+        format!("resolve-locks-for-read-visible-{suffix}-secondary").into_bytes();
+    let visible_value = b"visible-value".to_vec();
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::Warn),
+        )
+        .await?;
+    txn.put(primary_visible.clone(), b"primary-value".to_vec())
+        .await?;
+    txn.put(secondary_visible.clone(), visible_value.clone())
+        .await?;
+    let start_ts = txn.start_ts();
+    let commit_ts = txn
+        .commit()
+        .await?
+        .expect("expected commit ts for visible transaction");
+
+    let read_start_ts = client.current_timestamp().await?;
+    assert!(
+        commit_ts.version() <= read_start_ts.version(),
+        "expected commit_ts <= read_start_ts for committed lock read"
+    );
+
+    let mut secondary_visible_end = secondary_visible.clone();
+    secondary_visible_end.push(0);
+    let safepoint = client.current_timestamp().await?;
+    let locks = client
+        .scan_locks(
+            &safepoint,
+            secondary_visible.clone()..secondary_visible_end.clone(),
+            16,
+        )
+        .await?;
+    assert!(
+        locks.iter().any(|lock| lock.key == secondary_visible),
+        "expected secondary lock to remain after commit when secondary commit is skipped"
+    );
+
+    let result = client
+        .resolve_locks_for_read(locks, read_start_ts, false)
+        .await?;
+    assert_eq!(result.ms_before_txn_expired, 0);
+    assert!(result.live_locks.is_empty());
+    assert!(result.resolved_locks.is_empty());
+    assert_eq!(result.committed_locks, vec![start_ts]);
+
+    let remaining =
+        wait_for_locks_count_in_range(&client, &secondary_visible, &secondary_visible_end, 0)
+            .await?;
+    assert_eq!(remaining, 0);
+
+    let mut snapshot = client.snapshot(
+        client.current_timestamp().await?,
+        TransactionOptions::default(),
+    );
+    assert_eq!(
+        snapshot.get(secondary_visible.clone()).await?,
+        Some(visible_value)
+    );
+
+    // Case 2: commit_ts > read_start_ts => committed lock is ignored for that snapshot read.
+    let primary_future = format!("resolve-locks-for-read-future-{suffix}-primary").into_bytes();
+    let secondary_future = format!("resolve-locks-for-read-future-{suffix}-secondary").into_bytes();
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::Warn),
+        )
+        .await?;
+    txn.put(primary_future.clone(), b"primary-value".to_vec())
+        .await?;
+    txn.put(secondary_future.clone(), b"future-value".to_vec())
+        .await?;
+    let start_ts = txn.start_ts();
+
+    let read_start_ts = client.current_timestamp().await?;
+    let commit_ts = txn
+        .commit()
+        .await?
+        .expect("expected commit ts for future transaction");
+    assert!(
+        commit_ts.version() > read_start_ts.version(),
+        "expected commit_ts > read_start_ts for future read classification"
+    );
+
+    let mut secondary_future_end = secondary_future.clone();
+    secondary_future_end.push(0);
+    let safepoint = client.current_timestamp().await?;
+    let locks = client
+        .scan_locks(
+            &safepoint,
+            secondary_future.clone()..secondary_future_end.clone(),
+            16,
+        )
+        .await?;
+    assert!(
+        locks.iter().any(|lock| lock.key == secondary_future),
+        "expected secondary lock to remain after commit when secondary commit is skipped"
+    );
+
+    let result = client
+        .resolve_locks_for_read(locks, read_start_ts.clone(), false)
+        .await?;
+    assert_eq!(result.ms_before_txn_expired, 0);
+    assert!(result.live_locks.is_empty());
+    assert!(result.committed_locks.is_empty());
+    assert_eq!(result.resolved_locks, vec![start_ts]);
+
+    let remaining =
+        wait_for_locks_count_in_range(&client, &secondary_future, &secondary_future_end, 0).await?;
+    assert_eq!(remaining, 0);
+
+    let mut snapshot = client.snapshot(read_start_ts, TransactionOptions::default());
+    assert_eq!(snapshot.get(secondary_future).await?, None);
 
     scenario.teardown();
     Ok(())
