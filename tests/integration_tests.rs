@@ -291,6 +291,46 @@ async fn txn_pipelined_rollback_after_flush_discards_writes() -> Result<()> {
 
 #[tokio::test]
 #[serial]
+async fn txn_pipelined_batch_get_after_flush_merges_buffer_and_snapshot() -> Result<()> {
+    init().await?;
+
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+
+    let mut txn = client
+        .begin_with_options(
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+        )
+        .await?;
+
+    let key1 = b"key1".to_vec();
+    let key2 = b"key2".to_vec();
+    let value1 = b"value1".to_vec();
+    let value2 = b"value2".to_vec();
+
+    txn.put(key1.clone(), value1.clone()).await?;
+    assert!(txn.flush(true).await?);
+    txn.flush_wait().await?;
+    txn.put(key2.clone(), value2.clone()).await?;
+
+    let result: HashMap<Key, Value> = txn
+        .batch_get(vec![key1.clone(), key2.clone()])
+        .await?
+        .map(|pair| (pair.0, pair.1))
+        .collect();
+
+    assert_eq!(result.get(&Key::from(key1)), Some(&value1));
+    assert_eq!(result.get(&Key::from(key2)), Some(&value2));
+
+    txn.commit().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn txn_split_batch() -> Result<()> {
     init().await?;
 
