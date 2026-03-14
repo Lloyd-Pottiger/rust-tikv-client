@@ -1001,6 +1001,12 @@ impl<PdC: PdClient> Transaction<PdC> {
             .pipelined
             .as_ref()
             .map(|state| state.flushed_deletes.clone());
+        let pipelined_flushed_range = self.pipelined.as_ref().and_then(|state| {
+            match (&state.flushed_range_start, &state.flushed_range_end) {
+                (Some(start), Some(end)) => Some((start.clone(), end.clone())),
+                _ => None,
+            }
+        });
         let pipelined_flushing_puts = self
             .pipelined
             .as_ref()
@@ -1025,54 +1031,64 @@ impl<PdC: PdClient> Transaction<PdC> {
                         }
                     }
 
-                    let mut request =
-                        new_buffer_batch_get_request(iter::once(key.clone()), timestamp.clone());
-                    Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx.clone());
-                    if !resource_group_tag_set {
-                        if let Some(tagger) = resource_group_tagger.as_ref() {
-                            let tag = (tagger)(request.label());
-                            let ctx = request
-                                .context
-                                .get_or_insert_with(kvrpcpb::Context::default);
-                            ctx.resource_group_tag = tag;
+                    if pipelined_flushed_range
+                        .as_ref()
+                        .is_some_and(|(start, end)| &key >= start && &key < end)
+                    {
+                        let mut request = new_buffer_batch_get_request(
+                            iter::once(key.clone()),
+                            timestamp.clone(),
+                        );
+                        Self::apply_snapshot_read_context(
+                            &mut request.context,
+                            snapshot_ctx.clone(),
+                        );
+                        if !resource_group_tag_set {
+                            if let Some(tagger) = resource_group_tagger.as_ref() {
+                                let tag = (tagger)(request.label());
+                                let ctx = request
+                                    .context
+                                    .get_or_insert_with(kvrpcpb::Context::default);
+                                ctx.resource_group_tag = tag;
+                            }
                         }
-                    }
 
-                    let plan_builder = PlanBuilder::new_with_rpc_interceptors(
-                        rpc.clone(),
-                        keyspace,
-                        request,
-                        lock_resolver_rpc_context.rpc_interceptors.clone(),
-                    )
-                    .resolve_lock_for_read(
-                        resolve_locks_ctx.clone(),
-                        timestamp.clone(),
-                        lock_backoff.clone(),
-                        killed.clone(),
-                        keyspace,
-                        true,
-                        lock_tracker.clone(),
-                        lock_resolver_rpc_context.clone(),
-                    );
-                    let plan_builder =
-                        if replica_read.is_follower_read() || enable_load_based_replica_read {
-                            plan_builder
-                                .retry_multi_region_with_replica_read_and_match_stores(
-                                    region_backoff.clone(),
-                                    replica_read,
-                                    match_store_ids.clone(),
-                                    match_store_labels.clone(),
-                                )
-                                .with_killed(killed.clone())
-                        } else {
-                            plan_builder
-                                .retry_multi_region(region_backoff.clone())
-                                .with_killed(killed.clone())
-                        };
-                    let plan = plan_builder.merge(Collect).plan();
-                    let mut pairs = plan.execute().await?;
-                    if let Some(pair) = pairs.pop() {
-                        return Ok(Some(pair.1));
+                        let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+                            rpc.clone(),
+                            keyspace,
+                            request,
+                            lock_resolver_rpc_context.rpc_interceptors.clone(),
+                        )
+                        .resolve_lock_for_read(
+                            resolve_locks_ctx.clone(),
+                            timestamp.clone(),
+                            lock_backoff.clone(),
+                            killed.clone(),
+                            keyspace,
+                            true,
+                            lock_tracker.clone(),
+                            lock_resolver_rpc_context.clone(),
+                        );
+                        let plan_builder =
+                            if replica_read.is_follower_read() || enable_load_based_replica_read {
+                                plan_builder
+                                    .retry_multi_region_with_replica_read_and_match_stores(
+                                        region_backoff.clone(),
+                                        replica_read,
+                                        match_store_ids.clone(),
+                                        match_store_labels.clone(),
+                                    )
+                                    .with_killed(killed.clone())
+                            } else {
+                                plan_builder
+                                    .retry_multi_region(region_backoff.clone())
+                                    .with_killed(killed.clone())
+                            };
+                        let plan = plan_builder.merge(Collect).plan();
+                        let mut pairs = plan.execute().await?;
+                        if let Some(pair) = pairs.pop() {
+                            return Ok(Some(pair.1));
+                        }
                     }
                 }
 
@@ -1390,6 +1406,12 @@ impl<PdC: PdClient> Transaction<PdC> {
             .pipelined
             .as_ref()
             .map(|state| state.flushed_deletes.clone());
+        let pipelined_flushed_range = self.pipelined.as_ref().and_then(|state| {
+            match (&state.flushed_range_start, &state.flushed_range_end) {
+                (Some(start), Some(end)) => Some((start.clone(), end.clone())),
+                _ => None,
+            }
+        });
         let pipelined_flushing_puts = self
             .pipelined
             .as_ref()
@@ -1437,43 +1459,55 @@ impl<PdC: PdClient> Transaction<PdC> {
                             return Ok(buffer_pairs);
                         }
 
-                        let mut buffer_request =
-                            crate::transaction::requests::new_buffer_batch_get_request(
-                                keys.iter().cloned().map(Into::into).collect(),
-                                timestamp.version(),
-                            );
-                        Self::apply_snapshot_read_context(
-                            &mut buffer_request.context,
-                            snapshot_ctx.clone(),
-                        );
-                        if !resource_group_tag_set {
-                            if let Some(tagger) = resource_group_tagger.as_ref() {
-                                let tag = (tagger)(buffer_request.label());
-                                let ctx = buffer_request
-                                    .context
-                                    .get_or_insert_with(kvrpcpb::Context::default);
-                                ctx.resource_group_tag = tag;
-                            }
-                        }
+                        let buffer_lookup_keys = pipelined_flushed_range
+                            .as_ref()
+                            .map(|(start, end)| {
+                                keys.iter()
+                                    .filter(|key| *key >= start && *key < end)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
 
-                        let plan_builder = PlanBuilder::new_with_rpc_interceptors(
-                            rpc.clone(),
-                            keyspace,
-                            buffer_request,
-                            lock_resolver_rpc_context.rpc_interceptors.clone(),
-                        )
-                        .resolve_lock_for_read(
-                            resolve_locks_ctx.clone(),
-                            timestamp.clone(),
-                            retry_options.lock_backoff.clone(),
-                            killed.clone(),
-                            keyspace,
-                            false,
-                            lock_tracker.clone(),
-                            lock_resolver_rpc_context.clone(),
-                        );
-                        let plan_builder =
-                            if replica_read.is_follower_read() || enable_load_based_replica_read {
+                        if !buffer_lookup_keys.is_empty() {
+                            let mut buffer_request =
+                                crate::transaction::requests::new_buffer_batch_get_request(
+                                    buffer_lookup_keys.iter().cloned().map(Into::into).collect(),
+                                    timestamp.version(),
+                                );
+                            Self::apply_snapshot_read_context(
+                                &mut buffer_request.context,
+                                snapshot_ctx.clone(),
+                            );
+                            if !resource_group_tag_set {
+                                if let Some(tagger) = resource_group_tagger.as_ref() {
+                                    let tag = (tagger)(buffer_request.label());
+                                    let ctx = buffer_request
+                                        .context
+                                        .get_or_insert_with(kvrpcpb::Context::default);
+                                    ctx.resource_group_tag = tag;
+                                }
+                            }
+
+                            let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+                                rpc.clone(),
+                                keyspace,
+                                buffer_request,
+                                lock_resolver_rpc_context.rpc_interceptors.clone(),
+                            )
+                            .resolve_lock_for_read(
+                                resolve_locks_ctx.clone(),
+                                timestamp.clone(),
+                                retry_options.lock_backoff.clone(),
+                                killed.clone(),
+                                keyspace,
+                                false,
+                                lock_tracker.clone(),
+                                lock_resolver_rpc_context.clone(),
+                            );
+                            let plan_builder = if replica_read.is_follower_read()
+                                || enable_load_based_replica_read
+                            {
                                 plan_builder
                                     .retry_multi_region_with_replica_read_and_match_stores(
                                         retry_options.region_backoff.clone(),
@@ -1487,10 +1521,11 @@ impl<PdC: PdClient> Transaction<PdC> {
                                     .retry_multi_region(retry_options.region_backoff.clone())
                                     .with_killed(killed.clone())
                             };
-                        let plan = plan_builder.merge(Collect).plan();
-                        let mut remote_pairs: Vec<KvPair> =
-                            plan.execute().await?.into_iter().map(Into::into).collect();
-                        buffer_pairs.append(&mut remote_pairs);
+                            let plan = plan_builder.merge(Collect).plan();
+                            let mut remote_pairs: Vec<KvPair> =
+                                plan.execute().await?.into_iter().map(Into::into).collect();
+                            buffer_pairs.append(&mut remote_pairs);
+                        }
 
                         let buffer_keys = buffer_pairs
                             .iter()
@@ -6708,6 +6743,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pipelined_get_outside_flushed_range_skips_remote_buffer() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                if req
+                    .downcast_ref::<kvrpcpb::BufferBatchGetRequest>()
+                    .is_some()
+                {
+                    return Err(Error::StringError(
+                        "BufferBatchGet should be skipped for keys outside flushed range"
+                            .to_owned(),
+                    ));
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
+                    assert_eq!(req.version, 5);
+                    assert_eq!(req.key, vec![2u8]);
+                    return Ok(Box::new(kvrpcpb::GetResponse {
+                        value: b"v2".to_vec(),
+                        ..Default::default()
+                    }) as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        assert_eq!(txn.get(vec![2u8]).await.unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[tokio::test]
     async fn test_pipelined_batch_get_after_flush_merges_buffer_and_snapshot() {
         let buffer_batch_get_calls = Arc::new(AtomicUsize::new(0));
         let snapshot_batch_get_calls = Arc::new(AtomicUsize::new(0));
@@ -6724,7 +6804,7 @@ mod tests {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::BufferBatchGetRequest>() {
                     buffer_batch_get_calls_cloned.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(req.version, 5);
-                    assert_eq!(req.keys, vec![vec![1u8], vec![2u8]]);
+                    assert_eq!(req.keys, vec![vec![1u8]]);
 
                     let mut pair = kvrpcpb::KvPair::default();
                     pair.key = vec![1u8];
