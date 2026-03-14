@@ -573,6 +573,15 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.kv_read_timeout
     }
 
+    /// Set scan sampling step for snapshot scan requests.
+    ///
+    /// If `step > 0`, TiKV skips `step - 1` keys after each returned key.
+    ///
+    /// This maps to client-go `KVSnapshot.SetSampleStep`.
+    pub fn set_sample_step(&mut self, step: u32) {
+        self.options.sample_step = step;
+    }
+
     pub(crate) fn set_snapshot_ts(&mut self, timestamp: Timestamp) -> Result<()> {
         if !self.options.read_only {
             return Err(Error::StringError(
@@ -3260,6 +3269,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
         let kv_read_timeout = self.options.kv_read_timeout;
+        let sample_step = self.options.sample_step;
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
 
         self.buffer
@@ -3276,6 +3286,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                         key_only,
                         reverse,
                     );
+                    request.sample_step = sample_step;
                     Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
                     if !resource_group_tag_set {
                         if let Some(tagger) = resource_group_tagger.as_ref() {
@@ -4884,6 +4895,12 @@ pub struct TransactionOptions {
     /// This maps to client-go `KVSnapshot.SetKVReadTimeout` and only applies to snapshot reads
     /// (i.e. `get`/`batch_get`/`scan` on read-only snapshots).
     kv_read_timeout: Duration,
+    /// Scan sampling step (`kvrpcpb::ScanRequest.sample_step`).
+    ///
+    /// If `sample_step > 0`, TiKV skips `sample_step - 1` keys after each returned key.
+    ///
+    /// This maps to client-go `KVSnapshot.SetSampleStep`.
+    sample_step: u32,
     /// Server-side maximum execution duration for read requests (read-only snapshots only).
     max_execution_duration_ms: u64,
     /// TiKV may reject requests early if estimated wait time exceeds the threshold (read-only snapshots only).
@@ -5116,6 +5133,7 @@ impl TransactionOptions {
             not_fill_cache: false,
             task_id: 0,
             kv_read_timeout: Duration::ZERO,
+            sample_step: 0,
             max_execution_duration_ms: 0,
             busy_threshold_ms: 0,
             priority: CommandPriority::Normal,
@@ -5154,6 +5172,7 @@ impl TransactionOptions {
             not_fill_cache: false,
             task_id: 0,
             kv_read_timeout: Duration::ZERO,
+            sample_step: 0,
             max_execution_duration_ms: 0,
             busy_threshold_ms: 0,
             priority: CommandPriority::Normal,

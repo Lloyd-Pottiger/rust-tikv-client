@@ -288,6 +288,15 @@ impl SyncSnapshot {
         self.inner.set_isolation_level(isolation_level);
     }
 
+    /// Set scan sampling step for TiKV scan requests.
+    ///
+    /// If `step > 0`, TiKV skips `step - 1` keys after each returned key.
+    ///
+    /// This maps to client-go `KVSnapshot.SetSampleStep`.
+    pub fn set_sample_step(&mut self, step: u32) {
+        self.inner.set_sample_step(step);
+    }
+
     /// Set resource group tag for requests.
     ///
     /// This maps to client-go `KVSnapshot.SetResourceGroupTag`.

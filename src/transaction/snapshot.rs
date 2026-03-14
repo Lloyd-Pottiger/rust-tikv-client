@@ -386,6 +386,15 @@ impl<PdC: PdClient> Snapshot<PdC> {
         self.transaction.set_isolation_level(isolation_level);
     }
 
+    /// Set scan sampling step for TiKV scan requests.
+    ///
+    /// If `step > 0`, TiKV skips `step - 1` keys after each returned key.
+    ///
+    /// This maps to client-go `KVSnapshot.SetSampleStep`.
+    pub fn set_sample_step(&mut self, step: u32) {
+        self.transaction.set_sample_step(step);
+    }
+
     /// Set resource group tag for requests.
     ///
     /// This maps to client-go `KVSnapshot.SetResourceGroupTag`.
@@ -954,6 +963,44 @@ mod tests {
         snapshot.set_kv_read_timeout(Duration::from_millis(321));
 
         let _ = snapshot.get(b"k".to_vec()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_set_sample_step_sets_scan_request_sample_step() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::ScanRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+                assert_eq!(req.sample_step, 10);
+
+                let mut resp = kvrpcpb::ScanResponse::default();
+                resp.pairs.push(kvrpcpb::KvPair {
+                    key: b"k".to_vec(),
+                    value: b"v".to_vec(),
+                    error: None,
+                    commit_ts: 0,
+                });
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        snapshot.set_sample_step(10);
+        let pairs: Vec<KvPair> = snapshot
+            .scan(b"a".to_vec()..b"z".to_vec(), 10)
+            .await
+            .unwrap()
+            .collect();
+        assert_eq!(pairs, vec![KvPair(b"k".to_vec().into(), b"v".to_vec())]);
     }
 
     #[test]
