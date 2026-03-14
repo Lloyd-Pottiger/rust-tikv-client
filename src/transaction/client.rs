@@ -245,6 +245,13 @@ impl Client {
     pub fn cluster_id(&self) -> u64 {
         self.pd.cluster_id()
     }
+
+    /// Close cached gRPC connections to a TiKV store address.
+    ///
+    /// The client will reconnect the next time that address is used.
+    pub async fn close_addr(&self, address: &str) -> bool {
+        self.pd.close_addr(address).await
+    }
 }
 
 impl<PdC: PdClient> Client<PdC> {

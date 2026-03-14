@@ -943,6 +943,10 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             .insert(address.to_owned(), pool);
         Ok(selected)
     }
+
+    pub(crate) async fn close_addr(&self, address: &str) -> bool {
+        self.kv_client_cache.write().await.remove(address).is_some()
+    }
 }
 
 impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC> {
@@ -1204,6 +1208,37 @@ pub mod test {
         let cache = client.kv_client_cache.read().await;
         let pool = cache.get("foo").expect("kv client pool should be cached");
         assert_eq!(pool.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_kv_client_pool_close_addr_drops_pool() {
+        let config = Config::default().with_grpc_connection_count(2);
+        let client = PdRpcClient::new(
+            config.clone(),
+            |_| CountingKvConnect {
+                connect_calls: AtomicUsize::new(0),
+            },
+            |sm| {
+                futures::future::ok(RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    42,
+                    MockCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let c0 = client.kv_client("foo").await.unwrap();
+        assert_eq!(c0.id, 0);
+        assert_eq!(client.kv_connect.connect_calls.load(Ordering::Relaxed), 2);
+
+        assert!(client.close_addr("foo").await);
+        let c1 = client.kv_client("foo").await.unwrap();
+        assert_eq!(c1.id, 2);
+        assert_eq!(client.kv_connect.connect_calls.load(Ordering::Relaxed), 4);
     }
 
     #[tokio::test]

@@ -140,6 +140,13 @@ impl Client<PdRpcClient> {
         self.rpc.cluster_id()
     }
 
+    /// Close cached gRPC connections to a TiKV store address.
+    ///
+    /// The client will reconnect the next time that address is used.
+    pub async fn close_addr(&self, address: &str) -> bool {
+        self.rpc.close_addr(address).await
+    }
+
     /// Create a new client which is a clone of `self`, but which uses an explicit column family for
     /// all requests.
     ///
