@@ -228,9 +228,114 @@ async fn txn_cleanup_async_commit_locks() -> Result<()> {
         assert_eq!(count_locks(&client).await?, 0);
     }
 
-    // TODO: test rollback
+    // rollback
+    {
+        info!("test rollback");
+        fail::cfg("after-prewrite", "return").unwrap();
+        defer! {
+            fail::cfg("after-prewrite", "off").unwrap()
+        }
 
-    // TODO: test region error
+        let client = TransactionClient::new_with_config(
+            pd_addrs(),
+            Config::default().with_default_keyspace(),
+        )
+        .await?;
+
+        let primary_key = b"rollback-primary".to_vec();
+        let secondary_key = b"rollback-secondary".to_vec();
+
+        let mut txn = client
+            .begin_with_options(
+                TransactionOptions::new_optimistic()
+                    .use_async_commit()
+                    .retry_options(RetryOptions {
+                        region_backoff: REGION_BACKOFF,
+                        lock_backoff: OPTIMISTIC_BACKOFF,
+                    })
+                    .drop_check(CheckLevel::Warn),
+            )
+            .await?;
+        txn.put(primary_key.clone(), primary_key.clone()).await?;
+        txn.put(secondary_key.clone(), secondary_key.clone())
+            .await?;
+        txn.commit()
+            .await
+            .expect_err("expected commit to fail after prewrite");
+
+        let mut secondary_end = secondary_key.clone();
+        secondary_end.push(0);
+        client
+            .unsafe_destroy_range(secondary_key.clone()..secondary_end)
+            .await?;
+
+        let safepoint = client.current_timestamp().await?;
+        let options = ResolveLocksOptions {
+            async_commit_only: true,
+            ..Default::default()
+        };
+        client
+            .cleanup_locks(full_range, &safepoint, options)
+            .await?;
+
+        let keys = HashSet::from_iter([primary_key, secondary_key]);
+        must_rollbacked(&client, keys).await;
+        assert_eq!(count_locks(&client).await?, 0);
+    }
+
+    // region error
+    {
+        info!("test region error");
+        fail::cfg("after-prewrite", "return").unwrap();
+        fail::cfg("kv_resolve_lock_region_error", "3*return").unwrap();
+        defer! {{
+            fail::cfg("after-prewrite", "off").unwrap();
+            fail::cfg("kv_resolve_lock_region_error", "off").unwrap();
+        }}
+
+        let client = TransactionClient::new_with_config(
+            pd_addrs(),
+            Config::default().with_default_keyspace(),
+        )
+        .await?;
+
+        let primary_key = b"region-error-primary".to_vec();
+        let secondary_key = b"region-error-secondary".to_vec();
+
+        let mut txn = client
+            .begin_with_options(
+                TransactionOptions::new_optimistic()
+                    .use_async_commit()
+                    .retry_options(RetryOptions {
+                        region_backoff: REGION_BACKOFF,
+                        lock_backoff: OPTIMISTIC_BACKOFF,
+                    })
+                    .drop_check(CheckLevel::Warn),
+            )
+            .await?;
+        txn.put(primary_key.clone(), primary_key.clone()).await?;
+        txn.put(secondary_key.clone(), secondary_key.clone())
+            .await?;
+        txn.commit()
+            .await
+            .expect_err("expected commit to fail after prewrite");
+
+        let locks_before = count_locks_in_range(&client, &primary_key, &secondary_key).await?;
+        assert!(locks_before > 0, "expected locks before cleanup");
+
+        let safepoint = client.current_timestamp().await?;
+        let options = ResolveLocksOptions {
+            async_commit_only: true,
+            ..Default::default()
+        };
+        client
+            .cleanup_locks(full_range, &safepoint, options)
+            .await?;
+
+        let keys = HashSet::from_iter([primary_key, secondary_key]);
+        must_committed(&client, keys).await;
+        assert_eq!(count_locks(&client).await?, 0);
+    }
 
     scenario.teardown();
     Ok(())
