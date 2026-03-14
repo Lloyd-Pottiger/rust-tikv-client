@@ -13,9 +13,11 @@
 mod common;
 use common::*;
 use futures::prelude::*;
+use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::thread_rng;
 use rand::Rng;
+use rand::SeedableRng;
 use serial_test::serial;
 use std::collections::HashMap;
 use std::iter;
@@ -716,7 +718,25 @@ async fn txn_read() -> Result<()> {
     Ok(())
 }
 
-// FIXME: the test is temporarily ingnored since it's easy to fail when scheduling is frequent.
+fn is_retryable_txn_bank_transfer_error(err: &Error) -> bool {
+    match err {
+        Error::RegionError(_)
+        | Error::RegionForKeyNotFound { .. }
+        | Error::RegionForRangeNotFound { .. }
+        | Error::RegionNotFoundInResponse { .. }
+        | Error::LeaderNotFound { .. }
+        | Error::WriteConflict(_)
+        | Error::WriteConflictInLatch { .. }
+        | Error::Deadlock(_) => true,
+        Error::ExtractedErrors(errors) | Error::MultipleKeyErrors(errors) => errors
+            .iter()
+            .all(|inner| is_retryable_txn_bank_transfer_error(inner)),
+        Error::PessimisticLockError { inner, .. } => is_retryable_txn_bank_transfer_error(inner),
+        Error::UndeterminedError(_) => false,
+        _ => false,
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn txn_bank_transfer() -> Result<()> {
@@ -724,41 +744,70 @@ async fn txn_bank_transfer() -> Result<()> {
     let client =
         TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
             .await?;
-    let mut rng = thread_rng();
+    let mut rng = StdRng::seed_from_u64(0);
     let options = TransactionOptions::new_optimistic()
         .use_async_commit()
+        .retry_options(RetryOptions {
+            region_backoff: Backoff::no_jitter_backoff(2, 500, 20),
+            lock_backoff: Backoff::equal_jitter_backoff(2, 3000, 16),
+        })
         .drop_check(tikv_client::CheckLevel::Warn);
 
-    let people = gen_u32_keys(NUM_PEOPLE, &mut rng);
-    let mut txn = client.begin_with_options(options.clone()).await?;
+    let people = (0..NUM_PEOPLE)
+        .map(|person| person.to_be_bytes().to_vec())
+        .collect::<Vec<_>>();
+
     let mut sum: u32 = 0;
-    for person in &people {
-        let init = rng.gen::<u8>() as u32;
-        sum += init;
-        txn.put(person.clone(), init.to_be_bytes().to_vec()).await?;
+    let mut txn = client.begin_with_options(options.clone()).await?;
+    for person in people.iter() {
+        let init_balance = rng.gen::<u8>() as u32;
+        sum += init_balance;
+        txn.put(person.clone(), init_balance.to_be_bytes().to_vec())
+            .await?;
     }
     txn.commit().await?;
 
     // transfer
-    for _ in 0..NUM_TRNASFER {
-        let mut txn = client.begin_with_options(options.clone()).await?;
-        let chosen_people = people.iter().choose_multiple(&mut rng, 2);
-        let alice = chosen_people[0];
-        let mut alice_balance = get_txn_u32(&mut txn, alice.clone()).await?;
-        let bob = chosen_people[1];
-        let mut bob_balance = get_txn_u32(&mut txn, bob.clone()).await?;
-        if alice_balance == 0 {
-            txn.rollback().await?;
-            continue;
+    let transfer_ops = (0..NUM_TRNASFER)
+        .map(|_| {
+            let alice_idx = rng.gen_range(0..people.len());
+            let mut bob_idx = rng.gen_range(0..people.len());
+            while bob_idx == alice_idx {
+                bob_idx = rng.gen_range(0..people.len());
+            }
+            (alice_idx, bob_idx, rng.gen::<u32>())
+        })
+        .collect::<Vec<_>>();
+
+    const MAX_TRANSFER_RETRIES: usize = 10;
+    for (alice_idx, bob_idx, transfer_seed) in transfer_ops {
+        for attempt in 1..=MAX_TRANSFER_RETRIES {
+            let mut txn = client.begin_with_options(options.clone()).await?;
+            let alice = people[alice_idx].clone();
+            let bob = people[bob_idx].clone();
+            let mut alice_balance = get_txn_u32(&mut txn, alice.clone()).await?;
+            let mut bob_balance = get_txn_u32(&mut txn, bob.clone()).await?;
+            if alice_balance == 0 {
+                txn.rollback().await?;
+                break;
+            }
+            let transfer = transfer_seed % alice_balance;
+            alice_balance -= transfer;
+            bob_balance += transfer;
+            txn.put(alice, alice_balance.to_be_bytes().to_vec()).await?;
+            txn.put(bob, bob_balance.to_be_bytes().to_vec()).await?;
+            match txn.commit().await {
+                Ok(_) => break,
+                Err(err)
+                    if attempt < MAX_TRANSFER_RETRIES
+                        && is_retryable_txn_bank_transfer_error(&err) =>
+                {
+                    let _ = txn.rollback().await;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
         }
-        let transfer = rng.gen_range(0..alice_balance);
-        alice_balance -= transfer;
-        bob_balance += transfer;
-        txn.put(alice.clone(), alice_balance.to_be_bytes().to_vec())
-            .await?;
-        txn.put(bob.clone(), bob_balance.to_be_bytes().to_vec())
-            .await?;
-        txn.commit().await?;
     }
 
     // check
