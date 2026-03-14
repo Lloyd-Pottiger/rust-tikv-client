@@ -106,6 +106,8 @@ pub struct MockPdClient {
     invalidated_region_ver_ids: Mutex<Vec<RegionVerId>>,
     #[new(value = "Mutex::new(Vec::new())")]
     invalidated_store_ids: Mutex<Vec<StoreId>>,
+    #[new(value = "Mutex::new(Vec::new())")]
+    added_regions_to_cache: Mutex<Vec<RegionWithLeader>>,
     #[new(value = "Arc::new(AtomicU64::new(0))")]
     tso_version: Arc<AtomicU64>,
     #[new(value = "false")]
@@ -343,6 +345,14 @@ impl MockPdClient {
             Err(poisoned) => poisoned.into_inner(),
         };
         invalidated.clone()
+    }
+
+    pub fn added_regions_to_cache(&self) -> Vec<RegionWithLeader> {
+        let added = match self.added_regions_to_cache.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        added.clone()
     }
 
     pub fn with_tso_sequence(mut self, start_version: u64) -> MockPdClient {
@@ -848,6 +858,14 @@ impl PdClient for MockPdClient {
             Err(poisoned) => poisoned.into_inner(),
         };
         invalidated.push(store_id);
+    }
+
+    async fn add_region_to_cache(&self, region: RegionWithLeader) {
+        let mut added = match self.added_regions_to_cache.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        added.push(region);
     }
 
     async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {

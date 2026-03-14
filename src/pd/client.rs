@@ -501,6 +501,17 @@ pub trait PdClient: Send + Sync + 'static {
     async fn invalidate_region_cache(&self, ver_id: RegionVerId);
 
     async fn invalidate_store_cache(&self, store_id: StoreId);
+
+    /// Add or refresh a region in the local region cache.
+    ///
+    /// This is primarily used to apply region metadata returned by TiKV region errors (for
+    /// example `EpochNotMatch`) without an extra PD round-trip.
+    ///
+    /// The default implementation is a no-op.
+    #[doc(hidden)]
+    async fn add_region_to_cache(&self, region: RegionWithLeader) {
+        let _ = region;
+    }
 }
 
 /// This client converts requests for the logical TiKV cluster into requests
@@ -830,6 +841,10 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     async fn invalidate_store_cache(&self, store_id: StoreId) {
         self.region_cache.invalidate_store_cache(store_id).await
+    }
+
+    async fn add_region_to_cache(&self, region: RegionWithLeader) {
+        self.region_cache.add_region(region).await;
     }
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {

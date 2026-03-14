@@ -1591,15 +1591,16 @@ pub(crate) async fn on_region_epoch_not_match<PdC: PdClient>(
     let ver_id = region_store.region_with_leader.ver_id();
     if error.current_regions.is_empty() {
         pd_client.invalidate_region_cache(ver_id).await;
-        return Ok(true);
+        return Ok(false);
     }
 
     let current_conf_ver = ver_id.conf_ver;
     let current_version = ver_id.ver;
-    for r in error.current_regions {
+    for r in &error.current_regions {
         if r.id == region_store.region_with_leader.id() {
-            let Some(region_epoch) = r.region_epoch else {
-                break;
+            let Some(region_epoch) = r.region_epoch.as_ref() else {
+                pd_client.invalidate_region_cache(ver_id).await;
+                return Ok(false);
             };
             let returned_conf_ver = region_epoch.conf_ver;
             let returned_version = region_epoch.version;
@@ -1611,9 +1612,28 @@ pub(crate) async fn on_region_epoch_not_match<PdC: PdClient>(
             break;
         }
     }
-    // TODO: finer grained processing
-    pd_client.invalidate_region_cache(ver_id).await;
-    Ok(false)
+
+    let init_leader_store_id = region_store.region_with_leader.get_store_id().ok();
+    let mut need_invalidate_old = true;
+    for meta in error.current_regions {
+        let leader = init_leader_store_id
+            .and_then(|store_id| meta.peers.iter().find(|peer| peer.store_id == store_id))
+            .or_else(|| meta.peers.first())
+            .cloned();
+        let region = RegionWithLeader {
+            region: meta,
+            leader,
+        };
+        if region.ver_id() == ver_id {
+            need_invalidate_old = false;
+        }
+        pd_client.add_region_to_cache(region).await;
+    }
+    if need_invalidate_old {
+        pd_client.invalidate_region_cache(ver_id).await;
+    }
+
+    Ok(true)
 }
 
 impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
@@ -4109,6 +4129,103 @@ mod test {
             .await
             .unwrap();
         assert!(!resolved);
+    }
+
+    #[tokio::test]
+    async fn test_on_region_epoch_not_match_empty_current_regions_invalidates_and_backoffs() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let store = RegionStore::new(
+            MockPdClient::region1(),
+            Arc::new(MockKvClient::with_dispatch_hook(|_| {
+                unreachable!("dispatch not expected")
+            })),
+            "mock://41".to_owned(),
+        );
+        let ver_id = store.region_with_leader.ver_id();
+
+        let err = EpochNotMatch::default();
+
+        let resolved = on_region_epoch_not_match(pd_client.clone(), store, err)
+            .await
+            .unwrap();
+        assert!(!resolved);
+        assert_eq!(pd_client.invalidated_region_ver_ids(), vec![ver_id]);
+    }
+
+    #[tokio::test]
+    async fn test_on_region_epoch_not_match_applies_current_regions_and_retries_immediately() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let store = RegionStore::new(
+            MockPdClient::region1(),
+            Arc::new(MockKvClient::with_dispatch_hook(|_| {
+                unreachable!("dispatch not expected")
+            })),
+            "mock://41".to_owned(),
+        );
+        let ver_id = store.region_with_leader.ver_id();
+        let leader_store_id = store
+            .region_with_leader
+            .get_store_id()
+            .expect("region store must have leader");
+
+        let mut current_region = metapb::Region::default();
+        current_region.id = store.region_with_leader.id();
+        current_region.region_epoch = Some(metapb::RegionEpoch {
+            conf_ver: ver_id.conf_ver,
+            version: ver_id.ver + 1,
+        });
+        current_region.peers = store.region_with_leader.region.peers.clone();
+
+        let mut err = EpochNotMatch::default();
+        err.current_regions = vec![current_region];
+
+        let resolved = on_region_epoch_not_match(pd_client.clone(), store, err)
+            .await
+            .unwrap();
+        assert!(resolved);
+
+        let added = pd_client.added_regions_to_cache();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].region.id, ver_id.id);
+        assert_eq!(
+            added[0].leader.as_ref().map(|peer| peer.store_id),
+            Some(leader_store_id)
+        );
+        assert_eq!(pd_client.invalidated_region_ver_ids(), vec![ver_id]);
+    }
+
+    #[tokio::test]
+    async fn test_on_region_epoch_not_match_epoch_ahead_retries_with_backoff() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let mut region = MockPdClient::region1();
+        region.region.region_epoch = Some(metapb::RegionEpoch {
+            conf_ver: 10,
+            version: 10,
+        });
+        let store = RegionStore::new(
+            region,
+            Arc::new(MockKvClient::with_dispatch_hook(|_| {
+                unreachable!("dispatch not expected")
+            })),
+            "mock://41".to_owned(),
+        );
+
+        let mut current_region = metapb::Region::default();
+        current_region.id = store.region_with_leader.id();
+        current_region.region_epoch = Some(metapb::RegionEpoch {
+            conf_ver: 0,
+            version: 0,
+        });
+
+        let mut err = EpochNotMatch::default();
+        err.current_regions = vec![current_region];
+
+        let resolved = on_region_epoch_not_match(pd_client.clone(), store, err)
+            .await
+            .unwrap();
+        assert!(!resolved);
+        assert!(pd_client.invalidated_region_ver_ids().is_empty());
+        assert!(pd_client.added_regions_to_cache().is_empty());
     }
 
     #[tokio::test]
