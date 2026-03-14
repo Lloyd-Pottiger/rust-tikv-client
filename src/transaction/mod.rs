@@ -51,6 +51,9 @@ pub use lock::ResolveLocksResult;
 pub use lock::ResolvingLock;
 pub use requests::TransactionStatus;
 pub use requests::TransactionStatusKind;
+
+/// Alias for [`TransactionStatus`], mirroring client-go `txnkv.TxnStatus`.
+pub type TxnStatus = TransactionStatus;
 mod snapshot;
 mod sync_client;
 mod sync_snapshot;
