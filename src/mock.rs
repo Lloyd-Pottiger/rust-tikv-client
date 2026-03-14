@@ -21,6 +21,7 @@ use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
 use crate::pd::RetryClient;
 use crate::proto::keyspacepb;
+use crate::proto::kvrpcpb;
 use crate::proto::metapb::RegionEpoch;
 use crate::proto::metapb::{self};
 use crate::region::RegionId;
@@ -348,6 +349,31 @@ impl PdClient for MockPdClient {
             .get(&store_id)
             .cloned()
             .ok_or(Error::Unimplemented)
+    }
+
+    async fn get_health_feedback(&self, store_id: StoreId) -> Result<kvrpcpb::HealthFeedback> {
+        let _ = store_id;
+        let mut req = kvrpcpb::GetHealthFeedbackRequest::default();
+        req.context = Some(kvrpcpb::Context::default());
+
+        let resp = self.client.dispatch(&req).await?;
+        let resp = resp
+            .downcast::<kvrpcpb::GetHealthFeedbackResponse>()
+            .map_err(|_| {
+                Error::StringError("unexpected GetHealthFeedback response type".to_owned())
+            })?;
+        let resp = *resp;
+        if let Some(region_error) = resp.region_error {
+            return Err(Error::RegionError(Box::new(region_error)));
+        }
+
+        let feedback = resp.health_feedback.ok_or_else(|| {
+            Error::StringError("GetHealthFeedback response missing health_feedback".to_owned())
+        })?;
+        if feedback.slow_score >= crate::pd::HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD {
+            self.mark_store_slow(feedback.store_id, crate::pd::HEALTH_FEEDBACK_SLOW_STORE_TTL);
+        }
+        Ok(feedback)
     }
 
     fn mark_store_slow(&self, store_id: StoreId, duration: Duration) {

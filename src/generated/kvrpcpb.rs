@@ -2177,6 +2177,47 @@ pub struct BufferBatchGetResponse {
     #[prost(message, optional, tag = "4")]
     pub exec_details_v2: ::core::option::Option<ExecDetailsV2>,
 }
+/// Actively request TiKV to report health feedback information. TiKV won't omit the health feedback
+/// information when sending the `BatchCommandsResponse` that contains this response.
+///
+/// The health feedback information won't be replied in the response, but will be attached to
+/// `BatchCommandsResponse.health_feedback` field as usual.
+///
+/// Only works when batch RPC is enabled.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetHealthFeedbackRequest {
+    #[prost(message, optional, tag = "1")]
+    pub context: ::core::option::Option<Context>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetHealthFeedbackResponse {
+    /// The error field is added for keeping consistent. This request won't meet any region error as
+    /// it's store level rather than region level.
+    #[prost(message, optional, tag = "1")]
+    pub region_error: ::core::option::Option<super::errorpb::Error>,
+    #[prost(message, optional, tag = "2")]
+    pub health_feedback: ::core::option::Option<HealthFeedback>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HealthFeedback {
+    #[prost(uint64, tag = "1")]
+    pub store_id: u64,
+    /// The sequence number of the feedback message.
+    /// It's defined as an incrementing integer, starting from the unix timestamp (milliseconds) at
+    /// the time that the TiKV node is started.
+    /// This can be useful for filtering out out-of-order feedback messages.
+    /// Note that considering the possibility of system clock changing, this field doesn't guarantee
+    /// uniqueness and monotonic if the TiKV node is restarted.
+    #[prost(uint64, tag = "2")]
+    pub feedback_seq_no: u64,
+    /// The slow_score calculated in raftstore module. Due to some limitations of slow score, this
+    /// would be replaced by `SlowTrend` in the future.
+    #[prost(int32, tag = "3")]
+    pub slow_score: i32,
+}
 /// Used to specify the behavior when a pessimistic lock request is woken up after waiting for another
 /// lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]

@@ -14,7 +14,7 @@ pub mod batch_commands_request {
     pub struct Request {
         #[prost(
             oneof = "request::Cmd",
-            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 255"
+            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 39, 255"
         )]
         pub cmd: ::core::option::Option<request::Cmd>,
     }
@@ -89,6 +89,8 @@ pub mod batch_commands_request {
             PrepareFlashbackToVersion(
                 super::super::super::kvrpcpb::PrepareFlashbackToVersionRequest,
             ),
+            #[prost(message, tag = "39")]
+            GetHealthFeedback(super::super::super::kvrpcpb::GetHealthFeedbackRequest),
             /// For some test cases.
             #[prost(message, tag = "255")]
             Empty(super::super::BatchCommandsEmptyRequest),
@@ -105,6 +107,8 @@ pub struct BatchCommandsResponse {
     /// 280 means TiKV gRPC cpu usage is 280%.
     #[prost(uint64, tag = "3")]
     pub transport_layer_load: u64,
+    #[prost(message, optional, tag = "4")]
+    pub health_feedback: ::core::option::Option<super::kvrpcpb::HealthFeedback>,
 }
 /// Nested message and enum types in `BatchCommandsResponse`.
 pub mod batch_commands_response {
@@ -113,7 +117,7 @@ pub mod batch_commands_response {
     pub struct Response {
         #[prost(
             oneof = "response::Cmd",
-            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 255"
+            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 39, 255"
         )]
         pub cmd: ::core::option::Option<response::Cmd>,
     }
@@ -188,6 +192,8 @@ pub mod batch_commands_response {
             PrepareFlashbackToVersion(
                 super::super::super::kvrpcpb::PrepareFlashbackToVersionResponse,
             ),
+            #[prost(message, tag = "39")]
+            GetHealthFeedback(super::super::super::kvrpcpb::GetHealthFeedbackResponse),
             /// For some test cases.
             #[prost(message, tag = "255")]
             Empty(super::super::BatchCommandsEmptyResponse),
@@ -2010,6 +2016,34 @@ pub mod tikv_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("tikvpb.Tikv", "GetDisaggConfig"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// / Get health feedback info from the TiKV node.
+        pub async fn get_health_feedback(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                super::super::kvrpcpb::GetHealthFeedbackRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::super::kvrpcpb::GetHealthFeedbackResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/tikvpb.Tikv/GetHealthFeedback",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("tikvpb.Tikv", "GetHealthFeedback"));
             self.inner.unary(req, path, codec).await
         }
     }

@@ -40,6 +40,9 @@ use crate::Result;
 use crate::SecurityManager;
 use crate::Timestamp;
 
+pub(crate) const HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD: i32 = 80;
+pub(crate) const HEALTH_FEEDBACK_SLOW_STORE_TTL: Duration = Duration::from_secs(15);
+
 /// The PdClient handles all the encoding stuff.
 ///
 /// Raw APIs does not require encoding/decoding at all.
@@ -154,6 +157,17 @@ pub trait PdClient: Send + Sync + 'static {
     ///
     /// The default implementation returns [`Error::Unimplemented`].
     async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
+        let _ = store_id;
+        Err(Error::Unimplemented)
+    }
+
+    /// Request health feedback from a TiKV store.
+    ///
+    /// Implementations may use the returned feedback to update internal heuristics (for example
+    /// marking a store as slow for replica selection).
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn get_health_feedback(&self, store_id: StoreId) -> Result<kvrpcpb::HealthFeedback> {
         let _ = store_id;
         Err(Error::Unimplemented)
     }
@@ -428,6 +442,33 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
         self.region_cache.get_store_by_id(store_id).await
+    }
+
+    async fn get_health_feedback(&self, store_id: StoreId) -> Result<kvrpcpb::HealthFeedback> {
+        let store = self.store_meta_by_id(store_id).await?;
+        let address = safe_ts_store_address(&store);
+        let client = self.kv_client(address).await?;
+
+        let mut req = kvrpcpb::GetHealthFeedbackRequest::default();
+        req.context = Some(kvrpcpb::Context::default());
+        let resp = client.dispatch(&req).await?;
+        let resp = resp
+            .downcast::<kvrpcpb::GetHealthFeedbackResponse>()
+            .map_err(|_| {
+                Error::StringError("unexpected GetHealthFeedback response type".to_owned())
+            })?;
+        let resp = *resp;
+        if let Some(region_error) = resp.region_error {
+            return Err(Error::RegionError(Box::new(region_error)));
+        }
+
+        let feedback = resp.health_feedback.ok_or_else(|| {
+            Error::StringError("GetHealthFeedback response missing health_feedback".to_owned())
+        })?;
+        if feedback.slow_score >= HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD {
+            self.mark_store_slow(feedback.store_id, HEALTH_FEEDBACK_SLOW_STORE_TTL);
+        }
+        Ok(feedback)
     }
 
     fn mark_store_slow(&self, store_id: StoreId, duration: Duration) {
@@ -811,6 +852,7 @@ fn make_key_range(start_key: Vec<u8>, end_key: Vec<u8>) -> kvrpcpb::KeyRange {
 
 #[cfg(test)]
 pub mod test {
+    use std::any::Any;
     use std::io::BufRead;
     use std::io::BufReader;
     use std::io::Write;
@@ -1058,5 +1100,69 @@ pub mod test {
         assert_eq!(ranges2.0, vec![make_key_range(k3, k4)]);
         assert_eq!(ranges3.1.id(), 3);
         assert_eq!(ranges3.0, vec![make_key_range(k5, k6)]);
+    }
+
+    #[tokio::test]
+    async fn test_get_health_feedback_returns_feedback_and_marks_store_slow_when_score_exceeds_threshold(
+    ) {
+        let store_id = 7;
+        let feedback_seq_no = 42;
+        let client = MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            let req = req
+                .downcast_ref::<kvrpcpb::GetHealthFeedbackRequest>()
+                .expect("GetHealthFeedbackRequest");
+            assert!(
+                req.context.is_some(),
+                "GetHealthFeedbackRequest should populate context"
+            );
+
+            let mut resp = kvrpcpb::GetHealthFeedbackResponse::default();
+            resp.health_feedback = Some(kvrpcpb::HealthFeedback {
+                store_id,
+                feedback_seq_no,
+                slow_score: HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD,
+            });
+            Ok(Box::new(resp) as Box<dyn Any>)
+        }));
+
+        assert!(!client.is_store_slow(store_id));
+        let feedback = client.get_health_feedback(store_id).await.unwrap();
+        assert_eq!(feedback.store_id, store_id);
+        assert_eq!(feedback.feedback_seq_no, feedback_seq_no);
+        assert_eq!(feedback.slow_score, HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD);
+        assert!(client.is_store_slow(store_id));
+    }
+
+    #[tokio::test]
+    async fn test_get_health_feedback_does_not_mark_store_slow_when_score_is_normal() {
+        let store_id = 11;
+        let client = MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            req.downcast_ref::<kvrpcpb::GetHealthFeedbackRequest>()
+                .expect("GetHealthFeedbackRequest");
+
+            let mut resp = kvrpcpb::GetHealthFeedbackResponse::default();
+            resp.health_feedback = Some(kvrpcpb::HealthFeedback {
+                store_id,
+                feedback_seq_no: 1,
+                slow_score: 1,
+            });
+            Ok(Box::new(resp) as Box<dyn Any>)
+        }));
+
+        client.get_health_feedback(store_id).await.unwrap();
+        assert!(!client.is_store_slow(store_id));
+    }
+
+    #[tokio::test]
+    async fn test_get_health_feedback_rejects_missing_health_feedback() {
+        let store_id = 1;
+        let client = MockPdClient::new(MockKvClient::with_dispatch_hook(|req: &dyn Any| {
+            req.downcast_ref::<kvrpcpb::GetHealthFeedbackRequest>()
+                .expect("GetHealthFeedbackRequest");
+            Ok(Box::new(kvrpcpb::GetHealthFeedbackResponse::default()) as Box<dyn Any>)
+        }));
+
+        let err = client.get_health_feedback(store_id).await.unwrap_err();
+        assert!(matches!(err, Error::StringError(_)), "err={err:?}");
     }
 }
