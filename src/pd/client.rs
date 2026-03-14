@@ -160,6 +160,24 @@ pub trait PdClient: Send + Sync + 'static {
         Err(Error::Unimplemented)
     }
 
+    /// Update the PD "service safe point" for a given keyspace.
+    ///
+    /// This maps to client-go `pd.Client.UpdateServiceSafePointV2`.
+    ///
+    /// On success, returns the PD-reported `min_safe_point` (the effective service safe point).
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn update_service_safe_point_v2(
+        self: Arc<Self>,
+        keyspace_id: u32,
+        service_id: String,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        let _ = (keyspace_id, service_id, ttl, safe_point);
+        Err(Error::Unimplemented)
+    }
+
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
 
     /// In transactional API, `key` is in raw format
@@ -690,6 +708,19 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         self.pd
             .clone()
             .update_service_gc_safe_point(service_id, ttl, safe_point)
+            .await
+    }
+
+    async fn update_service_safe_point_v2(
+        self: Arc<Self>,
+        keyspace_id: u32,
+        service_id: String,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        self.pd
+            .clone()
+            .update_service_safe_point_v2(keyspace_id, service_id, ttl, safe_point)
             .await
     }
 
