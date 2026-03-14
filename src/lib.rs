@@ -152,6 +152,8 @@ pub use common::Result;
 pub use common::WriteConflictError;
 #[doc(inline)]
 pub use config::Config;
+#[doc(inline)]
+pub use config::GrpcCompressionType;
 
 #[doc(inline)]
 pub use crate::backoff::Backoff;

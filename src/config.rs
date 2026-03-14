@@ -6,6 +6,15 @@ use std::time::Duration;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
 
+/// gRPC compression type for TiKV channels.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GrpcCompressionType {
+    #[default]
+    None,
+    Gzip,
+}
+
 /// The configuration for either a [`RawClient`](crate::RawClient) or a
 /// [`TransactionClient`](crate::TransactionClient).
 ///
@@ -33,6 +42,8 @@ pub struct Config {
     /// The maximum number of gRPC connections established with each TiKV server (client-go
     /// `GrpcConnectionCount`).
     pub grpc_connection_count: usize,
+    /// gRPC compression type for TiKV channels (client-go `GrpcCompressionType`).
+    pub grpc_compression_type: GrpcCompressionType,
     /// After a duration of this time without RPC activity, the client pings the server to see if
     /// the transport is still alive (client-go `GrpcKeepAliveTime`).
     ///
@@ -91,6 +102,7 @@ impl Default for Config {
             tso_max_pending_count: DEFAULT_TSO_MAX_PENDING_COUNT,
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
             grpc_connection_count: DEFAULT_GRPC_CONNECTION_COUNT,
+            grpc_compression_type: GrpcCompressionType::None,
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
             grpc_initial_window_size: DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
@@ -197,6 +209,13 @@ impl Config {
         self
     }
 
+    /// Set the gRPC compression type for TiKV channels.
+    #[must_use]
+    pub fn with_grpc_compression_type(mut self, compression_type: GrpcCompressionType) -> Self {
+        self.grpc_compression_type = compression_type;
+        self
+    }
+
     /// Set the gRPC HTTP2 keepalive ping interval.
     ///
     /// Set to `Duration::ZERO` to disable keepalive pings.
@@ -295,6 +314,7 @@ mod tests {
         assert_eq!(config.grpc_initial_window_size, 1 << 27);
         assert_eq!(config.grpc_initial_conn_window_size, 1 << 27);
         assert_eq!(config.grpc_connection_count, 4);
+        assert_eq!(config.grpc_compression_type, GrpcCompressionType::None);
         config.validate().unwrap();
     }
 

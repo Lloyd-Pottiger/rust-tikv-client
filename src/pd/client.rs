@@ -850,6 +850,7 @@ impl PdRpcClient<TikvConnect, Cluster> {
                     security_mgr,
                     config.timeout,
                     config.grpc_max_decoding_message_size,
+                    config.grpc_compression_type,
                 )
             },
             |security_mgr| {
