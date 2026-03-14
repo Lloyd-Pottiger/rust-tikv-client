@@ -1997,6 +1997,117 @@ impl<PdC: PdClient> Transaction<PdC> {
         if self.buffer.get(&key).is_some() {
             return Err(Error::DuplicateKeyInsertion);
         }
+        if self.options.pipelined_txn.is_some()
+            && self
+                .pipelined
+                .as_ref()
+                .is_some_and(|state| state.generation > 0)
+            && !self.buffer.has_mutation_or_lock(&key)
+        {
+            let pipelined_flushed_deletes = self
+                .pipelined
+                .as_ref()
+                .map(|state| state.flushed_deletes.clone());
+            if pipelined_flushed_deletes.as_ref().is_some_and(|deleted| {
+                let deleted = match deleted.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                deleted.contains(&key)
+            }) {
+                // The key has been flushed as a delete (or CheckNotExist); treat it as non-existent.
+            } else {
+                let pipelined_flushing_puts = self
+                    .pipelined
+                    .as_ref()
+                    .and_then(|state| state.flushing_puts.clone());
+                if pipelined_flushing_puts
+                    .as_ref()
+                    .is_some_and(|puts| puts.contains_key(&key))
+                {
+                    return Err(Error::DuplicateKeyInsertion);
+                }
+
+                let pipelined_flushed_range = self.pipelined.as_ref().and_then(|state| {
+                    match (&state.flushed_range_start, &state.flushed_range_end) {
+                        (Some(start), Some(end)) => Some((start.clone(), end.clone())),
+                        _ => None,
+                    }
+                });
+
+                if pipelined_flushed_range
+                    .as_ref()
+                    .is_some_and(|(start, end)| &key >= start && &key < end)
+                {
+                    let timestamp = self.timestamp.clone();
+                    let rpc = self.rpc.clone();
+                    let keyspace = self.keyspace;
+                    let lock_backoff = self.lock_backoff();
+                    let region_backoff = self.region_backoff();
+                    let killed = self.vars.killed.clone();
+                    let snapshot_ctx = self.snapshot_read_context();
+                    let enable_load_based_replica_read = snapshot_ctx.busy_threshold_ms > 0;
+                    let replica_read = snapshot_ctx.replica_read;
+                    let lock_tracker = self.read_lock_tracker.clone();
+                    let resolve_locks_ctx = self.resolve_locks_ctx.clone();
+                    let match_store_ids = self.options.match_store_ids.clone();
+                    let match_store_labels = self.options.match_store_labels.clone();
+                    let resource_group_tag_set = self.options.resource_group_tag.is_some();
+                    let resource_group_tagger = self.resource_group_tagger.clone();
+                    let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
+
+                    let mut request =
+                        new_buffer_batch_get_request(iter::once(key.clone()), timestamp.clone());
+                    Self::apply_snapshot_read_context(&mut request.context, snapshot_ctx);
+                    if !resource_group_tag_set {
+                        if let Some(tagger) = resource_group_tagger.as_ref() {
+                            let tag = (tagger)(request.label());
+                            let ctx = request
+                                .context
+                                .get_or_insert_with(kvrpcpb::Context::default);
+                            ctx.resource_group_tag = tag;
+                        }
+                    }
+
+                    let plan_builder = PlanBuilder::new_with_rpc_interceptors(
+                        rpc,
+                        keyspace,
+                        request,
+                        lock_resolver_rpc_context.rpc_interceptors.clone(),
+                    )
+                    .resolve_lock_for_read(
+                        resolve_locks_ctx,
+                        timestamp,
+                        lock_backoff,
+                        killed.clone(),
+                        keyspace,
+                        true,
+                        lock_tracker,
+                        lock_resolver_rpc_context,
+                    );
+                    let plan_builder =
+                        if replica_read.is_follower_read() || enable_load_based_replica_read {
+                            plan_builder
+                                .retry_multi_region_with_replica_read_and_match_stores(
+                                    region_backoff,
+                                    replica_read,
+                                    match_store_ids,
+                                    match_store_labels,
+                                )
+                                .with_killed(killed)
+                        } else {
+                            plan_builder
+                                .retry_multi_region(region_backoff)
+                                .with_killed(killed)
+                        };
+                    let plan = plan_builder.merge(Collect).plan();
+                    let pairs = plan.execute().await?;
+                    if !pairs.is_empty() {
+                        return Err(Error::DuplicateKeyInsertion);
+                    }
+                }
+            }
+        }
         if self.is_pessimistic() {
             self.pessimistic_lock(
                 iter::once((key.clone(), kvrpcpb::Assertion::NotExist)),
@@ -6738,6 +6849,62 @@ mod tests {
         txn.flush_wait().await.unwrap();
 
         assert_eq!(txn.get(vec![1u8]).await.unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(buffer_batch_get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_insert_after_flush_detects_duplicate_in_remote_buffer() {
+        let flush_calls = Arc::new(AtomicUsize::new(0));
+        let buffer_batch_get_calls = Arc::new(AtomicUsize::new(0));
+
+        let flush_calls_cloned = flush_calls.clone();
+        let buffer_batch_get_calls_cloned = buffer_batch_get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BufferBatchGetRequest>() {
+                    buffer_batch_get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.version, 5);
+                    assert_eq!(req.keys, vec![vec![1u8]]);
+
+                    let mut pair = kvrpcpb::KvPair::default();
+                    pair.key = vec![1u8];
+                    pair.value = b"v1".to_vec();
+
+                    let resp = kvrpcpb::BufferBatchGetResponse {
+                        pairs: vec![pair],
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        let err = txn
+            .insert(vec![1u8], b"v2".to_vec())
+            .await
+            .expect_err("expected insert to fail on duplicate key");
+        assert!(matches!(err, Error::DuplicateKeyInsertion));
         assert_eq!(flush_calls.load(Ordering::SeqCst), 1);
         assert_eq!(buffer_batch_get_calls.load(Ordering::SeqCst), 1);
     }
