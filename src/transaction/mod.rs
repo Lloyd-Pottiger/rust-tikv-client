@@ -40,6 +40,7 @@ mod client;
 mod lock;
 pub mod lowering;
 mod requests;
+pub use lock::new_lock;
 pub use lock::BoundLockResolver;
 pub use lock::Lock;
 pub use lock::LockResolver;

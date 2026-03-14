@@ -149,6 +149,14 @@ pub struct Lock {
     inner: kvrpcpb::LockInfo,
 }
 
+/// Create a [`Lock`] from a protobuf [`kvrpcpb::LockInfo`].
+///
+/// This mirrors client-go `txnkv.NewLock`.
+#[must_use]
+pub fn new_lock(lock: kvrpcpb::LockInfo) -> Lock {
+    Lock::new(lock)
+}
+
 impl Lock {
     #[must_use]
     pub fn new(inner: kvrpcpb::LockInfo) -> Lock {
@@ -1301,6 +1309,18 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
             .await
     }
 
+    /// Resolve locks in a batch (GC-only).
+    ///
+    /// This mirrors client-go `LockResolver.BatchResolveLocks` and is an alias for
+    /// [`BoundLockResolver::cleanup_locks`].
+    pub async fn batch_resolve_locks(
+        &self,
+        store: RegionStore,
+        locks: Vec<kvrpcpb::LockInfo>,
+    ) -> Result<()> {
+        self.cleanup_locks(store, locks).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn check_txn_status(
         &self,
@@ -1600,6 +1620,20 @@ impl LockResolver {
         .await
     }
 
+    /// Resolve locks in a batch (GC-only).
+    ///
+    /// This mirrors client-go `LockResolver.BatchResolveLocks` and is an alias for
+    /// [`LockResolver::cleanup_locks`].
+    pub async fn batch_resolve_locks(
+        &self,
+        store: RegionStore,
+        locks: Vec<kvrpcpb::LockInfo>,
+        pd_client: Arc<impl PdClient>,
+        keyspace: Keyspace,
+    ) -> Result<()> {
+        self.cleanup_locks(store, locks, pd_client, keyspace).await
+    }
+
     /// _Cleanup_ the given locks. Returns whether all the given locks are resolved.
     ///
     /// Note: Will rollback RUNNING transactions. ONLY use in GC.
@@ -1768,7 +1802,12 @@ impl LockResolver {
             txn_info_vec.push(txn_info);
         }
         let cleaned_region = self
-            .batch_resolve_locks(pd_client.clone(), keyspace, store.clone(), txn_info_vec)
+            .send_batch_resolve_lock_request(
+                pd_client.clone(),
+                keyspace,
+                store.clone(),
+                txn_info_vec,
+            )
             .await?;
         for txn_id in txn_ids {
             self.ctx
@@ -1890,7 +1929,7 @@ impl LockResolver {
         Ok(secondary_status)
     }
 
-    async fn batch_resolve_locks(
+    async fn send_batch_resolve_lock_request(
         &self,
         pd_client: Arc<impl PdClient>,
         keyspace: Keyspace,
@@ -2141,7 +2180,7 @@ mod tests {
         proto.min_commit_ts = 8;
 
         proto.lock_type = kvrpcpb::Op::PessimisticLock as i32;
-        let lock = Lock::new(proto.clone());
+        let lock = new_lock(proto.clone());
 
         assert_eq!(lock.key(), b"k");
         assert_eq!(lock.primary(), b"p");
@@ -2163,12 +2202,12 @@ mod tests {
     fn test_lock_wrapper_shared_predicates() {
         let mut proto = kvrpcpb::LockInfo::default();
         proto.lock_type = kvrpcpb::Op::SharedPessimisticLock as i32;
-        let lock = Lock::new(proto.clone());
+        let lock = new_lock(proto.clone());
         assert!(lock.is_pessimistic());
         assert!(!lock.is_shared());
 
         proto.lock_type = kvrpcpb::Op::SharedLock as i32;
-        let lock = Lock::new(proto);
+        let lock = new_lock(proto);
         assert!(!lock.is_pessimistic());
         assert!(lock.is_shared());
     }
