@@ -40,6 +40,7 @@ mod client;
 mod latches;
 mod lock;
 pub mod lowering;
+mod probe;
 mod requests;
 pub use lock::new_lock;
 pub use lock::BoundLockResolver;
@@ -51,6 +52,10 @@ pub use lock::ResolveLocksForReadResult;
 pub use lock::ResolveLocksOptions;
 pub use lock::ResolveLocksResult;
 pub use lock::ResolvingLock;
+#[doc(hidden)]
+pub use probe::LockProbe;
+#[doc(hidden)]
+pub use probe::LockResolverProbe;
 pub use requests::TransactionStatus;
 pub use requests::TransactionStatusKind;
 
