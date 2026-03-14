@@ -257,6 +257,23 @@ impl SyncSnapshot {
         self.inner.set_max_execution_duration(duration);
     }
 
+    /// Set timeout for individual KV read operations under this snapshot.
+    ///
+    /// This maps to client-go `KVSnapshot.SetKVReadTimeout`.
+    pub fn set_kv_read_timeout(&mut self, read_timeout: Duration) {
+        self.inner.set_kv_read_timeout(read_timeout);
+    }
+
+    /// Get the configured per-snapshot KV read timeout.
+    ///
+    /// Returns [`Duration::ZERO`] if unset.
+    ///
+    /// This maps to client-go `KVSnapshot.GetKVReadTimeout`.
+    #[must_use]
+    pub fn kv_read_timeout(&self) -> Duration {
+        self.inner.kv_read_timeout()
+    }
+
     /// Set the priority for requests.
     ///
     /// This maps to client-go `KVSnapshot.SetPriority`.

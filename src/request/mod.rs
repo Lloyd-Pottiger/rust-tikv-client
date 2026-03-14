@@ -30,6 +30,7 @@ pub use self::shard::HasNextBatch;
 pub use self::shard::NextBatch;
 pub use self::shard::RangeRequest;
 pub use self::shard::Shardable;
+pub(crate) use self::timeout::RequestWithTimeout;
 use crate::backoff::Backoff;
 use crate::backoff::DEFAULT_REGION_BACKOFF;
 use crate::backoff::OPTIMISTIC_BACKOFF;
@@ -42,6 +43,7 @@ mod keyspace;
 pub mod plan;
 mod plan_builder;
 mod shard;
+mod timeout;
 
 /// Abstracts any request sent to a TiKV server.
 #[async_trait]

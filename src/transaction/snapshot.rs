@@ -355,6 +355,23 @@ impl<PdC: PdClient> Snapshot<PdC> {
         self.transaction.set_max_execution_duration(duration);
     }
 
+    /// Set timeout for individual KV read operations under this snapshot.
+    ///
+    /// This maps to client-go `KVSnapshot.SetKVReadTimeout`.
+    pub fn set_kv_read_timeout(&mut self, read_timeout: Duration) {
+        self.transaction.set_kv_read_timeout(read_timeout);
+    }
+
+    /// Get the configured per-snapshot KV read timeout.
+    ///
+    /// Returns [`Duration::ZERO`] if unset.
+    ///
+    /// This maps to client-go `KVSnapshot.GetKVReadTimeout`.
+    #[must_use]
+    pub fn kv_read_timeout(&self) -> Duration {
+        self.transaction.kv_read_timeout()
+    }
+
     /// Set the priority for requests.
     ///
     /// This maps to client-go `KVSnapshot.SetPriority`.
@@ -667,6 +684,7 @@ mod tests {
     use std::any::Any;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use crate::mock::{MockKvClient, MockPdClient};
     use crate::proto::kvrpcpb;
@@ -878,6 +896,64 @@ mod tests {
         assert_eq!(get_calls.load(Ordering::SeqCst), 2);
         assert_eq!(snapshot.snap_cache_hit_count(), 1);
         assert_eq!(snapshot.snap_cache_size(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_set_kv_read_timeout_sets_max_execution_duration_by_default() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+                let ctx = req.context.as_ref().expect("context should be populated");
+                assert_eq!(ctx.max_execution_duration_ms, 321);
+
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        snapshot.set_kv_read_timeout(Duration::from_millis(321));
+        assert_eq!(snapshot.kv_read_timeout(), Duration::from_millis(321));
+
+        let _ = snapshot.get(b"k".to_vec()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_set_kv_read_timeout_does_not_override_explicit_max_execution_duration() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+                let ctx = req.context.as_ref().expect("context should be populated");
+                assert_eq!(ctx.max_execution_duration_ms, 999);
+
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        snapshot.set_max_execution_duration(Duration::from_millis(999));
+        snapshot.set_kv_read_timeout(Duration::from_millis(321));
+
+        let _ = snapshot.get(b"k".to_vec()).await.unwrap();
     }
 
     #[test]

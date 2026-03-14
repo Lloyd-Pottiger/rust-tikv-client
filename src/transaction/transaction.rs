@@ -397,13 +397,23 @@ impl<PdC: PdClient> Transaction<PdC> {
 
     fn snapshot_read_context(&self) -> SnapshotReadContext {
         if self.options.read_only {
+            let max_execution_duration_ms = if self.options.max_execution_duration_ms > 0 {
+                self.options.max_execution_duration_ms
+            } else if self.options.kv_read_timeout.is_zero() {
+                0
+            } else {
+                self.options
+                    .kv_read_timeout
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64
+            };
             SnapshotReadContext {
                 replica_read: self.options.replica_read,
                 replica_read_adjuster: self.replica_read_adjuster.clone(),
                 stale_read: self.options.stale_read,
                 not_fill_cache: self.options.not_fill_cache,
                 task_id: self.options.task_id,
-                max_execution_duration_ms: self.options.max_execution_duration_ms,
+                max_execution_duration_ms,
                 busy_threshold_ms: self.options.busy_threshold_ms,
                 priority: self.options.priority,
                 isolation_level: self.options.isolation_level,
@@ -542,6 +552,25 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// This option is only effective for read-only snapshots.
     pub fn set_task_id(&mut self, task_id: u64) {
         self.options.task_id = task_id;
+    }
+
+    /// Set timeout for individual KV read operations under this snapshot read view.
+    ///
+    /// This maps to client-go `KVSnapshot.SetKVReadTimeout`.
+    ///
+    /// This option is only effective for read-only snapshots.
+    pub fn set_kv_read_timeout(&mut self, read_timeout: Duration) {
+        self.options.kv_read_timeout = read_timeout;
+    }
+
+    /// Get the configured per-snapshot KV read timeout.
+    ///
+    /// Returns [`Duration::ZERO`] if unset.
+    ///
+    /// This maps to client-go `KVSnapshot.GetKVReadTimeout`.
+    #[must_use]
+    pub fn kv_read_timeout(&self) -> Duration {
+        self.options.kv_read_timeout
     }
 
     pub(crate) fn set_snapshot_ts(&mut self, timestamp: Timestamp) -> Result<()> {
@@ -1034,6 +1063,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
+        let kv_read_timeout = self.options.kv_read_timeout;
         let pipelined_has_flushed = self
             .pipelined
             .as_ref()
@@ -1095,6 +1125,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                             }
                         }
 
+                        let request =
+                            crate::request::RequestWithTimeout::new(request, kv_read_timeout);
+
                         let plan_builder = PlanBuilder::new_with_rpc_interceptors(
                             rpc.clone(),
                             keyspace,
@@ -1145,6 +1178,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                         ctx.resource_group_tag = tag;
                     }
                 }
+
+                let request = crate::request::RequestWithTimeout::new(request, kv_read_timeout);
 
                 let plan_builder = PlanBuilder::new_with_rpc_interceptors(
                     rpc,
@@ -1241,6 +1276,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
+
+        let request =
+            crate::request::RequestWithTimeout::new(request, self.options.kv_read_timeout);
 
         let plan_builder = PlanBuilder::new_with_rpc_interceptors(
             rpc,
@@ -1441,6 +1479,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
+        let kv_read_timeout = self.options.kv_read_timeout;
         let pipelined_has_flushed = self
             .pipelined
             .as_ref()
@@ -1532,6 +1571,11 @@ impl<PdC: PdClient> Transaction<PdC> {
                                     ctx.resource_group_tag = tag;
                                 }
                             }
+
+                            let buffer_request = crate::request::RequestWithTimeout::new(
+                                buffer_request,
+                                kv_read_timeout,
+                            );
 
                             let plan_builder = PlanBuilder::new_with_rpc_interceptors(
                                 rpc.clone(),
@@ -1655,6 +1699,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                         }
                     }
 
+                    let request = crate::request::RequestWithTimeout::new(request, kv_read_timeout);
+
                     let plan_builder = PlanBuilder::new_with_rpc_interceptors(
                         rpc,
                         keyspace,
@@ -1760,6 +1806,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
+
+        let request =
+            crate::request::RequestWithTimeout::new(request, self.options.kv_read_timeout);
 
         let plan_builder = PlanBuilder::new_with_rpc_interceptors(
             rpc,
@@ -3210,6 +3259,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let match_store_labels = self.options.match_store_labels.clone();
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
+        let kv_read_timeout = self.options.kv_read_timeout;
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
 
         self.buffer
@@ -3236,6 +3286,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                             ctx.resource_group_tag = tag;
                         }
                     }
+
+                    let request = crate::request::RequestWithTimeout::new(request, kv_read_timeout);
 
                     let plan_builder = PlanBuilder::new_with_rpc_interceptors(
                         rpc,
@@ -4827,6 +4879,11 @@ pub struct TransactionOptions {
     not_fill_cache: bool,
     /// A hint for TiKV to schedule tasks more fairly (read-only snapshots only).
     task_id: u64,
+    /// Timeout for individual KV read operations under this transaction's snapshot read view.
+    ///
+    /// This maps to client-go `KVSnapshot.SetKVReadTimeout` and only applies to snapshot reads
+    /// (i.e. `get`/`batch_get`/`scan` on read-only snapshots).
+    kv_read_timeout: Duration,
     /// Server-side maximum execution duration for read requests (read-only snapshots only).
     max_execution_duration_ms: u64,
     /// TiKV may reject requests early if estimated wait time exceeds the threshold (read-only snapshots only).
@@ -5058,6 +5115,7 @@ impl TransactionOptions {
             stale_read: false,
             not_fill_cache: false,
             task_id: 0,
+            kv_read_timeout: Duration::ZERO,
             max_execution_duration_ms: 0,
             busy_threshold_ms: 0,
             priority: CommandPriority::Normal,
@@ -5095,6 +5153,7 @@ impl TransactionOptions {
             stale_read: false,
             not_fill_cache: false,
             task_id: 0,
+            kv_read_timeout: Duration::ZERO,
             max_execution_duration_ms: 0,
             busy_threshold_ms: 0,
             priority: CommandPriority::Normal,
