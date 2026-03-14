@@ -704,6 +704,18 @@ impl<PdC: PdClient> Client<PdC> {
             .await
     }
 
+    /// Update the PD GC safe point (V2) for the given keyspace.
+    ///
+    /// This maps to client-go `pd.Client.UpdateGCSafePointV2`.
+    ///
+    /// On success, returns PD's `new_safe_point` (the effective GC safe point).
+    pub async fn update_gc_safe_point_v2(&self, keyspace_id: u32, safe_point: u64) -> Result<u64> {
+        self.pd
+            .clone()
+            .update_gc_safe_point_v2(keyspace_id, safe_point)
+            .await
+    }
+
     /// Request garbage collection (GC) of the TiKV cluster.
     ///
     /// GC deletes MVCC records whose timestamp is lower than the given `safepoint`. We must guarantee
@@ -3326,6 +3338,26 @@ mod tests {
             pd_client.update_service_safe_point_v2_calls(),
             vec![(7, "service".to_owned(), 42, 9)]
         );
+    }
+
+    #[tokio::test]
+    async fn test_update_gc_safe_point_v2_calls_pd() {
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.push_update_gc_safe_point_v2_response(100);
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let new_safe_point = client.update_gc_safe_point_v2(7, 9).await.unwrap();
+        assert_eq!(new_safe_point, 100);
+        assert_eq!(pd_client.update_gc_safe_point_v2_calls(), vec![(7, 9)]);
     }
 
     #[derive(Clone)]

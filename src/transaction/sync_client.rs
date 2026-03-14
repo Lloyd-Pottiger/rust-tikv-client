@@ -398,6 +398,17 @@ impl SyncTransactionClient {
         )
     }
 
+    /// Update the PD GC safe point (V2) for the given keyspace.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::update_gc_safe_point_v2`](crate::TransactionClient::update_gc_safe_point_v2).
+    pub fn update_gc_safe_point_v2(&self, keyspace_id: u32, safe_point: u64) -> Result<u64> {
+        safe_block_on(
+            &self.runtime,
+            self.client.update_gc_safe_point_v2(keyspace_id, safe_point),
+        )
+    }
+
     /// Request garbage collection (GC) of the TiKV cluster.
     ///
     /// This is a synchronous version of [`TransactionClient::gc`](crate::TransactionClient::gc).
