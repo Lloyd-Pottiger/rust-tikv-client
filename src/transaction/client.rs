@@ -669,6 +669,41 @@ impl<PdC: PdClient> Client<PdC> {
             .await
     }
 
+    /// Update the PD "service GC safe point" for the given service.
+    ///
+    /// This maps to client-go `pd.Client.UpdateServiceGCSafePoint`.
+    ///
+    /// On success, returns PD's `min_safe_point` (the effective service GC safe point).
+    pub async fn update_service_gc_safe_point(
+        &self,
+        service_id: impl Into<String>,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        self.pd
+            .clone()
+            .update_service_gc_safe_point(service_id.into(), ttl, safe_point)
+            .await
+    }
+
+    /// Update the PD "service safe point" (V2) for the given keyspace and service.
+    ///
+    /// This maps to client-go `pd.Client.UpdateServiceSafePointV2`.
+    ///
+    /// On success, returns PD's `min_safe_point` (the effective service safe point).
+    pub async fn update_service_safe_point_v2(
+        &self,
+        keyspace_id: u32,
+        service_id: impl Into<String>,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        self.pd
+            .clone()
+            .update_service_safe_point_v2(keyspace_id, service_id.into(), ttl, safe_point)
+            .await
+    }
+
     /// Request garbage collection (GC) of the TiKV cluster.
     ///
     /// GC deletes MVCC records whose timestamp is lower than the given `safepoint`. We must guarantee
@@ -3239,6 +3274,58 @@ mod tests {
         assert_eq!(pd_client.update_safepoint_calls(), vec![9]);
         assert!(pd_client.update_gc_safe_point_v2_calls().is_empty());
         assert!(scan_lock_calls.load(Ordering::SeqCst) > 0);
+    }
+
+    #[tokio::test]
+    async fn test_update_service_gc_safe_point_calls_pd() {
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.push_update_service_gc_safe_point_response(100);
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let min_safe_point = client
+            .update_service_gc_safe_point("service".to_owned(), 42, 7)
+            .await
+            .unwrap();
+        assert_eq!(min_safe_point, 100);
+        assert_eq!(
+            pd_client.update_service_gc_safe_point_calls(),
+            vec![("service".to_owned(), 42, 7)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_service_safe_point_v2_calls_pd() {
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.push_update_service_safe_point_v2_response(100);
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let min_safe_point = client
+            .update_service_safe_point_v2(7, "service".to_owned(), 42, 9)
+            .await
+            .unwrap();
+        assert_eq!(min_safe_point, 100);
+        assert_eq!(
+            pd_client.update_service_safe_point_v2_calls(),
+            vec![(7, "service".to_owned(), 42, 9)]
+        );
     }
 
     #[derive(Clone)]

@@ -363,6 +363,41 @@ impl SyncTransactionClient {
         )
     }
 
+    /// Update the PD "service GC safe point" for the given service.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::update_service_gc_safe_point`](crate::TransactionClient::update_service_gc_safe_point).
+    pub fn update_service_gc_safe_point(
+        &self,
+        service_id: impl Into<String>,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        safe_block_on(
+            &self.runtime,
+            self.client
+                .update_service_gc_safe_point(service_id, ttl, safe_point),
+        )
+    }
+
+    /// Update the PD "service safe point" (V2) for the given keyspace and service.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::update_service_safe_point_v2`](crate::TransactionClient::update_service_safe_point_v2).
+    pub fn update_service_safe_point_v2(
+        &self,
+        keyspace_id: u32,
+        service_id: impl Into<String>,
+        ttl: i64,
+        safe_point: u64,
+    ) -> Result<u64> {
+        safe_block_on(
+            &self.runtime,
+            self.client
+                .update_service_safe_point_v2(keyspace_id, service_id, ttl, safe_point),
+        )
+    }
+
     /// Request garbage collection (GC) of the TiKV cluster.
     ///
     /// This is a synchronous version of [`TransactionClient::gc`](crate::TransactionClient::gc).
