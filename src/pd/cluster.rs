@@ -1,5 +1,6 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -332,9 +333,10 @@ impl Connection {
             } else {
                 cluster_id = Some(cid);
             }
-            // TODO: check all fields later?
 
-            if members.is_none() {
+            if let Some(sample) = members.as_ref() {
+                Connection::validate_get_members_consistency(ep, sample, &resp)?;
+            } else {
                 members = Some(resp);
             }
         }
@@ -428,6 +430,73 @@ impl Connection {
         } else {
             Ok(())
         }
+    }
+
+    fn validate_get_members_consistency(
+        addr: &str,
+        sample: &pdpb::GetMembersResponse,
+        current: &pdpb::GetMembersResponse,
+    ) -> Result<()> {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct NormalizedMember {
+            name: String,
+            peer_urls: Vec<String>,
+            client_urls: Vec<String>,
+        }
+
+        fn normalize_members(resp: &pdpb::GetMembersResponse) -> BTreeMap<u64, NormalizedMember> {
+            resp.members
+                .iter()
+                .map(|member| {
+                    let mut peer_urls = member.peer_urls.clone();
+                    peer_urls.sort();
+                    let mut client_urls = member.client_urls.clone();
+                    client_urls.sort();
+                    (
+                        member.member_id,
+                        NormalizedMember {
+                            name: member.name.clone(),
+                            peer_urls,
+                            client_urls,
+                        },
+                    )
+                })
+                .collect()
+        }
+
+        let sample = normalize_members(sample);
+        let current = normalize_members(current);
+        if sample == current {
+            return Ok(());
+        }
+
+        let missing: Vec<u64> = sample
+            .keys()
+            .filter(|id| !current.contains_key(id))
+            .copied()
+            .collect();
+        let extra: Vec<u64> = current
+            .keys()
+            .filter(|id| !sample.contains_key(id))
+            .copied()
+            .collect();
+        let changed: Vec<u64> = sample
+            .iter()
+            .filter_map(|(id, sample_member)| {
+                current
+                    .get(id)
+                    .filter(|current_member| *current_member != sample_member)
+                    .map(|_| *id)
+            })
+            .collect();
+
+        Err(internal_err!(
+            "PD endpoint {} returned inconsistent get_members members list (missing={:?}, extra={:?}, changed={:?})",
+            addr,
+            missing,
+            extra,
+            changed
+        ))
     }
 
     async fn try_connect_leader(
@@ -851,5 +920,97 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("missing header"));
+    }
+
+    #[test]
+    fn test_validate_get_members_consistency_accepts_reordered_members() {
+        let member1 = pdpb::Member {
+            name: "pd-1".to_owned(),
+            member_id: 1,
+            peer_urls: vec!["peer1".to_owned()],
+            client_urls: vec!["client1".to_owned()],
+            ..Default::default()
+        };
+        let member2 = pdpb::Member {
+            name: "pd-2".to_owned(),
+            member_id: 2,
+            peer_urls: vec!["peer2".to_owned()],
+            client_urls: vec!["client2".to_owned()],
+            ..Default::default()
+        };
+
+        let sample = pdpb::GetMembersResponse {
+            members: vec![member1.clone(), member2.clone()],
+            ..Default::default()
+        };
+        let current = pdpb::GetMembersResponse {
+            members: vec![member2, member1],
+            ..Default::default()
+        };
+
+        Connection::validate_get_members_consistency("127.0.0.1:2379", &sample, &current).unwrap();
+    }
+
+    #[test]
+    fn test_validate_get_members_consistency_rejects_missing_member() {
+        let member1 = pdpb::Member {
+            name: "pd-1".to_owned(),
+            member_id: 1,
+            peer_urls: vec!["peer1".to_owned()],
+            client_urls: vec!["client1".to_owned()],
+            ..Default::default()
+        };
+        let member2 = pdpb::Member {
+            name: "pd-2".to_owned(),
+            member_id: 2,
+            peer_urls: vec!["peer2".to_owned()],
+            client_urls: vec!["client2".to_owned()],
+            ..Default::default()
+        };
+
+        let sample = pdpb::GetMembersResponse {
+            members: vec![member1.clone(), member2],
+            ..Default::default()
+        };
+        let current = pdpb::GetMembersResponse {
+            members: vec![member1],
+            ..Default::default()
+        };
+
+        let err = Connection::validate_get_members_consistency("127.0.0.1:2379", &sample, &current)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("inconsistent get_members members list"));
+        assert!(err.contains("missing"));
+    }
+
+    #[test]
+    fn test_validate_get_members_consistency_rejects_member_url_changes() {
+        let member1 = pdpb::Member {
+            name: "pd-1".to_owned(),
+            member_id: 1,
+            peer_urls: vec!["peer1".to_owned()],
+            client_urls: vec!["client1".to_owned()],
+            ..Default::default()
+        };
+        let member1_changed = pdpb::Member {
+            client_urls: vec!["client1-new".to_owned()],
+            ..member1.clone()
+        };
+
+        let sample = pdpb::GetMembersResponse {
+            members: vec![member1],
+            ..Default::default()
+        };
+        let current = pdpb::GetMembersResponse {
+            members: vec![member1_changed],
+            ..Default::default()
+        };
+
+        let err = Connection::validate_get_members_consistency("127.0.0.1:2379", &sample, &current)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("inconsistent get_members members list"));
+        assert!(err.contains("changed"));
     }
 }
