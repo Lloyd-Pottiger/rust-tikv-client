@@ -2353,6 +2353,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let write_throttle_ratio = pipelined.write_throttle_ratio();
 
         let flush_handle = tokio::spawn(async move {
+            fail_point!("before-pipelined-flush", |_| { Ok(()) });
             throttle_pipelined_flush(flush_ewma.clone(), write_throttle_ratio).await;
 
             let start = Instant::now();
@@ -6885,6 +6886,57 @@ mod tests {
             "pipelined_flush"
         );
         assert_eq!(flushed[0].assertion_level, AssertionLevel::Strict as i32);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_pipelined_flush_blocks_when_previous_flush_in_flight() {
+        struct FailpointGuard;
+        impl Drop for FailpointGuard {
+            fn drop(&mut self) {
+                let _ = fail::cfg("before-pipelined-flush", "off");
+            }
+        }
+
+        let scenario = FailScenario::setup();
+        fail::cfg("before-pipelined-flush", "1*sleep(200)").unwrap();
+        let _failpoint_guard = FailpointGuard;
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put("key1".to_owned(), "value1").await.unwrap();
+        assert!(txn.flush(true).await.unwrap());
+
+        txn.put("key2".to_owned(), "value2").await.unwrap();
+        let mut second_flush = Box::pin(txn.flush(true));
+
+        tokio::select! {
+            res = &mut second_flush => {
+                panic!("flush should be blocked by in-flight flush, got {res:?}");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+
+        assert!(second_flush.await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        scenario.teardown();
     }
 
     #[tokio::test]
