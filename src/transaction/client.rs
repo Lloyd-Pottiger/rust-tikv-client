@@ -700,11 +700,22 @@ impl<PdC: PdClient> Client<PdC> {
         self.cleanup_locks(.., &safepoint, options).await?;
 
         // update safepoint to PD
-        let new_safe_point = self
-            .pd
-            .clone()
-            .update_safepoint(safepoint.version())
-            .await?;
+        let requested = safepoint.version();
+        let new_safe_point = match self.keyspace {
+            Keyspace::Enable { keyspace_id } => match self
+                .pd
+                .clone()
+                .update_gc_safe_point_v2(keyspace_id, requested)
+                .await
+            {
+                Ok(new_safe_point) => new_safe_point,
+                Err(crate::Error::Unimplemented) => {
+                    self.pd.clone().update_safepoint(requested).await?
+                }
+                Err(err) => return Err(err),
+            },
+            _ => self.pd.clone().update_safepoint(requested).await?,
+        };
         if new_safe_point != safepoint.version() {
             info!(
                 "new safepoint {} != user-specified safepoint {}",
@@ -3153,5 +3164,189 @@ mod tests {
         assert!(client.check_region_in_scattering(42).await.unwrap());
         assert!(!client.check_region_in_scattering(42).await.unwrap());
         assert_eq!(pd_client.get_operator_calls(), vec![42, 42]);
+    }
+
+    #[tokio::test]
+    async fn test_gc_safepoint_uses_update_gc_safe_point_v2_when_keyspace_enabled() {
+        let scan_lock_calls = Arc::new(AtomicUsize::new(0));
+        let scan_lock_calls_captured = scan_lock_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::ScanLockRequest>().is_some() {
+                    scan_lock_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::ScanLockResponse::default()) as Box<dyn Any>);
+                }
+
+                unreachable!("unexpected request type")
+            },
+        )));
+        pd_client.push_update_gc_safe_point_v2_response(100);
+
+        let keyspace = Keyspace::Enable { keyspace_id: 7 };
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let new_safe_point = client
+            .gc_safepoint(Timestamp::from_version(9))
+            .await
+            .unwrap();
+        assert_eq!(new_safe_point, 100);
+        assert_eq!(pd_client.update_gc_safe_point_v2_calls(), vec![(7, 9)]);
+        assert!(pd_client.update_safepoint_calls().is_empty());
+        assert!(scan_lock_calls.load(Ordering::SeqCst) > 0);
+    }
+
+    #[tokio::test]
+    async fn test_gc_safepoint_uses_update_safepoint_when_keyspace_disabled() {
+        let scan_lock_calls = Arc::new(AtomicUsize::new(0));
+        let scan_lock_calls_captured = scan_lock_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::ScanLockRequest>().is_some() {
+                    scan_lock_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::ScanLockResponse::default()) as Box<dyn Any>);
+                }
+
+                unreachable!("unexpected request type")
+            },
+        )));
+        pd_client.push_update_safepoint_response(100);
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let new_safe_point = client
+            .gc_safepoint(Timestamp::from_version(9))
+            .await
+            .unwrap();
+        assert_eq!(new_safe_point, 100);
+        assert_eq!(pd_client.update_safepoint_calls(), vec![9]);
+        assert!(pd_client.update_gc_safe_point_v2_calls().is_empty());
+        assert!(scan_lock_calls.load(Ordering::SeqCst) > 0);
+    }
+
+    #[derive(Clone)]
+    struct UnimplementedGcSafePointV2PdClient {
+        inner: Arc<MockPdClient>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::pd::PdClient for UnimplementedGcSafePointV2PdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            region: crate::region::RegionWithLeader,
+        ) -> crate::Result<crate::store::RegionStore> {
+            self.inner.clone().map_region_to_store(region).await
+        }
+
+        async fn region_for_key(
+            &self,
+            key: &crate::Key,
+        ) -> crate::Result<crate::region::RegionWithLeader> {
+            self.inner.region_for_key(key).await
+        }
+
+        async fn region_for_id(
+            &self,
+            id: crate::region::RegionId,
+        ) -> crate::Result<crate::region::RegionWithLeader> {
+            self.inner.region_for_id(id).await
+        }
+
+        async fn all_stores(&self) -> crate::Result<Vec<crate::store::Store>> {
+            self.inner.all_stores().await
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> crate::Result<crate::Timestamp> {
+            self.inner.clone().get_timestamp().await
+        }
+
+        async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> crate::Result<u64> {
+            self.inner.clone().update_safepoint(safepoint).await
+        }
+
+        async fn load_keyspace(
+            &self,
+            keyspace: &str,
+        ) -> crate::Result<crate::proto::keyspacepb::KeyspaceMeta> {
+            self.inner.load_keyspace(keyspace).await
+        }
+
+        async fn update_leader(
+            &self,
+            ver_id: crate::region::RegionVerId,
+            leader: crate::proto::metapb::Peer,
+        ) -> crate::Result<()> {
+            self.inner.update_leader(ver_id, leader).await
+        }
+
+        async fn invalidate_region_cache(&self, ver_id: crate::region::RegionVerId) {
+            self.inner.invalidate_region_cache(ver_id).await;
+        }
+
+        async fn invalidate_store_cache(&self, store_id: crate::region::StoreId) {
+            self.inner.invalidate_store_cache(store_id).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gc_safepoint_falls_back_to_update_safepoint_when_gc_safe_point_v2_unimplemented()
+    {
+        let scan_lock_calls = Arc::new(AtomicUsize::new(0));
+        let scan_lock_calls_captured = scan_lock_calls.clone();
+
+        let inner = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::ScanLockRequest>().is_some() {
+                    scan_lock_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::ScanLockResponse::default()) as Box<dyn Any>);
+                }
+
+                unreachable!("unexpected request type")
+            },
+        )));
+        inner.push_update_safepoint_response(100);
+
+        let pd_client = Arc::new(UnimplementedGcSafePointV2PdClient {
+            inner: inner.clone(),
+        });
+
+        let keyspace = Keyspace::Enable { keyspace_id: 7 };
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            pd: pd_client,
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+        };
+
+        let new_safe_point = client
+            .gc_safepoint(Timestamp::from_version(9))
+            .await
+            .unwrap();
+        assert_eq!(new_safe_point, 100);
+        assert_eq!(inner.update_safepoint_calls(), vec![9]);
+        assert!(inner.update_gc_safe_point_v2_calls().is_empty());
+        assert!(scan_lock_calls.load(Ordering::SeqCst) > 0);
     }
 }

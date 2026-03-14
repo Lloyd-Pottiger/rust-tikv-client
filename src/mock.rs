@@ -140,6 +140,10 @@ pub struct MockPdClient {
     update_gc_safe_point_v2_calls: Mutex<Vec<(u32, u64)>>,
     #[new(value = "Mutex::new(VecDeque::new())")]
     update_gc_safe_point_v2_responses: Mutex<VecDeque<u64>>,
+    #[new(value = "Mutex::new(Vec::new())")]
+    update_safepoint_calls: Mutex<Vec<u64>>,
+    #[new(value = "Mutex::new(VecDeque::new())")]
+    update_safepoint_responses: Mutex<VecDeque<u64>>,
 }
 
 #[async_trait]
@@ -259,6 +263,22 @@ impl MockPdClient {
 
     pub fn push_update_gc_safe_point_v2_response(&self, new_safe_point: u64) {
         let mut responses = match self.update_gc_safe_point_v2_responses.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        responses.push_back(new_safe_point);
+    }
+
+    pub fn update_safepoint_calls(&self) -> Vec<u64> {
+        let calls = match self.update_safepoint_calls.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        calls.clone()
+    }
+
+    pub fn push_update_safepoint_response(&self, new_safe_point: u64) {
+        let mut responses = match self.update_safepoint_responses.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -733,8 +753,18 @@ impl PdClient for MockPdClient {
         Ok(responses.pop_front().unwrap_or(safe_point))
     }
 
-    async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
-        Err(Error::Unimplemented)
+    async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {
+        let mut calls = match self.update_safepoint_calls.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        calls.push(safepoint);
+
+        let mut responses = match self.update_safepoint_responses.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Ok(responses.pop_front().unwrap_or(safepoint))
     }
 
     async fn update_leader(
@@ -874,6 +904,20 @@ mod tests {
         assert_eq!(client.update_gc_safe_point_v2_calls(), vec![(7, 9)]);
 
         let new_safe_point = client.clone().update_gc_safe_point_v2(7, 5).await.unwrap();
+        assert_eq!(new_safe_point, 5);
+    }
+
+    #[tokio::test]
+    async fn test_mock_pd_client_update_safepoint_records_calls_and_uses_queue() {
+        let client = Arc::new(MockPdClient::default());
+
+        client.push_update_safepoint_response(100);
+        let new_safe_point = client.clone().update_safepoint(9).await.unwrap();
+
+        assert_eq!(new_safe_point, 100);
+        assert_eq!(client.update_safepoint_calls(), vec![9]);
+
+        let new_safe_point = client.clone().update_safepoint(5).await.unwrap();
         assert_eq!(new_safe_point, 5);
     }
 }
