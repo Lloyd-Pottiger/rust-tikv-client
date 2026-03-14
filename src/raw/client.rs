@@ -112,8 +112,10 @@ impl Client<PdRpcClient> {
     ) -> Result<Self> {
         let enable_codec = config.keyspace.is_some();
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
+        let health_feedback_update_interval = config.health_feedback_update_interval;
         let rpc =
             Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), enable_codec).await?);
+        crate::pd::spawn_health_feedback_updater(rpc.clone(), health_feedback_update_interval);
         let keyspace = match config.keyspace {
             Some(name) => {
                 let keyspace = rpc.load_keyspace(&name).await?;

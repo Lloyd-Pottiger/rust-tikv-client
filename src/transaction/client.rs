@@ -174,7 +174,9 @@ impl Client {
     ) -> Result<Client> {
         debug!("creating new transactional client");
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
+        let health_feedback_update_interval = config.health_feedback_update_interval;
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
+        crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
         let keyspace = match config.keyspace {
             Some(name) => {
                 let keyspace = pd.load_keyspace(&name).await?;
@@ -210,7 +212,9 @@ impl Client {
 
         debug!("creating new transactional client (api-v2-no-prefix)");
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
+        let health_feedback_update_interval = config.health_feedback_update_interval;
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
+        crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
         Ok(Client {
             safe_ts: SafeTsCache::new(pd.clone(), Keyspace::ApiV2NoPrefix),
             pd,

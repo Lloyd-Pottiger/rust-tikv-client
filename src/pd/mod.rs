@@ -1,10 +1,12 @@
 mod client;
 mod cluster;
+mod health_feedback;
 mod retry;
 mod timestamp;
 
 pub use self::client::PdClient;
 pub use self::client::PdRpcClient;
+pub(crate) use self::health_feedback::spawn_health_feedback_updater;
 #[cfg(test)]
 pub(crate) const HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD: i32 =
     self::client::HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD;

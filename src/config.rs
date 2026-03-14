@@ -32,6 +32,13 @@ pub struct Config {
     pub grpc_max_decoding_message_size: usize,
     pub keyspace: Option<String>,
     pub resolve_lock_lite_threshold: u64,
+    /// How often to refresh TiKV store health feedback (slow score).
+    ///
+    /// When non-zero, the client periodically issues `GetHealthFeedback` to all stores and uses
+    /// the responses to update best-effort slow-store heuristics for replica read selection.
+    ///
+    /// Defaults to disabled (`0s`).
+    pub health_feedback_update_interval: Duration,
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -50,6 +57,7 @@ impl Default for Config {
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
             keyspace: None,
             resolve_lock_lite_threshold: DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD,
+            health_feedback_update_interval: Duration::ZERO,
         }
     }
 }
@@ -147,6 +155,15 @@ impl Config {
     #[must_use]
     pub fn with_resolve_lock_lite_threshold(mut self, threshold: u64) -> Self {
         self.resolve_lock_lite_threshold = threshold;
+        self
+    }
+
+    /// Set how often to refresh TiKV store health feedback (slow score).
+    ///
+    /// Set to `Duration::ZERO` to disable the background refresher (default).
+    #[must_use]
+    pub fn with_health_feedback_update_interval(mut self, interval: Duration) -> Self {
+        self.health_feedback_update_interval = interval;
         self
     }
 }
