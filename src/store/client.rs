@@ -173,6 +173,20 @@ impl KvRpcClient {
             };
         }
 
+        if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::ScanLockRequest>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::ScanLock(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(tikvpb::batch_commands_response::response::Cmd::ScanLock(resp)) => {
+                    Ok(Some(Box::new(resp) as Box<dyn Any>))
+                }
+                Ok(other) => Err(Error::StringError(format!(
+                    "unexpected batch_commands response for scan_lock: {other:?}"
+                ))),
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawGetRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawGet(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
@@ -442,6 +456,87 @@ mod tests {
             .downcast::<kvrpcpb::RawCoprocessorResponse>()
             .map_err(|_| Error::StringError("expected raw_coprocessor response".to_owned()))?;
         assert_eq!(resp.data, b"pong".to_vec());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_scan_lock_via_batch_commands() -> Result<()> {
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
+            rx.recv().await.map(|message| (message, rx))
+        });
+        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
+
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+        let client = KvRpcClient {
+            rpc_client,
+            timeout: Duration::from_secs(1),
+            batch: Some(batch),
+        };
+
+        let mut request = kvrpcpb::ScanLockRequest::default();
+        request.max_version = 42;
+        request.start_key = b"a".to_vec();
+        request.end_key = b"z".to_vec();
+        request.limit = 123;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "scan_lock dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::ScanLock(sent_req) => {
+                assert_eq!(sent_req.max_version, 42);
+                assert_eq!(sent_req.start_key, b"a".to_vec());
+                assert_eq!(sent_req.end_key, b"z".to_vec());
+                assert_eq!(sent_req.limit, 123);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for scan_lock: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::ScanLock(
+                    kvrpcpb::ScanLockResponse {
+                        locks: vec![kvrpcpb::LockInfo {
+                            key: b"k".to_vec(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::ScanLockResponse>()
+            .map_err(|_| Error::StringError("expected scan_lock response".to_owned()))?;
+        assert_eq!(resp.locks.len(), 1);
+        assert_eq!(resp.locks[0].key, b"k".to_vec());
         Ok(())
     }
 }
