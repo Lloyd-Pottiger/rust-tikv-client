@@ -5,6 +5,7 @@
 //! These utilities are intended to make it easier to port client-go tests that
 //! rely on exported `*Probe` types (for example, `txnlock/test_probe.go`).
 
+use crate::backoff::OPTIMISTIC_BACKOFF;
 use crate::pd::PdClient;
 use crate::proto::kvrpcpb;
 use crate::timestamp::TimestampExt;
@@ -114,6 +115,24 @@ impl<PdC: PdClient> LockResolverProbe<PdC> {
         matches!(err, Error::TxnNotFound(_))
     }
 
+    /// Resolves a single lock.
+    ///
+    /// This mirrors client-go `LockResolverProbe.ResolveLock`.
+    pub async fn resolve_lock(&self, lock: Lock) -> Result<()> {
+        let lock = lock.into_proto();
+        self.inner
+            .resolve_lock_for_probe(&lock, 0, OPTIMISTIC_BACKOFF, None)
+            .await
+    }
+
+    /// Resolves a single pessimistic lock.
+    ///
+    /// This mirrors client-go `LockResolverProbe.ResolvePessimisticLock`.
+    pub async fn resolve_pessimistic_lock(&self, lock: Lock) -> Result<()> {
+        let lock = lock.into_proto();
+        self.inner.resolve_pessimistic_lock_for_probe(&lock).await
+    }
+
     /// Forces resolving the given lock by setting `lock_ttl = 0` before invoking lock resolution.
     ///
     /// This mirrors the helper used by client-go tests (`ForceResolveLock`).
@@ -138,6 +157,7 @@ impl<PdC: PdClient> LockResolverProbe<PdC> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::*;
@@ -199,5 +219,77 @@ mod tests {
 
         assert!(probe.is_error_not_found(&Error::TxnNotFound(kvrpcpb::TxnNotFound::default())));
         assert!(!probe.is_error_not_found(&Error::Unimplemented));
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_probe_resolve_lock_issues_resolve_lock_lite() {
+        let resolve_lock_calls = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_calls_captured = resolve_lock_calls.clone();
+        let expected_key = b"k".to_vec();
+        let expected_key_captured = expected_key.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn std::any::Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.start_version, 42);
+                    assert_eq!(req.commit_version, 0);
+                    assert_eq!(req.keys, vec![expected_key_captured.clone()]);
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()));
+                }
+                Err(Error::Unimplemented)
+            },
+        )));
+        let resolver =
+            BoundLockResolver::new(pd_client, Keyspace::Disable, ResolveLocksContext::default());
+        let probe = LockResolverProbe::new(resolver);
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = expected_key;
+        lock.primary_lock = b"p".to_vec();
+        lock.lock_version = 42;
+        lock.txn_size = 1;
+        probe
+            .resolve_lock(Lock::new(lock))
+            .await
+            .expect("resolve_lock should succeed");
+
+        assert_eq!(resolve_lock_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_lock_resolver_probe_resolve_pessimistic_lock_issues_pessimistic_rollback() {
+        let rollback_calls = Arc::new(AtomicUsize::new(0));
+        let rollback_calls_captured = rollback_calls.clone();
+        let expected_key = b"k".to_vec();
+        let expected_key_captured = expected_key.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn std::any::Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticRollbackRequest>() {
+                    rollback_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.start_version, 42);
+                    assert_eq!(req.for_update_ts, u64::MAX);
+                    assert_eq!(req.keys, vec![expected_key_captured.clone()]);
+                    return Ok(Box::new(kvrpcpb::PessimisticRollbackResponse::default()));
+                }
+                Err(Error::Unimplemented)
+            },
+        )));
+        let resolver =
+            BoundLockResolver::new(pd_client, Keyspace::Disable, ResolveLocksContext::default());
+        let probe = LockResolverProbe::new(resolver);
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = expected_key;
+        lock.primary_lock = b"p".to_vec();
+        lock.lock_version = 42;
+        lock.lock_type = kvrpcpb::Op::PessimisticLock as i32;
+        probe
+            .resolve_pessimistic_lock(Lock::new(lock))
+            .await
+            .expect("resolve_pessimistic_lock should succeed");
+
+        assert_eq!(rollback_calls.load(Ordering::SeqCst), 1);
     }
 }

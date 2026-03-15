@@ -1576,6 +1576,55 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
         self.inner.clear_meet_lock_callback();
     }
 
+    /// Resolves a single lock by issuing a `ResolveLock` request.
+    ///
+    /// This is intended for test probes and mirrors client-go `LockResolverProbe.ResolveLock`.
+    pub(crate) async fn resolve_lock_for_probe(
+        &self,
+        lock: &kvrpcpb::LockInfo,
+        commit_version: u64,
+        backoff: Backoff,
+        killed: Option<Arc<AtomicU32>>,
+    ) -> Result<()> {
+        let resolve_lock_lite_threshold = self.pd_client.resolve_lock_lite_threshold();
+        let resolve_lite = lock.txn_size < resolve_lock_lite_threshold;
+        if resolve_lite && lock.key == lock.primary_lock {
+            return Ok(());
+        }
+
+        let _ = resolve_lock_with_retry(
+            &lock.key,
+            lock.lock_version,
+            commit_version,
+            lock.is_txn_file,
+            resolve_lite,
+            &self.inner.rpc_context,
+            self.pd_client.clone(),
+            self.keyspace,
+            backoff,
+            killed,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Resolves a single pessimistic lock by issuing a `PessimisticRollback` request.
+    ///
+    /// This is intended for test probes and mirrors client-go
+    /// `LockResolverProbe.ResolvePessimisticLock`.
+    pub(crate) async fn resolve_pessimistic_lock_for_probe(
+        &self,
+        lock: &kvrpcpb::LockInfo,
+    ) -> Result<()> {
+        rollback_pessimistic_lock(
+            lock,
+            &self.inner.rpc_context,
+            self.pd_client.clone(),
+            self.keyspace,
+        )
+        .await
+    }
+
     /// Records the locks being resolved for a given `caller_start_ts` and returns a token.
     pub async fn record_resolving_locks(
         &self,
