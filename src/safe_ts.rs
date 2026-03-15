@@ -4,8 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use log::debug;
-use tokio::sync::Mutex;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, Mutex, RwLock};
 
 use crate::backoff::DEFAULT_STORE_BACKOFF;
 use crate::pd::PdClient;
@@ -14,6 +13,7 @@ use crate::region::StoreId;
 use crate::request::Keyspace;
 use crate::request::Plan;
 use crate::request::PlanBuilder;
+use crate::Error;
 use crate::Result;
 
 const GLOBAL_TXN_SCOPE: &str = "global";
@@ -32,13 +32,21 @@ impl<PdC: PdClient> Clone for SafeTsCache<PdC> {
     }
 }
 
+#[derive(Debug, Default)]
+struct SafeTsRefreshState {
+    in_flight: bool,
+    generation: u64,
+    last_error: Option<String>,
+}
+
 struct SafeTsCacheInner<PdC: PdClient> {
     pd: Arc<PdC>,
     keyspace: Keyspace,
     state: RwLock<SafeTsState>,
     started: AtomicBool,
     start_lock: Mutex<()>,
-    refresh_lock: Mutex<()>,
+    refresh: Mutex<SafeTsRefreshState>,
+    refresh_generation: watch::Sender<u64>,
 }
 
 #[derive(Default)]
@@ -50,6 +58,7 @@ struct SafeTsState {
 
 impl<PdC: PdClient> SafeTsCache<PdC> {
     pub(crate) fn new(pd: Arc<PdC>, keyspace: Keyspace) -> Self {
+        let (refresh_generation, _rx) = watch::channel(0);
         SafeTsCache {
             inner: Arc::new(SafeTsCacheInner {
                 pd,
@@ -57,7 +66,8 @@ impl<PdC: PdClient> SafeTsCache<PdC> {
                 state: RwLock::new(SafeTsState::default()),
                 started: AtomicBool::new(false),
                 start_lock: Mutex::new(()),
-                refresh_lock: Mutex::new(()),
+                refresh: Mutex::new(SafeTsRefreshState::default()),
+                refresh_generation,
             }),
         }
     }
@@ -125,8 +135,47 @@ impl<PdC: PdClient> SafeTsCache<PdC> {
 
 impl<PdC: PdClient> SafeTsCacheInner<PdC> {
     async fn refresh(&self) -> Result<()> {
-        let _guard = self.refresh_lock.lock().await;
+        loop {
+            let wait_for_generation = {
+                let mut refresh = self.refresh.lock().await;
+                if refresh.in_flight {
+                    Some(refresh.generation)
+                } else {
+                    refresh.in_flight = true;
+                    None
+                }
+            };
 
+            if let Some(generation) = wait_for_generation {
+                let mut refreshed = self.refresh_generation.subscribe();
+                while *refreshed.borrow() == generation {
+                    // Sender is owned by the cache; treat closure as a best-effort wake-up.
+                    if refreshed.changed().await.is_err() {
+                        break;
+                    }
+                }
+
+                let refresh = self.refresh.lock().await;
+                if let Some(err) = refresh.last_error.as_ref() {
+                    return Err(Error::StringError(err.clone()));
+                }
+                return Ok(());
+            }
+
+            let result = self.refresh_once().await;
+            let generation = {
+                let mut refresh = self.refresh.lock().await;
+                refresh.in_flight = false;
+                refresh.generation = refresh.generation.wrapping_add(1);
+                refresh.last_error = result.as_ref().err().map(|err| err.to_string());
+                refresh.generation
+            };
+            let _ = self.refresh_generation.send(generation);
+            return result;
+        }
+    }
+
+    async fn refresh_once(&self) -> Result<()> {
         let stores = self.pd.all_stores_for_safe_ts().await?;
         if stores.is_empty() {
             let mut state = self.state.write().await;
@@ -514,6 +563,62 @@ mod tests {
             store_safe_ts_calls.load(Ordering::SeqCst),
             0,
             "pd fast path should skip StoreSafeTS RPCs"
+        );
+
+        assert_eq!(safe_ts.min_safe_ts().await?, 10);
+        assert_eq!(safe_ts.min_safe_ts_with_txn_scope("dc1").await?, 100);
+        assert_eq!(safe_ts.min_safe_ts_with_txn_scope("dc2").await?, 10);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_safe_ts_refresh_dedupes_concurrent_calls() -> Result<()> {
+        let store_safe_ts_calls = Arc::new(AtomicUsize::new(0));
+        let tikv_dc1 = store_for_safe_ts_with_counter(
+            1,
+            vec![metapb::StoreLabel {
+                key: "zone".to_owned(),
+                value: "dc1".to_owned(),
+            }],
+            100,
+            store_safe_ts_calls.clone(),
+        );
+        let tikv_dc2 = store_for_safe_ts_with_counter(
+            2,
+            vec![metapb::StoreLabel {
+                key: "zone".to_owned(),
+                value: "dc2".to_owned(),
+            }],
+            10,
+            store_safe_ts_calls.clone(),
+        );
+
+        let pd_client = Arc::new(SafeTsPdClient {
+            stores: vec![tikv_dc1, tikv_dc2],
+        });
+        let safe_ts = SafeTsCache::new(pd_client, Keyspace::Disable);
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(11));
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let safe_ts = safe_ts.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                safe_ts.refresh().await
+            }));
+        }
+        barrier.wait().await;
+
+        for handle in handles {
+            handle.await.unwrap()?;
+        }
+
+        assert_eq!(
+            store_safe_ts_calls.load(Ordering::SeqCst),
+            2,
+            "concurrent refresh calls should be singleflighted"
         );
 
         assert_eq!(safe_ts.min_safe_ts().await?, 10);
