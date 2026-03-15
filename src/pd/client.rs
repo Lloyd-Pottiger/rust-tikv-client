@@ -567,9 +567,7 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     pd_http_use_https: bool,
 }
 
-impl<KvC: KvConnect + Send + Sync + 'static> HealthFeedbackObserver
-    for PdRpcClient<KvC, Cluster>
-{
+impl<KvC: KvConnect + Send + Sync + 'static> HealthFeedbackObserver for PdRpcClient<KvC, Cluster> {
     fn observe_health_feedback(&self, feedback: &kvrpcpb::HealthFeedback) {
         if feedback.slow_score >= HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD {
             PdClient::mark_store_slow(self, feedback.store_id, HEALTH_FEEDBACK_SLOW_STORE_TTL);

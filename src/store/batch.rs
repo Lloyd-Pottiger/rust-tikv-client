@@ -37,6 +37,7 @@ struct BatchCommandsClientInner {
     inflight: Arc<Mutex<HashMap<u64, oneshot::Sender<BatchResponse>>>>,
     next_id: AtomicU64,
     reader: JoinHandle<()>,
+    stream_error: Arc<Mutex<Option<Status>>>,
 }
 
 impl Drop for BatchCommandsClientInner {
@@ -80,6 +81,8 @@ impl BatchCommandsClient {
         let inflight: Arc<Mutex<HashMap<u64, oneshot::Sender<BatchResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let inflight_reader = inflight.clone();
+        let stream_error = Arc::new(Mutex::new(None));
+        let stream_error_reader = stream_error.clone();
 
         let reader = tokio::spawn(async move {
             let mut inbound = Box::pin(inbound);
@@ -128,6 +131,12 @@ impl BatchCommandsClient {
                 }
             };
 
+            let mut guard = stream_error_reader
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = Some(stream_err.clone());
+            drop(guard);
+
             let mut inflight = inflight_reader.lock().unwrap_or_else(|e| e.into_inner());
             for (_, sender) in inflight.drain() {
                 let _ = sender.send(Err(Error::GrpcAPI(stream_err.clone())));
@@ -139,6 +148,7 @@ impl BatchCommandsClient {
             inflight,
             next_id: AtomicU64::new(1),
             reader,
+            stream_error,
         };
         Ok(BatchCommandsClient {
             inner: Arc::new(inner),
@@ -150,6 +160,16 @@ impl BatchCommandsClient {
         cmd: tikvpb::batch_commands_request::request::Cmd,
         timeout: Duration,
     ) -> Result<BatchDispatchResult> {
+        if let Some(status) = self
+            .inner
+            .stream_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Err(Error::GrpcAPI(status));
+        }
+
         let request_id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         {
@@ -170,11 +190,17 @@ impl BatchCommandsClient {
             request_ids: vec![request_id],
         };
 
-        self.inner.outbound.send(request).await.map_err(|_| {
-            Error::GrpcAPI(Status::unavailable(
-                "batch_commands stream is unavailable (sender dropped)",
-            ))
-        })?;
+        if self.inner.outbound.send(request).await.is_err() {
+            let status =
+                Status::unavailable("batch_commands stream is unavailable (sender dropped)");
+            let mut guard = self
+                .inner
+                .stream_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = Some(status.clone());
+            return Err(Error::GrpcAPI(status));
+        }
 
         match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(result)) => result,
@@ -341,5 +367,65 @@ mod tests {
             Error::GrpcAPI(status) => assert_eq!(status.code(), tonic::Code::Unavailable),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_batch_commands_client_stream_error_fails_fast_for_future_requests() {
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let client = client_with_channels(out_tx, in_rx);
+
+        let task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .dispatch(
+                        tikvpb::batch_commands_request::request::Cmd::Empty(
+                            tikvpb::BatchCommandsEmptyRequest::default(),
+                        ),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            })
+        };
+
+        let _req = out_rx.recv().await.expect("batch request");
+        in_tx
+            .send(Err(Status::unavailable("boom")))
+            .await
+            .expect("send stream error");
+
+        let err = task
+            .await
+            .expect("task join")
+            .expect_err("expected stream error");
+        match err {
+            Error::GrpcAPI(status) => assert_eq!(status.code(), tonic::Code::Unavailable),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let err = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.dispatch(
+                tikvpb::batch_commands_request::request::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyRequest::default(),
+                ),
+                Duration::from_secs(30),
+            ),
+        )
+        .await
+        .expect("second dispatch should not hang")
+        .expect_err("expected stream error");
+        match err {
+            Error::GrpcAPI(status) => assert_eq!(status.code(), tonic::Code::Unavailable),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), out_rx.recv())
+                .await
+                .is_err(),
+            "stream error should prevent sending new batch requests"
+        );
     }
 }
