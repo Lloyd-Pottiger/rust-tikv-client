@@ -21,6 +21,7 @@ struct GcSafePointState {
 struct GcSafePointRefreshState {
     in_flight: bool,
     generation: u64,
+    last_error: Option<String>,
 }
 
 struct GcSafePointCacheInner<PdC: PdClient> {
@@ -102,10 +103,16 @@ impl<PdC: PdClient> GcSafePointCache<PdC> {
                         break;
                     }
                 }
+
+                let refresh = self.inner.refresh.lock().await;
+                if let Some(err) = refresh.last_error.as_ref() {
+                    return Err(Error::StringError(err.clone()));
+                }
                 continue;
             }
 
             let fetched = self.fetch_safe_point().await;
+            let last_error = fetched.as_ref().err().map(|err| err.to_string());
             let result = match fetched {
                 Ok(safe_point) => {
                     let mut state = self.inner.state.write().await;
@@ -120,6 +127,7 @@ impl<PdC: PdClient> GcSafePointCache<PdC> {
                 let mut refresh = self.inner.refresh.lock().await;
                 refresh.in_flight = false;
                 refresh.generation = refresh.generation.wrapping_add(1);
+                refresh.last_error = last_error;
                 refresh.generation
             };
             let _ = self.inner.refresh_generation.send(generation);
@@ -191,6 +199,7 @@ mod tests {
         ready: Arc<Notify>,
         safe_point: u64,
         calls: Arc<AtomicUsize>,
+        fail: bool,
     }
 
     #[async_trait]
@@ -220,7 +229,13 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.called.notify_one();
             self.ready.notified().await;
-            Ok(self.safe_point)
+            if self.fail {
+                Err(Error::StringError(
+                    "injected gc safe point error".to_owned(),
+                ))
+            } else {
+                Ok(self.safe_point)
+            }
         }
 
         async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
@@ -254,6 +269,7 @@ mod tests {
             ready: ready.clone(),
             safe_point: 42,
             calls,
+            fail: false,
         });
         let cache = GcSafePointCache::new(pd_client, Keyspace::Disable);
 
@@ -283,6 +299,7 @@ mod tests {
             ready: ready.clone(),
             safe_point: 42,
             calls: calls.clone(),
+            fail: false,
         });
         let cache = GcSafePointCache::new(pd_client, Keyspace::Disable);
 
@@ -322,6 +339,61 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "cached safe_point should not refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gc_safe_point_refresh_propagates_error_to_waiters() {
+        let called = Arc::new(Notify::new());
+        let ready = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let pd_client = Arc::new(BlockingGcSafePointPdClient {
+            called: called.clone(),
+            ready: ready.clone(),
+            safe_point: 42,
+            calls: calls.clone(),
+            fail: true,
+        });
+        let cache = GcSafePointCache::new(pd_client, Keyspace::Disable);
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(11));
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                cache.safe_point().await
+            }));
+        }
+        barrier.wait().await;
+
+        tokio::time::timeout(Duration::from_secs(1), called.notified())
+            .await
+            .expect("pd get_gc_safe_point called");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        ready.notify_waiters();
+
+        for handle in handles {
+            let err = tokio::time::timeout(Duration::from_secs(1), handle)
+                .await
+                .expect("safe_point task should finish")
+                .unwrap()
+                .unwrap_err();
+            match err {
+                Error::StringError(message) => {
+                    assert_eq!(message, "injected gc safe point error");
+                }
+                other => panic!("expected StringError, got {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "refresh errors should be returned to all waiters"
         );
     }
 }
