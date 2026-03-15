@@ -808,6 +808,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_replica_read_adjuster_called_for_get() {
+        let adjust_calls = Arc::new(AtomicUsize::new(0));
+        let adjust_calls_cloned = adjust_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(_req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = false;
+                resp.value = b"v".to_vec();
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        snapshot.set_replica_read(crate::ReplicaReadType::Follower);
+        snapshot.set_replica_read_adjuster(move |key_count| {
+            assert_eq!(key_count, 1);
+            adjust_calls_cloned.fetch_add(1, Ordering::SeqCst);
+            crate::ReplicaReadType::Follower
+        });
+
+        snapshot.get(b"k".to_vec()).await.unwrap();
+        assert_eq!(adjust_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_replica_read_adjuster_called_for_batch_get() {
+        let adjust_calls = Arc::new(AtomicUsize::new(0));
+        let adjust_calls_cloned = adjust_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::BatchGetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                let mut resp = kvrpcpb::BatchGetResponse::default();
+                for key in &req.keys {
+                    resp.pairs.push(kvrpcpb::KvPair {
+                        key: key.clone(),
+                        value: b"v".to_vec(),
+                        error: None,
+                        commit_ts: 0,
+                    });
+                }
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        snapshot.set_replica_read(crate::ReplicaReadType::Follower);
+        snapshot.set_replica_read_adjuster(move |key_count| {
+            assert_eq!(key_count, 3);
+            adjust_calls_cloned.fetch_add(1, Ordering::SeqCst);
+            crate::ReplicaReadType::Follower
+        });
+
+        let keys = vec![b"k1".to_vec(), b"k2".to_vec(), b"k3".to_vec()];
+        let pairs: Vec<KvPair> = snapshot.batch_get(keys).await.unwrap().collect();
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(adjust_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn test_snapshot_clean_cache_clears_transaction_read_cache() {
         let get_calls = Arc::new(AtomicUsize::new(0));
         let get_calls_cloned = get_calls.clone();
