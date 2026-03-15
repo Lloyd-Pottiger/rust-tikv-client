@@ -9,6 +9,8 @@ use super::Keyspace;
 use crate::backoff::Backoff;
 use crate::pd::PdClient;
 use crate::request::plan::DispatchWithInterceptor;
+use crate::request::plan::DispatchWithInterceptorRuntimeStats;
+use crate::request::plan::DispatchWithRuntimeStats;
 use crate::request::plan::ResolveLockInContext;
 use crate::request::plan::{
     CleanupLocks, HasKvContext, RetryableAllStores, RetryableStores,
@@ -40,6 +42,7 @@ use crate::transaction::LockResolverRpcContext;
 use crate::transaction::ReadLockTracker;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
+use crate::transaction::SnapshotRuntimeStats;
 use crate::ReplicaReadType;
 use crate::Result;
 use crate::StoreLabel;
@@ -78,6 +81,21 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn with_optional_runtime_stats(
+        self,
+        runtime_stats: Option<Arc<SnapshotRuntimeStats>>,
+    ) -> PlanBuilder<PdC, DispatchWithRuntimeStats<Req>, NoTarget> {
+        PlanBuilder {
+            pd_client: self.pd_client.clone(),
+            plan: DispatchWithRuntimeStats {
+                inner: self.plan,
+                runtime_stats,
+            },
+            phantom: PhantomData,
+        }
+    }
+
     pub(crate) fn new_with_rpc_interceptors(
         pd_client: Arc<PdC>,
         keyspace: Keyspace,
@@ -97,6 +115,22 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
                 kv_client: None,
                 store_address: None,
                 rpc_interceptors,
+            },
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, DispatchWithInterceptor<Req>, NoTarget> {
+    pub(crate) fn with_optional_runtime_stats(
+        self,
+        runtime_stats: Option<Arc<SnapshotRuntimeStats>>,
+    ) -> PlanBuilder<PdC, DispatchWithInterceptorRuntimeStats<Req>, NoTarget> {
+        PlanBuilder {
+            pd_client: self.pd_client.clone(),
+            plan: DispatchWithInterceptorRuntimeStats {
+                inner: self.plan,
+                runtime_stats,
             },
             phantom: PhantomData,
         }
@@ -487,6 +521,47 @@ impl<PdC: PdClient, R: KvRequest> PlanBuilder<PdC, DispatchWithInterceptor<R>, N
         self.plan.request.set_leader(&store.region_with_leader)?;
         self.plan.kv_client = Some(store.client);
         self.plan.store_address = Some(store.store_address);
+        Ok(PlanBuilder {
+            plan: self.plan,
+            pd_client: self.pd_client,
+            phantom: PhantomData,
+        })
+    }
+}
+
+impl<PdC: PdClient, R: KvRequest> PlanBuilder<PdC, DispatchWithRuntimeStats<R>, NoTarget> {
+    /// Target the request at a single region; caller supplies the store to target.
+    pub async fn single_region_with_store(
+        mut self,
+        store: RegionStore,
+    ) -> Result<PlanBuilder<PdC, DispatchWithRuntimeStats<R>, Targetted>> {
+        self.plan
+            .inner
+            .request
+            .set_leader(&store.region_with_leader)?;
+        self.plan.inner.kv_client = Some(store.client);
+        Ok(PlanBuilder {
+            plan: self.plan,
+            pd_client: self.pd_client,
+            phantom: PhantomData,
+        })
+    }
+}
+
+impl<PdC: PdClient, R: KvRequest>
+    PlanBuilder<PdC, DispatchWithInterceptorRuntimeStats<R>, NoTarget>
+{
+    /// Target the request at a single region; caller supplies the store to target.
+    pub async fn single_region_with_store(
+        mut self,
+        store: RegionStore,
+    ) -> Result<PlanBuilder<PdC, DispatchWithInterceptorRuntimeStats<R>, Targetted>> {
+        self.plan
+            .inner
+            .request
+            .set_leader(&store.region_with_leader)?;
+        self.plan.inner.kv_client = Some(store.client);
+        self.plan.inner.store_address = Some(store.store_address);
         Ok(PlanBuilder {
             plan: self.plan,
             pd_client: self.pd_client,

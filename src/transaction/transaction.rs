@@ -23,6 +23,7 @@ use super::LockResolverRpcContext;
 use super::ReadLockTracker;
 use super::ResolveLockDetail;
 use super::ResolveLocksContext;
+use super::SnapshotRuntimeStats;
 use super::Variables;
 use crate::backoff::Backoff;
 use crate::gc_safe_point::GcSafePointCache;
@@ -189,6 +190,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     resolve_lock_detail: Arc<ResolveLockDetailCollector>,
     options: TransactionOptions,
     rpc_interceptors: RpcInterceptors,
+    snapshot_runtime_stats: Option<Arc<SnapshotRuntimeStats>>,
     vars: Variables,
     resource_group_tagger: Option<ResourceGroupTagger>,
     replica_read_adjuster: Option<ReplicaReadAdjuster>,
@@ -223,6 +225,8 @@ struct SnapshotReadContext {
     resource_group_tag: Option<Vec<u8>>,
     resource_group_name: Option<String>,
     request_source: Option<String>,
+    record_time_stat: bool,
+    record_scan_stat: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -378,6 +382,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             resolve_lock_detail: Arc::new(ResolveLockDetailCollector::default()),
             options,
             rpc_interceptors: Default::default(),
+            snapshot_runtime_stats: None,
             vars: Variables::default(),
             resource_group_tagger: None,
             replica_read_adjuster: None,
@@ -396,6 +401,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     }
 
     fn snapshot_read_context(&self) -> SnapshotReadContext {
+        let should_record_runtime_stats = self.snapshot_runtime_stats.is_some();
         if self.options.read_only {
             let max_execution_duration_ms = if self.options.max_execution_duration_ms > 0 {
                 self.options.max_execution_duration_ms
@@ -420,6 +426,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                 resource_group_tag: self.options.resource_group_tag.clone(),
                 resource_group_name: self.options.resource_group_name.clone(),
                 request_source: self.options.request_source.clone(),
+                record_time_stat: should_record_runtime_stats,
+                record_scan_stat: should_record_runtime_stats,
             }
         } else {
             SnapshotReadContext {
@@ -427,6 +435,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                 resource_group_tag: self.options.resource_group_tag.clone(),
                 resource_group_name: self.options.resource_group_name.clone(),
                 request_source: self.options.request_source.clone(),
+                record_time_stat: should_record_runtime_stats,
+                record_scan_stat: should_record_runtime_stats,
                 ..SnapshotReadContext::default()
             }
         }
@@ -438,7 +448,16 @@ impl<PdC: PdClient> Transaction<PdC> {
             .lock_resolver_rpc_context(self.resource_group_tagger.clone());
         ctx.rpc_interceptors = self.rpc_interceptors.clone();
         ctx.resolve_lock_detail = Some(self.resolve_lock_detail.clone());
+        ctx.runtime_stats = self.snapshot_runtime_stats.clone();
         ctx
+    }
+
+    pub(crate) fn set_snapshot_runtime_stats(&mut self, stats: Option<Arc<SnapshotRuntimeStats>>) {
+        self.snapshot_runtime_stats = stats;
+    }
+
+    pub(crate) fn snapshot_runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.snapshot_runtime_stats.clone()
     }
 
     fn apply_snapshot_read_context(ctx: &mut Option<kvrpcpb::Context>, opts: SnapshotReadContext) {
@@ -449,6 +468,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         ctx.busy_threshold_ms = opts.busy_threshold_ms;
         ctx.priority = opts.priority as i32;
         ctx.isolation_level = opts.isolation_level as i32;
+        ctx.record_time_stat = opts.record_time_stat;
+        ctx.record_scan_stat = opts.record_scan_stat;
         ctx.resource_group_tag = opts.resource_group_tag.unwrap_or_default();
         ctx.resource_control_context =
             opts.resource_group_name
@@ -1097,6 +1118,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             .as_ref()
             .and_then(|state| state.flushing_puts.clone());
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
+        let runtime_stats = self.snapshot_runtime_stats.clone();
 
         self.buffer
             .get_or_else(key, |key| async move {
@@ -1147,6 +1169,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                             request,
                             lock_resolver_rpc_context.rpc_interceptors.clone(),
                         )
+                        .with_optional_runtime_stats(runtime_stats.clone())
                         .resolve_lock_for_read(
                             resolve_locks_ctx.clone(),
                             timestamp.clone(),
@@ -1200,6 +1223,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                     request,
                     lock_resolver_rpc_context.rpc_interceptors.clone(),
                 )
+                .with_optional_runtime_stats(runtime_stats.clone())
                 .resolve_lock_for_read(
                     resolve_locks_ctx,
                     timestamp,
@@ -1276,6 +1300,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
+        let runtime_stats = self.snapshot_runtime_stats.clone();
 
         let mut request = new_get_request(key, timestamp.clone());
         request.need_commit_ts = true;
@@ -1299,6 +1324,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             request,
             lock_resolver_rpc_context.rpc_interceptors.clone(),
         )
+        .with_optional_runtime_stats(runtime_stats)
         .resolve_lock_for_read(
             resolve_locks_ctx,
             timestamp,
@@ -1513,6 +1539,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             .as_ref()
             .and_then(|state| state.flushing_puts.clone());
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
+        let runtime_stats = self.snapshot_runtime_stats.clone();
 
         self.buffer
             .batch_get_or_else(keys, move |keys| {
@@ -1596,6 +1623,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                                 buffer_request,
                                 lock_resolver_rpc_context.rpc_interceptors.clone(),
                             )
+                            .with_optional_runtime_stats(runtime_stats.clone())
                             .resolve_lock_for_read(
                                 resolve_locks_ctx.clone(),
                                 timestamp.clone(),
@@ -1665,6 +1693,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                             snapshot_request,
                             lock_resolver_rpc_context.rpc_interceptors.clone(),
                         )
+                        .with_optional_runtime_stats(runtime_stats.clone())
                         .resolve_lock_for_read(
                             resolve_locks_ctx,
                             timestamp,
@@ -1720,6 +1749,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                         request,
                         lock_resolver_rpc_context.rpc_interceptors.clone(),
                     )
+                    .with_optional_runtime_stats(runtime_stats.clone())
                     .resolve_lock_for_read(
                         resolve_locks_ctx,
                         timestamp,
@@ -1803,6 +1833,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let resource_group_tag_set = self.options.resource_group_tag.is_some();
         let resource_group_tagger = self.resource_group_tagger.clone();
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
+        let runtime_stats = self.snapshot_runtime_stats.clone();
 
         let mut request = crate::transaction::requests::new_batch_get_request(
             keys.into_iter().map(Into::into).collect(),
@@ -1829,6 +1860,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             request,
             lock_resolver_rpc_context.rpc_interceptors.clone(),
         )
+        .with_optional_runtime_stats(runtime_stats)
         .resolve_lock_for_read(
             resolve_locks_ctx,
             timestamp,
@@ -3275,6 +3307,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         let kv_read_timeout = self.options.kv_read_timeout;
         let sample_step = self.options.sample_step;
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
+        let runtime_stats = self.snapshot_runtime_stats.clone();
 
         self.buffer
             .scan_and_fetch(
@@ -3310,6 +3343,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                         request,
                         lock_resolver_rpc_context.rpc_interceptors.clone(),
                     )
+                    .with_optional_runtime_stats(runtime_stats.clone())
                     .resolve_lock_for_read(
                         resolve_locks_ctx,
                         timestamp,
@@ -5570,6 +5604,7 @@ impl TransactionOptions {
             resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
             meet_lock_callback: None,
+            runtime_stats: None,
         }
     }
 

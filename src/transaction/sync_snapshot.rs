@@ -1,7 +1,8 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
     BoundRange, CommandPriority, IsolationLevel, Key, KvPair, ReplicaReadType, ResolveLockDetail,
-    Result, Snapshot, SnapshotCacheEntry, StoreLabel, Timestamp, Value, Variables,
+    Result, Snapshot, SnapshotCacheEntry, SnapshotRuntimeStats, StoreLabel, Timestamp, Value,
+    Variables,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -245,6 +246,19 @@ impl SyncSnapshot {
     #[must_use]
     pub fn resolve_lock_detail(&self) -> ResolveLockDetail {
         self.inner.resolve_lock_detail()
+    }
+
+    /// Attach or clear snapshot runtime stats collection.
+    ///
+    /// This maps to client-go `KVSnapshot.SetRuntimeStats`.
+    pub fn set_runtime_stats(&mut self, stats: Option<Arc<SnapshotRuntimeStats>>) {
+        self.inner.set_runtime_stats(stats);
+    }
+
+    /// Get the currently attached snapshot runtime stats container.
+    #[must_use]
+    pub fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.inner.runtime_stats()
     }
 
     /// Set the snapshot timestamp.

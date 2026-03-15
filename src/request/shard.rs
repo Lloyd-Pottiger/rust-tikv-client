@@ -9,6 +9,8 @@ use crate::pd::PdClient;
 use crate::region::RegionWithLeader;
 use crate::request::plan::CleanupLocks;
 use crate::request::plan::DispatchWithInterceptor;
+use crate::request::plan::DispatchWithInterceptorRuntimeStats;
+use crate::request::plan::DispatchWithRuntimeStats;
 use crate::request::plan::ResolveLockInContext;
 use crate::request::Dispatch;
 use crate::request::KvRequest;
@@ -175,6 +177,64 @@ impl<Req: KvRequest + Shardable> Shardable for DispatchWithInterceptor<Req> {
     }
 }
 
+impl<Req: KvRequest + Shardable> Shardable for DispatchWithRuntimeStats<Req> {
+    type Shard = Req::Shard;
+
+    fn shards(
+        &self,
+        pd_client: &Arc<impl PdClient>,
+    ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+        self.inner.shards(pd_client)
+    }
+
+    fn apply_shard(&mut self, shard: Self::Shard) {
+        self.inner.apply_shard(shard);
+    }
+
+    fn clone_then_apply_shard(&self, shard: Self::Shard) -> Self
+    where
+        Self: Sized + Clone,
+    {
+        DispatchWithRuntimeStats {
+            inner: self.inner.clone_then_apply_shard(shard),
+            runtime_stats: self.runtime_stats.clone(),
+        }
+    }
+
+    fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        self.inner.apply_store(store)
+    }
+}
+
+impl<Req: KvRequest + Shardable> Shardable for DispatchWithInterceptorRuntimeStats<Req> {
+    type Shard = Req::Shard;
+
+    fn shards(
+        &self,
+        pd_client: &Arc<impl PdClient>,
+    ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
+        self.inner.shards(pd_client)
+    }
+
+    fn apply_shard(&mut self, shard: Self::Shard) {
+        self.inner.apply_shard(shard);
+    }
+
+    fn clone_then_apply_shard(&self, shard: Self::Shard) -> Self
+    where
+        Self: Sized + Clone,
+    {
+        DispatchWithInterceptorRuntimeStats {
+            inner: self.inner.clone_then_apply_shard(shard),
+            runtime_stats: self.runtime_stats.clone(),
+        }
+    }
+
+    fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
+        self.inner.apply_store(store)
+    }
+}
+
 impl<Req: KvRequest + NextBatch> NextBatch for Dispatch<Req> {
     fn next_batch(&mut self, range: (Vec<u8>, Vec<u8>)) {
         self.request.next_batch(range);
@@ -184,6 +244,18 @@ impl<Req: KvRequest + NextBatch> NextBatch for Dispatch<Req> {
 impl<Req: KvRequest + NextBatch> NextBatch for DispatchWithInterceptor<Req> {
     fn next_batch(&mut self, range: (Vec<u8>, Vec<u8>)) {
         self.request.next_batch(range);
+    }
+}
+
+impl<Req: KvRequest + NextBatch> NextBatch for DispatchWithRuntimeStats<Req> {
+    fn next_batch(&mut self, range: (Vec<u8>, Vec<u8>)) {
+        self.inner.next_batch(range);
+    }
+}
+
+impl<Req: KvRequest + NextBatch> NextBatch for DispatchWithInterceptorRuntimeStats<Req> {
+    fn next_batch(&mut self, range: (Vec<u8>, Vec<u8>)) {
+        self.inner.next_batch(range);
     }
 }
 

@@ -39,6 +39,7 @@ use crate::transaction::requests::new_check_txn_status_request;
 use crate::transaction::requests::SecondaryLocksStatus;
 use crate::transaction::requests::TransactionStatus;
 use crate::transaction::requests::TransactionStatusKind;
+use crate::transaction::SnapshotRuntimeStats;
 use crate::Error;
 use crate::Result;
 
@@ -949,6 +950,7 @@ async fn resolve_lock_with_retry(
             request,
             rpc_context.rpc_interceptors.clone(),
         )
+        .with_optional_runtime_stats(rpc_context.runtime_stats.clone())
         .single_region_with_store(store.clone())
         .await
         {
@@ -958,6 +960,9 @@ async fn resolve_lock_with_retry(
                 match backoff.next_delay_duration() {
                     Some(duration) => {
                         check_killed(&killed)?;
+                        if let Some(stats) = rpc_context.runtime_stats.as_ref() {
+                            stats.record_backoff("region", duration);
+                        }
                         sleep(duration).await;
                         continue;
                     }
@@ -981,6 +986,9 @@ async fn resolve_lock_with_retry(
                                 handle_region_error(pd_client.clone(), *e, store.clone()).await?;
                             if !region_error_resolved {
                                 check_killed(&killed)?;
+                                if let Some(stats) = rpc_context.runtime_stats.as_ref() {
+                                    stats.record_backoff("region", duration);
+                                }
                                 sleep(duration).await;
                             }
                             continue;
@@ -1010,6 +1018,9 @@ async fn resolve_lock_with_retry(
                         pd_client.invalidate_store_cache(store_id).await;
                     }
                     check_killed(&killed)?;
+                    if let Some(stats) = rpc_context.runtime_stats.as_ref() {
+                        stats.record_backoff("grpc", duration);
+                    }
                     sleep(duration).await;
                     continue;
                 }
@@ -1049,6 +1060,7 @@ async fn resolve_lock_keys_with_retry(
         req,
         rpc_context.rpc_interceptors.clone(),
     )
+    .with_optional_runtime_stats(rpc_context.runtime_stats.clone())
     .retry_multi_region(backoff)
     .with_killed(killed)
     .plan();
@@ -1085,6 +1097,7 @@ async fn rollback_pessimistic_lock(
         request,
         rpc_context.rpc_interceptors.clone(),
     )
+    .with_optional_runtime_stats(rpc_context.runtime_stats.clone())
     .retry_multi_region(DEFAULT_REGION_BACKOFF)
     .extract_error()
     .plan();
@@ -1122,6 +1135,7 @@ async fn rollback_pessimistic_lock_with_retry(
             request,
             rpc_context.rpc_interceptors.clone(),
         )
+        .with_optional_runtime_stats(rpc_context.runtime_stats.clone())
         .single_region_with_store(store.clone())
         .await
         {
@@ -1131,6 +1145,9 @@ async fn rollback_pessimistic_lock_with_retry(
                 match backoff.next_delay_duration() {
                     Some(duration) => {
                         check_killed(&killed)?;
+                        if let Some(stats) = rpc_context.runtime_stats.as_ref() {
+                            stats.record_backoff("region", duration);
+                        }
                         sleep(duration).await;
                         continue;
                     }
@@ -1149,6 +1166,9 @@ async fn rollback_pessimistic_lock_with_retry(
                             handle_region_error(pd_client.clone(), *e, store.clone()).await?;
                         if !region_error_resolved {
                             check_killed(&killed)?;
+                            if let Some(stats) = rpc_context.runtime_stats.as_ref() {
+                                stats.record_backoff("region", duration);
+                            }
                             sleep(duration).await;
                         }
                         continue;
@@ -1176,6 +1196,9 @@ async fn rollback_pessimistic_lock_with_retry(
                         pd_client.invalidate_store_cache(store_id).await;
                     }
                     check_killed(&killed)?;
+                    if let Some(stats) = rpc_context.runtime_stats.as_ref() {
+                        stats.record_backoff("grpc", duration);
+                    }
                     sleep(duration).await;
                     continue;
                 }
@@ -1331,6 +1354,7 @@ pub(crate) struct LockResolverRpcContext {
     pub(crate) resolve_lock_detail: Option<Arc<ResolveLockDetailCollector>>,
     pub(crate) rpc_interceptors: RpcInterceptors,
     pub(crate) meet_lock_callback: Option<MeetLockCallback>,
+    pub(crate) runtime_stats: Option<Arc<SnapshotRuntimeStats>>,
 }
 
 impl LockResolverRpcContext {
@@ -1354,6 +1378,11 @@ impl LockResolverRpcContext {
             if let Some(tagger) = self.resource_group_tagger.as_ref() {
                 ctx.resource_group_tag = (tagger)(label);
             }
+        }
+
+        if self.runtime_stats.is_some() {
+            ctx.record_time_stat = true;
+            ctx.record_scan_stat = true;
         }
     }
 
@@ -2190,6 +2219,7 @@ impl LockResolver {
             req,
             self.rpc_context.rpc_interceptors.clone(),
         )
+        .with_optional_runtime_stats(self.rpc_context.runtime_stats.clone())
         .retry_multi_region(DEFAULT_REGION_BACKOFF)
         .merge(CollectSingle)
         .extract_error()
@@ -2239,6 +2269,7 @@ impl LockResolver {
             req,
             self.rpc_context.rpc_interceptors.clone(),
         )
+        .with_optional_runtime_stats(self.rpc_context.runtime_stats.clone())
         .retry_multi_region(DEFAULT_REGION_BACKOFF)
         .extract_error()
         .merge(Collect)
@@ -2276,6 +2307,7 @@ impl LockResolver {
                 request,
                 self.rpc_context.rpc_interceptors.clone(),
             )
+            .with_optional_runtime_stats(self.rpc_context.runtime_stats.clone())
             .single_region_with_store(store.clone())
             .await
             {
@@ -2284,6 +2316,9 @@ impl LockResolver {
                     pd_client.invalidate_region_cache(region.clone()).await;
                     match backoff.next_delay_duration() {
                         Some(duration) => {
+                            if let Some(stats) = self.rpc_context.runtime_stats.as_ref() {
+                                stats.record_backoff("region", duration);
+                            }
                             sleep(duration).await;
                             continue;
                         }
@@ -2301,6 +2336,9 @@ impl LockResolver {
                             let region_error_resolved =
                                 handle_region_error(pd_client.clone(), *e, store.clone()).await?;
                             if !region_error_resolved {
+                                if let Some(stats) = self.rpc_context.runtime_stats.as_ref() {
+                                    stats.record_backoff("region", duration);
+                                }
                                 sleep(duration).await;
                             }
                             continue;
@@ -2315,6 +2353,9 @@ impl LockResolver {
                         pd_client.invalidate_region_cache(ver_id.clone()).await;
                         if let Ok(store_id) = store.region_with_leader.get_store_id() {
                             pd_client.invalidate_store_cache(store_id).await;
+                        }
+                        if let Some(stats) = self.rpc_context.runtime_stats.as_ref() {
+                            stats.record_backoff("grpc", duration);
                         }
                         sleep(duration).await;
                         continue;
@@ -2772,6 +2813,7 @@ mod tests {
             resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
             meet_lock_callback: None,
+            runtime_stats: None,
         };
         rpc_context.apply_to_kv_context("kv_check_txn_status", &mut ctx);
 
@@ -2828,6 +2870,7 @@ mod tests {
             resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
             meet_lock_callback: None,
+            runtime_stats: None,
         };
 
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
@@ -2947,6 +2990,7 @@ mod tests {
             resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
             meet_lock_callback: None,
+            runtime_stats: None,
         };
 
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
@@ -3024,6 +3068,7 @@ mod tests {
             resolve_lock_detail: None,
             rpc_interceptors: Default::default(),
             meet_lock_callback: None,
+            runtime_stats: None,
         };
 
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(

@@ -210,6 +210,8 @@ pub use crate::transaction::lowering as transaction_lowering;
 #[doc(inline)]
 pub use crate::transaction::AssertionLevel;
 #[doc(inline)]
+pub use crate::transaction::BackoffRuntimeStats;
+#[doc(inline)]
 pub use crate::transaction::BoundLockResolver;
 #[doc(inline)]
 pub use crate::transaction::CheckLevel;
@@ -246,11 +248,19 @@ pub use crate::transaction::ResolveLocksResult;
 #[doc(inline)]
 pub use crate::transaction::ResolvingLock;
 #[doc(inline)]
+pub use crate::transaction::RpcRuntimeStats;
+#[doc(inline)]
 pub use crate::transaction::SchemaLeaseChecker;
 #[doc(inline)]
 pub use crate::transaction::Snapshot;
 #[doc(inline)]
 pub use crate::transaction::SnapshotCacheEntry;
+#[doc(inline)]
+pub use crate::transaction::SnapshotRuntimeStats;
+#[doc(inline)]
+pub use crate::transaction::SnapshotScanDetail;
+#[doc(inline)]
+pub use crate::transaction::SnapshotTimeDetail;
 #[doc(inline)]
 pub use crate::transaction::SyncSnapshot;
 #[doc(inline)]

@@ -6,6 +6,7 @@ use log::{debug, trace};
 use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
 use crate::transaction::ResolveLockDetail;
+use crate::transaction::SnapshotRuntimeStats;
 use crate::transaction::Variables;
 use crate::BoundRange;
 use crate::CommandPriority;
@@ -19,6 +20,7 @@ use crate::Timestamp;
 use crate::Transaction;
 use crate::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use std::time::Duration;
 
@@ -190,6 +192,26 @@ impl<PdC: PdClient> Snapshot<PdC> {
     #[must_use]
     pub fn resolve_lock_detail(&self) -> ResolveLockDetail {
         self.transaction.resolve_lock_detail()
+    }
+
+    /// Attach or clear snapshot runtime stats collection.
+    ///
+    /// When enabled, the snapshot records:
+    /// - per-RPC counts and total wall time (client-side),
+    /// - backoff counts and total backoff sleep time (client-side),
+    /// - exec details (server-side `ExecDetailsV2`) when available.
+    ///
+    /// Passing `None` disables runtime stats collection.
+    ///
+    /// This maps to client-go `KVSnapshot.SetRuntimeStats`.
+    pub fn set_runtime_stats(&mut self, stats: Option<Arc<SnapshotRuntimeStats>>) {
+        self.transaction.set_snapshot_runtime_stats(stats);
+    }
+
+    /// Get the currently attached snapshot runtime stats container.
+    #[must_use]
+    pub fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.transaction.snapshot_runtime_stats()
     }
 
     /// Set the snapshot timestamp.
@@ -882,7 +904,9 @@ mod tests {
     use crate::request::Keyspace;
     use crate::timestamp::TimestampExt;
     use crate::Timestamp;
-    use crate::{CheckLevel, Error, TransactionOptions};
+    use crate::{
+        Backoff, CheckLevel, Error, RetryOptions, SnapshotRuntimeStats, TransactionOptions,
+    };
 
     use super::*;
 
@@ -1592,5 +1616,101 @@ mod tests {
 
         snapshot.set_read_replica_scope("");
         assert_eq!(snapshot.txn_scope(), "global");
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_runtime_stats_records_rpc_backoff_and_exec_details() {
+        let runtime_stats = Arc::new(SnapshotRuntimeStats::default());
+        let runtime_stats_for_assert = runtime_stats.clone();
+
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls_cloned = get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                let ctx = req.context.as_ref().expect("context");
+                assert!(ctx.record_time_stat);
+                assert!(ctx.record_scan_stat);
+
+                let attempt = get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    return Err(Error::GrpcAPI(tonic::Status::unavailable("boom")));
+                }
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = false;
+                resp.value = b"v".to_vec();
+                resp.exec_details_v2 = Some(kvrpcpb::ExecDetailsV2 {
+                    time_detail_v2: Some(kvrpcpb::TimeDetailV2 {
+                        process_wall_time_ns: 10,
+                        wait_wall_time_ns: 20,
+                        ..Default::default()
+                    }),
+                    scan_detail_v2: Some(kvrpcpb::ScanDetailV2 {
+                        processed_versions: 3,
+                        processed_versions_size: 4,
+                        total_versions: 5,
+                        get_snapshot_nanos: 7,
+                        rocksdb_delete_skipped_count: 11,
+                        rocksdb_key_skipped_count: 13,
+                        rocksdb_block_cache_hit_count: 17,
+                        rocksdb_block_read_count: 19,
+                        rocksdb_block_read_byte: 23,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .retry_options(RetryOptions {
+                    region_backoff: Backoff::no_jitter_backoff(0, 0, 1),
+                    lock_backoff: Backoff::no_jitter_backoff(0, 0, 1),
+                })
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+        snapshot.set_runtime_stats(Some(runtime_stats.clone()));
+
+        assert_eq!(
+            snapshot.get(b"k".to_vec()).await.unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(get_calls.load(Ordering::SeqCst), 2);
+
+        let rpc_stats = runtime_stats_for_assert
+            .rpc_stats("kv_get")
+            .expect("expected kv_get stats");
+        assert_eq!(rpc_stats.count, 2);
+
+        let backoff_stats = runtime_stats_for_assert
+            .backoff_stats("grpc")
+            .expect("expected grpc backoff stats");
+        assert_eq!(backoff_stats.count, 1);
+
+        let time_detail = runtime_stats_for_assert.time_detail();
+        assert_eq!(time_detail.total_process_time, Duration::from_nanos(10));
+        assert_eq!(time_detail.total_wait_time, Duration::from_nanos(20));
+
+        let scan_detail = runtime_stats_for_assert.scan_detail();
+        assert_eq!(scan_detail.total_process_keys, 3);
+        assert_eq!(scan_detail.total_process_keys_size, 4);
+        assert_eq!(scan_detail.total_keys, 5);
+        assert_eq!(scan_detail.get_snapshot_time, Duration::from_nanos(7));
+        assert_eq!(scan_detail.rocksdb_delete_skipped_count, 11);
+        assert_eq!(scan_detail.rocksdb_key_skipped_count, 13);
+        assert_eq!(scan_detail.rocksdb_block_cache_hit_count, 17);
+        assert_eq!(scan_detail.rocksdb_block_read_count, 19);
+        assert_eq!(scan_detail.rocksdb_block_read_byte, 23);
     }
 }

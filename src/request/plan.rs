@@ -1,9 +1,10 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::any::Any;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
@@ -44,6 +45,7 @@ use crate::transaction::LockResolverRpcContext;
 use crate::transaction::ReadLockTracker;
 use crate::transaction::ResolveLocksContext;
 use crate::transaction::ResolveLocksOptions;
+use crate::transaction::SnapshotRuntimeStats;
 use crate::util::iter::FlatMapOkIterExt;
 use crate::Error;
 use crate::Key;
@@ -88,6 +90,14 @@ pub trait Plan: Sized + Clone + Sync + Send + 'static {
 
     /// Execute the plan.
     async fn execute(&self) -> Result<Self::Result>;
+
+    /// Snapshot runtime stats collected while executing this plan.
+    ///
+    /// This is internal plumbing used to propagate snapshot runtime stats through plan wrappers.
+    #[doc(hidden)]
+    fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        None
+    }
 }
 
 /// The simplest plan which just dispatches a request to a specific kv server.
@@ -191,6 +201,110 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
     }
 }
 
+fn exec_details_v2_from_response(resp: &dyn Any) -> Option<&kvrpcpb::ExecDetailsV2> {
+    if let Some(resp) = resp.downcast_ref::<kvrpcpb::GetResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = resp.downcast_ref::<kvrpcpb::BatchGetResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = resp.downcast_ref::<kvrpcpb::BatchRollbackResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = resp.downcast_ref::<kvrpcpb::CheckSecondaryLocksResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = resp.downcast_ref::<kvrpcpb::CheckTxnStatusResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = resp.downcast_ref::<kvrpcpb::ResolveLockResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = resp.downcast_ref::<kvrpcpb::ScanLockResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    None
+}
+
+/// A dispatch plan that records snapshot runtime stats.
+///
+/// This is internal plumbing used by [`PlanBuilder`](crate::request::PlanBuilder) when snapshot
+/// runtime stats are enabled via `Snapshot::set_runtime_stats`.
+#[derive(Clone)]
+pub(crate) struct DispatchWithRuntimeStats<Req: KvRequest> {
+    pub(crate) inner: Dispatch<Req>,
+    pub(crate) runtime_stats: Option<Arc<SnapshotRuntimeStats>>,
+}
+
+#[async_trait]
+impl<Req: KvRequest> Plan for DispatchWithRuntimeStats<Req> {
+    type Result = Req::Response;
+
+    async fn execute(&self) -> Result<Self::Result> {
+        let label = self.inner.request.label();
+        let should_record = self.runtime_stats.is_some() && self.inner.kv_client.is_some();
+        if !should_record {
+            return self.inner.execute().await;
+        }
+        let started_at = Instant::now();
+        let result = self.inner.execute().await;
+        let elapsed = started_at.elapsed();
+
+        if let Some(stats) = self.runtime_stats.as_ref() {
+            stats.record_rpc(label, elapsed);
+            if let Ok(resp) = result.as_ref() {
+                if let Some(details) = exec_details_v2_from_response(resp as &dyn Any) {
+                    stats.merge_exec_details_v2(details);
+                }
+            }
+        }
+
+        result
+    }
+
+    fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.runtime_stats.clone()
+    }
+}
+
+/// A dispatch-with-interceptors plan that records snapshot runtime stats.
+#[derive(Clone)]
+pub(crate) struct DispatchWithInterceptorRuntimeStats<Req: KvRequest> {
+    pub(crate) inner: DispatchWithInterceptor<Req>,
+    pub(crate) runtime_stats: Option<Arc<SnapshotRuntimeStats>>,
+}
+
+#[async_trait]
+impl<Req: KvRequest> Plan for DispatchWithInterceptorRuntimeStats<Req> {
+    type Result = Req::Response;
+
+    async fn execute(&self) -> Result<Self::Result> {
+        let label = self.inner.request.label();
+        let should_record = self.runtime_stats.is_some() && self.inner.kv_client.is_some();
+        if !should_record {
+            return self.inner.execute().await;
+        }
+        let started_at = Instant::now();
+        let result = self.inner.execute().await;
+        let elapsed = started_at.elapsed();
+
+        if let Some(stats) = self.runtime_stats.as_ref() {
+            stats.record_rpc(label, elapsed);
+            if let Ok(resp) = result.as_ref() {
+                if let Some(details) = exec_details_v2_from_response(resp as &dyn Any) {
+                    stats.merge_exec_details_v2(details);
+                }
+            }
+        }
+
+        result
+    }
+
+    fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.runtime_stats.clone()
+    }
+}
+
 impl<Req: KvRequest + StoreRequest> StoreRequest for Dispatch<Req> {
     fn apply_store(&mut self, store: &Store) {
         self.kv_client = Some(store.client.clone());
@@ -203,6 +317,18 @@ impl<Req: KvRequest + StoreRequest> StoreRequest for DispatchWithInterceptor<Req
         self.kv_client = Some(store.client.clone());
         self.store_address = Some(store.meta.address.clone());
         self.request.apply_store(store);
+    }
+}
+
+impl<Req: KvRequest + StoreRequest> StoreRequest for DispatchWithRuntimeStats<Req> {
+    fn apply_store(&mut self, store: &Store) {
+        self.inner.apply_store(store);
+    }
+}
+
+impl<Req: KvRequest + StoreRequest> StoreRequest for DispatchWithInterceptorRuntimeStats<Req> {
+    fn apply_store(&mut self, store: &Store) {
+        self.inner.apply_store(store);
     }
 }
 
@@ -247,6 +373,18 @@ impl<Req: KvRequest> HasKvContext for Dispatch<Req> {
 impl<Req: KvRequest> HasKvContext for DispatchWithInterceptor<Req> {
     fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         self.request.context_mut()
+    }
+}
+
+impl<Req: KvRequest> HasKvContext for DispatchWithRuntimeStats<Req> {
+    fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.inner.request.context_mut()
+    }
+}
+
+impl<Req: KvRequest> HasKvContext for DispatchWithInterceptorRuntimeStats<Req> {
+    fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+        self.inner.request.context_mut()
     }
 }
 
@@ -1353,6 +1491,9 @@ where
                     // don't sleep if we have resolved the region error
                     if !region_error_resolved {
                         check_killed(&killed)?;
+                        if let Some(stats) = plan.runtime_stats() {
+                            stats.record_backoff("region", duration);
+                        }
                         sleep(duration).await;
                     }
                     let replica_read = match (is_server_busy, replica_read) {
@@ -1445,6 +1586,10 @@ where
                     };
                 }
                 check_killed(&killed)?;
+                if let Some(stats) = plan.runtime_stats() {
+                    let label = if is_grpc_error { "grpc" } else { "region" };
+                    stats.record_backoff(label, duration);
+                }
                 sleep(duration).await;
                 Self::single_plan_handler(
                     pd_client,
@@ -1687,6 +1832,10 @@ where
         )
         .await
     }
+
+    fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.inner.runtime_stats()
+    }
 }
 
 pub struct RetryableAllStores<P: Plan, PdC: PdClient> {
@@ -1733,6 +1882,10 @@ where
         let results = try_join_all(handles).await?;
         Ok(results.into_iter().collect::<Vec<_>>())
     }
+
+    fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.inner.runtime_stats()
+    }
 }
 
 impl<P: Plan, PdC: PdClient> RetryableAllStores<P, PdC>
@@ -1764,6 +1917,9 @@ where
                 }
                 Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
                     Some(duration) => {
+                        if let Some(stats) = plan.runtime_stats() {
+                            stats.record_backoff("grpc", duration);
+                        }
                         sleep(duration).await;
                         continue;
                     }
@@ -1814,6 +1970,10 @@ where
         let results = try_join_all(handles).await?;
         Ok(results.into_iter().collect::<Vec<_>>())
     }
+
+    fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.inner.runtime_stats()
+    }
 }
 
 impl<P: Plan> RetryableStores<P>
@@ -1845,6 +2005,9 @@ where
                 }
                 Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
                     Some(duration) => {
+                        if let Some(stats) = plan.runtime_stats() {
+                            stats.record_backoff("grpc", duration);
+                        }
                         sleep(duration).await;
                         continue;
                     }
@@ -1951,6 +2114,10 @@ impl<P: Plan, Pr: Process<P::Result>> Plan for ProcessResponse<P, Pr> {
     async fn execute(&self) -> Result<Self::Result> {
         self.processor.process(self.inner.execute().await)
     }
+
+    fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.inner.runtime_stats()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2038,6 +2205,9 @@ where
                         } else {
                             delay_duration
                         };
+                        if let Some(stats) = plan.runtime_stats() {
+                            stats.record_backoff("txnLockFast", delay_duration);
+                        }
                         sleep(delay_duration).await;
                         result = plan.execute().await?;
                     }
@@ -2135,12 +2305,19 @@ where
                             delay_duration
                         };
                         check_killed(&self.killed)?;
+                        if let Some(stats) = plan.runtime_stats() {
+                            stats.record_backoff("txnLockFast", delay_duration);
+                        }
                         sleep(delay_duration).await;
                         result = plan.execute().await?;
                     }
                 }
             }
         }
+    }
+
+    fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.inner.runtime_stats()
     }
 }
 
@@ -2316,6 +2493,9 @@ where
                     let delay_duration =
                         delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64));
                     check_killed(&self.killed)?;
+                    if let Some(stats) = plan.runtime_stats() {
+                        stats.record_backoff("txnLockFast", delay_duration);
+                    }
                     sleep(delay_duration).await;
                     result = match plan.execute().await {
                         Ok(result) => result,
@@ -2329,6 +2509,10 @@ where
                 }
             }
         }
+    }
+
+    fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.inner.runtime_stats()
     }
 }
 
@@ -2590,6 +2774,10 @@ where
             .clone();
         let res = self.inner.execute().await?;
         Ok(ResponseWithShard(res, shard))
+    }
+
+    fn runtime_stats(&self) -> Option<Arc<SnapshotRuntimeStats>> {
+        self.inner.runtime_stats()
     }
 }
 
