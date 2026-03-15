@@ -7428,6 +7428,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pipelined_flush_check_not_exists_short_circuits_reads_and_allows_reinsert() {
+        let flush_calls = Arc::new(AtomicUsize::new(0));
+        let flush_calls_cloned = flush_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![2u8], b"p".to_vec()).await.unwrap();
+        txn.insert(vec![1u8], b"v1".to_vec()).await.unwrap();
+        txn.delete(vec![1u8]).await.unwrap();
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        assert_eq!(txn.get(vec![1u8]).await.unwrap(), None);
+
+        txn.insert(vec![1u8], b"v2".to_vec()).await.unwrap();
+        assert_eq!(txn.get(vec![1u8]).await.unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn test_pipelined_insert_after_flush_detects_duplicate_in_remote_buffer() {
         let flush_calls = Arc::new(AtomicUsize::new(0));
         let buffer_batch_get_calls = Arc::new(AtomicUsize::new(0));
