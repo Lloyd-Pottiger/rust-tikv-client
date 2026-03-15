@@ -1209,6 +1209,7 @@ async fn rollback_pessimistic_lock_with_retry(
 }
 
 const RESOLVED_CACHE_SIZE: usize = 2048;
+const CLEANED_REGIONS_CACHE_SIZE: usize = RESOLVED_CACHE_SIZE;
 const LOW_RESOLUTION_TS_CACHE_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
@@ -1356,6 +1357,41 @@ impl ResolvedTxnStatusCache {
     }
 }
 
+#[derive(Default)]
+struct CleanedRegionsCache {
+    map: HashMap<u64, HashSet<RegionVerId>>,
+    order: VecDeque<u64>,
+}
+
+impl CleanedRegionsCache {
+    fn contains(&self, txn_id: u64, region: &RegionVerId) -> bool {
+        self.map
+            .get(&txn_id)
+            .map(|regions| regions.contains(region))
+            .unwrap_or(false)
+    }
+
+    fn insert(&mut self, txn_id: u64, region: RegionVerId) {
+        if let Some(regions) = self.map.get_mut(&txn_id) {
+            regions.insert(region);
+            return;
+        }
+
+        if self.map.len() >= CLEANED_REGIONS_CACHE_SIZE {
+            while let Some(evict) = self.order.pop_front() {
+                if self.map.remove(&evict).is_some() {
+                    break;
+                }
+            }
+        }
+
+        let mut regions = HashSet::new();
+        regions.insert(region);
+        self.map.insert(txn_id, regions);
+        self.order.push_back(txn_id);
+    }
+}
+
 /// Shared lock-resolution state reused across requests.
 ///
 /// This is a cheap-to-clone handle (`Arc`-backed) used by [`LockResolver`] and transactional reads
@@ -1365,7 +1401,7 @@ impl ResolvedTxnStatusCache {
 pub struct ResolveLocksContext {
     // Record the status of each transaction.
     resolved: Arc<RwLock<ResolvedTxnStatusCache>>,
-    clean_regions: Arc<RwLock<HashMap<u64, HashSet<RegionVerId>>>>,
+    clean_regions: Arc<RwLock<CleanedRegionsCache>>,
     resolving: Arc<RwLock<ResolvingLocksState>>,
     low_resolution_ts: Arc<LowResolutionTimestampCache>,
 }
@@ -1483,21 +1519,11 @@ impl ResolveLocksContext {
     }
 
     pub async fn is_region_cleaned(&self, txn_id: u64, region: &RegionVerId) -> bool {
-        self.clean_regions
-            .read()
-            .await
-            .get(&txn_id)
-            .map(|regions| regions.contains(region))
-            .unwrap_or(false)
+        self.clean_regions.read().await.contains(txn_id, region)
     }
 
     pub async fn save_cleaned_region(&self, txn_id: u64, region: RegionVerId) {
-        self.clean_regions
-            .write()
-            .await
-            .entry(txn_id)
-            .or_insert_with(HashSet::new)
-            .insert(region);
+        self.clean_regions.write().await.insert(txn_id, region);
     }
 
     async fn low_resolution_timestamp(&self, pd_client: Arc<impl PdClient>) -> Result<Timestamp> {
@@ -2986,6 +3012,30 @@ mod tests {
         assert!(
             ctx.get_resolved(9).await.is_some(),
             "cacheable committed status should be stored in resolved cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_locks_context_clean_regions_cache_is_bounded_fifo() {
+        let ctx = ResolveLocksContext::default();
+        let region = RegionVerId {
+            id: 7,
+            conf_ver: 8,
+            ver: 9,
+        };
+
+        for txn_id in 0..(CLEANED_REGIONS_CACHE_SIZE as u64 + 1) {
+            ctx.save_cleaned_region(txn_id, region.clone()).await;
+        }
+
+        assert!(
+            !ctx.is_region_cleaned(0, &region).await,
+            "oldest entry should be evicted once cache exceeds CLEANED_REGIONS_CACHE_SIZE"
+        );
+        assert!(ctx.is_region_cleaned(1, &region).await);
+        assert!(
+            ctx.is_region_cleaned(CLEANED_REGIONS_CACHE_SIZE as u64, &region)
+                .await
         );
     }
 
