@@ -265,6 +265,118 @@ impl KvRpcClient {
 
         if let Some(req) = request
             .as_any()
+            .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::CheckTxnStatus(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::CheckTxnStatus(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for check_txn_status: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::CheckSecondaryLocksRequest>()
+        {
+            let cmd =
+                tikvpb::batch_commands_request::request::Cmd::CheckSecondaryLocks(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::CheckSecondaryLocks(
+                            resp,
+                        ) => Ok(Some(Box::new(resp) as Box<dyn Any>)),
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for check_secondary_locks: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::TxnHeartBeatRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::TxnHeartBeat(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::TxnHeartBeat(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for txn_heart_beat: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::ResolveLockRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::ResolveLock(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::ResolveLock(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for resolve_lock: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::PessimisticRollbackRequest>()
+        {
+            let cmd =
+                tikvpb::batch_commands_request::request::Cmd::PessimisticRollback(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::PessimisticRollback(
+                            resp,
+                        ) => Ok(Some(Box::new(resp) as Box<dyn Any>)),
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for pessimistic_rollback: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
             .downcast_ref::<kvrpcpb::GetHealthFeedbackRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::GetHealthFeedback(req.clone());
@@ -637,9 +749,14 @@ mod tests {
         assert!(accept.contains("gzip"));
     }
 
-    #[tokio::test]
-    async fn test_kv_rpc_client_dispatches_raw_coprocessor_via_batch_commands() -> Result<()> {
-        let (out_tx, mut out_rx) = mpsc::channel(8);
+    type BatchInbound = std::result::Result<tikvpb::BatchCommandsResponse, tonic::Status>;
+
+    fn new_kv_rpc_client_with_batch_for_test() -> Result<(
+        KvRpcClient,
+        mpsc::Receiver<tikvpb::BatchCommandsRequest>,
+        mpsc::Sender<BatchInbound>,
+    )> {
+        let (out_tx, out_rx) = mpsc::channel(8);
         let (in_tx, in_rx) = mpsc::channel(8);
         let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
             rx.recv().await.map(|message| (message, rx))
@@ -654,6 +771,13 @@ mod tests {
             batch: Some(batch),
             health_feedback_observer: Arc::new(Mutex::new(None)),
         };
+
+        Ok((client, out_rx, in_tx))
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_raw_coprocessor_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
 
         let mut request = kvrpcpb::RawCoprocessorRequest::default();
         request.copr_name = "example".to_owned();
@@ -716,21 +840,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_rpc_client_dispatches_raw_put_via_batch_commands() -> Result<()> {
-        let (out_tx, mut out_rx) = mpsc::channel(8);
-        let (in_tx, in_rx) = mpsc::channel(8);
-        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
-            rx.recv().await.map(|message| (message, rx))
-        });
-        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
-
-        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
-        let rpc_client = TikvClient::new(channel);
-        let client = KvRpcClient {
-            rpc_client,
-            timeout: Duration::from_secs(1),
-            batch: Some(batch),
-            health_feedback_observer: Arc::new(Mutex::new(None)),
-        };
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
 
         let mut request = kvrpcpb::RawPutRequest::default();
         request.key = b"k".to_vec();
@@ -784,21 +894,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_rpc_client_dispatches_raw_delete_range_via_batch_commands() -> Result<()> {
-        let (out_tx, mut out_rx) = mpsc::channel(8);
-        let (in_tx, in_rx) = mpsc::channel(8);
-        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
-            rx.recv().await.map(|message| (message, rx))
-        });
-        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
-
-        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
-        let rpc_client = TikvClient::new(channel);
-        let client = KvRpcClient {
-            rpc_client,
-            timeout: Duration::from_secs(1),
-            batch: Some(batch),
-            health_feedback_observer: Arc::new(Mutex::new(None)),
-        };
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
 
         let mut request = kvrpcpb::RawDeleteRangeRequest::default();
         request.start_key = b"a".to_vec();
@@ -854,13 +950,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_rpc_client_dispatches_scan_lock_via_batch_commands() -> Result<()> {
-        let (out_tx, mut out_rx) = mpsc::channel(8);
-        let (in_tx, in_rx) = mpsc::channel(8);
-        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
-            rx.recv().await.map(|message| (message, rx))
-        });
-        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
-
         struct MockObserver {
             calls: AtomicUsize,
         }
@@ -878,14 +967,8 @@ mod tests {
         let observer_dyn: Arc<dyn HealthFeedbackObserver> = observer.clone();
         let health_feedback_observer = Arc::new(Mutex::new(Some(Arc::downgrade(&observer_dyn))));
 
-        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
-        let rpc_client = TikvClient::new(channel);
-        let client = KvRpcClient {
-            rpc_client,
-            timeout: Duration::from_secs(1),
-            batch: Some(batch),
-            health_feedback_observer,
-        };
+        let (mut client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+        client.health_feedback_observer = health_feedback_observer;
 
         let mut request = kvrpcpb::ScanLockRequest::default();
         request.max_version = 42;
@@ -957,22 +1040,332 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_kv_rpc_client_dispatches_get_health_feedback_via_batch_commands() -> Result<()> {
-        let (out_tx, mut out_rx) = mpsc::channel(8);
-        let (in_tx, in_rx) = mpsc::channel(8);
-        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
-            rx.recv().await.map(|message| (message, rx))
-        });
-        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
+    async fn test_kv_rpc_client_dispatches_check_txn_status_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
 
-        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
-        let rpc_client = TikvClient::new(channel);
-        let client = KvRpcClient {
-            rpc_client,
-            timeout: Duration::from_secs(1),
-            batch: Some(batch),
-            health_feedback_observer: Arc::new(Mutex::new(None)),
+        let mut request = kvrpcpb::CheckTxnStatusRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.primary_key = b"p".to_vec();
+        request.lock_ts = 10;
+        request.caller_start_ts = 20;
+        request.current_ts = 30;
+        request.rollback_if_not_exist = true;
+        request.force_sync_commit = true;
+        request.resolving_pessimistic_lock = true;
+        request.verify_is_primary = true;
+        request.is_txn_file = true;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "check_txn_status dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
         };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::CheckTxnStatus(sent_req) => {
+                assert_eq!(sent_req.primary_key, b"p".to_vec());
+                assert_eq!(sent_req.lock_ts, 10);
+                assert_eq!(sent_req.caller_start_ts, 20);
+                assert_eq!(sent_req.current_ts, 30);
+                assert!(sent_req.rollback_if_not_exist);
+                assert!(sent_req.force_sync_commit);
+                assert!(sent_req.resolving_pessimistic_lock);
+                assert!(sent_req.verify_is_primary);
+                assert!(sent_req.is_txn_file);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for check_txn_status: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(
+                    tikvpb::batch_commands_response::response::Cmd::CheckTxnStatus(
+                        kvrpcpb::CheckTxnStatusResponse::default(),
+                    ),
+                ),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        resp.downcast::<kvrpcpb::CheckTxnStatusResponse>()
+            .map_err(|_| Error::StringError("expected check_txn_status response".to_owned()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_check_secondary_locks_via_batch_commands() -> Result<()>
+    {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::CheckSecondaryLocksRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.keys = vec![b"k1".to_vec(), b"k2".to_vec()];
+        request.start_version = 99;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "check_secondary_locks dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::CheckSecondaryLocks(sent_req) => {
+                assert_eq!(sent_req.keys, vec![b"k1".to_vec(), b"k2".to_vec()]);
+                assert_eq!(sent_req.start_version, 99);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for check_secondary_locks: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(
+                    tikvpb::batch_commands_response::response::Cmd::CheckSecondaryLocks(
+                        kvrpcpb::CheckSecondaryLocksResponse::default(),
+                    ),
+                ),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        resp.downcast::<kvrpcpb::CheckSecondaryLocksResponse>()
+            .map_err(|_| {
+                Error::StringError("expected check_secondary_locks response".to_owned())
+            })?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_txn_heart_beat_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::TxnHeartBeatRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.primary_lock = b"p".to_vec();
+        request.start_version = 7;
+        request.advise_lock_ttl = 123;
+        request.is_txn_file = true;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "txn_heart_beat dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::TxnHeartBeat(sent_req) => {
+                assert_eq!(sent_req.primary_lock, b"p".to_vec());
+                assert_eq!(sent_req.start_version, 7);
+                assert_eq!(sent_req.advise_lock_ttl, 123);
+                assert!(sent_req.is_txn_file);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for txn_heart_beat: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(
+                    tikvpb::batch_commands_response::response::Cmd::TxnHeartBeat(
+                        kvrpcpb::TxnHeartBeatResponse::default(),
+                    ),
+                ),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        resp.downcast::<kvrpcpb::TxnHeartBeatResponse>()
+            .map_err(|_| Error::StringError("expected txn_heart_beat response".to_owned()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_resolve_lock_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::ResolveLockRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.start_version = 7;
+        request.commit_version = 8;
+        request.txn_infos = vec![kvrpcpb::TxnInfo {
+            txn: 1,
+            status: 2,
+            is_txn_file: true,
+        }];
+        request.keys = vec![b"k".to_vec()];
+        request.is_txn_file = true;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "resolve_lock dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::ResolveLock(sent_req) => {
+                assert_eq!(sent_req.start_version, 7);
+                assert_eq!(sent_req.commit_version, 8);
+                assert_eq!(sent_req.txn_infos.len(), 1);
+                assert_eq!(sent_req.txn_infos[0].txn, 1);
+                assert_eq!(sent_req.txn_infos[0].status, 2);
+                assert!(sent_req.txn_infos[0].is_txn_file);
+                assert_eq!(sent_req.keys, vec![b"k".to_vec()]);
+                assert!(sent_req.is_txn_file);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for resolve_lock: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::ResolveLock(
+                    kvrpcpb::ResolveLockResponse::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        resp.downcast::<kvrpcpb::ResolveLockResponse>()
+            .map_err(|_| Error::StringError("expected resolve_lock response".to_owned()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_pessimistic_rollback_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::PessimisticRollbackRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.start_version = 42;
+        request.for_update_ts = 43;
+        request.keys = vec![b"k".to_vec()];
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "pessimistic_rollback dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::PessimisticRollback(sent_req) => {
+                assert_eq!(sent_req.start_version, 42);
+                assert_eq!(sent_req.for_update_ts, 43);
+                assert_eq!(sent_req.keys, vec![b"k".to_vec()]);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for pessimistic_rollback: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(
+                    tikvpb::batch_commands_response::response::Cmd::PessimisticRollback(
+                        kvrpcpb::PessimisticRollbackResponse::default(),
+                    ),
+                ),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        resp.downcast::<kvrpcpb::PessimisticRollbackResponse>()
+            .map_err(|_| Error::StringError("expected pessimistic_rollback response".to_owned()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_get_health_feedback_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
 
         let request = kvrpcpb::GetHealthFeedbackRequest {
             context: Some(kvrpcpb::Context::default()),
@@ -1038,21 +1431,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_rpc_client_dispatches_broadcast_txn_status_via_batch_commands() -> Result<()> {
-        let (out_tx, mut out_rx) = mpsc::channel(8);
-        let (in_tx, in_rx) = mpsc::channel(8);
-        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
-            rx.recv().await.map(|message| (message, rx))
-        });
-        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
-
-        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
-        let rpc_client = TikvClient::new(channel);
-        let client = KvRpcClient {
-            rpc_client,
-            timeout: Duration::from_secs(1),
-            batch: Some(batch),
-            health_feedback_observer: Arc::new(Mutex::new(None)),
-        };
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
 
         let request = kvrpcpb::BroadcastTxnStatusRequest {
             context: Some(kvrpcpb::Context::default()),
