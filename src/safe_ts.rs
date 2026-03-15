@@ -135,44 +135,42 @@ impl<PdC: PdClient> SafeTsCache<PdC> {
 
 impl<PdC: PdClient> SafeTsCacheInner<PdC> {
     async fn refresh(&self) -> Result<()> {
-        loop {
-            let wait_for_generation = {
-                let mut refresh = self.refresh.lock().await;
-                if refresh.in_flight {
-                    Some(refresh.generation)
-                } else {
-                    refresh.in_flight = true;
-                    None
-                }
-            };
+        let wait_for_generation = {
+            let mut refresh = self.refresh.lock().await;
+            if refresh.in_flight {
+                Some(refresh.generation)
+            } else {
+                refresh.in_flight = true;
+                None
+            }
+        };
 
-            if let Some(generation) = wait_for_generation {
-                let mut refreshed = self.refresh_generation.subscribe();
-                while *refreshed.borrow() == generation {
-                    // Sender is owned by the cache; treat closure as a best-effort wake-up.
-                    if refreshed.changed().await.is_err() {
-                        break;
-                    }
+        if let Some(generation) = wait_for_generation {
+            let mut refreshed = self.refresh_generation.subscribe();
+            while *refreshed.borrow() == generation {
+                // Sender is owned by the cache; treat closure as a best-effort wake-up.
+                if refreshed.changed().await.is_err() {
+                    break;
                 }
-
-                let refresh = self.refresh.lock().await;
-                if let Some(err) = refresh.last_error.as_ref() {
-                    return Err(Error::StringError(err.clone()));
-                }
-                return Ok(());
             }
 
-            let result = self.refresh_once().await;
-            let generation = {
-                let mut refresh = self.refresh.lock().await;
-                refresh.in_flight = false;
-                refresh.generation = refresh.generation.wrapping_add(1);
-                refresh.last_error = result.as_ref().err().map(|err| err.to_string());
-                refresh.generation
-            };
-            let _ = self.refresh_generation.send(generation);
-            return result;
+            let refresh = self.refresh.lock().await;
+            if let Some(err) = refresh.last_error.as_ref() {
+                return Err(Error::StringError(err.clone()));
+            }
+            return Ok(());
         }
+
+        let result = self.refresh_once().await;
+        let generation = {
+            let mut refresh = self.refresh.lock().await;
+            refresh.in_flight = false;
+            refresh.generation = refresh.generation.wrapping_add(1);
+            refresh.last_error = result.as_ref().err().map(|err| err.to_string());
+            refresh.generation
+        };
+        let _ = self.refresh_generation.send(generation);
+        result
     }
 
     async fn refresh_once(&self) -> Result<()> {

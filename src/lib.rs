@@ -236,6 +236,12 @@ pub use crate::transaction::ProtoTiFlashSystemTableResponse;
 #[doc(inline)]
 pub use crate::transaction::ProtoWaitForEntry;
 #[doc(inline)]
+pub use crate::transaction::RangeTaskHandler;
+#[doc(inline)]
+pub use crate::transaction::RangeTaskRunner;
+#[doc(inline)]
+pub use crate::transaction::RangeTaskStat;
+#[doc(inline)]
 pub use crate::transaction::ResolveLockDetail;
 #[doc(inline)]
 pub use crate::transaction::ResolveLocksContext;
