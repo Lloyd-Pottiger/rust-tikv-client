@@ -33,6 +33,13 @@ pub struct Config {
     pub cert_path: Option<PathBuf>,
     pub key_path: Option<PathBuf>,
     pub timeout: Duration,
+    /// Maximum concurrency for 2PC committer multi-region requests.
+    ///
+    /// This limits the number of region shards executed concurrently for the prewrite, secondary
+    /// commit, and rollback phases.
+    ///
+    /// This maps to client-go `CommitterConcurrency`.
+    pub committer_concurrency: usize,
     /// The maximum number of pending batched TSO requests buffered in the timestamp oracle.
     ///
     /// When exhausted, new timestamp requests will apply backpressure until pending requests are
@@ -116,6 +123,7 @@ pub struct Config {
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_COMMITTER_CONCURRENCY: usize = 128;
 pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
 const DEFAULT_GRPC_CONNECTION_COUNT: usize = 4;
@@ -137,6 +145,7 @@ impl Default for Config {
             cert_path: None,
             key_path: None,
             timeout: DEFAULT_REQUEST_TIMEOUT,
+            committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
             tso_max_pending_count: DEFAULT_TSO_MAX_PENDING_COUNT,
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
             grpc_connection_count: DEFAULT_GRPC_CONNECTION_COUNT,
@@ -164,6 +173,11 @@ impl Config {
     /// This is called internally by client constructors, and can also be called by users to catch
     /// invalid configurations early.
     pub fn validate(&self) -> crate::Result<()> {
+        if self.committer_concurrency == 0 {
+            return Err(crate::Error::StringError(
+                "committer-concurrency should be greater than 0".to_owned(),
+            ));
+        }
         if self.grpc_connection_count == 0 {
             return Err(crate::Error::StringError(
                 "grpc-connection-count should be greater than 0".to_owned(),
@@ -224,6 +238,15 @@ impl Config {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the maximum concurrency for 2PC committer multi-region requests.
+    ///
+    /// This maps to client-go `CommitterConcurrency`.
+    #[must_use]
+    pub fn with_committer_concurrency(mut self, concurrency: usize) -> Self {
+        self.committer_concurrency = concurrency;
         self
     }
 
@@ -405,6 +428,7 @@ mod tests {
         assert_eq!(config.grpc_compression_type, GrpcCompressionType::None);
         assert!(!config.enable_batch_rpc);
         assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.committer_concurrency, DEFAULT_COMMITTER_CONCURRENCY);
         assert_eq!(
             config.ttl_refreshed_txn_size,
             DEFAULT_TTL_REFRESHED_TXN_SIZE
@@ -417,6 +441,14 @@ mod tests {
     #[test]
     fn test_config_validate_grpc_keepalive_timeout_min() {
         let config = Config::default().with_grpc_keepalive_timeout(Duration::from_millis(49));
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, crate::Error::StringError(_)));
+    }
+
+    #[test]
+    fn test_config_validate_committer_concurrency_min() {
+        let mut config = Config::default();
+        config.committer_concurrency = 0;
         let err = config.validate().unwrap_err();
         assert!(matches!(err, crate::Error::StringError(_)));
     }

@@ -6278,6 +6278,7 @@ impl<PdC: PdClient> Committer<PdC> {
         }
 
         let killed = self.vars.killed.clone();
+        let committer_concurrency = self.rpc.committer_concurrency();
         let response = match self.options.prewrite_encounter_lock_policy {
             PrewriteEncounterLockPolicy::TryResolve => {
                 let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
@@ -6298,7 +6299,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     true,
                     lock_resolver_rpc_context,
                 )
-                .retry_multi_region(region_backoff)
+                .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
                 .with_killed(killed.clone())
                 .merge(CollectError)
                 .extract_error()
@@ -6313,7 +6314,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     request,
                     self.rpc_interceptors.clone(),
                 )
-                .retry_multi_region(region_backoff)
+                .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
                 .with_killed(killed.clone())
                 .merge(CollectError)
                 .extract_error()
@@ -6483,6 +6484,7 @@ impl<PdC: PdClient> Committer<PdC> {
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
+        let committer_concurrency = self.rpc.committer_concurrency();
         let killed = self.vars.killed.clone();
         let plan = PlanBuilder::new_with_rpc_interceptors(
             self.rpc.clone(),
@@ -6498,7 +6500,7 @@ impl<PdC: PdClient> Committer<PdC> {
             self.keyspace,
             lock_resolver_rpc_context,
         )
-        .retry_multi_region(region_backoff)
+        .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
         .with_killed(killed)
         .extract_error()
         .plan();
@@ -6593,6 +6595,7 @@ impl<PdC: PdClient> Committer<PdC> {
         let start_version = self.start_version.clone();
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
+        let committer_concurrency = self.rpc.committer_concurrency();
         let killed = self.vars.killed.clone();
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let mutations_len = self.mutations.len();
@@ -6664,7 +6667,7 @@ impl<PdC: PdClient> Committer<PdC> {
             self.keyspace,
             lock_resolver_rpc_context,
         )
-        .retry_multi_region(region_backoff)
+        .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
         .with_killed(killed)
         .extract_error()
         .plan();
@@ -6679,6 +6682,7 @@ impl<PdC: PdClient> Committer<PdC> {
         }
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
+        let committer_concurrency = self.rpc.committer_concurrency();
         let killed = self.vars.killed.clone();
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let keys = self
@@ -6711,7 +6715,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     self.keyspace,
                     lock_resolver_rpc_context.clone(),
                 )
-                .retry_multi_region(region_backoff)
+                .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
                 .with_killed(killed)
                 .extract_error()
                 .plan();
@@ -6749,7 +6753,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     self.keyspace,
                     lock_resolver_rpc_context.clone(),
                 )
-                .retry_multi_region(region_backoff)
+                .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
                 .with_killed(killed)
                 .extract_error()
                 .plan();

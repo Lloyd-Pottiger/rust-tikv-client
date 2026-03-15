@@ -377,6 +377,13 @@ pub trait PdClient: Send + Sync + 'static {
         crate::config::DEFAULT_TTL_REFRESHED_TXN_SIZE
     }
 
+    /// Maximum concurrency for 2PC committer multi-region requests.
+    ///
+    /// This maps to client-go `CommitterConcurrency`.
+    fn committer_concurrency(&self) -> usize {
+        crate::config::DEFAULT_COMMITTER_CONCURRENCY
+    }
+
     /// Groups consecutive keys by region.
     ///
     /// The input keys must be sorted in increasing key order so that keys from the same region are
@@ -570,6 +577,7 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     region_cache: RegionCache<RetryClient<Cl>>,
     resolve_lock_lite_threshold: u64,
     ttl_refreshed_txn_size: u64,
+    committer_concurrency: usize,
     pd_http_client: Option<reqwest::Client>,
     pd_http_endpoints: Vec<String>,
     pd_http_use_https: bool,
@@ -593,6 +601,10 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     fn ttl_refreshed_txn_size(&self) -> u64 {
         self.ttl_refreshed_txn_size
+    }
+
+    fn committer_concurrency(&self) -> usize {
+        self.committer_concurrency
     }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
@@ -933,6 +945,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         let grpc_connection_count = config.grpc_connection_count;
         let resolve_lock_lite_threshold = config.resolve_lock_lite_threshold;
         let ttl_refreshed_txn_size = config.ttl_refreshed_txn_size;
+        let committer_concurrency = config.committer_concurrency;
         let (pd_http_client, pd_http_use_https) = build_pd_http_client(&config);
         let security_mgr = Arc::new(
             (if let (Some(ca_path), Some(cert_path), Some(key_path)) =
@@ -967,6 +980,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             ),
             resolve_lock_lite_threshold,
             ttl_refreshed_txn_size,
+            committer_concurrency,
             pd_http_client,
             pd_http_endpoints: Vec::new(),
             pd_http_use_https,
@@ -1198,6 +1212,27 @@ pub mod test {
         let kv3 = client.kv_client(addr2).await.unwrap();
         assert!(kv1.addr != kv2.addr);
         assert_eq!(kv2.addr, kv3.addr);
+    }
+
+    #[tokio::test]
+    async fn test_committer_concurrency_is_plumbed_from_config() {
+        let config = Config::default().with_committer_concurrency(7);
+        let client = PdRpcClient::new(
+            config.clone(),
+            |_| MockKvConnect,
+            |sm| {
+                futures::future::ok(RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    0,
+                    MockCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(client.committer_concurrency, 7);
     }
 
     #[derive(Clone)]

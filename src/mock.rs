@@ -120,6 +120,8 @@ pub struct MockPdClient {
     external_timestamp: Arc<AtomicU64>,
     #[new(value = "Arc::new(AtomicU64::new(crate::config::DEFAULT_TTL_REFRESHED_TXN_SIZE))")]
     ttl_refreshed_txn_size: Arc<AtomicU64>,
+    #[new(value = "Arc::new(AtomicUsize::new(crate::config::DEFAULT_COMMITTER_CONCURRENCY))")]
+    committer_concurrency: Arc<AtomicUsize>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
     get_external_timestamp_calls: Arc<AtomicUsize>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
@@ -189,6 +191,11 @@ impl MockPdClient {
 
     pub fn set_ttl_refreshed_txn_size(&self, size: u64) {
         self.ttl_refreshed_txn_size.store(size, Ordering::SeqCst);
+    }
+
+    pub fn set_committer_concurrency(&self, concurrency: usize) {
+        self.committer_concurrency
+            .store(concurrency, Ordering::SeqCst);
     }
 
     pub async fn insert_store_meta(&self, store: metapb::Store) {
@@ -512,6 +519,10 @@ impl PdClient for MockPdClient {
 
     fn ttl_refreshed_txn_size(&self) -> u64 {
         self.ttl_refreshed_txn_size.load(Ordering::SeqCst)
+    }
+
+    fn committer_concurrency(&self) -> usize {
+        self.committer_concurrency.load(Ordering::SeqCst)
     }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
@@ -908,6 +919,17 @@ mod tests {
     use crate::proto::pdpb;
 
     use super::MockPdClient;
+
+    #[test]
+    fn test_mock_pd_client_committer_concurrency_is_configurable() {
+        let client = MockPdClient::default();
+        assert_eq!(
+            client.committer_concurrency(),
+            crate::config::DEFAULT_COMMITTER_CONCURRENCY
+        );
+        client.set_committer_concurrency(1);
+        assert_eq!(client.committer_concurrency(), 1);
+    }
 
     #[tokio::test]
     async fn test_mock_pd_client_scatter_regions_records_calls() {
