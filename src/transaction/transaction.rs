@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::iter;
-use std::sync::atomic::{self, AtomicU64, AtomicU8};
+use std::sync::atomic::{self, AtomicBool, AtomicU64, AtomicU8};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -2386,6 +2386,13 @@ impl<PdC: PdClient> Transaction<PdC> {
         if !should_flush {
             return Ok(false);
         }
+        if self
+            .pipelined
+            .as_ref()
+            .is_some_and(|state| state.ttl_manager_closed.load(atomic::Ordering::SeqCst))
+        {
+            return Err(Error::StringError("ttl manager is closed".to_owned()));
+        }
         debug!(
             "triggering transactional flush (force={force}, mutation_count={mutation_count}, write_size={write_size})"
         );
@@ -4386,6 +4393,14 @@ impl<PdC: PdClient> Transaction<PdC> {
 
     async fn start_auto_heartbeat(&mut self) -> Result<()> {
         debug!("starting auto_heartbeat");
+        if self.options.pipelined_txn.is_some()
+            && self
+                .pipelined
+                .as_ref()
+                .is_some_and(|state| state.ttl_manager_closed.load(atomic::Ordering::SeqCst))
+        {
+            return Ok(());
+        }
         if !self.options.heartbeat_option.is_auto_heartbeat()
             || self
                 .heartbeat_running_generation
@@ -4431,19 +4446,29 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         let status = self.status.clone();
         let start_ts = self.timestamp.clone();
+        let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
+        let resolve_locks_ctx = self.resolve_locks_ctx.clone();
         let killed = self.vars.killed.clone();
         let heartbeat_running_generation = self.heartbeat_running_generation.clone();
         let heartbeat_generation = self.heartbeat_generation.clone();
         let rpc = self.rpc.clone();
         let rpc_interceptors = self.rpc_interceptors.clone();
         let broadcast_pipelined_txn_status = self.options.pipelined_txn.is_some();
+        let pipelined_ttl_manager_closed = self
+            .pipelined
+            .as_ref()
+            .map(|state| state.ttl_manager_closed.clone());
         let heartbeat_interval = match self.options.heartbeat_option {
             HeartbeatOption::NoHeartbeat => DEFAULT_HEARTBEAT_INTERVAL,
             HeartbeatOption::FixedTime(heartbeat_interval) => heartbeat_interval,
         };
         let start_instant = self.start_instant;
         let keyspace = self.keyspace;
+        let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
+        let heart_beat_kv_context = lock_resolver_rpc_context.context.clone();
+        let resource_group_tag_set = lock_resolver_rpc_context.resource_group_tag_set;
+        let resource_group_tagger = lock_resolver_rpc_context.resource_group_tagger.clone();
         let mut max_txn_ttl = rpc.max_txn_ttl();
         if broadcast_pipelined_txn_status {
             max_txn_ttl = max_txn_ttl.max(MAX_PIPELINED_TXN_TTL);
@@ -4481,21 +4506,67 @@ impl<PdC: PdClient> Transaction<PdC> {
                             exceeded.max_txn_ttl_ms,
                             broadcast_pipelined_txn_status
                         );
+                        if broadcast_pipelined_txn_status {
+                            if let Some(flag) = pipelined_ttl_manager_closed.as_ref() {
+                                flag.store(true, atomic::Ordering::SeqCst);
+                            }
+                        }
                         break;
                     }
                 };
-                let request = new_heart_beat_request(start_ts.clone(), primary_key.clone(), ttl);
+                let mut request =
+                    new_heart_beat_request(start_ts.clone(), primary_key.clone(), ttl);
+                request.context.clone_from(&heart_beat_kv_context);
+                if !resource_group_tag_set {
+                    if let Some(tagger) = resource_group_tagger.as_ref() {
+                        let tag = (tagger)(request.label());
+                        let ctx = request
+                            .context
+                            .get_or_insert_with(kvrpcpb::Context::default);
+                        ctx.resource_group_tag = tag;
+                    }
+                }
+
                 let plan = PlanBuilder::new_with_rpc_interceptors(
                     rpc.clone(),
                     keyspace,
                     request,
                     rpc_interceptors.clone(),
                 )
+                .resolve_lock_in_context(
+                    resolve_locks_ctx.clone(),
+                    start_ts.clone(),
+                    lock_backoff.clone(),
+                    killed.clone(),
+                    keyspace,
+                    lock_resolver_rpc_context.clone(),
+                )
                 .retry_multi_region(region_backoff.clone())
                 .with_killed(killed.clone())
+                .extract_error()
                 .merge(CollectSingle)
+                .post_process_default()
                 .plan();
-                plan.execute().await?;
+
+                if let Err(err) = plan.execute().await {
+                    if broadcast_pipelined_txn_status {
+                        let mut should_close = false;
+                        match &err {
+                            Error::ExtractedErrors(errors) => {
+                                should_close =
+                                    errors.iter().any(|e| matches!(e, Error::TxnNotFound(_)));
+                            }
+                            Error::TxnNotFound(_) => should_close = true,
+                            _ => {}
+                        }
+                        if should_close {
+                            if let Some(flag) = pipelined_ttl_manager_closed.as_ref() {
+                                flag.store(true, atomic::Ordering::SeqCst);
+                            }
+                        }
+                    }
+                    return Err(err);
+                }
 
                 if broadcast_pipelined_txn_status {
                     let rpc = rpc.clone();
@@ -4710,6 +4781,7 @@ struct PipelinedState {
     flushing: Option<JoinHandle<Result<()>>>,
     flushing_puts: Option<Arc<HashMap<Key, Value>>>,
     flushed_deletes: Arc<Mutex<HashSet<Key>>>,
+    ttl_manager_closed: Arc<AtomicBool>,
     flushed_range_start: Option<Key>,
     flushed_range_end: Option<Key>,
     flush_duration_ewma: Arc<Mutex<FlushDurationEwma>>,
@@ -4723,6 +4795,7 @@ impl PipelinedState {
             flushing: None,
             flushing_puts: None,
             flushed_deletes: Arc::new(Mutex::new(HashSet::new())),
+            ttl_manager_closed: Arc::new(AtomicBool::new(false)),
             flushed_range_start: None,
             flushed_range_end: None,
             flush_duration_ewma: Arc::new(Mutex::new(FlushDurationEwma::default())),
@@ -7152,6 +7225,82 @@ mod tests {
         txn.flush_wait().await.unwrap();
 
         scenario.teardown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_pipelined_flush_fails_after_ttl_manager_closed_by_txn_not_found_heartbeat() {
+        use tokio::sync::Notify;
+
+        let heartbeats = Arc::new(AtomicUsize::new(0));
+        let heartbeats_captured = heartbeats.clone();
+
+        let notified = Arc::new(Notify::new());
+        let notified_captured = notified.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                if req.downcast_ref::<kvrpcpb::TxnHeartBeatRequest>().is_some() {
+                    heartbeats_captured.fetch_add(1, Ordering::SeqCst);
+                    notified_captured.notify_one();
+
+                    let mut key_err = kvrpcpb::KeyError::default();
+                    key_err.txn_not_found = Some(kvrpcpb::TxnNotFound {
+                        start_ts: 5,
+                        primary_key: b"key1".to_vec(),
+                    });
+
+                    let mut resp = kvrpcpb::TxnHeartBeatResponse::default();
+                    resp.error = Some(key_err);
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_millis(1)))
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put("key1".to_owned(), "value1").await.unwrap();
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), notified.notified())
+            .await
+            .expect("auto heartbeat should issue a TxnHeartBeat request");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !txn
+                .pipelined
+                .as_ref()
+                .expect("pipelined state must exist")
+                .ttl_manager_closed
+                .load(Ordering::SeqCst)
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("pipelined ttl manager should close after txn_not_found heartbeat error");
+
+        assert_eq!(heartbeats.load(Ordering::SeqCst), 1);
+
+        txn.put("key2".to_owned(), "value2").await.unwrap();
+        let err = txn.flush(true).await.expect_err("expected flush to fail");
+        assert!(
+            matches!(err, Error::StringError(ref msg) if msg == "ttl manager is closed"),
+            "err={err:?}"
+        );
     }
 
     #[tokio::test]
