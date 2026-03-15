@@ -183,6 +183,7 @@ impl Client {
         let health_feedback_update_interval = config.health_feedback_update_interval;
         let txn_local_latches_capacity = config.txn_local_latches_capacity;
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
+        pd.install_health_feedback_observer();
         crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
         let keyspace = match config.keyspace {
             Some(name) => {
@@ -226,6 +227,7 @@ impl Client {
         let health_feedback_update_interval = config.health_feedback_update_interval;
         let txn_local_latches_capacity = config.txn_local_latches_capacity;
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
+        pd.install_health_feedback_observer();
         crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
         let txn_latches = (txn_local_latches_capacity > 0)
             .then(|| Arc::new(TxnLocalLatches::new(txn_local_latches_capacity)));

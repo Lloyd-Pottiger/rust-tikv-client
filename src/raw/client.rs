@@ -115,6 +115,7 @@ impl Client<PdRpcClient> {
         let health_feedback_update_interval = config.health_feedback_update_interval;
         let rpc =
             Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), enable_codec).await?);
+        rpc.install_health_feedback_observer();
         crate::pd::spawn_health_feedback_updater(rpc.clone(), health_feedback_update_interval);
         let keyspace = match config.keyspace {
             Some(name) => {

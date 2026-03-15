@@ -7,6 +7,11 @@ mod timestamp;
 pub use self::client::PdClient;
 pub use self::client::PdRpcClient;
 pub(crate) use self::health_feedback::spawn_health_feedback_updater;
+
+pub(crate) trait HealthFeedbackObserver: Send + Sync {
+    fn observe_health_feedback(&self, feedback: &crate::proto::kvrpcpb::HealthFeedback);
+}
+
 #[cfg(test)]
 pub(crate) const HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD: i32 =
     self::client::HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD;

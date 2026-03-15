@@ -21,6 +21,7 @@ use crate::compat::stream_fn;
 use crate::kv::codec;
 use crate::pd::retry::RetryClientTrait;
 use crate::pd::Cluster;
+use crate::pd::HealthFeedbackObserver;
 use crate::pd::RetryClient;
 use crate::proto::keyspacepb;
 use crate::proto::kvrpcpb;
@@ -566,6 +567,16 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     pd_http_use_https: bool,
 }
 
+impl<KvC: KvConnect + Send + Sync + 'static> HealthFeedbackObserver
+    for PdRpcClient<KvC, Cluster>
+{
+    fn observe_health_feedback(&self, feedback: &kvrpcpb::HealthFeedback) {
+        if feedback.slow_score >= HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD {
+            PdClient::mark_store_slow(self, feedback.store_id, HEALTH_FEEDBACK_SLOW_STORE_TTL);
+        }
+    }
+}
+
 #[async_trait]
 impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     type KvClient = KvC::KvClient;
@@ -882,6 +893,12 @@ impl PdRpcClient<TikvConnect, Cluster> {
         .await?;
         client.pd_http_endpoints = pd_endpoints.to_vec();
         Ok(client)
+    }
+
+    pub(crate) fn install_health_feedback_observer(self: &Arc<Self>) {
+        let observer: Arc<dyn HealthFeedbackObserver> = self.clone();
+        self.kv_connect
+            .set_health_feedback_observer(Arc::downgrade(&observer));
     }
 }
 
