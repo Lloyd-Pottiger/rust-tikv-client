@@ -235,6 +235,23 @@ impl KvRpcClient {
             };
         }
 
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::RawCoprocessorRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::RawCoprocessor(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(tikvpb::batch_commands_response::response::Cmd::RawCoprocessor(resp)) => {
+                    Ok(Some(Box::new(resp) as Box<dyn Any>))
+                }
+                Ok(other) => Err(Error::StringError(format!(
+                    "unexpected batch_commands response for raw_coprocessor: {other:?}"
+                ))),
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
         Ok(None)
     }
 }
@@ -258,6 +275,8 @@ mod tests {
     use std::task::Context;
     use std::task::Poll;
 
+    use futures::stream;
+    use tokio::sync::mpsc;
     use tonic::body::BoxBody;
     use tonic::codegen::http;
     use tonic::codegen::Service;
@@ -348,5 +367,81 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(accept.contains("gzip"));
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_raw_coprocessor_via_batch_commands() -> Result<()> {
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
+            rx.recv().await.map(|message| (message, rx))
+        });
+        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
+
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+        let client = KvRpcClient {
+            rpc_client,
+            timeout: Duration::from_secs(1),
+            batch: Some(batch),
+        };
+
+        let mut request = kvrpcpb::RawCoprocessorRequest::default();
+        request.copr_name = "example".to_owned();
+        request.copr_version_req = "0.1.0".to_owned();
+        request.data = b"ping".to_vec();
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "raw_coprocessor dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::RawCoprocessor(sent_req) => {
+                assert_eq!(sent_req.copr_name, "example");
+                assert_eq!(sent_req.copr_version_req, "0.1.0");
+                assert_eq!(sent_req.data, b"ping".to_vec());
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for raw_coprocessor: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(
+                    tikvpb::batch_commands_response::response::Cmd::RawCoprocessor(
+                        kvrpcpb::RawCoprocessorResponse {
+                            data: b"pong".to_vec(),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::RawCoprocessorResponse>()
+            .map_err(|_| Error::StringError("expected raw_coprocessor response".to_owned()))?;
+        assert_eq!(resp.data, b"pong".to_vec());
+        Ok(())
     }
 }

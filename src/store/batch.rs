@@ -54,6 +54,16 @@ impl BatchCommandsClient {
         Self::new_with_inbound(outbound_tx, response.into_inner())
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_inbound_for_test(
+        outbound: mpsc::Sender<tikvpb::BatchCommandsRequest>,
+        inbound: impl Stream<Item = std::result::Result<tikvpb::BatchCommandsResponse, Status>>
+            + Send
+            + 'static,
+    ) -> Result<Self> {
+        Self::new_with_inbound(outbound, inbound)
+    }
+
     fn new_with_inbound(
         outbound: mpsc::Sender<tikvpb::BatchCommandsRequest>,
         inbound: impl Stream<Item = std::result::Result<tikvpb::BatchCommandsResponse, Status>>
