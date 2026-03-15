@@ -3962,6 +3962,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_locks_cached_committed_async_commit_txn_skips_secondary_checks() {
+        let resolve_lock_count = Arc::new(AtomicUsize::new(0));
+
+        let resolve_lock_count_captured = resolve_lock_count.clone();
+        let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.is::<kvrpcpb::CheckTxnStatusRequest>() {
+                    panic!("unexpected CheckTxnStatusRequest: committed status should be cached");
+                }
+                if req.is::<kvrpcpb::CheckSecondaryLocksRequest>() {
+                    panic!(
+                        "unexpected CheckSecondaryLocksRequest: cached committed status should skip secondary checks"
+                    );
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.start_version, 1);
+                    assert_eq!(req.commit_version, 10);
+                    assert_eq!(req.keys, vec![b"k2".to_vec()]);
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                panic!("unexpected request type: {:?}", req.type_id());
+            },
+        )));
+
+        let ctx = ResolveLocksContext::default();
+        ctx.save_resolved(
+            1,
+            Arc::new(TransactionStatus {
+                kind: TransactionStatusKind::Committed(Timestamp::from_version(10)),
+                action: kvrpcpb::Action::NoAction,
+                is_expired: false,
+            }),
+        )
+        .await;
+
+        let mut lock = kvrpcpb::LockInfo::default();
+        lock.key = b"k2".to_vec();
+        lock.primary_lock = b"k1".to_vec();
+        lock.lock_version = 1;
+        lock.lock_ttl = 100;
+        lock.txn_size = 1;
+        lock.use_async_commit = true;
+        lock.min_commit_ts = 2;
+        lock.lock_type = kvrpcpb::Op::Put as i32;
+
+        let lock_resolver = LockResolver::new(ctx);
+        let resolve_result = lock_resolver
+            .resolve_locks_once(
+                vec![lock],
+                Timestamp::from_version(5),
+                client,
+                Keyspace::Disable,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert!(resolve_result.live_locks.is_empty());
+        assert_eq!(resolve_lock_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn test_resolve_locks_expired_async_commit_lock_missing_secondary_rolls_back_when_commit_ts_zero(
     ) {
         let check_txn_status_count = Arc::new(AtomicUsize::new(0));
