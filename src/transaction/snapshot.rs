@@ -202,6 +202,35 @@ impl<PdC: PdClient> Snapshot<PdC> {
         Ok(())
     }
 
+    /// Set the geographical scope of this snapshot.
+    ///
+    /// When `txn_scope` is `"global"` (or empty), this uses the global TSO allocator
+    /// (`dc_location=""`). Otherwise `txn_scope` is passed through as PD `dc_location` to request
+    /// a local TSO.
+    ///
+    /// This maps to client-go `KVSnapshot.SetTxnScope` / `KVSnapshot.SetReadReplicaScope`.
+    pub fn set_txn_scope(&mut self, txn_scope: impl AsRef<str>) {
+        self.transaction.set_txn_scope(txn_scope);
+    }
+
+    /// Get the geographical scope of this snapshot.
+    ///
+    /// Returns `"global"` if global scope is used.
+    ///
+    /// This maps to client-go `KVSnapshot.SetTxnScope` / `KVSnapshot.SetReadReplicaScope`.
+    #[must_use]
+    pub fn txn_scope(&self) -> &str {
+        self.transaction.txn_scope()
+    }
+
+    /// Set the read replica scope of this snapshot.
+    ///
+    /// In client-go, `KVSnapshot.SetReadReplicaScope` is an alias of `KVSnapshot.SetTxnScope`.
+    /// This method is provided for parity and forwards to [`Snapshot::set_txn_scope`].
+    pub fn set_read_replica_scope(&mut self, scope: impl AsRef<str>) {
+        self.set_txn_scope(scope);
+    }
+
     /// Get the snapshot cache hit count.
     ///
     /// This maps to client-go `KVSnapshot.SnapCacheHitCount` (primarily for testing/debugging).
@@ -1208,5 +1237,35 @@ mod tests {
 
         snapshot.set_request_source("external_gc");
         assert!(!snapshot.is_internal());
+    }
+
+    #[test]
+    fn test_snapshot_set_txn_scope_delegates_to_transaction() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |_req: &dyn Any| Err(Error::Unimplemented),
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        assert_eq!(snapshot.txn_scope(), "global");
+
+        snapshot.set_txn_scope("dc1");
+        assert_eq!(snapshot.txn_scope(), "dc1");
+
+        snapshot.set_read_replica_scope("dc2");
+        assert_eq!(snapshot.txn_scope(), "dc2");
+
+        snapshot.set_txn_scope("global");
+        assert_eq!(snapshot.txn_scope(), "global");
+
+        snapshot.set_read_replica_scope("");
+        assert_eq!(snapshot.txn_scope(), "global");
     }
 }

@@ -117,6 +117,31 @@ impl SyncSnapshot {
         self.inner.set_snapshot_ts(timestamp)
     }
 
+    /// Set the geographical scope of this snapshot.
+    ///
+    /// This maps to client-go `KVSnapshot.SetTxnScope` / `KVSnapshot.SetReadReplicaScope`.
+    pub fn set_txn_scope(&mut self, txn_scope: impl AsRef<str>) {
+        self.inner.set_txn_scope(txn_scope);
+    }
+
+    /// Get the geographical scope of this snapshot.
+    ///
+    /// Returns `"global"` if global scope is used.
+    ///
+    /// This maps to client-go `KVSnapshot.SetTxnScope` / `KVSnapshot.SetReadReplicaScope`.
+    #[must_use]
+    pub fn txn_scope(&self) -> &str {
+        self.inner.txn_scope()
+    }
+
+    /// Set the read replica scope of this snapshot.
+    ///
+    /// In client-go, `KVSnapshot.SetReadReplicaScope` is an alias of `KVSnapshot.SetTxnScope`.
+    /// This method is provided for parity and forwards to [`SyncSnapshot::set_txn_scope`].
+    pub fn set_read_replica_scope(&mut self, scope: impl AsRef<str>) {
+        self.inner.set_read_replica_scope(scope);
+    }
+
     /// Returns true if this snapshot is used by internal executions.
     ///
     /// This maps to client-go `KVSnapshot.IsInternal`.
