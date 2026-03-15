@@ -51,14 +51,19 @@ txn.commit().await?;
 ```
 
 You can configure the client via `Config`, for example enabling transaction local latches
-(optimistic commits only):
+(optimistic commits only) or enabling the optional `BatchCommands` streaming RPC for supported
+read-only requests:
 
 ```rust
 use tikv_client::{Config, TransactionClient};
 
-let config = Config::default().with_txn_local_latches_capacity(1024);
+let config = Config::default()
+    .with_txn_local_latches_capacity(1024)
+    .with_enable_batch_rpc(true);
 let txn_client = TransactionClient::new_with_config(vec!["127.0.0.1:2379"], config).await?;
 ```
+
+The batch RPC feature is best-effort and falls back to unary RPCs when batch RPC is unavailable.
 
 You can also begin a transaction with an explicit start timestamp (no PD TSO fetch), or ask PD for
 TSO in a specific transaction scope (`txn_scope`/`dc_location`):
