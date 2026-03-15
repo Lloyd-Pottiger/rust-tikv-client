@@ -351,6 +351,110 @@ impl KvRpcClient {
             };
         }
 
+        if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawPutRequest>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::RawPut(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::RawPut(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for raw_put: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::RawBatchPutRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::RawBatchPut(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::RawBatchPut(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for raw_batch_put: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawDeleteRequest>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::RawDelete(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::RawDelete(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for raw_delete: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::RawBatchDeleteRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::RawBatchDelete(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::RawBatchDelete(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for raw_batch_delete: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::RawDeleteRangeRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::RawDeleteRange(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::RawDeleteRange(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for raw_delete_range: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawScanRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawScan(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
@@ -607,6 +711,144 @@ mod tests {
             .downcast::<kvrpcpb::RawCoprocessorResponse>()
             .map_err(|_| Error::StringError("expected raw_coprocessor response".to_owned()))?;
         assert_eq!(resp.data, b"pong".to_vec());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_raw_put_via_batch_commands() -> Result<()> {
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
+            rx.recv().await.map(|message| (message, rx))
+        });
+        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
+
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+        let client = KvRpcClient {
+            rpc_client,
+            timeout: Duration::from_secs(1),
+            batch: Some(batch),
+            health_feedback_observer: Arc::new(Mutex::new(None)),
+        };
+
+        let mut request = kvrpcpb::RawPutRequest::default();
+        request.key = b"k".to_vec();
+        request.value = b"v".to_vec();
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "raw_put dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::RawPut(sent_req) => {
+                assert_eq!(sent_req.key, b"k".to_vec());
+                assert_eq!(sent_req.value, b"v".to_vec());
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for raw_put: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::RawPut(
+                    kvrpcpb::RawPutResponse::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        resp.downcast::<kvrpcpb::RawPutResponse>()
+            .map_err(|_| Error::StringError("expected raw_put response".to_owned()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_raw_delete_range_via_batch_commands() -> Result<()> {
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
+            rx.recv().await.map(|message| (message, rx))
+        });
+        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
+
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+        let client = KvRpcClient {
+            rpc_client,
+            timeout: Duration::from_secs(1),
+            batch: Some(batch),
+            health_feedback_observer: Arc::new(Mutex::new(None)),
+        };
+
+        let mut request = kvrpcpb::RawDeleteRangeRequest::default();
+        request.start_key = b"a".to_vec();
+        request.end_key = b"z".to_vec();
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "raw_delete_range dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::RawDeleteRange(sent_req) => {
+                assert_eq!(sent_req.start_key, b"a".to_vec());
+                assert_eq!(sent_req.end_key, b"z".to_vec());
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for raw_delete_range: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(
+                    tikvpb::batch_commands_response::response::Cmd::RawDeleteRange(
+                        kvrpcpb::RawDeleteRangeResponse::default(),
+                    ),
+                ),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        resp.downcast::<kvrpcpb::RawDeleteRangeResponse>()
+            .map_err(|_| Error::StringError("expected raw_delete_range response".to_owned()))?;
         Ok(())
     }
 
