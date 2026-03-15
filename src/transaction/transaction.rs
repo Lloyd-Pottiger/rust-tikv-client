@@ -3242,11 +3242,20 @@ impl<PdC: PdClient> Transaction<PdC> {
             Some(k) => k,
             None => return Err(Error::NoPrimaryKey),
         };
-        let mut request = new_heart_beat_request(
-            self.timestamp.clone(),
-            primary_key,
-            self.start_instant.elapsed().as_millis() as u64 + MAX_TTL,
-        );
+        let max_txn_ttl = if self.options.pipelined_txn.is_some() {
+            self.rpc.max_txn_ttl().max(MAX_PIPELINED_TXN_TTL)
+        } else {
+            self.rpc.max_txn_ttl()
+        };
+        let ttl = next_heartbeat_ttl(self.start_instant, max_txn_ttl).map_err(|exceeded| {
+            Error::StringError(format!(
+                "transaction TTL exceeded max-txn-ttl, start_ts: {}, uptime_ms: {}, max_txn_ttl_ms: {}",
+                self.timestamp.version(),
+                exceeded.uptime_ms,
+                exceeded.max_txn_ttl_ms
+            ))
+        })?;
+        let mut request = new_heart_beat_request(self.timestamp.clone(), primary_key, ttl);
         self.options.apply_write_context(&mut request.context);
         if self.options.resource_group_tag.is_none() {
             if let Some(tagger) = self.resource_group_tagger.as_ref() {
@@ -4435,6 +4444,10 @@ impl<PdC: PdClient> Transaction<PdC> {
         };
         let start_instant = self.start_instant;
         let keyspace = self.keyspace;
+        let mut max_txn_ttl = rpc.max_txn_ttl();
+        if broadcast_pipelined_txn_status {
+            max_txn_ttl = max_txn_ttl.max(MAX_PIPELINED_TXN_TTL);
+        }
 
         let heartbeat_task = async move {
             loop {
@@ -4458,11 +4471,20 @@ impl<PdC: PdClient> Transaction<PdC> {
                 if heartbeat_generation.load(atomic::Ordering::SeqCst) != heartbeat_generation_id {
                     break;
                 }
-                let request = new_heart_beat_request(
-                    start_ts.clone(),
-                    primary_key.clone(),
-                    start_instant.elapsed().as_millis() as u64 + MAX_TTL,
-                );
+                let ttl = match next_heartbeat_ttl(start_instant, max_txn_ttl) {
+                    Ok(ttl) => ttl,
+                    Err(exceeded) => {
+                        info!(
+                            "auto heartbeat reached max txn ttl, stop heartbeating, start_ts: {}, uptime_ms: {}, max_txn_ttl_ms: {}, pipelined: {}",
+                            start_ts.version(),
+                            exceeded.uptime_ms,
+                            exceeded.max_txn_ttl_ms,
+                            broadcast_pipelined_txn_status
+                        );
+                        break;
+                    }
+                };
+                let request = new_heart_beat_request(start_ts.clone(), primary_key.clone(), ttl);
                 let plan = PlanBuilder::new_with_rpc_interceptors(
                     rpc.clone(),
                     keyspace,
@@ -4568,6 +4590,10 @@ const MAX_TTL: u64 = 20000;
 const DEFAULT_LOCK_TTL: u64 = 3000;
 /// The default heartbeat interval
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(MAX_TTL / 2);
+/// Maximum lifetime for pipelined transactions using managed lock TTL heartbeats.
+///
+/// This matches client-go `MaxPipelinedTxnTTL` (24 hours).
+const MAX_PIPELINED_TXN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Default maximum time allowed for PD TSO to catch up to the commit-wait target timestamp.
 ///
 /// This matches client-go `KVTxn.commitWaitUntilTSOTimeout` default.
@@ -4576,6 +4602,28 @@ const DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT: Duration = Duration::from_secs(1);
 ///
 /// This matches the default in client-go.
 const DEFAULT_ASYNC_COMMIT_SAFE_WINDOW: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug)]
+struct MaxTxnTtlExceeded {
+    uptime_ms: u64,
+    max_txn_ttl_ms: u64,
+}
+
+fn next_heartbeat_ttl(
+    start_instant: Instant,
+    max_txn_ttl: Duration,
+) -> std::result::Result<u64, MaxTxnTtlExceeded> {
+    let uptime_ms = u64::try_from(start_instant.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let max_txn_ttl_ms = u64::try_from(max_txn_ttl.as_millis()).unwrap_or(u64::MAX);
+    if uptime_ms > max_txn_ttl_ms {
+        Err(MaxTxnTtlExceeded {
+            uptime_ms,
+            max_txn_ttl_ms,
+        })
+    } else {
+        Ok(uptime_ms.saturating_add(MAX_TTL))
+    }
+}
 /// TiKV recommends each RPC packet should be less than around 1MB. We keep KV size of
 /// each request below 16KB.
 pub const TXN_COMMIT_BATCH_SIZE: u64 = 16 * 1024;
@@ -11419,6 +11467,47 @@ mod tests {
             .expect("heartbeat should restart");
 
         assert_eq!(heartbeat_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_auto_heartbeat_stops_after_max_txn_ttl_exceeded() {
+        let heartbeat_calls = Arc::new(AtomicUsize::new(0));
+        let heartbeat_calls_captured = heartbeat_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::TxnHeartBeatRequest>().is_some() {
+                    heartbeat_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::TxnHeartBeatResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+        pd_client.set_ttl_refreshed_txn_size(0);
+        pd_client.set_max_txn_ttl(Duration::from_millis(5));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_millis(1)))
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put("k".to_owned(), "v").await.unwrap();
+        txn.start_instant = Instant::now() - Duration::from_millis(10);
+        txn.start_auto_heartbeat().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while txn.heartbeat_running_generation.load(Ordering::SeqCst) != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("running heartbeat state should reset after exceeding max_txn_ttl");
+
+        assert_eq!(heartbeat_calls.load(Ordering::SeqCst), 0);
     }
 
     #[rstest::rstest]

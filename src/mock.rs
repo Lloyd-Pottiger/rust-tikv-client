@@ -122,6 +122,10 @@ pub struct MockPdClient {
     ttl_refreshed_txn_size: Arc<AtomicU64>,
     #[new(value = "Arc::new(AtomicUsize::new(crate::config::DEFAULT_COMMITTER_CONCURRENCY))")]
     committer_concurrency: Arc<AtomicUsize>,
+    #[new(
+        value = "Arc::new(AtomicU64::new(u64::try_from(crate::config::DEFAULT_MAX_TXN_TTL.as_millis()).unwrap_or(u64::MAX)))"
+    )]
+    max_txn_ttl_ms: Arc<AtomicU64>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
     get_external_timestamp_calls: Arc<AtomicUsize>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
@@ -196,6 +200,11 @@ impl MockPdClient {
     pub fn set_committer_concurrency(&self, concurrency: usize) {
         self.committer_concurrency
             .store(concurrency, Ordering::SeqCst);
+    }
+
+    pub fn set_max_txn_ttl(&self, ttl: Duration) {
+        let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+        self.max_txn_ttl_ms.store(ttl_ms, Ordering::SeqCst);
     }
 
     pub async fn insert_store_meta(&self, store: metapb::Store) {
@@ -523,6 +532,10 @@ impl PdClient for MockPdClient {
 
     fn committer_concurrency(&self) -> usize {
         self.committer_concurrency.load(Ordering::SeqCst)
+    }
+
+    fn max_txn_ttl(&self) -> Duration {
+        Duration::from_millis(self.max_txn_ttl_ms.load(Ordering::SeqCst))
     }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
@@ -914,6 +927,7 @@ impl PdClient for MockPdClient {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use crate::pd::PdClient;
     use crate::proto::pdpb;
@@ -929,6 +943,14 @@ mod tests {
         );
         client.set_committer_concurrency(1);
         assert_eq!(client.committer_concurrency(), 1);
+    }
+
+    #[test]
+    fn test_mock_pd_client_max_txn_ttl_is_configurable() {
+        let client = MockPdClient::default();
+        assert_eq!(client.max_txn_ttl(), crate::config::DEFAULT_MAX_TXN_TTL);
+        client.set_max_txn_ttl(Duration::from_secs(2));
+        assert_eq!(client.max_txn_ttl(), Duration::from_secs(2));
     }
 
     #[tokio::test]

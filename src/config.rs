@@ -40,6 +40,13 @@ pub struct Config {
     ///
     /// This maps to client-go `CommitterConcurrency`.
     pub committer_concurrency: usize,
+    /// Maximum lifetime for transactions using managed lock TTL heartbeats.
+    ///
+    /// When a transaction has been alive longer than this duration, the automatic transaction
+    /// heartbeat loop stops so locks won't be kept alive forever.
+    ///
+    /// This maps to client-go `MaxTxnTTL` (default: 1 hour).
+    pub max_txn_ttl: Duration,
     /// The maximum number of pending batched TSO requests buffered in the timestamp oracle.
     ///
     /// When exhausted, new timestamp requests will apply backpressure until pending requests are
@@ -124,6 +131,7 @@ pub struct Config {
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const DEFAULT_COMMITTER_CONCURRENCY: usize = 128;
+pub(crate) const DEFAULT_MAX_TXN_TTL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
 const DEFAULT_GRPC_CONNECTION_COUNT: usize = 4;
@@ -146,6 +154,7 @@ impl Default for Config {
             key_path: None,
             timeout: DEFAULT_REQUEST_TIMEOUT,
             committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
+            max_txn_ttl: DEFAULT_MAX_TXN_TTL,
             tso_max_pending_count: DEFAULT_TSO_MAX_PENDING_COUNT,
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
             grpc_connection_count: DEFAULT_GRPC_CONNECTION_COUNT,
@@ -176,6 +185,11 @@ impl Config {
         if self.committer_concurrency == 0 {
             return Err(crate::Error::StringError(
                 "committer-concurrency should be greater than 0".to_owned(),
+            ));
+        }
+        if self.max_txn_ttl.is_zero() {
+            return Err(crate::Error::StringError(
+                "max-txn-ttl should be greater than 0".to_owned(),
             ));
         }
         if self.grpc_connection_count == 0 {
@@ -247,6 +261,15 @@ impl Config {
     #[must_use]
     pub fn with_committer_concurrency(mut self, concurrency: usize) -> Self {
         self.committer_concurrency = concurrency;
+        self
+    }
+
+    /// Set the maximum transaction lifetime for auto-heartbeat.
+    ///
+    /// This maps to client-go `MaxTxnTTL`.
+    #[must_use]
+    pub fn with_max_txn_ttl(mut self, ttl: Duration) -> Self {
+        self.max_txn_ttl = ttl;
         self
     }
 
@@ -429,6 +452,7 @@ mod tests {
         assert!(!config.enable_batch_rpc);
         assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
         assert_eq!(config.committer_concurrency, DEFAULT_COMMITTER_CONCURRENCY);
+        assert_eq!(config.max_txn_ttl, DEFAULT_MAX_TXN_TTL);
         assert_eq!(
             config.ttl_refreshed_txn_size,
             DEFAULT_TTL_REFRESHED_TXN_SIZE
@@ -449,6 +473,14 @@ mod tests {
     fn test_config_validate_committer_concurrency_min() {
         let mut config = Config::default();
         config.committer_concurrency = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, crate::Error::StringError(_)));
+    }
+
+    #[test]
+    fn test_config_validate_max_txn_ttl_min() {
+        let mut config = Config::default();
+        config.max_txn_ttl = Duration::ZERO;
         let err = config.validate().unwrap_err();
         assert!(matches!(err, crate::Error::StringError(_)));
     }
