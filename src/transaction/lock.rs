@@ -11,7 +11,7 @@ use fail::fail_point;
 use log::debug;
 use log::error;
 use log::warn;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 use tokio::time::sleep;
 
 use crate::backoff::Backoff;
@@ -1218,29 +1218,81 @@ struct CachedLowResolutionTimestamp {
     updated_at: Instant,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
+struct LowResolutionTimestampCacheState {
+    cached: Option<CachedLowResolutionTimestamp>,
+    refresh_in_flight: bool,
+    generation: u64,
+}
+
 struct LowResolutionTimestampCache {
-    inner: Mutex<Option<CachedLowResolutionTimestamp>>,
+    inner: Mutex<LowResolutionTimestampCacheState>,
+    refreshed: watch::Sender<u64>,
+}
+
+impl Default for LowResolutionTimestampCache {
+    fn default() -> Self {
+        let (refreshed, _rx) = watch::channel(0);
+        Self {
+            inner: Mutex::new(LowResolutionTimestampCacheState {
+                cached: None,
+                refresh_in_flight: false,
+                generation: 0,
+            }),
+            refreshed,
+        }
+    }
 }
 
 impl LowResolutionTimestampCache {
     async fn get(&self, pd_client: Arc<impl PdClient>) -> Result<Timestamp> {
-        {
-            let guard = self.inner.lock().await;
-            if let Some(cached) = guard.as_ref() {
-                if cached.updated_at.elapsed() < LOW_RESOLUTION_TS_CACHE_INTERVAL {
-                    return Ok(cached.timestamp.clone());
+        loop {
+            let wait_for_generation = {
+                let mut state = self.inner.lock().await;
+                if let Some(cached) = state.cached.as_ref() {
+                    if cached.updated_at.elapsed() < LOW_RESOLUTION_TS_CACHE_INTERVAL {
+                        return Ok(cached.timestamp.clone());
+                    }
                 }
-            }
-        }
 
-        let timestamp = pd_client.get_timestamp().await?;
-        let mut guard = self.inner.lock().await;
-        *guard = Some(CachedLowResolutionTimestamp {
-            timestamp: timestamp.clone(),
-            updated_at: Instant::now(),
-        });
-        Ok(timestamp)
+                if state.refresh_in_flight {
+                    Some(state.generation)
+                } else {
+                    state.refresh_in_flight = true;
+                    None
+                }
+            };
+
+            if let Some(generation) = wait_for_generation {
+                let mut refreshed = self.refreshed.subscribe();
+                while *refreshed.borrow() == generation {
+                    // Sender is owned by the cache; treat closure as a best-effort wake-up.
+                    if refreshed.changed().await.is_err() {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            let fetched = pd_client.get_timestamp().await;
+            let generation = {
+                let mut state = self.inner.lock().await;
+                state.refresh_in_flight = false;
+                state.generation = state.generation.wrapping_add(1);
+                let generation = state.generation;
+                if let Ok(timestamp) = &fetched {
+                    state.cached = Some(CachedLowResolutionTimestamp {
+                        timestamp: timestamp.clone(),
+                        updated_at: Instant::now(),
+                    });
+                }
+                generation
+            };
+
+            // Wake up any waiters even when refresh fails so they can retry.
+            let _ = self.refreshed.send(generation);
+            return fetched;
+        }
     }
 }
 
@@ -2714,6 +2766,46 @@ mod tests {
             ctx.get_resolved(9).await.is_some(),
             "cacheable committed status should be stored in resolved cache"
         );
+    }
+
+    #[tokio::test]
+    async fn test_low_resolution_timestamp_cache_dedupes_concurrent_refresh_calls() {
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::default())
+                .with_tso_sequence(1)
+                .with_get_timestamp_delay(Duration::from_millis(50)),
+        );
+        let ctx = ResolveLocksContext::default();
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(11));
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let ctx = ctx.clone();
+            let pd_client = pd_client.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                ctx.low_resolution_timestamp(pd_client).await
+            }));
+        }
+        barrier.wait().await;
+
+        let mut versions = Vec::new();
+        for handle in handles {
+            let ts = handle.await.unwrap().unwrap();
+            versions.push(ts.version());
+        }
+        versions.sort_unstable();
+        versions.dedup();
+        assert_eq!(versions, vec![1]);
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
+
+        let ts = ctx
+            .low_resolution_timestamp(pd_client.clone())
+            .await
+            .unwrap();
+        assert_eq!(ts.version(), 1);
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
     }
 
     #[tokio::test]
