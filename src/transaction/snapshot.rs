@@ -751,6 +751,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_cache_bypassed_for_read_latest_start_ts() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                if let Some(_req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    resp.not_found = false;
+                    resp.value = b"v".to_vec();
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BatchGetRequest>() {
+                    let mut resp = kvrpcpb::BatchGetResponse::default();
+                    for key in &req.keys {
+                        resp.pairs.push(kvrpcpb::KvPair {
+                            key: key.clone(),
+                            value: b"v".to_vec(),
+                            error: None,
+                            commit_ts: 0,
+                        });
+                    }
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                Err(Error::Unimplemented)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(u64::MAX),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        let _ = snapshot.get(b"x".to_vec()).await.unwrap();
+        let _ = snapshot
+            .batch_get(vec![b"y".to_vec(), b"z".to_vec()])
+            .await
+            .unwrap()
+            .collect::<Vec<_>>();
+
+        snapshot.update_snapshot_cache([(
+            b"k".to_vec(),
+            SnapshotCacheEntry {
+                value: Some(b"v".to_vec()),
+                commit_ts: 0,
+            },
+        )]);
+
+        assert_eq!(snapshot.snap_cache_hit_count(), 0);
+        assert_eq!(snapshot.snap_cache_size(), 0);
+        assert!(snapshot.snap_cache().is_empty());
+    }
+
+    #[tokio::test]
     async fn test_snapshot_clean_cache_clears_transaction_read_cache() {
         let get_calls = Arc::new(AtomicUsize::new(0));
         let get_calls_cloned = get_calls.clone();
