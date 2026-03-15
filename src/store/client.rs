@@ -219,6 +219,25 @@ impl KvRpcClient {
             };
         }
 
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::BroadcastTxnStatus(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::BroadcastTxnStatus(resp) => {
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for broadcast_txn_status: {other:?}"
+                    ))),
+                },
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawGetRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawGet(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
@@ -658,6 +677,96 @@ mod tests {
         assert_eq!(seen.store_id, 42);
         assert_eq!(seen.feedback_seq_no, 7);
         assert_eq!(seen.slow_score, 81);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_broadcast_txn_status_via_batch_commands() -> Result<()> {
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
+            rx.recv().await.map(|message| (message, rx))
+        });
+        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
+
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+        let client = KvRpcClient {
+            rpc_client,
+            timeout: Duration::from_secs(1),
+            batch: Some(batch),
+        };
+
+        let request = kvrpcpb::BroadcastTxnStatusRequest {
+            context: Some(kvrpcpb::Context::default()),
+            txn_status: vec![
+                kvrpcpb::TxnStatus {
+                    start_ts: 1,
+                    min_commit_ts: 2,
+                    commit_ts: 0,
+                    rolled_back: false,
+                    is_completed: false,
+                },
+                kvrpcpb::TxnStatus {
+                    start_ts: 10,
+                    min_commit_ts: 0,
+                    commit_ts: 11,
+                    rolled_back: false,
+                    is_completed: true,
+                },
+            ],
+        };
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "broadcast_txn_status dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::BroadcastTxnStatus(sent_req) => {
+                assert_eq!(sent_req.txn_status.len(), 2);
+                assert_eq!(sent_req.txn_status[0].start_ts, 1);
+                assert_eq!(sent_req.txn_status[0].min_commit_ts, 2);
+                assert_eq!(sent_req.txn_status[1].start_ts, 10);
+                assert_eq!(sent_req.txn_status[1].commit_ts, 11);
+                assert!(sent_req.txn_status[1].is_completed);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for broadcast_txn_status: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(
+                    tikvpb::batch_commands_response::response::Cmd::BroadcastTxnStatus(
+                        kvrpcpb::BroadcastTxnStatusResponse {},
+                    ),
+                ),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        resp.downcast::<kvrpcpb::BroadcastTxnStatusResponse>()
+            .map_err(|_| Error::StringError("expected broadcast_txn_status response".to_owned()))?;
         Ok(())
     }
 }
