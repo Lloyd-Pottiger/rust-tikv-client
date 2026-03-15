@@ -15,6 +15,115 @@ pub struct SyncSnapshot {
     runtime: Arc<tokio::runtime::Runtime>,
 }
 
+enum SyncSnapshotScanDirection {
+    Forward { next_start: Key, upper_bound: Key },
+    Reverse { lower_bound: Key, next_end: Key },
+}
+
+struct SyncSnapshotScanIterator<'a> {
+    snapshot: &'a mut SyncSnapshot,
+    direction: SyncSnapshotScanDirection,
+    pending: std::vec::IntoIter<KvPair>,
+    finished: bool,
+    batch_size: u32,
+}
+
+impl<'a> SyncSnapshotScanIterator<'a> {
+    fn forward(snapshot: &'a mut SyncSnapshot, start_key: Key, upper_bound: Key) -> Self {
+        Self {
+            batch_size: snapshot.scan_batch_size(),
+            snapshot,
+            direction: SyncSnapshotScanDirection::Forward {
+                next_start: start_key,
+                upper_bound,
+            },
+            pending: Vec::<KvPair>::new().into_iter(),
+            finished: false,
+        }
+    }
+
+    fn reverse(snapshot: &'a mut SyncSnapshot, start_key: Key, lower_bound: Key) -> Self {
+        Self {
+            batch_size: snapshot.scan_batch_size(),
+            snapshot,
+            direction: SyncSnapshotScanDirection::Reverse {
+                lower_bound,
+                next_end: start_key,
+            },
+            pending: Vec::<KvPair>::new().into_iter(),
+            finished: false,
+        }
+    }
+}
+
+impl Iterator for SyncSnapshotScanIterator<'_> {
+    type Item = Result<KvPair>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(pair) = self.pending.next() {
+                return Some(Ok(pair));
+            }
+            if self.finished {
+                return None;
+            }
+
+            let (batch, last_key) = match &mut self.direction {
+                SyncSnapshotScanDirection::Forward {
+                    next_start,
+                    upper_bound,
+                } => match self
+                    .snapshot
+                    .scan(next_start.clone()..upper_bound.clone(), self.batch_size)
+                {
+                    Ok(iter) => {
+                        let batch: Vec<KvPair> = iter.collect();
+                        let last_key = batch.last().map(|pair| pair.key().clone());
+                        (batch, last_key)
+                    }
+                    Err(err) => {
+                        self.finished = true;
+                        return Some(Err(err));
+                    }
+                },
+                SyncSnapshotScanDirection::Reverse {
+                    lower_bound,
+                    next_end,
+                } => match self
+                    .snapshot
+                    .scan_reverse(lower_bound.clone()..next_end.clone(), self.batch_size)
+                {
+                    Ok(iter) => {
+                        let batch: Vec<KvPair> = iter.collect();
+                        let last_key = batch.last().map(|pair| pair.key().clone());
+                        (batch, last_key)
+                    }
+                    Err(err) => {
+                        self.finished = true;
+                        return Some(Err(err));
+                    }
+                },
+            };
+
+            let Some(last_key) = last_key else {
+                self.finished = true;
+                return None;
+            };
+
+            match &mut self.direction {
+                SyncSnapshotScanDirection::Forward { next_start, .. } => {
+                    *next_start = last_key.next_key();
+                }
+                SyncSnapshotScanDirection::Reverse { next_end, .. } => {
+                    *next_end = last_key;
+                }
+            }
+
+            self.pending = batch.into_iter();
+        }
+    }
+}
+
 impl SyncSnapshot {
     pub(crate) fn new(inner: Snapshot, runtime: Arc<tokio::runtime::Runtime>) -> Self {
         Self { inner, runtime }
@@ -85,6 +194,34 @@ impl SyncSnapshot {
         limit: u32,
     ) -> Result<impl Iterator<Item = Key>> {
         safe_block_on(&self.runtime, self.inner.scan_keys_reverse(range, limit))
+    }
+
+    /// Create a streaming iterator over key-value pairs starting at `start_key`.
+    ///
+    /// The returned iterator yields all pairs whose keys are in the range `[start_key, upper_bound)`.
+    /// When `upper_bound` is empty, it means upper unbounded.
+    ///
+    /// This maps to client-go `KVSnapshot.Iter`.
+    pub fn iter(
+        &mut self,
+        start_key: impl Into<Key>,
+        upper_bound: impl Into<Key>,
+    ) -> impl Iterator<Item = Result<KvPair>> + '_ {
+        SyncSnapshotScanIterator::forward(self, start_key.into(), upper_bound.into())
+    }
+
+    /// Create a reversed streaming iterator positioned on the first entry with key < `start_key`.
+    ///
+    /// The returned iterator yields all pairs whose keys are in the range `[lower_bound, start_key)`,
+    /// in descending order. When `lower_bound` is empty, it means lower unbounded.
+    ///
+    /// This maps to client-go `KVSnapshot.IterReverse`.
+    pub fn iter_reverse(
+        &mut self,
+        start_key: impl Into<Key>,
+        lower_bound: impl Into<Key>,
+    ) -> impl Iterator<Item = Result<KvPair>> + '_ {
+        SyncSnapshotScanIterator::reverse(self, start_key.into(), lower_bound.into())
     }
 
     /// Set the KV variables used by this snapshot.
@@ -320,6 +457,23 @@ impl SyncSnapshot {
     /// This maps to client-go `KVSnapshot.SetSampleStep`.
     pub fn set_sample_step(&mut self, step: u32) {
         self.inner.set_sample_step(step);
+    }
+
+    /// Set the scan batch size used by [`SyncSnapshot::iter`] and [`SyncSnapshot::iter_reverse`].
+    ///
+    /// When set to `0` or `1`, the default batch size (`256`) is used.
+    ///
+    /// This maps to client-go `KVSnapshot.SetScanBatchSize`.
+    pub fn set_scan_batch_size(&mut self, batch_size: u32) {
+        self.inner.set_scan_batch_size(batch_size);
+    }
+
+    /// Get the scan batch size used by [`SyncSnapshot::iter`] and [`SyncSnapshot::iter_reverse`].
+    ///
+    /// This maps to client-go `KVSnapshot.SetScanBatchSize`.
+    #[must_use]
+    pub fn scan_batch_size(&self) -> u32 {
+        self.inner.scan_batch_size()
     }
 
     /// Set resource group tag for requests.
