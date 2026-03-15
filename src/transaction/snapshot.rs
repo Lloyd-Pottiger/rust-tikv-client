@@ -163,6 +163,8 @@ pub struct Snapshot<PdC: PdClient = PdRpcClient> {
     cache: SnapshotCache,
     #[new(value = "DEFAULT_SCAN_BATCH_SIZE")]
     scan_batch_size: u32,
+    #[new(default)]
+    key_only: bool,
 }
 
 impl<PdC: PdClient> Snapshot<PdC> {
@@ -395,6 +397,22 @@ impl<PdC: PdClient> Snapshot<PdC> {
     /// This maps to client-go `KVSnapshot.SetNotFillCache`.
     pub fn set_not_fill_cache(&mut self, not_fill_cache: bool) {
         self.transaction.set_not_fill_cache(not_fill_cache);
+    }
+
+    /// Set whether scan requests should return only keys (no values).
+    ///
+    /// When enabled, `scan`/`scan_reverse` and the streaming iterators (`iter`/`iter_reverse`)
+    /// set `kvrpcpb::ScanRequest.key_only = true`.
+    ///
+    /// This maps to client-go `KVSnapshot.SetKeyOnly`.
+    pub fn set_key_only(&mut self, key_only: bool) {
+        self.key_only = key_only;
+    }
+
+    /// Get whether key-only scan mode is enabled for this snapshot.
+    #[must_use]
+    pub fn key_only(&self) -> bool {
+        self.key_only
     }
 
     /// Set task ID hint for TiKV.
@@ -730,7 +748,9 @@ impl<PdC: PdClient> Snapshot<PdC> {
         limit: u32,
     ) -> Result<impl Iterator<Item = KvPair>> {
         debug!("invoking scan request on snapshot");
-        self.transaction.scan(range, limit).await
+        self.transaction
+            .scan_with_key_only(range, limit, self.key_only, false)
+            .await
     }
 
     /// Scan a range, return at most `limit` keys that lying in the range.
@@ -750,7 +770,9 @@ impl<PdC: PdClient> Snapshot<PdC> {
         limit: u32,
     ) -> Result<impl Iterator<Item = KvPair>> {
         debug!("invoking scan_reverse request on snapshot");
-        self.transaction.scan_reverse(range, limit).await
+        self.transaction
+            .scan_with_key_only(range, limit, self.key_only, true)
+            .await
     }
 
     /// Similar to scan_keys, but in the reverse direction.
@@ -1388,6 +1410,84 @@ mod tests {
             .unwrap()
             .collect();
         assert_eq!(pairs, vec![KvPair(b"k".to_vec().into(), b"v".to_vec())]);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_set_key_only_sets_scan_request_key_only() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::ScanRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+                assert!(req.key_only);
+                assert!(!req.reverse);
+
+                let mut resp = kvrpcpb::ScanResponse::default();
+                resp.pairs.push(kvrpcpb::KvPair {
+                    key: b"k".to_vec(),
+                    value: Vec::new(),
+                    error: None,
+                    commit_ts: 0,
+                });
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        snapshot.set_key_only(true);
+        let pairs: Vec<KvPair> = snapshot
+            .scan(b"a".to_vec()..b"z".to_vec(), 10)
+            .await
+            .unwrap()
+            .collect();
+        assert_eq!(pairs, vec![KvPair(b"k".to_vec().into(), Vec::new())]);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_set_key_only_sets_scan_reverse_request_key_only() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::ScanRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+                assert!(req.key_only);
+                assert!(req.reverse);
+
+                let mut resp = kvrpcpb::ScanResponse::default();
+                resp.pairs.push(kvrpcpb::KvPair {
+                    key: b"k".to_vec(),
+                    value: Vec::new(),
+                    error: None,
+                    commit_ts: 0,
+                });
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        snapshot.set_key_only(true);
+        let pairs: Vec<KvPair> = snapshot
+            .scan_reverse(b"a".to_vec()..b"z".to_vec(), 10)
+            .await
+            .unwrap()
+            .collect();
+        assert_eq!(pairs, vec![KvPair(b"k".to_vec().into(), Vec::new())]);
     }
 
     #[tokio::test]

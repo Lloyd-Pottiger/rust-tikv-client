@@ -419,6 +419,22 @@ impl SyncSnapshot {
         self.inner.set_not_fill_cache(not_fill_cache);
     }
 
+    /// Set whether scan requests should return only keys (no values).
+    ///
+    /// When enabled, `scan`/`scan_reverse` and the streaming iterators (`iter`/`iter_reverse`)
+    /// set `kvrpcpb::ScanRequest.key_only = true`.
+    ///
+    /// This maps to client-go `KVSnapshot.SetKeyOnly`.
+    pub fn set_key_only(&mut self, key_only: bool) {
+        self.inner.set_key_only(key_only);
+    }
+
+    /// Get whether key-only scan mode is enabled for this snapshot.
+    #[must_use]
+    pub fn key_only(&self) -> bool {
+        self.inner.key_only()
+    }
+
     /// Set task ID hint for TiKV.
     ///
     /// This maps to client-go `KVSnapshot.SetTaskID`.

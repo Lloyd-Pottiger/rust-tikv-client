@@ -2082,6 +2082,16 @@ impl<PdC: PdClient> Transaction<PdC> {
             .map(KvPair::into_key))
     }
 
+    pub(crate) async fn scan_with_key_only(
+        &mut self,
+        range: impl Into<BoundRange>,
+        limit: u32,
+        key_only: bool,
+        reverse: bool,
+    ) -> Result<impl Iterator<Item = KvPair>> {
+        self.scan_inner(range, limit, key_only, reverse).await
+    }
+
     /// Sets the value associated with the given key.
     ///
     /// # Examples
