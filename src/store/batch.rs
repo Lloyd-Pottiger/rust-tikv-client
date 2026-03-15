@@ -13,12 +13,19 @@ use tonic::transport::Channel;
 use tonic::IntoStreamingRequest;
 use tonic::Status;
 
+use crate::proto::kvrpcpb;
 use crate::proto::tikvpb;
 use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::Error;
 use crate::Result;
 
-type BatchResponse = std::result::Result<tikvpb::batch_commands_response::response::Cmd, Error>;
+#[derive(Clone, Debug)]
+pub(crate) struct BatchDispatchResult {
+    pub(crate) cmd: tikvpb::batch_commands_response::response::Cmd,
+    pub(crate) health_feedback: Option<kvrpcpb::HealthFeedback>,
+}
+
+type BatchResponse = std::result::Result<BatchDispatchResult, Error>;
 
 #[derive(Clone)]
 pub(crate) struct BatchCommandsClient {
@@ -87,6 +94,7 @@ impl BatchCommandsClient {
                             );
                         }
 
+                        let health_feedback = message.health_feedback.clone();
                         for (request_id, response) in message
                             .request_ids
                             .into_iter()
@@ -101,9 +109,17 @@ impl BatchCommandsClient {
                                 continue;
                             };
 
-                            let result = response.cmd.ok_or_else(|| {
-                                Error::StringError("batch_commands response missing cmd".to_owned())
-                            });
+                            let result = response
+                                .cmd
+                                .ok_or_else(|| {
+                                    Error::StringError(
+                                        "batch_commands response missing cmd".to_owned(),
+                                    )
+                                })
+                                .map(|cmd| BatchDispatchResult {
+                                    cmd,
+                                    health_feedback: health_feedback.clone(),
+                                });
                             let _ = sender.send(result);
                         }
                     }
@@ -133,7 +149,7 @@ impl BatchCommandsClient {
         &self,
         cmd: tikvpb::batch_commands_request::request::Cmd,
         timeout: Duration,
-    ) -> Result<tikvpb::batch_commands_response::response::Cmd> {
+    ) -> Result<BatchDispatchResult> {
         let request_id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         {
@@ -259,11 +275,11 @@ mod tests {
         let r1 = t1.await.expect("task 1").expect("task 1 ok");
         let r2 = t2.await.expect("task 2").expect("task 2 ok");
         assert!(matches!(
-            r1,
+            r1.cmd,
             tikvpb::batch_commands_response::response::Cmd::Empty(_)
         ));
         assert!(matches!(
-            r2,
+            r2.cmd,
             tikvpb::batch_commands_response::response::Cmd::Empty(_)
         ));
     }

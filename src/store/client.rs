@@ -134,12 +134,14 @@ impl KvRpcClient {
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::GetRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Get(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
-                Ok(tikvpb::batch_commands_response::response::Cmd::Get(resp)) => {
-                    Ok(Some(Box::new(resp) as Box<dyn Any>))
-                }
-                Ok(other) => Err(Error::StringError(format!(
-                    "unexpected batch_commands response for get: {other:?}"
-                ))),
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::Get(resp) => {
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for get: {other:?}"
+                    ))),
+                },
                 Err(Error::GrpcAPI(_)) => Ok(None),
                 Err(err) => Err(err),
             };
@@ -148,12 +150,14 @@ impl KvRpcClient {
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::BatchGetRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::BatchGet(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
-                Ok(tikvpb::batch_commands_response::response::Cmd::BatchGet(resp)) => {
-                    Ok(Some(Box::new(resp) as Box<dyn Any>))
-                }
-                Ok(other) => Err(Error::StringError(format!(
-                    "unexpected batch_commands response for batch_get: {other:?}"
-                ))),
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::BatchGet(resp) => {
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for batch_get: {other:?}"
+                    ))),
+                },
                 Err(Error::GrpcAPI(_)) => Ok(None),
                 Err(err) => Err(err),
             };
@@ -162,12 +166,14 @@ impl KvRpcClient {
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::ScanRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Scan(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
-                Ok(tikvpb::batch_commands_response::response::Cmd::Scan(resp)) => {
-                    Ok(Some(Box::new(resp) as Box<dyn Any>))
-                }
-                Ok(other) => Err(Error::StringError(format!(
-                    "unexpected batch_commands response for scan: {other:?}"
-                ))),
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::Scan(resp) => {
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for scan: {other:?}"
+                    ))),
+                },
                 Err(Error::GrpcAPI(_)) => Ok(None),
                 Err(err) => Err(err),
             };
@@ -176,12 +182,38 @@ impl KvRpcClient {
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::ScanLockRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::ScanLock(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
-                Ok(tikvpb::batch_commands_response::response::Cmd::ScanLock(resp)) => {
-                    Ok(Some(Box::new(resp) as Box<dyn Any>))
-                }
-                Ok(other) => Err(Error::StringError(format!(
-                    "unexpected batch_commands response for scan_lock: {other:?}"
-                ))),
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::ScanLock(resp) => {
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for scan_lock: {other:?}"
+                    ))),
+                },
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::GetHealthFeedbackRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::GetHealthFeedback(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::GetHealthFeedback(resp) => {
+                        let health_feedback = result.health_feedback.or(resp.health_feedback);
+                        let resp = kvrpcpb::GetHealthFeedbackResponse {
+                            region_error: resp.region_error,
+                            health_feedback,
+                        };
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for get_health_feedback: {other:?}"
+                    ))),
+                },
                 Err(Error::GrpcAPI(_)) => Ok(None),
                 Err(err) => Err(err),
             };
@@ -190,12 +222,14 @@ impl KvRpcClient {
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawGetRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawGet(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
-                Ok(tikvpb::batch_commands_response::response::Cmd::RawGet(resp)) => {
-                    Ok(Some(Box::new(resp) as Box<dyn Any>))
-                }
-                Ok(other) => Err(Error::StringError(format!(
-                    "unexpected batch_commands response for raw_get: {other:?}"
-                ))),
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::RawGet(resp) => {
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for raw_get: {other:?}"
+                    ))),
+                },
                 Err(Error::GrpcAPI(_)) => Ok(None),
                 Err(err) => Err(err),
             };
@@ -207,12 +241,14 @@ impl KvRpcClient {
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawBatchGet(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
-                Ok(tikvpb::batch_commands_response::response::Cmd::RawBatchGet(resp)) => {
-                    Ok(Some(Box::new(resp) as Box<dyn Any>))
-                }
-                Ok(other) => Err(Error::StringError(format!(
-                    "unexpected batch_commands response for raw_batch_get: {other:?}"
-                ))),
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::RawBatchGet(resp) => {
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for raw_batch_get: {other:?}"
+                    ))),
+                },
                 Err(Error::GrpcAPI(_)) => Ok(None),
                 Err(err) => Err(err),
             };
@@ -221,12 +257,14 @@ impl KvRpcClient {
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawScanRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawScan(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
-                Ok(tikvpb::batch_commands_response::response::Cmd::RawScan(resp)) => {
-                    Ok(Some(Box::new(resp) as Box<dyn Any>))
-                }
-                Ok(other) => Err(Error::StringError(format!(
-                    "unexpected batch_commands response for raw_scan: {other:?}"
-                ))),
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::RawScan(resp) => {
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for raw_scan: {other:?}"
+                    ))),
+                },
                 Err(Error::GrpcAPI(_)) => Ok(None),
                 Err(err) => Err(err),
             };
@@ -238,12 +276,14 @@ impl KvRpcClient {
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawBatchScan(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
-                Ok(tikvpb::batch_commands_response::response::Cmd::RawBatchScan(resp)) => {
-                    Ok(Some(Box::new(resp) as Box<dyn Any>))
-                }
-                Ok(other) => Err(Error::StringError(format!(
-                    "unexpected batch_commands response for raw_batch_scan: {other:?}"
-                ))),
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::RawBatchScan(resp) => {
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for raw_batch_scan: {other:?}"
+                    ))),
+                },
                 Err(Error::GrpcAPI(_)) => Ok(None),
                 Err(err) => Err(err),
             };
@@ -255,12 +295,14 @@ impl KvRpcClient {
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawCoprocessor(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
-                Ok(tikvpb::batch_commands_response::response::Cmd::RawCoprocessor(resp)) => {
-                    Ok(Some(Box::new(resp) as Box<dyn Any>))
-                }
-                Ok(other) => Err(Error::StringError(format!(
-                    "unexpected batch_commands response for raw_coprocessor: {other:?}"
-                ))),
+                Ok(result) => match result.cmd {
+                    tikvpb::batch_commands_response::response::Cmd::RawCoprocessor(resp) => {
+                        Ok(Some(Box::new(resp) as Box<dyn Any>))
+                    }
+                    other => Err(Error::StringError(format!(
+                        "unexpected batch_commands response for raw_coprocessor: {other:?}"
+                    ))),
+                },
                 Err(Error::GrpcAPI(_)) => Ok(None),
                 Err(err) => Err(err),
             };
@@ -537,6 +579,85 @@ mod tests {
             .map_err(|_| Error::StringError("expected scan_lock response".to_owned()))?;
         assert_eq!(resp.locks.len(), 1);
         assert_eq!(resp.locks[0].key, b"k".to_vec());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_get_health_feedback_via_batch_commands() -> Result<()> {
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
+            rx.recv().await.map(|message| (message, rx))
+        });
+        let batch = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound_stream)?;
+
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+        let client = KvRpcClient {
+            rpc_client,
+            timeout: Duration::from_secs(1),
+            batch: Some(batch),
+        };
+
+        let request = kvrpcpb::GetHealthFeedbackRequest {
+            context: Some(kvrpcpb::Context::default()),
+        };
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "get_health_feedback dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::GetHealthFeedback(_sent_req) => {}
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for get_health_feedback: {other:?}"
+                )));
+            }
+        }
+
+        let feedback = kvrpcpb::HealthFeedback {
+            store_id: 42,
+            feedback_seq_no: 7,
+            slow_score: 81,
+        };
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(
+                    tikvpb::batch_commands_response::response::Cmd::GetHealthFeedback(
+                        kvrpcpb::GetHealthFeedbackResponse::default(),
+                    ),
+                ),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: Some(feedback.clone()),
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::GetHealthFeedbackResponse>()
+            .map_err(|_| Error::StringError("expected get_health_feedback response".to_owned()))?;
+        let seen = resp.health_feedback.as_ref().ok_or_else(|| {
+            Error::StringError("expected health feedback to be present".to_owned())
+        })?;
+        assert_eq!(seen.store_id, 42);
+        assert_eq!(seen.feedback_seq_no, 7);
+        assert_eq!(seen.slow_score, 81);
         Ok(())
     }
 }
