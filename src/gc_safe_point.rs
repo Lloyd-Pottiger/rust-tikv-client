@@ -168,6 +168,7 @@ impl<PdC: PdClient> GcSafePointCache<PdC> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -189,6 +190,7 @@ mod tests {
         called: Arc<Notify>,
         ready: Arc<Notify>,
         safe_point: u64,
+        calls: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -215,6 +217,7 @@ mod tests {
         }
 
         async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             self.called.notify_one();
             self.ready.notified().await;
             Ok(self.safe_point)
@@ -245,10 +248,12 @@ mod tests {
     async fn test_gc_safe_point_refresh_gate_is_not_held_across_await() {
         let called = Arc::new(Notify::new());
         let ready = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
         let pd_client = Arc::new(BlockingGcSafePointPdClient {
             called: called.clone(),
             ready: ready.clone(),
             safe_point: 42,
+            calls,
         });
         let cache = GcSafePointCache::new(pd_client, Keyspace::Disable);
 
@@ -266,5 +271,57 @@ mod tests {
 
         ready.notify_one();
         assert_eq!(handle.await.unwrap().unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_gc_safe_point_refresh_dedupes_concurrent_calls() {
+        let called = Arc::new(Notify::new());
+        let ready = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let pd_client = Arc::new(BlockingGcSafePointPdClient {
+            called: called.clone(),
+            ready: ready.clone(),
+            safe_point: 42,
+            calls: calls.clone(),
+        });
+        let cache = GcSafePointCache::new(pd_client, Keyspace::Disable);
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(11));
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                cache.safe_point().await
+            }));
+        }
+        barrier.wait().await;
+
+        tokio::time::timeout(Duration::from_secs(1), called.notified())
+            .await
+            .expect("pd get_gc_safe_point called");
+        ready.notify_waiters();
+
+        for handle in handles {
+            let value = tokio::time::timeout(Duration::from_secs(1), handle)
+                .await
+                .expect("safe_point task should finish")
+                .unwrap()
+                .unwrap();
+            assert_eq!(value, 42);
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "concurrent safe_point calls should be singleflighted"
+        );
+        assert_eq!(cache.safe_point().await.unwrap(), 42);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "cached safe_point should not refresh"
+        );
     }
 }
