@@ -109,6 +109,12 @@ impl<PdC: PdClient> RangeTaskRunner<PdC> {
         self.failed_regions.load(Ordering::Relaxed)
     }
 
+    /// Returns the runner identifier (primarily for debugging/logging).
+    #[must_use]
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
     /// Runs the task on the given range.
     ///
     /// Empty start key or end key means unbounded (matching [`BoundRange`] conventions).
@@ -180,7 +186,7 @@ impl<PdC: PdClient> RangeTaskRunner<PdC> {
             },
         );
 
-        let identifier = self.identifier.clone();
+        let identifier = self.identifier.as_str();
         let handler = self.handler.clone();
         let completed_regions = &self.completed_regions;
         let failed_regions = &self.failed_regions;
@@ -188,7 +194,6 @@ impl<PdC: PdClient> RangeTaskRunner<PdC> {
         task_ranges
             .try_for_each_concurrent(self.concurrency, move |range| {
                 let handler = handler.clone();
-                let identifier = identifier.clone();
                 async move {
                     let (stat, res) = handler.handle(range).await;
                     completed_regions.fetch_add(stat.completed_regions, Ordering::Relaxed);
