@@ -1624,6 +1624,101 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
         .await
     }
 
+    /// Checks async-commit secondary locks and returns the merged status.
+    ///
+    /// This is intended for test probes and mirrors the internal client-go
+    /// `checkAllSecondaries` helper.
+    pub(crate) async fn check_all_secondaries_for_probe(
+        &self,
+        keys: Vec<Vec<u8>>,
+        txn_id: u64,
+        primary_min_commit_ts: u64,
+    ) -> Result<SecondaryLocksStatus> {
+        self.inner
+            .check_all_secondaries(
+                self.pd_client.clone(),
+                self.keyspace,
+                keys,
+                txn_id,
+                primary_min_commit_ts,
+            )
+            .await
+    }
+
+    /// Queries transaction status for a lock, applying the same backoff/retry logic as lock
+    /// resolution.
+    ///
+    /// This is intended for test probes and mirrors client-go `getTxnStatusFromLock`.
+    pub(crate) async fn get_txn_status_from_lock_for_probe(
+        &self,
+        lock: &kvrpcpb::LockInfo,
+        caller_start_ts: u64,
+        force_sync_commit: bool,
+    ) -> Result<Arc<TransactionStatus>> {
+        let current_ts = self
+            .inner
+            .ctx
+            .low_resolution_timestamp(self.pd_client.clone())
+            .await?;
+        match self
+            .inner
+            .get_txn_status_from_lock(
+                OPTIMISTIC_BACKOFF,
+                None,
+                lock,
+                caller_start_ts,
+                current_ts.version(),
+                force_sync_commit,
+                self.pd_client.clone(),
+                self.keyspace,
+            )
+            .await?
+        {
+            TxnStatusFromLock::Status(status)
+            | TxnStatusFromLock::AsyncCommitResolved { status, .. } => Ok(status),
+            TxnStatusFromLock::PessimisticRollbackRequired => Err(Error::StringError(
+                "check_txn_status returned primary_mismatch on pessimistic lock".to_owned(),
+            )),
+        }
+    }
+
+    /// Saves a transaction status in the shared resolved-status cache.
+    ///
+    /// This is intended for test probes and mirrors client-go `saveResolved`.
+    pub(crate) async fn save_resolved_for_probe(
+        &self,
+        txn_id: u64,
+        status: Arc<TransactionStatus>,
+    ) {
+        self.inner.ctx.save_resolved(txn_id, status).await;
+    }
+
+    /// Resolves locks for an explicit set of keys.
+    ///
+    /// This is intended for test probes and mirrors client-go `resolveAsyncResolveData`.
+    pub(crate) async fn resolve_lock_keys_for_probe(
+        &self,
+        keys: Vec<Vec<u8>>,
+        start_version: u64,
+        commit_version: u64,
+        is_txn_file: bool,
+        backoff: Backoff,
+        killed: Option<Arc<AtomicU32>>,
+    ) -> Result<()> {
+        resolve_lock_keys_with_retry(
+            keys,
+            start_version,
+            commit_version,
+            is_txn_file,
+            &self.inner.rpc_context,
+            self.pd_client.clone(),
+            self.keyspace,
+            backoff,
+            killed,
+        )
+        .await
+    }
+
     /// Records the locks being resolved for a given `caller_start_ts` and returns a token.
     pub async fn record_resolving_locks(
         &self,
