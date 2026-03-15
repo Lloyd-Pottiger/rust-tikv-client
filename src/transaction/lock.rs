@@ -1223,6 +1223,7 @@ struct LowResolutionTimestampCacheState {
     cached: Option<CachedLowResolutionTimestamp>,
     refresh_in_flight: bool,
     generation: u64,
+    last_error: Option<String>,
 }
 
 struct LowResolutionTimestampCache {
@@ -1238,6 +1239,7 @@ impl Default for LowResolutionTimestampCache {
                 cached: None,
                 refresh_in_flight: false,
                 generation: 0,
+                last_error: None,
             }),
             refreshed,
         }
@@ -1271,15 +1273,21 @@ impl LowResolutionTimestampCache {
                         break;
                     }
                 }
+                let state = self.inner.lock().await;
+                if let Some(err) = state.last_error.as_ref() {
+                    return Err(Error::StringError(err.clone()));
+                }
                 continue;
             }
 
             let fetched = pd_client.get_timestamp().await;
+            let last_error = fetched.as_ref().err().map(|err| err.to_string());
             let generation = {
                 let mut state = self.inner.lock().await;
                 state.refresh_in_flight = false;
                 state.generation = state.generation.wrapping_add(1);
                 let generation = state.generation;
+                state.last_error = last_error;
                 if let Ok(timestamp) = &fetched {
                     state.cached = Some(CachedLowResolutionTimestamp {
                         timestamp: timestamp.clone(),
@@ -2806,6 +2814,43 @@ mod tests {
             .unwrap();
         assert_eq!(ts.version(), 1);
         assert_eq!(pd_client.get_timestamp_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_low_resolution_timestamp_cache_propagates_error_to_waiters() {
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::default())
+                .with_tso_sequence(1)
+                .with_get_timestamp_delay(Duration::from_millis(50))
+                .with_get_timestamp_error(),
+        );
+        let ctx = ResolveLocksContext::default();
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(11));
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let ctx = ctx.clone();
+            let pd_client = pd_client.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                ctx.low_resolution_timestamp(pd_client).await
+            }));
+        }
+        barrier.wait().await;
+
+        for handle in handles {
+            let err = handle.await.unwrap().unwrap_err();
+            match err {
+                Error::StringError(message) => assert_eq!(message, "injected get_timestamp error"),
+                other => panic!("expected StringError, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            pd_client.get_timestamp_call_count(),
+            1,
+            "concurrent refresh failure should propagate to all waiters"
+        );
     }
 
     #[tokio::test]

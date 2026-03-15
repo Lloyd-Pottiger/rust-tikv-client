@@ -124,6 +124,8 @@ pub struct MockPdClient {
     set_external_timestamp_calls: Arc<AtomicUsize>,
     #[new(default)]
     get_timestamp_delay: Duration,
+    #[new(value = "false")]
+    get_timestamp_should_fail: bool,
     #[new(value = "Mutex::new(Vec::new())")]
     scatter_regions_calls: Mutex<Vec<(Vec<RegionId>, Option<String>)>>,
     #[new(value = "Mutex::new(Vec::new())")]
@@ -363,6 +365,11 @@ impl MockPdClient {
 
     pub fn with_get_timestamp_delay(mut self, delay: Duration) -> MockPdClient {
         self.get_timestamp_delay = delay;
+        self
+    }
+
+    pub fn with_get_timestamp_error(mut self) -> MockPdClient {
+        self.get_timestamp_should_fail = true;
         self
     }
 
@@ -653,6 +660,11 @@ impl PdClient for MockPdClient {
         if self.get_timestamp_delay > Duration::from_millis(0) {
             sleep(self.get_timestamp_delay).await;
         }
+        if self.get_timestamp_should_fail {
+            return Err(Error::StringError(
+                "injected get_timestamp error".to_owned(),
+            ));
+        }
         if self.use_tso_sequence {
             let version = self.tso_version.fetch_add(1, Ordering::SeqCst);
             Ok(Timestamp::from_version(version))
@@ -676,6 +688,11 @@ impl PdClient for MockPdClient {
         };
         locations.push(dc_location);
 
+        if self.get_timestamp_should_fail {
+            return Err(Error::StringError(
+                "injected get_timestamp error".to_owned(),
+            ));
+        }
         if self.use_tso_sequence {
             let version = self.tso_version.fetch_add(1, Ordering::SeqCst);
             Ok(Timestamp::from_version(version))
