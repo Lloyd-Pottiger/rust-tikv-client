@@ -1313,6 +1313,7 @@ impl Merge<kvrpcpb::CheckSecondaryLocksResponse> for Collect {
             fallback_2pc: false,
             locked_keys: 0,
             missing_lock: false,
+            resolve_keys: Vec::new(),
         };
         for resp in input {
             let resp = resp?;
@@ -1323,6 +1324,7 @@ impl Merge<kvrpcpb::CheckSecondaryLocksResponse> for Collect {
                     return Ok(out);
                 }
                 out.min_commit_ts = cmp::max(out.min_commit_ts, lock.min_commit_ts);
+                out.resolve_keys.push(lock.key);
             }
             if let Some(commit_ts) = Timestamp::try_from_version(resp.commit_ts) {
                 if let Some(existing) = out.commit_ts.as_ref() {
@@ -1358,6 +1360,7 @@ pub struct SecondaryLocksStatus {
     pub fallback_2pc: bool,
     pub locked_keys: usize,
     pub missing_lock: bool,
+    pub resolve_keys: Vec<Vec<u8>>,
 }
 
 pair_locks!(kvrpcpb::BatchGetResponse);

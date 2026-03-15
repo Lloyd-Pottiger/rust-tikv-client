@@ -25,7 +25,6 @@ use crate::proto::pdpb::Timestamp;
 use crate::region::RegionVerId;
 use crate::request::plan::handle_region_error;
 use crate::request::plan::is_grpc_error;
-use crate::request::Collect;
 use crate::request::CollectSingle;
 use crate::request::Keyspace;
 use crate::request::Plan;
@@ -2369,7 +2368,17 @@ impl LockResolver {
         txn_id: u64,
         primary_min_commit_ts: u64,
     ) -> Result<SecondaryLocksStatus> {
-        let expected_keys = keys.len();
+        if keys.is_empty() {
+            return Ok(SecondaryLocksStatus {
+                commit_ts: None,
+                min_commit_ts: primary_min_commit_ts,
+                fallback_2pc: false,
+                locked_keys: 0,
+                missing_lock: false,
+                resolve_keys: Vec::new(),
+            });
+        }
+
         let mut req = new_check_secondary_locks_request(keys, txn_id);
         self.rpc_context.apply_to_request(&mut req);
         let plan = crate::request::PlanBuilder::new_with_rpc_interceptors(
@@ -2379,22 +2388,82 @@ impl LockResolver {
             self.rpc_context.rpc_interceptors.clone(),
         )
         .with_optional_runtime_stats(self.rpc_context.runtime_stats.clone())
+        .preserve_shard()
         .retry_multi_region(DEFAULT_REGION_BACKOFF)
         .extract_error()
-        .merge(Collect)
         .plan();
-        let mut secondary_status = plan.execute().await?;
-        secondary_status.missing_lock = secondary_status.locked_keys < expected_keys;
+
+        let results = plan.execute().await?;
+        let mut secondary_status = SecondaryLocksStatus {
+            commit_ts: None,
+            min_commit_ts: 0,
+            fallback_2pc: false,
+            locked_keys: 0,
+            missing_lock: false,
+            resolve_keys: Vec::new(),
+        };
+        // client-go treats `commit_ts` as meaningful only when at least one lock is missing; in
+        // that case `commit_ts == 0` indicates rollback and must match across all missing shards.
+        let mut missing_commit_ts: Option<u64> = None;
+
+        for result in results {
+            let crate::request::ResponseWithShard(resp, shard_keys) = result?;
+            secondary_status.locked_keys = secondary_status
+                .locked_keys
+                .saturating_add(resp.locks.len());
+
+            let expected = shard_keys.len();
+            if resp.locks.len() < expected {
+                secondary_status.missing_lock = true;
+                let commit_ts = resp.commit_ts;
+                if let Some(existing) = missing_commit_ts {
+                    if existing != commit_ts {
+                        return Err(Error::StringError(format!(
+                            "check_secondary_locks commit_ts mismatch: {existing} vs {commit_ts}",
+                        )));
+                    }
+                } else {
+                    let baseline = secondary_status.min_commit_ts.max(primary_min_commit_ts);
+                    if commit_ts != 0 && commit_ts < baseline {
+                        return Err(Error::StringError(format!(
+                            "check_secondary_locks commit_ts {commit_ts} is less than min_commit_ts {baseline}",
+                        )));
+                    }
+                    missing_commit_ts = Some(commit_ts);
+                }
+                continue;
+            }
+
+            for lock in resp.locks {
+                if lock.lock_version != txn_id {
+                    return Err(Error::StringError(format!(
+                        "unexpected timestamp, expected: {txn_id}, found: {}",
+                        lock.lock_version
+                    )));
+                }
+                if !lock.use_async_commit {
+                    secondary_status.fallback_2pc = true;
+                    return Ok(secondary_status);
+                }
+                secondary_status.min_commit_ts =
+                    secondary_status.min_commit_ts.max(lock.min_commit_ts);
+                secondary_status.resolve_keys.push(lock.key);
+            }
+        }
+
+        if let Some(commit_ts) = missing_commit_ts {
+            secondary_status.commit_ts = Timestamp::try_from_version(commit_ts);
+        }
+        secondary_status.min_commit_ts = secondary_status.min_commit_ts.max(primary_min_commit_ts);
         if let Some(commit_ts) = secondary_status.commit_ts.as_ref() {
-            if commit_ts.version() < primary_min_commit_ts {
+            if commit_ts.version() < secondary_status.min_commit_ts {
                 return Err(Error::StringError(format!(
-                    "check_secondary_locks commit_ts {} is less than primary min_commit_ts {}",
+                    "check_secondary_locks commit_ts {} is less than min_commit_ts {}",
                     commit_ts.version(),
-                    primary_min_commit_ts,
+                    secondary_status.min_commit_ts,
                 )));
             }
         }
-        secondary_status.min_commit_ts = secondary_status.min_commit_ts.max(primary_min_commit_ts);
         Ok(secondary_status)
     }
 
@@ -2571,7 +2640,7 @@ impl LockResolver {
                                 .save_resolved(lock.lock_version, resolved_status.clone())
                                 .await;
                         }
-                        let mut keys = primary_lock.secondaries;
+                        let mut keys = secondary_status.resolve_keys;
                         keys.push(lock.primary_lock.clone());
                         keys.push(lock.key.clone());
                         return Ok(TxnStatusFromLock::AsyncCommitResolved {
@@ -3977,7 +4046,7 @@ mod tests {
                     resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(req.start_version, 7);
                     assert_eq!(req.commit_version, 200);
-                    assert_eq!(req.keys, vec![vec![1], vec![2], vec![3]]);
+                    assert_eq!(req.keys, vec![vec![1], vec![2]]);
                     return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
                 }
                 panic!("unexpected request type: {:?}", req.type_id());
@@ -4113,7 +4182,7 @@ mod tests {
                     resolve_lock_count_captured.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(req.start_version, 7);
                     assert_eq!(req.commit_version, 0);
-                    assert_eq!(req.keys, vec![vec![1], vec![2], vec![3]]);
+                    assert_eq!(req.keys, vec![vec![1], vec![2]]);
                     return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
                 }
                 panic!("unexpected request type: {:?}", req.type_id());
@@ -4189,6 +4258,7 @@ mod tests {
                     assert_eq!(req.keys, vec![vec![4]]);
                     let resp = kvrpcpb::CheckSecondaryLocksResponse {
                         locks: vec![kvrpcpb::LockInfo {
+                            lock_version: 9,
                             use_async_commit: false,
                             ..Default::default()
                         }],
@@ -4666,7 +4736,7 @@ mod tests {
                 .expect("resolve-lock request should report request metadata");
         assert_eq!(start_version, txn_id);
         assert_eq!(commit_version, 200);
-        assert_eq!(keys, vec![vec![1], vec![2], vec![3]]);
+        assert_eq!(keys, vec![vec![1], vec![2]]);
 
         let resolved = ctx
             .get_resolved(txn_id)
