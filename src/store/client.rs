@@ -6,14 +6,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use derive_new::new;
+use log::debug;
 use tonic::codec::CompressionEncoding;
 use tonic::codegen::Body;
 use tonic::codegen::Bytes;
 use tonic::codegen::StdError;
 use tonic::transport::Channel;
 
+use super::batch::BatchCommandsClient;
 use super::Request;
+use crate::proto::kvrpcpb;
+use crate::proto::tikvpb;
 use crate::proto::tikvpb::tikv_client::TikvClient;
+use crate::Error;
 use crate::GrpcCompressionType;
 use crate::Result;
 use crate::SecurityManager;
@@ -32,6 +37,7 @@ pub struct TikvConnect {
     timeout: Duration,
     grpc_max_decoding_message_size: usize,
     grpc_compression_type: GrpcCompressionType,
+    enable_batch_rpc: bool,
 }
 
 fn build_tikv_client<T>(
@@ -63,8 +69,10 @@ impl KvConnect for TikvConnect {
         let timeout = self.timeout;
         let grpc_max_decoding_message_size = self.grpc_max_decoding_message_size;
         let grpc_compression_type = self.grpc_compression_type;
+        let enable_batch_rpc = self.enable_batch_rpc;
 
-        self.security_mgr
+        let rpc_client = self
+            .security_mgr
             .connect(address, move |channel| {
                 build_tikv_client(
                     channel,
@@ -72,8 +80,9 @@ impl KvConnect for TikvConnect {
                     grpc_compression_type,
                 )
             })
-            .await
-            .map(|c| KvRpcClient::new(c, timeout))
+            .await?;
+
+        Ok(KvRpcClient::new(rpc_client, timeout, enable_batch_rpc).await)
     }
 }
 
@@ -84,15 +93,96 @@ pub trait KvClient {
 
 /// This client handles requests for a single TiKV node. It converts the data
 /// types and abstractions of the client program into the grpc data types.
-#[derive(new, Clone)]
+#[derive(Clone)]
 pub struct KvRpcClient {
     rpc_client: TikvClient<Channel>,
     timeout: Duration,
+    batch: Option<BatchCommandsClient>,
+}
+
+impl KvRpcClient {
+    async fn new(
+        rpc_client: TikvClient<Channel>,
+        timeout: Duration,
+        enable_batch_rpc: bool,
+    ) -> KvRpcClient {
+        let batch = if enable_batch_rpc {
+            match BatchCommandsClient::connect(rpc_client.clone()).await {
+                Ok(client) => Some(client),
+                Err(Error::GrpcAPI(status)) if status.code() == tonic::Code::Unimplemented => None,
+                Err(err) => {
+                    debug!("failed to init batch_commands stream: {err:?}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        KvRpcClient {
+            rpc_client,
+            timeout,
+            batch,
+        }
+    }
+
+    async fn try_dispatch_batch(&self, request: &dyn Request) -> Result<Option<Box<dyn Any>>> {
+        let Some(batch) = self.batch.as_ref() else {
+            return Ok(None);
+        };
+
+        if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::GetRequest>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::Get(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(tikvpb::batch_commands_response::response::Cmd::Get(resp)) => {
+                    Ok(Some(Box::new(resp) as Box<dyn Any>))
+                }
+                Ok(other) => Err(Error::StringError(format!(
+                    "unexpected batch_commands response for get: {other:?}"
+                ))),
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::BatchGetRequest>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::BatchGet(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(tikvpb::batch_commands_response::response::Cmd::BatchGet(resp)) => {
+                    Ok(Some(Box::new(resp) as Box<dyn Any>))
+                }
+                Ok(other) => Err(Error::StringError(format!(
+                    "unexpected batch_commands response for batch_get: {other:?}"
+                ))),
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::ScanRequest>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::Scan(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(tikvpb::batch_commands_response::response::Cmd::Scan(resp)) => {
+                    Ok(Some(Box::new(resp) as Box<dyn Any>))
+                }
+                Ok(other) => Err(Error::StringError(format!(
+                    "unexpected batch_commands response for scan: {other:?}"
+                ))),
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        Ok(None)
+    }
 }
 
 #[async_trait]
 impl KvClient for KvRpcClient {
     async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any>> {
+        if let Some(resp) = self.try_dispatch_batch(request).await? {
+            return Ok(resp);
+        }
         request.dispatch(&self.rpc_client, self.timeout).await
     }
 }

@@ -44,6 +44,11 @@ pub struct Config {
     pub grpc_connection_count: usize,
     /// gRPC compression type for TiKV channels (client-go `GrpcCompressionType`).
     pub grpc_compression_type: GrpcCompressionType,
+    /// Enable batch RPC (`BatchCommands`) for supported KV requests.
+    ///
+    /// When enabled, the client attempts to dispatch supported requests over a persistent
+    /// `BatchCommands` stream and falls back to unary RPCs when batch RPC is unavailable.
+    pub enable_batch_rpc: bool,
     /// Timeout for establishing gRPC connections (client-go `dialTimeout`).
     ///
     /// Set to `Duration::ZERO` to disable the connect timeout (use the system default).
@@ -124,6 +129,7 @@ impl Default for Config {
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
             grpc_connection_count: DEFAULT_GRPC_CONNECTION_COUNT,
             grpc_compression_type: GrpcCompressionType::None,
+            enable_batch_rpc: false,
             grpc_connect_timeout: DEFAULT_GRPC_CONNECT_TIMEOUT,
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
@@ -237,6 +243,13 @@ impl Config {
     #[must_use]
     pub fn with_grpc_compression_type(mut self, compression_type: GrpcCompressionType) -> Self {
         self.grpc_compression_type = compression_type;
+        self
+    }
+
+    /// Enable or disable batch RPC (`BatchCommands`) for supported KV requests.
+    #[must_use]
+    pub fn with_enable_batch_rpc(mut self, enable: bool) -> Self {
+        self.enable_batch_rpc = enable;
         self
     }
 
@@ -366,6 +379,7 @@ mod tests {
         assert_eq!(config.grpc_initial_conn_window_size, 1 << 27);
         assert_eq!(config.grpc_connection_count, 4);
         assert_eq!(config.grpc_compression_type, GrpcCompressionType::None);
+        assert!(!config.enable_batch_rpc);
         assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
         assert_eq!(config.region_cache_ttl, Duration::from_secs(600));
         assert_eq!(config.region_cache_ttl_jitter, Duration::from_secs(60));
