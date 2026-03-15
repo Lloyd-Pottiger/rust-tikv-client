@@ -118,6 +118,8 @@ pub struct MockPdClient {
     use_min_ts: bool,
     #[new(value = "Arc::new(AtomicU64::new(0))")]
     external_timestamp: Arc<AtomicU64>,
+    #[new(value = "Arc::new(AtomicU64::new(crate::config::DEFAULT_TTL_REFRESHED_TXN_SIZE))")]
+    ttl_refreshed_txn_size: Arc<AtomicU64>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
     get_external_timestamp_calls: Arc<AtomicUsize>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
@@ -183,6 +185,10 @@ impl KvConnect for MockKvConnect {
 impl MockPdClient {
     pub fn default() -> MockPdClient {
         MockPdClient::new(MockKvClient::default())
+    }
+
+    pub fn set_ttl_refreshed_txn_size(&self, size: u64) {
+        self.ttl_refreshed_txn_size.store(size, Ordering::SeqCst);
     }
 
     pub async fn insert_store_meta(&self, store: metapb::Store) {
@@ -503,6 +509,10 @@ impl MockPdClient {
 #[async_trait]
 impl PdClient for MockPdClient {
     type KvClient = MockKvClient;
+
+    fn ttl_refreshed_txn_size(&self) -> u64 {
+        self.ttl_refreshed_txn_size.load(Ordering::SeqCst)
+    }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
         let store_id = region.get_store_id()?;

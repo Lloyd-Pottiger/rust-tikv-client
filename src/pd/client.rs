@@ -370,6 +370,13 @@ pub trait PdClient: Send + Sync + 'static {
         crate::config::DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD
     }
 
+    /// Transaction size threshold for starting optimistic auto-heartbeat.
+    ///
+    /// This maps to client-go `TTLRefreshedTxnSize`.
+    fn ttl_refreshed_txn_size(&self) -> u64 {
+        crate::config::DEFAULT_TTL_REFRESHED_TXN_SIZE
+    }
+
     /// Groups consecutive keys by region.
     ///
     /// The input keys must be sorted in increasing key order so that keys from the same region are
@@ -562,6 +569,7 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
     resolve_lock_lite_threshold: u64,
+    ttl_refreshed_txn_size: u64,
     pd_http_client: Option<reqwest::Client>,
     pd_http_endpoints: Vec<String>,
     pd_http_use_https: bool,
@@ -581,6 +589,10 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     fn resolve_lock_lite_threshold(&self) -> u64 {
         self.resolve_lock_lite_threshold
+    }
+
+    fn ttl_refreshed_txn_size(&self) -> u64 {
+        self.ttl_refreshed_txn_size
     }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
@@ -920,6 +932,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
 
         let grpc_connection_count = config.grpc_connection_count;
         let resolve_lock_lite_threshold = config.resolve_lock_lite_threshold;
+        let ttl_refreshed_txn_size = config.ttl_refreshed_txn_size;
         let (pd_http_client, pd_http_use_https) = build_pd_http_client(&config);
         let security_mgr = Arc::new(
             (if let (Some(ca_path), Some(cert_path), Some(key_path)) =
@@ -953,6 +966,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
                 config.region_cache_ttl_jitter,
             ),
             resolve_lock_lite_threshold,
+            ttl_refreshed_txn_size,
             pd_http_client,
             pd_http_endpoints: Vec::new(),
             pd_http_use_https,

@@ -4386,6 +4386,24 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Ok(());
         }
 
+        let should_start = if self.options.pipelined_txn.is_some()
+            || matches!(self.options.kind, TransactionKind::Pessimistic(_))
+        {
+            true
+        } else {
+            let threshold = self.rpc.ttl_refreshed_txn_size();
+            if threshold == 0 {
+                true
+            } else {
+                let write_size = u64::try_from(self.buffer.get_write_size()).unwrap_or(u64::MAX);
+                write_size > threshold
+            }
+        };
+
+        if !should_start {
+            return Ok(());
+        }
+
         let primary_key = self
             .pipelined
             .as_ref()
@@ -11326,9 +11344,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_auto_heartbeat_without_primary_key_returns_error() {
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.set_ttl_refreshed_txn_size(0);
         let mut txn = Transaction::new(
             Timestamp::default(),
-            Arc::new(MockPdClient::default()),
+            pd_client,
             TransactionOptions::new_optimistic()
                 .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_secs(1)))
                 .drop_check(CheckLevel::None),
@@ -11363,6 +11383,7 @@ mod tests {
                 Err(Error::StringError("unexpected request".to_owned()))
             },
         )));
+        pd_client.set_ttl_refreshed_txn_size(0);
 
         let mut txn = Transaction::new(
             Timestamp::from_version(5),
@@ -11420,7 +11441,7 @@ mod tests {
         let key1 = "key1".to_owned();
         let mut heartbeat_txn = Transaction::new(
             Timestamp::default(),
-            pd_client,
+            pd_client.clone(),
             TransactionOptions::new_optimistic()
                 .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_secs(1))),
             keyspace,
@@ -11430,6 +11451,22 @@ mod tests {
             assert!(futures::executor::block_on(heartbeat_txn.commit()).is_ok())
         });
         assert_eq!(heartbeats.load(Ordering::SeqCst), 0);
+        heartbeat_txn_handle.await.unwrap();
+        assert_eq!(heartbeats.load(Ordering::SeqCst), 0);
+
+        pd_client.set_ttl_refreshed_txn_size(0);
+        let key2 = "key2".to_owned();
+        let mut heartbeat_txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_secs(1))),
+            keyspace,
+        );
+        heartbeat_txn.put(key2, "foo").await.unwrap();
+        let heartbeat_txn_handle = tokio::task::spawn_blocking(move || {
+            assert!(futures::executor::block_on(heartbeat_txn.commit()).is_ok())
+        });
         heartbeat_txn_handle.await.unwrap();
         assert_eq!(heartbeats.load(Ordering::SeqCst), 1);
         scenario.teardown();

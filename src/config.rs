@@ -74,6 +74,17 @@ pub struct Config {
     pub grpc_initial_conn_window_size: u32,
     pub keyspace: Option<String>,
     pub resolve_lock_lite_threshold: u64,
+    /// Transaction size threshold for starting the automatic transaction heartbeat loop.
+    ///
+    /// This maps to client-go `TTLRefreshedTxnSize`.
+    ///
+    /// - For **optimistic, non-pipelined** transactions, auto-heartbeat is started only when the
+    ///   transaction's total write size exceeds this threshold.
+    /// - For **pessimistic** and **pipelined** transactions, auto-heartbeat may still be started
+    ///   once a primary key is established (client-go parity).
+    ///
+    /// Set to `0` to always start auto-heartbeat for optimistic transactions.
+    pub ttl_refreshed_txn_size: u64,
     /// Time-to-live for cached region metadata (client-go `RegionCacheTTL`).
     ///
     /// When non-zero, cached region entries expire after roughly this duration of inactivity
@@ -115,6 +126,7 @@ const DEFAULT_GRPC_INITIAL_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
 const DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
 const MIN_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) const DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
+pub(crate) const DEFAULT_TTL_REFRESHED_TXN_SIZE: u64 = 32 * 1024 * 1024;
 const DEFAULT_REGION_CACHE_TTL: Duration = Duration::from_secs(600);
 const DEFAULT_REGION_CACHE_TTL_JITTER: Duration = Duration::from_secs(60);
 
@@ -137,6 +149,7 @@ impl Default for Config {
             grpc_initial_conn_window_size: DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE,
             keyspace: None,
             resolve_lock_lite_threshold: DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD,
+            ttl_refreshed_txn_size: DEFAULT_TTL_REFRESHED_TXN_SIZE,
             region_cache_ttl: DEFAULT_REGION_CACHE_TTL,
             region_cache_ttl_jitter: DEFAULT_REGION_CACHE_TTL_JITTER,
             health_feedback_update_interval: Duration::ZERO,
@@ -329,6 +342,17 @@ impl Config {
         self
     }
 
+    /// Set the transaction size threshold for starting optimistic auto-heartbeat.
+    ///
+    /// This maps to client-go `TTLRefreshedTxnSize`.
+    ///
+    /// Set to `0` to always start optimistic auto-heartbeat.
+    #[must_use]
+    pub fn with_ttl_refreshed_txn_size(mut self, size: u64) -> Self {
+        self.ttl_refreshed_txn_size = size;
+        self
+    }
+
     /// Set the region cache TTL for cached region metadata (client-go `RegionCacheTTL`).
     ///
     /// Set to `Duration::ZERO` to disable region cache TTL expiry.
@@ -381,6 +405,10 @@ mod tests {
         assert_eq!(config.grpc_compression_type, GrpcCompressionType::None);
         assert!(!config.enable_batch_rpc);
         assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
+        assert_eq!(
+            config.ttl_refreshed_txn_size,
+            DEFAULT_TTL_REFRESHED_TXN_SIZE
+        );
         assert_eq!(config.region_cache_ttl, Duration::from_secs(600));
         assert_eq!(config.region_cache_ttl_jitter, Duration::from_secs(60));
         config.validate().unwrap();
