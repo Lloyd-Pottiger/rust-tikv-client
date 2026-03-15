@@ -153,6 +153,30 @@ impl SnapshotRuntimeStats {
         }
     }
 
+    /// Get a snapshot of all per-RPC runtime stats observed so far.
+    ///
+    /// The map is keyed by request labels (e.g. `"kv_get"`).
+    #[must_use]
+    pub fn rpc_stats_map(&self) -> BTreeMap<&'static str, RpcRuntimeStats> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.rpc.clone()
+    }
+
+    /// Get a snapshot of all backoff runtime stats observed so far.
+    ///
+    /// The map is keyed by backoff labels (e.g. `"grpc"`).
+    #[must_use]
+    pub fn backoff_stats_map(&self) -> BTreeMap<&'static str, BackoffRuntimeStats> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.backoff.clone()
+    }
+
+    /// Clear all collected stats.
+    pub fn reset(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        *inner = SnapshotRuntimeStatsInner::default();
+    }
+
     /// Get the aggregated time details observed so far.
     #[must_use]
     pub fn time_detail(&self) -> SnapshotTimeDetail {
@@ -179,5 +203,31 @@ impl SnapshotRuntimeStats {
     pub fn backoff_stats(&self, label: &str) -> Option<BackoffRuntimeStats> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.backoff.get(label).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_snapshot_runtime_stats_reset_clears_all_stats() {
+        let stats = SnapshotRuntimeStats::default();
+        stats.record_rpc("kv_get", Duration::from_millis(1));
+        stats.record_backoff("grpc", Duration::from_millis(2));
+
+        assert_eq!(stats.rpc_stats("kv_get").unwrap().count, 1);
+        assert_eq!(stats.backoff_stats("grpc").unwrap().count, 1);
+        assert_eq!(stats.rpc_stats_map().len(), 1);
+        assert_eq!(stats.backoff_stats_map().len(), 1);
+
+        stats.reset();
+
+        assert!(stats.rpc_stats("kv_get").is_none());
+        assert!(stats.backoff_stats("grpc").is_none());
+        assert!(stats.rpc_stats_map().is_empty());
+        assert!(stats.backoff_stats_map().is_empty());
+        assert_eq!(stats.time_detail(), SnapshotTimeDetail::default());
+        assert_eq!(stats.scan_detail(), SnapshotScanDetail::default());
     }
 }
