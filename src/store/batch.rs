@@ -89,20 +89,33 @@ impl BatchCommandsClient {
             let stream_err = loop {
                 match inbound.next().await {
                     Some(Ok(message)) => {
-                        if message.request_ids.len() != message.responses.len() {
+                        let request_ids_len = message.request_ids.len();
+                        let responses_len = message.responses.len();
+                        if request_ids_len != responses_len {
                             warn!(
                                 "batch_commands response mismatch: request_ids={}, responses={}",
-                                message.request_ids.len(),
-                                message.responses.len()
+                                request_ids_len, responses_len
                             );
                         }
 
                         let health_feedback = message.health_feedback.clone();
-                        for (request_id, response) in message
-                            .request_ids
-                            .into_iter()
-                            .zip(message.responses.into_iter())
-                        {
+                        let mut responses = message.responses.into_iter();
+                        for request_id in message.request_ids.into_iter() {
+                            let Some(response) = responses.next() else {
+                                let sender = {
+                                    let mut inflight =
+                                        inflight_reader.lock().unwrap_or_else(|e| e.into_inner());
+                                    inflight.remove(&request_id)
+                                };
+                                let Some(sender) = sender else {
+                                    continue;
+                                };
+                                let _ = sender.send(Err(Error::GrpcAPI(Status::internal(format!(
+                                    "batch_commands response missing response for request_id={request_id} (request_ids={request_ids_len}, responses={responses_len})",
+                                )))));
+                                continue;
+                            };
+
                             let sender = {
                                 let mut inflight =
                                     inflight_reader.lock().unwrap_or_else(|e| e.into_inner());
@@ -124,6 +137,12 @@ impl BatchCommandsClient {
                                     health_feedback: health_feedback.clone(),
                                 });
                             let _ = sender.send(result);
+                        }
+                        if responses.next().is_some() {
+                            warn!(
+                                "batch_commands response has extra responses: request_ids={}, responses={}",
+                                request_ids_len, responses_len
+                            );
                         }
                     }
                     Some(Err(status)) => break status,
@@ -427,5 +446,77 @@ mod tests {
                 .is_err(),
             "stream error should prevent sending new batch requests"
         );
+    }
+
+    #[tokio::test]
+    async fn test_batch_commands_client_response_mismatch_fails_missing_request_id() {
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let client = client_with_channels(out_tx, in_rx);
+
+        let t1 = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .dispatch(
+                        tikvpb::batch_commands_request::request::Cmd::Empty(
+                            tikvpb::BatchCommandsEmptyRequest::default(),
+                        ),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            })
+        };
+        let t2 = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .dispatch(
+                        tikvpb::batch_commands_request::request::Cmd::Empty(
+                            tikvpb::BatchCommandsEmptyRequest::default(),
+                        ),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            })
+        };
+
+        let req1 = out_rx.recv().await.expect("batch request");
+        let req2 = out_rx.recv().await.expect("batch request");
+        let id1 = *req1.request_ids.first().expect("request id");
+        let id2 = *req2.request_ids.first().expect("request id");
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyResponse::default(),
+                )),
+            }],
+            request_ids: vec![id1, id2],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let r1 = t1.await.expect("task 1");
+        let r2 = t2.await.expect("task 2");
+
+        let ok = r1.as_ref().ok().or_else(|| r2.as_ref().ok());
+        assert!(
+            ok.is_some_and(|result| matches!(
+                result.cmd,
+                tikvpb::batch_commands_response::response::Cmd::Empty(_)
+            )),
+            "expected one request to receive the empty response"
+        );
+
+        let err = r1
+            .err()
+            .or_else(|| r2.err())
+            .expect("missing response should error");
+        match err {
+            Error::GrpcAPI(status) => assert_eq!(status.code(), tonic::Code::Internal),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
