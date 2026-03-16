@@ -945,9 +945,9 @@ impl<PdC: PdClient> Transaction<PdC> {
     ///
     /// This maps to client-go `KVTxn.SetKVFilter`.
     ///
-    /// Note: currently this is only applied to non-pipelined commits. In pessimistic mode, skipped
-    /// write mutations are converted to lock-only mutations so any acquired pessimistic locks are
-    /// still released.
+    /// Note: in pessimistic mode, skipped write mutations are converted to lock-only mutations so
+    /// any acquired pessimistic locks are still released. For pipelined transactions, the filter
+    /// is applied to both explicit [`Transaction::flush`] calls and the final commit-time flush.
     pub fn set_kv_filter(&mut self, filter: Arc<dyn KvFilter>) {
         self.kv_filter = Some(filter);
     }
@@ -955,6 +955,43 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Clear the configured KV filter.
     pub fn clear_kv_filter(&mut self) {
         self.kv_filter = None;
+    }
+
+    fn apply_kv_filter(&self, mutations: Vec<kvrpcpb::Mutation>) -> Result<Vec<kvrpcpb::Mutation>> {
+        let Some(filter) = self.kv_filter.as_ref() else {
+            return Ok(mutations);
+        };
+
+        let is_pessimistic = matches!(self.options.kind, TransactionKind::Pessimistic(_));
+        let mut filtered = Vec::with_capacity(mutations.len());
+        for mut mutation in mutations {
+            let op = match mutation.op {
+                op if op == kvrpcpb::Op::Put as i32 => Some(KvFilterOp::Put),
+                op if op == kvrpcpb::Op::Insert as i32 => Some(KvFilterOp::Insert),
+                op if op == kvrpcpb::Op::Del as i32 || op == kvrpcpb::Op::CheckNotExists as i32 => {
+                    Some(KvFilterOp::Delete)
+                }
+                _ => None,
+            };
+
+            if let Some(op) = op {
+                let value = match op {
+                    KvFilterOp::Put | KvFilterOp::Insert => mutation.value.as_slice(),
+                    KvFilterOp::Delete => &[],
+                };
+                if filter.is_unnecessary_key_value(&mutation.key, value, op)? {
+                    if is_pessimistic {
+                        mutation.op = kvrpcpb::Op::Lock.into();
+                        mutation.value.clear();
+                        filtered.push(mutation);
+                    }
+                    continue;
+                }
+            }
+
+            filtered.push(mutation);
+        }
+        Ok(filtered)
     }
 
     /// Enable forcing TiKV to always sync logs for transactional write requests.
@@ -2746,6 +2783,10 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
 
         let mutations = self.buffer.take_mutations();
+        let mutations = self.apply_kv_filter(mutations)?;
+        if mutations.is_empty() {
+            return Ok(false);
+        }
         debug_assert!(!mutations.is_empty());
 
         let (primary_key, generation, flush_ewma) = {
@@ -3191,43 +3232,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             flush_wait_ms = elapsed_ms.min(u128::from(i64::MAX as u64)) as i64;
         }
 
-        let mut mutations = self.buffer.to_proto_mutations();
-        if self.options.pipelined_txn.is_none() {
-            if let Some(filter) = self.kv_filter.as_ref() {
-                let is_pessimistic = matches!(self.options.kind, TransactionKind::Pessimistic(_));
-                let mut filtered = Vec::with_capacity(mutations.len());
-                for mut mutation in mutations {
-                    let op = match mutation.op {
-                        op if op == kvrpcpb::Op::Put as i32 => Some(KvFilterOp::Put),
-                        op if op == kvrpcpb::Op::Insert as i32 => Some(KvFilterOp::Insert),
-                        op if op == kvrpcpb::Op::Del as i32
-                            || op == kvrpcpb::Op::CheckNotExists as i32 =>
-                        {
-                            Some(KvFilterOp::Delete)
-                        }
-                        _ => None,
-                    };
-
-                    if let Some(op) = op {
-                        let value = match op {
-                            KvFilterOp::Put | KvFilterOp::Insert => mutation.value.as_slice(),
-                            KvFilterOp::Delete => &[],
-                        };
-                        if filter.is_unnecessary_key_value(&mutation.key, value, op)? {
-                            if is_pessimistic {
-                                mutation.op = kvrpcpb::Op::Lock.into();
-                                mutation.value.clear();
-                                filtered.push(mutation);
-                            }
-                            continue;
-                        }
-                    }
-
-                    filtered.push(mutation);
-                }
-                mutations = filtered;
-            }
-        }
+        let mutations = self.apply_kv_filter(self.buffer.to_proto_mutations())?;
         let buffer_primary_key = self.buffer.get_primary_key();
         let has_flushed_range = self
             .pipelined
@@ -13472,6 +13477,162 @@ mod tests {
             .await
             .expect("expected secondary commit request for k2");
         assert_eq!(commit_k2_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_flush_applies_kv_filter_to_mutations() {
+        let flushed = Arc::new(Mutex::new(Vec::<kvrpcpb::FlushRequest>::new()));
+        let flushed_captured = flushed.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::FlushRequest>() {
+                    flushed_captured.lock().unwrap().push(req.clone());
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.set_kv_filter(Arc::new(SkipKeyKvFilter {
+            skip_key: vec![1u8],
+        }));
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        txn.put(vec![2u8], b"v2".to_vec()).await.unwrap();
+
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        let flushed = flushed.lock().unwrap().clone();
+        assert!(!flushed.is_empty(), "expected at least one flush request");
+
+        let keys = flushed
+            .iter()
+            .flat_map(|req| req.mutations.iter().map(|m| m.key.clone()))
+            .collect::<Vec<_>>();
+        assert!(
+            !keys.iter().any(|key| key.as_slice() == [1u8]),
+            "expected k1 mutation to be filtered out; got keys: {keys:?}"
+        );
+        assert!(
+            keys.iter().any(|key| key.as_slice() == [2u8]),
+            "expected k2 mutation to remain; got keys: {keys:?}"
+        );
+
+        for req in &flushed {
+            assert_eq!(req.primary_key, vec![2u8]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_commit_applies_kv_filter_to_commit_time_flush() {
+        use tokio::sync::Notify;
+
+        let scenario = FailScenario::setup();
+        fail::cfg("pipelined_broadcast_grace_period_ms", "return(0)").unwrap();
+
+        let flushed = Arc::new(Mutex::new(Vec::<kvrpcpb::FlushRequest>::new()));
+        let flushed_captured = flushed.clone();
+
+        let broadcasts = Arc::new(AtomicUsize::new(0));
+        let broadcasts_captured = broadcasts.clone();
+        let broadcast_notified = Arc::new(Notify::new());
+        let broadcast_notified_captured = broadcast_notified.clone();
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::FlushRequest>() {
+                    flushed_captured.lock().unwrap().push(req.clone());
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+                }
+                if req.downcast_ref::<kvrpcpb::ResolveLockRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>);
+                }
+                if req
+                    .downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>()
+                    .is_some()
+                {
+                    let count = broadcasts_captured.fetch_add(1, Ordering::SeqCst) + 1;
+                    if count == 2 {
+                        broadcast_notified_captured.notify_one();
+                    }
+                    return Ok(
+                        Box::<kvrpcpb::BroadcastTxnStatusResponse>::default() as Box<dyn Any>
+                    );
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            }))
+            .with_tso_sequence(100),
+        );
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                ..Default::default()
+            })
+            .await;
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.set_kv_filter(Arc::new(SkipKeyKvFilter {
+            skip_key: vec![1u8],
+        }));
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        txn.put(vec![2u8], b"v2".to_vec()).await.unwrap();
+        txn.commit().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), broadcast_notified.notified())
+            .await
+            .expect("completion broadcast should be dispatched to all stores");
+
+        let flushed = flushed.lock().unwrap().clone();
+        assert!(!flushed.is_empty(), "expected at least one flush request");
+
+        let keys = flushed
+            .iter()
+            .flat_map(|req| req.mutations.iter().map(|m| m.key.clone()))
+            .collect::<Vec<_>>();
+        assert!(
+            !keys.iter().any(|key| key.as_slice() == [1u8]),
+            "expected k1 mutation to be filtered out; got keys: {keys:?}"
+        );
+        assert!(
+            keys.iter().any(|key| key.as_slice() == [2u8]),
+            "expected k2 mutation to remain; got keys: {keys:?}"
+        );
+
+        for req in &flushed {
+            assert_eq!(req.primary_key, vec![2u8]);
+        }
+
+        scenario.teardown();
     }
 
     #[test]
