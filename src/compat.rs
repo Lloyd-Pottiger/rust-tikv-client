@@ -43,6 +43,10 @@ where
         if self.errored {
             return Poll::Ready(None);
         }
+        // SAFETY: `LoopFn` is pinned, and we only ever poll `future` in-place. We replace `future`
+        // only after it has completed (`poll` returned `Ready`), which is safe because we don't
+        // move it out of the pinned struct. The new future is stored back into the same location
+        // and will be polled in-place on the next call.
         unsafe {
             let this = Pin::get_unchecked_mut(self);
             match ready!(Pin::new_unchecked(&mut this.future).poll(cx)) {

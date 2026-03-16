@@ -298,19 +298,26 @@ fn keyspace_prefix(keyspace_id: u32, key_mode: KeyMode) -> [u8; KEYSPACE_PREFIX_
 }
 
 fn prepend_bytes<const N: usize>(vec: &mut Vec<u8>, prefix: &[u8; N]) {
+    vec.reserve_exact(N);
+    let len = vec.len();
+    // SAFETY: `reserve_exact(N)` ensures the vector has space for `len + N` bytes.
+    // We then shift the initialized `[0..len)` bytes up by `N` using `ptr::copy` (overlap-safe),
+    // write the `prefix` into the now-free `[0..N)` bytes, and finally update the length.
     unsafe {
-        vec.reserve_exact(N);
-        std::ptr::copy(vec.as_ptr(), vec.as_mut_ptr().add(N), vec.len());
+        std::ptr::copy(vec.as_ptr(), vec.as_mut_ptr().add(N), len);
         std::ptr::copy_nonoverlapping(prefix.as_ptr(), vec.as_mut_ptr(), N);
-        vec.set_len(vec.len() + N);
+        vec.set_len(len + N);
     }
 }
 
 fn pretruncate_bytes<const N: usize>(vec: &mut Vec<u8>) {
     assert!(vec.len() >= N);
+    let len = vec.len();
+    // SAFETY: The caller guarantees the first `N` bytes exist. We shift the initialized
+    // `[N..len)` bytes down to the start using `ptr::copy` (overlap-safe) and then shrink `len`.
     unsafe {
-        std::ptr::copy(vec.as_ptr().add(N), vec.as_mut_ptr(), vec.len() - N);
-        vec.set_len(vec.len() - N);
+        std::ptr::copy(vec.as_ptr().add(N), vec.as_mut_ptr(), len - N);
+        vec.set_len(len - N);
     }
 }
 

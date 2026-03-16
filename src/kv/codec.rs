@@ -83,10 +83,11 @@ pub fn decode_bytes_in_place(data: &mut Vec<u8>, desc: bool) -> Result<()> {
             return Err(internal_err!("unexpected EOF, original key = {:?}", data));
         };
 
+        // SAFETY: `marker_offset < data.len()` guarantees `read_offset + ENC_GROUP_SIZE <= data.len()`,
+        // so reading `ENC_GROUP_SIZE` bytes from `read_offset` is in-bounds. `write_offset <= read_offset`
+        // (we compact in-place while skipping marker bytes), so source and destination may overlap; `ptr::copy`
+        // has `memmove` semantics and is overlap-safe.
         unsafe {
-            // it is semantically equivalent to C's memmove()
-            // and the src and dest may overlap
-            // if src == dest do nothing
             ptr::copy(
                 data.as_ptr().add(read_offset),
                 data.as_mut_ptr().add(write_offset),
@@ -119,9 +120,9 @@ pub fn decode_bytes_in_place(data: &mut Vec<u8>, desc: bool) -> Result<()> {
             if &data[write_offset - pad_size..write_offset] != padding_slice {
                 return Err(internal_err!("invalid key padding"));
             }
-            unsafe {
-                data.set_len(write_offset - pad_size);
-            }
+            // SAFETY: We have written `write_offset` bytes of decoded data into `data` and validated that the
+            // last `pad_size` bytes are padding; shrinking the length keeps only initialized bytes.
+            unsafe { data.set_len(write_offset - pad_size) }
             if desc {
                 for k in data {
                     *k = !*k;
