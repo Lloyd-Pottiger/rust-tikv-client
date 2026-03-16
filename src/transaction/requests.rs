@@ -1453,6 +1453,75 @@ impl Merge<kvrpcpb::DeleteRangeResponse> for Collect {
     }
 }
 
+pub fn new_prepare_flashback_to_version_request(
+    start_key: Vec<u8>,
+    end_key: Vec<u8>,
+    start_ts: u64,
+    version: u64,
+) -> kvrpcpb::PrepareFlashbackToVersionRequest {
+    let mut req = kvrpcpb::PrepareFlashbackToVersionRequest::default();
+    req.start_key = start_key;
+    req.end_key = end_key;
+    req.start_ts = start_ts;
+    req.version = version;
+    req
+}
+
+impl KvRequest for kvrpcpb::PrepareFlashbackToVersionRequest {
+    type Response = kvrpcpb::PrepareFlashbackToVersionResponse;
+}
+
+range_request!(kvrpcpb::PrepareFlashbackToVersionRequest);
+shardable_range!(kvrpcpb::PrepareFlashbackToVersionRequest);
+impl HasLocks for kvrpcpb::PrepareFlashbackToVersionResponse {}
+
+impl Merge<kvrpcpb::PrepareFlashbackToVersionResponse> for Collect {
+    type Out = usize;
+
+    fn merge(
+        &self,
+        input: Vec<Result<kvrpcpb::PrepareFlashbackToVersionResponse>>,
+    ) -> Result<Self::Out> {
+        input
+            .into_iter()
+            .try_fold(0usize, |acc, res| res.map(|_| acc + 1))
+    }
+}
+
+pub fn new_flashback_to_version_request(
+    start_key: Vec<u8>,
+    end_key: Vec<u8>,
+    version: u64,
+    start_ts: u64,
+    commit_ts: u64,
+) -> kvrpcpb::FlashbackToVersionRequest {
+    let mut req = kvrpcpb::FlashbackToVersionRequest::default();
+    req.version = version;
+    req.start_key = start_key;
+    req.end_key = end_key;
+    req.start_ts = start_ts;
+    req.commit_ts = commit_ts;
+    req
+}
+
+impl KvRequest for kvrpcpb::FlashbackToVersionRequest {
+    type Response = kvrpcpb::FlashbackToVersionResponse;
+}
+
+range_request!(kvrpcpb::FlashbackToVersionRequest);
+shardable_range!(kvrpcpb::FlashbackToVersionRequest);
+impl HasLocks for kvrpcpb::FlashbackToVersionResponse {}
+
+impl Merge<kvrpcpb::FlashbackToVersionResponse> for Collect {
+    type Out = usize;
+
+    fn merge(&self, input: Vec<Result<kvrpcpb::FlashbackToVersionResponse>>) -> Result<Self::Out> {
+        input
+            .into_iter()
+            .try_fold(0usize, |acc, res| res.map(|_| acc + 1))
+    }
+}
+
 const SPLIT_REGION_BATCH_LIMIT: usize = 2048;
 
 pub fn new_split_region_request(

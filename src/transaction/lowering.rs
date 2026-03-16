@@ -238,6 +238,36 @@ pub fn new_delete_range_request(
     )
 }
 
+pub fn new_prepare_flashback_to_version_request(
+    range: BoundRange,
+    start_ts: u64,
+    version: u64,
+) -> kvrpcpb::PrepareFlashbackToVersionRequest {
+    let (start_key, end_key) = range.into_keys();
+    requests::new_prepare_flashback_to_version_request(
+        start_key.into(),
+        end_key.unwrap_or_default().into(),
+        start_ts,
+        version,
+    )
+}
+
+pub fn new_flashback_to_version_request(
+    range: BoundRange,
+    version: u64,
+    start_ts: u64,
+    commit_ts: u64,
+) -> kvrpcpb::FlashbackToVersionRequest {
+    let (start_key, end_key) = range.into_keys();
+    requests::new_flashback_to_version_request(
+        start_key.into(),
+        end_key.unwrap_or_default().into(),
+        version,
+        start_ts,
+        commit_ts,
+    )
+}
+
 pub fn new_compact_request(
     start_key: Key,
     physical_table_id: i64,

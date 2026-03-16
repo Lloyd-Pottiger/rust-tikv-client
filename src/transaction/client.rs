@@ -28,10 +28,12 @@ use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_check_lock_observer_request;
 use crate::transaction::lowering::new_compact_request;
 use crate::transaction::lowering::new_delete_range_request;
+use crate::transaction::lowering::new_flashback_to_version_request;
 use crate::transaction::lowering::new_get_lock_wait_history_request;
 use crate::transaction::lowering::new_get_lock_wait_info_request;
 use crate::transaction::lowering::new_get_ti_flash_system_table_request;
 use crate::transaction::lowering::new_physical_scan_lock_request;
+use crate::transaction::lowering::new_prepare_flashback_to_version_request;
 use crate::transaction::lowering::new_register_lock_observer_request;
 use crate::transaction::lowering::new_remove_lock_observer_request;
 use crate::transaction::lowering::new_scan_lock_request;
@@ -1008,6 +1010,65 @@ impl<PdC: PdClient> Client<PdC> {
             .await
     }
 
+    /// Prepares flashback for a key range.
+    ///
+    /// This is a region-based request (the range can span multiple regions). TiKV requires that
+    /// each region is prepared (locked) before calling [`Client::flashback_to_version`].
+    ///
+    /// Returns the number of regions affected when successful.
+    pub async fn prepare_flashback_to_version(
+        &self,
+        range: impl Into<BoundRange>,
+        start_ts: u64,
+        version: u64,
+        concurrency: usize,
+    ) -> Result<usize> {
+        if concurrency == 0 {
+            return Err(crate::Error::StringError(
+                "prepare_flashback_to_version concurrency must be greater than 0".to_owned(),
+            ));
+        }
+
+        let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
+        let req = new_prepare_flashback_to_version_request(range, start_ts, version);
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .retry_multi_region_with_concurrency(DEFAULT_REGION_BACKOFF, concurrency)
+            .extract_error()
+            .merge(crate::request::Collect)
+            .plan();
+        plan.execute().await
+    }
+
+    /// Flashbacks a key range to a specific version.
+    ///
+    /// This is a region-based request (the range can span multiple regions). TiKV requires that
+    /// each region is prepared (locked) via [`Client::prepare_flashback_to_version`] first.
+    ///
+    /// Returns the number of regions affected when successful.
+    pub async fn flashback_to_version(
+        &self,
+        range: impl Into<BoundRange>,
+        version: u64,
+        start_ts: u64,
+        commit_ts: u64,
+        concurrency: usize,
+    ) -> Result<usize> {
+        if concurrency == 0 {
+            return Err(crate::Error::StringError(
+                "flashback_to_version concurrency must be greater than 0".to_owned(),
+            ));
+        }
+
+        let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
+        let req = new_flashback_to_version_request(range, version, start_ts, commit_ts);
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .retry_multi_region_with_concurrency(DEFAULT_REGION_BACKOFF, concurrency)
+            .extract_error()
+            .merge(crate::request::Collect)
+            .plan();
+        plan.execute().await
+    }
+
     /// Split regions by the provided split keys.
     ///
     /// When `scatter` is true, this will also ask PD to scatter the resulting regions. When
@@ -1676,7 +1737,7 @@ mod tests {
         };
         let expected_api_version = keyspace.api_version() as i32;
 
-        let start_key_raw = b"start".to_vec();
+        let start_key_raw = b"begin".to_vec();
         let end_key_raw = b"end".to_vec();
         let expected_start_key_encoded: Vec<u8> = crate::Key::from(start_key_raw.clone())
             .encode_keyspace(keyspace, KeyMode::Txn)
@@ -1805,6 +1866,213 @@ mod tests {
         };
 
         let err = client.delete_range(vec![1]..vec![2], 0).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::StringError(msg) if msg.contains("concurrency must be greater than 0")
+        ));
+        assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_prepare_flashback_to_version_encodes_keyspace_and_sets_fields() {
+        use crate::request::EncodeKeyspace;
+        use crate::request::KeyMode;
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xCAFE,
+        };
+        let expected_api_version = keyspace.api_version() as i32;
+
+        let start_ts = 42;
+        let version = 123;
+
+        let start_key_raw = b"begin".to_vec();
+        let end_key_raw = b"end".to_vec();
+        let expected_start_key_encoded: Vec<u8> = crate::Key::from(start_key_raw.clone())
+            .encode_keyspace(keyspace, KeyMode::Txn)
+            .into();
+        let expected_end_key_encoded: Vec<u8> = crate::Key::from(end_key_raw.clone())
+            .encode_keyspace(keyspace, KeyMode::Txn)
+            .into();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req: &kvrpcpb::PrepareFlashbackToVersionRequest = req.downcast_ref().unwrap();
+                assert_eq!(req.start_key, expected_start_key_encoded);
+                assert_eq!(req.end_key, expected_end_key_encoded);
+                assert_eq!(req.start_ts, start_ts);
+                assert_eq!(req.version, version);
+
+                let ctx = req.context.as_ref().expect("context should be set");
+                assert_eq!(ctx.api_version, expected_api_version);
+                assert_eq!(ctx.keyspace_id, 0xCAFE);
+
+                Ok(Box::new(kvrpcpb::PrepareFlashbackToVersionResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        assert_eq!(
+            client
+                .prepare_flashback_to_version(start_key_raw..end_key_raw, start_ts, version, 4)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flashback_to_version_encodes_keyspace_and_sets_fields() {
+        use crate::request::EncodeKeyspace;
+        use crate::request::KeyMode;
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xCAFE,
+        };
+        let expected_api_version = keyspace.api_version() as i32;
+
+        let start_ts = 42;
+        let commit_ts = 87;
+        let version = 123;
+
+        let start_key_raw = b"begin".to_vec();
+        let end_key_raw = b"end".to_vec();
+        let expected_start_key_encoded: Vec<u8> = crate::Key::from(start_key_raw.clone())
+            .encode_keyspace(keyspace, KeyMode::Txn)
+            .into();
+        let expected_end_key_encoded: Vec<u8> = crate::Key::from(end_key_raw.clone())
+            .encode_keyspace(keyspace, KeyMode::Txn)
+            .into();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req: &kvrpcpb::FlashbackToVersionRequest = req.downcast_ref().unwrap();
+                assert_eq!(req.start_key, expected_start_key_encoded);
+                assert_eq!(req.end_key, expected_end_key_encoded);
+                assert_eq!(req.start_ts, start_ts);
+                assert_eq!(req.commit_ts, commit_ts);
+                assert_eq!(req.version, version);
+
+                let ctx = req.context.as_ref().expect("context should be set");
+                assert_eq!(ctx.api_version, expected_api_version);
+                assert_eq!(ctx.keyspace_id, 0xCAFE);
+
+                Ok(Box::new(kvrpcpb::FlashbackToVersionResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        assert_eq!(
+            client
+                .flashback_to_version(start_key_raw..end_key_raw, version, start_ts, commit_ts, 4)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flashback_to_version_splits_range_across_regions_and_returns_completed_count() {
+        let keyspace = Keyspace::Disable;
+
+        let seen_ranges = Arc::new(Mutex::new(Vec::<(Vec<u8>, Vec<u8>)>::new()));
+        let seen_ranges_cloned = seen_ranges.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req: &kvrpcpb::FlashbackToVersionRequest = req.downcast_ref().unwrap();
+                seen_ranges_cloned
+                    .lock()
+                    .unwrap()
+                    .push((req.start_key.clone(), req.end_key.clone()));
+
+                Ok(Box::new(kvrpcpb::FlashbackToVersionResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let completed = client
+            .flashback_to_version(vec![1]..vec![11], 123, 42, 87, 2)
+            .await
+            .unwrap();
+        assert_eq!(completed, 2);
+
+        let mut seen_ranges = seen_ranges.lock().unwrap().clone();
+        seen_ranges.sort();
+        assert_eq!(seen_ranges, vec![(vec![1], vec![10]), (vec![10], vec![11])]);
+    }
+
+    #[tokio::test]
+    async fn test_flashback_to_version_rejects_zero_concurrency() {
+        let keyspace = Keyspace::Disable;
+
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls_cloned = dispatch_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |_req: &dyn Any| {
+                dispatch_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let err = client
+            .flashback_to_version(vec![1]..vec![2], 123, 42, 87, 0)
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             crate::Error::StringError(msg) if msg.contains("concurrency must be greater than 0")
