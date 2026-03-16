@@ -226,6 +226,19 @@ impl Client<PdRpcClient> {
             safe_ts: self.safe_ts.clone(),
         }
     }
+}
+
+impl<PdC: PdClient> Client<PdC> {
+    fn apply_trace_context(&self, ctx: &mut crate::proto::kvrpcpb::Context) {
+        ctx.trace_id = self.trace_id.clone().unwrap_or_default();
+        ctx.trace_control_flags = self.trace_control_flags.bits();
+    }
+
+    fn apply_trace_to_request<R: StoreRequest>(&self, request: &mut R) {
+        if let Some(ctx) = request.context_mut() {
+            self.apply_trace_context(ctx);
+        }
+    }
 
     /// Create a new client which is a clone of `self`, but which uses the given trace id for all
     /// requests.
@@ -275,19 +288,6 @@ impl Client<PdRpcClient> {
             trace_control_flags: flags,
             keyspace: self.keyspace,
             safe_ts: self.safe_ts.clone(),
-        }
-    }
-}
-
-impl<PdC: PdClient> Client<PdC> {
-    fn apply_trace_context(&self, ctx: &mut crate::proto::kvrpcpb::Context) {
-        ctx.trace_id = self.trace_id.clone().unwrap_or_default();
-        ctx.trace_control_flags = self.trace_control_flags.bits();
-    }
-
-    fn apply_trace_to_request<R: StoreRequest>(&self, request: &mut R) {
-        if let Some(ctx) = request.context_mut() {
-            self.apply_trace_context(ctx);
         }
     }
 
@@ -2063,10 +2063,12 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
-            trace_id: Some(trace_id),
-            trace_control_flags: flags,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
-        };
+        }
+        .with_trace_id(trace_id)
+        .with_trace_control_flags(flags);
 
         let _ = client.get(vec![1]).await?;
         let _ = client.scan(vec![1]..vec![2], 1).await?;
