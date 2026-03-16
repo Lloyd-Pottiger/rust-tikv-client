@@ -24,6 +24,7 @@ use crate::request::Plan;
 use crate::request::TruncateKeyspace;
 use crate::request::{plan, Collect};
 use crate::safe_ts::SafeTsCache;
+use crate::store::Request as StoreRequest;
 use crate::store::{HasRegionError, RegionStore};
 use crate::Backoff;
 use crate::BoundRange;
@@ -32,6 +33,7 @@ use crate::Error::RegionError;
 use crate::Key;
 use crate::KvPair;
 use crate::Result;
+use crate::TraceControlFlags;
 use crate::Value;
 
 const MAX_RAW_KV_SCAN_LIMIT: u32 = 10240;
@@ -49,6 +51,8 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
     backoff: Backoff,
     /// Whether to use the [`atomic mode`](Client::with_atomic_for_cas).
     atomic: bool,
+    trace_id: Option<Vec<u8>>,
+    trace_control_flags: TraceControlFlags,
     keyspace: Keyspace,
     safe_ts: SafeTsCache<PdC>,
 }
@@ -60,6 +64,8 @@ impl Clone for Client {
             cf: self.cf.clone(),
             backoff: self.backoff.clone(),
             atomic: self.atomic,
+            trace_id: self.trace_id.clone(),
+            trace_control_flags: self.trace_control_flags,
             keyspace: self.keyspace,
             safe_ts: self.safe_ts.clone(),
         }
@@ -133,6 +139,8 @@ impl Client<PdRpcClient> {
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace,
         })
     }
@@ -180,6 +188,8 @@ impl Client<PdRpcClient> {
             cf: Some(cf),
             backoff: self.backoff.clone(),
             atomic: self.atomic,
+            trace_id: self.trace_id.clone(),
+            trace_control_flags: self.trace_control_flags,
             keyspace: self.keyspace,
             safe_ts: self.safe_ts.clone(),
         }
@@ -210,6 +220,59 @@ impl Client<PdRpcClient> {
             cf: self.cf.clone(),
             backoff,
             atomic: self.atomic,
+            trace_id: self.trace_id.clone(),
+            trace_control_flags: self.trace_control_flags,
+            keyspace: self.keyspace,
+            safe_ts: self.safe_ts.clone(),
+        }
+    }
+
+    /// Create a new client which is a clone of `self`, but which uses the given trace id for all
+    /// requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.trace_id`.
+    #[must_use]
+    pub fn with_trace_id(&self, trace_id: Vec<u8>) -> Self {
+        Client {
+            rpc: self.rpc.clone(),
+            cf: self.cf.clone(),
+            backoff: self.backoff.clone(),
+            atomic: self.atomic,
+            trace_id: Some(trace_id),
+            trace_control_flags: self.trace_control_flags,
+            keyspace: self.keyspace,
+            safe_ts: self.safe_ts.clone(),
+        }
+    }
+
+    /// Create a new client which is a clone of `self`, but with no configured trace id.
+    #[must_use]
+    pub fn without_trace_id(&self) -> Self {
+        Client {
+            rpc: self.rpc.clone(),
+            cf: self.cf.clone(),
+            backoff: self.backoff.clone(),
+            atomic: self.atomic,
+            trace_id: None,
+            trace_control_flags: self.trace_control_flags,
+            keyspace: self.keyspace,
+            safe_ts: self.safe_ts.clone(),
+        }
+    }
+
+    /// Create a new client which is a clone of `self`, but which uses the given trace control
+    /// flags for all requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.trace_control_flags`.
+    #[must_use]
+    pub fn with_trace_control_flags(&self, flags: TraceControlFlags) -> Self {
+        Client {
+            rpc: self.rpc.clone(),
+            cf: self.cf.clone(),
+            backoff: self.backoff.clone(),
+            atomic: self.atomic,
+            trace_id: self.trace_id.clone(),
+            trace_control_flags: flags,
             keyspace: self.keyspace,
             safe_ts: self.safe_ts.clone(),
         }
@@ -217,6 +280,17 @@ impl Client<PdRpcClient> {
 }
 
 impl<PdC: PdClient> Client<PdC> {
+    fn apply_trace_context(&self, ctx: &mut crate::proto::kvrpcpb::Context) {
+        ctx.trace_id = self.trace_id.clone().unwrap_or_default();
+        ctx.trace_control_flags = self.trace_control_flags.bits();
+    }
+
+    fn apply_trace_to_request<R: StoreRequest>(&self, request: &mut R) {
+        if let Some(ctx) = request.context_mut() {
+            self.apply_trace_context(ctx);
+        }
+    }
+
     /// Returns a handle to the underlying PD client.
     #[must_use]
     pub fn pd_client(&self) -> Arc<PdC> {
@@ -254,6 +328,8 @@ impl<PdC: PdClient> Client<PdC> {
             cf: self.cf.clone(),
             backoff: self.backoff.clone(),
             atomic: true,
+            trace_id: self.trace_id.clone(),
+            trace_control_flags: self.trace_control_flags,
             keyspace: self.keyspace,
             safe_ts: self.safe_ts.clone(),
         }
@@ -296,7 +372,8 @@ impl<PdC: PdClient> Client<PdC> {
     pub async fn get(&self, key: impl Into<Key>) -> Result<Option<Value>> {
         debug!("invoking raw get request");
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let request = new_raw_get_request(key, self.cf.clone());
+        let mut request = new_raw_get_request(key, self.cf.clone());
+        self.apply_trace_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
@@ -331,7 +408,8 @@ impl<PdC: PdClient> Client<PdC> {
         let keys = keys
             .into_iter()
             .map(|k| k.into().encode_keyspace(self.keyspace, KeyMode::Raw));
-        let request = new_raw_batch_get_request(keys, self.cf.clone());
+        let mut request = new_raw_batch_get_request(keys, self.cf.clone());
+        self.apply_trace_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(Collect)
@@ -367,7 +445,8 @@ impl<PdC: PdClient> Client<PdC> {
             .cloned()
             .map(|key| key.encode_keyspace(keyspace, KeyMode::Raw));
 
-        let request = new_raw_batch_get_request(request_keys, self.cf.clone());
+        let mut request = new_raw_batch_get_request(request_keys, self.cf.clone());
+        self.apply_trace_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(Collect)
@@ -404,7 +483,8 @@ impl<PdC: PdClient> Client<PdC> {
     pub async fn get_key_ttl_secs(&self, key: impl Into<Key>) -> Result<Option<u64>> {
         debug!("invoking raw get_key_ttl_secs request");
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let request = new_raw_get_key_ttl_request(key, self.cf.clone());
+        let mut request = new_raw_get_key_ttl_request(key, self.cf.clone());
+        self.apply_trace_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
@@ -441,8 +521,9 @@ impl<PdC: PdClient> Client<PdC> {
     ) -> Result<()> {
         debug!("invoking raw put request");
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let request =
+        let mut request =
             new_raw_put_request(key, value.into(), self.cf.clone(), ttl_secs, self.atomic);
+        self.apply_trace_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
@@ -485,8 +566,9 @@ impl<PdC: PdClient> Client<PdC> {
         let pairs = pairs
             .into_iter()
             .map(|pair| pair.into().encode_keyspace(self.keyspace, KeyMode::Raw));
-        let request =
+        let mut request =
             new_raw_batch_put_request(pairs, ttls.into_iter(), self.cf.clone(), self.atomic);
+        self.apply_trace_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .extract_error()
@@ -515,7 +597,8 @@ impl<PdC: PdClient> Client<PdC> {
     pub async fn delete(&self, key: impl Into<Key>) -> Result<()> {
         debug!("invoking raw delete request");
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let request = new_raw_delete_request(key, self.cf.clone(), self.atomic);
+        let mut request = new_raw_delete_request(key, self.cf.clone(), self.atomic);
+        self.apply_trace_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
@@ -548,7 +631,8 @@ impl<PdC: PdClient> Client<PdC> {
         let keys = keys
             .into_iter()
             .map(|k| k.into().encode_keyspace(self.keyspace, KeyMode::Raw));
-        let request = new_raw_batch_delete_request(keys, self.cf.clone());
+        let mut request = new_raw_batch_delete_request(keys, self.cf.clone());
+        self.apply_trace_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .extract_error()
@@ -576,7 +660,8 @@ impl<PdC: PdClient> Client<PdC> {
         debug!("invoking raw delete_range request");
         self.assert_non_atomic()?;
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let request = new_raw_delete_range_request(range, self.cf.clone());
+        let mut request = new_raw_delete_range_request(range, self.cf.clone());
+        self.apply_trace_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .extract_error()
@@ -714,7 +799,8 @@ impl<PdC: PdClient> Client<PdC> {
     pub async fn checksum(&self, range: impl Into<BoundRange>) -> Result<super::RawChecksum> {
         debug!("invoking raw checksum request");
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let request = new_raw_checksum_request(range);
+        let mut request = new_raw_checksum_request(range);
+        self.apply_trace_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .extract_error()
@@ -813,12 +899,13 @@ impl<PdC: PdClient> Client<PdC> {
         debug!("invoking raw compare_and_swap request");
         self.assert_atomic()?;
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let req = new_cas_request(
+        let mut req = new_cas_request(
             key,
             new_value.into(),
             previous_value.into(),
             self.cf.clone(),
         );
+        self.apply_trace_to_request(&mut req);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
@@ -849,12 +936,13 @@ impl<PdC: PdClient> Client<PdC> {
                     .collect(),
             )
         };
-        let req = new_raw_coprocessor_request(
+        let mut req = new_raw_coprocessor_request(
             copr_name.into(),
             copr_version_req,
             ranges,
             request_builder,
         );
+        self.apply_trace_to_request(&mut req);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .preserve_shard()
             .retry_multi_region(self.backoff.clone())
@@ -999,14 +1087,15 @@ impl<PdC: PdClient> Client<PdC> {
                 self.rpc.clone().region_for_key(&from_key).await?
             };
             let store = self.rpc.clone().store_for_id(region.id()).await?;
-            let request = new_raw_scan_request(
+            let mut request = new_raw_scan_request(
                 (from_key.clone(), to_key.clone()).into(),
                 scan_args.limit,
                 scan_args.key_only,
                 scan_args.reverse,
                 self.cf.clone(),
             );
-            let resp = self.do_store_scan(store.clone(), request.clone()).await;
+            self.apply_trace_to_request(&mut request);
+            let resp = self.do_store_scan(store.clone(), request).await;
             return match resp {
                 Ok(mut r) => {
                     if let Some(err) = r.region_error() {
@@ -1204,6 +1293,8 @@ mod tests {
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         }
     }
@@ -1336,6 +1427,8 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
 
@@ -1395,6 +1488,8 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
 
@@ -1434,6 +1529,8 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
 
@@ -1469,6 +1566,8 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
 
@@ -1510,6 +1609,8 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
 
@@ -1541,6 +1642,8 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Enable { keyspace_id: 0 },
         };
         let pairs = vec![
@@ -1580,6 +1683,8 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
 
@@ -1616,6 +1721,8 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
 
@@ -1662,6 +1769,8 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Enable { keyspace_id: 0 },
         };
         let resps = client
@@ -1698,6 +1807,8 @@ mod tests {
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
         assert!(Arc::ptr_eq(&client.pd_client(), &pd_client));
@@ -1730,6 +1841,8 @@ mod tests {
             cf: Some(ColumnFamily::Default),
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
 
@@ -1766,6 +1879,8 @@ mod tests {
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
 
@@ -1793,6 +1908,8 @@ mod tests {
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         };
 
@@ -1832,6 +1949,8 @@ mod tests {
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         }
         .with_atomic_for_cas();
@@ -1863,6 +1982,8 @@ mod tests {
             cf: None,
             backoff: DEFAULT_REGION_BACKOFF,
             atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         }
         .with_atomic_for_cas();
@@ -1875,5 +1996,99 @@ mod tests {
             Error::KvError { message } => assert_eq!(message, "injected cas error"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_raw_client_trace_fields_propagate_to_context() -> Result<()> {
+        let trace_id = b"trace-raw-123".to_vec();
+        let flags = TraceControlFlags::IMMEDIATE_LOG.with(TraceControlFlags::TIKV_CATEGORY_REQUEST);
+        let flags_bits = flags.bits();
+
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let scan_calls = Arc::new(AtomicUsize::new(0));
+        let checksum_calls = Arc::new(AtomicUsize::new(0));
+        let cas_calls = Arc::new(AtomicUsize::new(0));
+        let coprocessor_calls = Arc::new(AtomicUsize::new(0));
+
+        let expected_trace_id = trace_id.clone();
+        let get_calls_cloned = get_calls.clone();
+        let scan_calls_cloned = scan_calls.clone();
+        let checksum_calls_cloned = checksum_calls.clone();
+        let cas_calls_cloned = cas_calls.clone();
+        let coprocessor_calls_cloned = coprocessor_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawGetRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(ctx.trace_id, expected_trace_id);
+                    assert_eq!(ctx.trace_control_flags, flags_bits);
+                    get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::RawGetResponse::default()) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawScanRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(ctx.trace_id, expected_trace_id);
+                    assert_eq!(ctx.trace_control_flags, flags_bits);
+                    scan_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::RawScanResponse::default()) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawChecksumRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(ctx.trace_id, expected_trace_id);
+                    assert_eq!(ctx.trace_control_flags, flags_bits);
+                    checksum_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::RawChecksumResponse::default()) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawCasRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(ctx.trace_id, expected_trace_id);
+                    assert_eq!(ctx.trace_control_flags, flags_bits);
+                    cas_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::RawCasResponse::default()) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawCoprocessorRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    assert_eq!(ctx.trace_id, expected_trace_id);
+                    assert_eq!(ctx.trace_control_flags, flags_bits);
+                    coprocessor_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::RawCoprocessorResponse::default()) as Box<dyn Any>);
+                }
+                unreachable!("unexpected request type");
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            trace_id: Some(trace_id),
+            trace_control_flags: flags,
+            keyspace: Keyspace::Disable,
+        };
+
+        let _ = client.get(vec![1]).await?;
+        let _ = client.scan(vec![1]..vec![2], 1).await?;
+        let _ = client.checksum(vec![1]..vec![2]).await?;
+        let _ = client
+            .coprocessor(
+                "test",
+                "0.1.0",
+                vec![vec![1]..vec![2]],
+                |_region, _ranges| Vec::new(),
+            )
+            .await?;
+        let atomic_client = client.with_atomic_for_cas();
+        let _ = atomic_client
+            .compare_and_swap(vec![42], None::<Value>, vec![100])
+            .await?;
+
+        assert!(get_calls.load(Ordering::SeqCst) > 0);
+        assert!(scan_calls.load(Ordering::SeqCst) > 0);
+        assert!(checksum_calls.load(Ordering::SeqCst) > 0);
+        assert!(cas_calls.load(Ordering::SeqCst) > 0);
+        assert!(coprocessor_calls.load(Ordering::SeqCst) > 0);
+        Ok(())
     }
 }
