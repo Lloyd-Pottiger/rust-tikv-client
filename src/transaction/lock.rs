@@ -3475,6 +3475,7 @@ mod tests {
             move |req: &dyn Any| {
                 if let Some(req) = req.downcast_ref::<kvrpcpb::CheckSecondaryLocksRequest>() {
                     let ctx = req.context.as_ref().expect("context");
+                    let start_version = req.start_version;
                     assert_eq!(
                         ctx.disk_full_opt,
                         crate::DiskFullOpt::AllowedOnAlreadyFull as i32
@@ -3505,6 +3506,8 @@ mod tests {
                     let resp = kvrpcpb::CheckSecondaryLocksResponse {
                         commit_ts: 200,
                         locks: vec![kvrpcpb::LockInfo {
+                            key: vec![3],
+                            lock_version: start_version,
                             use_async_commit: true,
                             min_commit_ts: 150,
                             ..Default::default()
@@ -3524,15 +3527,15 @@ mod tests {
             .check_all_secondaries(client, Keyspace::Disable, vec![vec![3]], 7, 150)
             .await
             .unwrap();
-        assert_eq!(
-            status
-                .commit_ts
-                .as_ref()
-                .expect("commit_ts should be present")
-                .version(),
-            200
+        assert!(
+            status.commit_ts.is_none(),
+            "commit_ts is only meaningful when a lock is missing (commit_ts=0 indicates rollback)"
         );
+        assert_eq!(status.min_commit_ts, 150);
+        assert_eq!(status.locked_keys, 1);
+        assert_eq!(status.resolve_keys, vec![vec![3]]);
         assert!(!status.missing_lock);
+        assert!(!status.fallback_2pc);
         assert_eq!(tagger_calls.load(Ordering::SeqCst), 1);
     }
 
