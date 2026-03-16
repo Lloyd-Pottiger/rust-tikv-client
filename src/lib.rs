@@ -222,6 +222,8 @@ pub use crate::transaction::Client as TransactionClient;
 #[doc(inline)]
 pub use crate::transaction::DeleteRangeTask;
 #[doc(inline)]
+pub use crate::transaction::LifecycleHooks;
+#[doc(inline)]
 pub use crate::transaction::Lock;
 #[doc(inline)]
 pub use crate::transaction::LockResolver;

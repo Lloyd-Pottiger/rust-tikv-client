@@ -71,6 +71,83 @@ type ResourceGroupTagger = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
 type CommitTsUpperBoundCheck = Arc<dyn Fn(u64) -> bool + Send + Sync>;
 type CommitCallback = Arc<dyn Fn(&str, Option<&Error>) + Send + Sync>;
 
+type LifecycleHook = Arc<dyn Fn() + Send + Sync>;
+
+/// Hooks for tracking the lifecycle of background tasks spawned by a transaction.
+///
+/// The `pre` hook is invoked immediately before spawning a task, and the `post` hook is invoked
+/// when the task finishes (or is aborted).
+///
+/// This maps to client-go `transaction.KVTxn.SetBackgroundGoroutineLifecycleHooks`.
+#[derive(Clone, Default)]
+#[non_exhaustive]
+pub struct LifecycleHooks {
+    pre: Option<LifecycleHook>,
+    post: Option<LifecycleHook>,
+}
+
+impl LifecycleHooks {
+    /// Create an empty set of hooks.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the pre-spawn hook.
+    #[must_use]
+    pub fn with_pre<F>(mut self, hook: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.pre = Some(Arc::new(hook));
+        self
+    }
+
+    /// Set the post-finish hook.
+    #[must_use]
+    pub fn with_post<F>(mut self, hook: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.post = Some(Arc::new(hook));
+        self
+    }
+
+    fn call_pre(&self) {
+        if let Some(hook) = self.pre.as_ref() {
+            (hook)();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LifecyclePostGuard {
+    post: Option<LifecycleHook>,
+}
+
+impl Drop for LifecyclePostGuard {
+    fn drop(&mut self) {
+        if let Some(hook) = self.post.as_ref() {
+            (hook)();
+        }
+    }
+}
+
+fn spawn_with_lifecycle_hooks<F, T>(hooks: LifecycleHooks, future: F) -> JoinHandle<T>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    hooks.call_pre();
+    let guard = LifecyclePostGuard {
+        post: hooks.post.clone(),
+    };
+    tokio::spawn(async move {
+        let _guard = guard;
+        future.await
+    })
+}
+
 /// Hook for validating schema versions during commit.
 ///
 /// This mirrors the client-go v2 `SchemaLeaseChecker` concept. When configured via
@@ -198,6 +275,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     schema_ver: Option<i64>,
     schema_lease_checker: Option<Arc<dyn SchemaLeaseChecker>>,
     commit_callback: Option<CommitCallback>,
+    background_task_lifecycle_hooks: LifecycleHooks,
     commit_wait_until_tso: u64,
     commit_wait_until_tso_timeout: Duration,
     commit_ts_upper_bound_check: Option<CommitTsUpperBoundCheck>,
@@ -392,6 +470,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             schema_ver: None,
             schema_lease_checker: None,
             commit_callback: None,
+            background_task_lifecycle_hooks: LifecycleHooks::default(),
             commit_wait_until_tso: 0,
             commit_wait_until_tso_timeout: DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT,
             commit_ts_upper_bound_check: None,
@@ -1044,6 +1123,21 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Clear the commit callback.
     pub fn clear_commit_callback(&mut self) {
         self.commit_callback = None;
+    }
+
+    /// Set lifecycle hooks for background tasks spawned by this transaction.
+    ///
+    /// The hooks are invoked for tasks created via `tokio::spawn` in transaction control flows
+    /// (for example, auto-heartbeat and best-effort background cleanups).
+    ///
+    /// This maps to client-go `KVTxn.SetBackgroundGoroutineLifecycleHooks`.
+    pub fn set_background_task_lifecycle_hooks(&mut self, hooks: LifecycleHooks) {
+        self.background_task_lifecycle_hooks = hooks;
+    }
+
+    /// Clear lifecycle hooks for background tasks.
+    pub fn clear_background_task_lifecycle_hooks(&mut self) {
+        self.background_task_lifecycle_hooks = LifecycleHooks::default();
     }
 
     /// Set an RPC interceptor for this transaction.
@@ -2509,41 +2603,42 @@ impl<PdC: PdClient> Transaction<PdC> {
         let flush_lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let write_throttle_ratio = pipelined.write_throttle_ratio();
 
-        let flush_handle = tokio::spawn(async move {
-            fail_point!("before-pipelined-flush", |_| { Ok(()) });
-            throttle_pipelined_flush(flush_ewma.clone(), write_throttle_ratio).await;
+        let flush_handle =
+            spawn_with_lifecycle_hooks(self.background_task_lifecycle_hooks.clone(), async move {
+                fail_point!("before-pipelined-flush", |_| { Ok(()) });
+                throttle_pipelined_flush(flush_ewma.clone(), write_throttle_ratio).await;
 
-            let start = Instant::now();
-            let plan = PlanBuilder::new_with_rpc_interceptors(
-                flush_pd,
-                flush_keyspace,
-                flush_request,
-                flush_lock_resolver_rpc_context.rpc_interceptors.clone(),
-            )
-            .resolve_lock_in_context(
-                flush_resolve_locks_ctx,
-                flush_start_version,
-                flush_lock_backoff,
-                flush_killed.clone(),
-                flush_keyspace,
-                flush_lock_resolver_rpc_context,
-            )
-            .retry_multi_region_with_concurrency(flush_region_backoff, flush_concurrency)
-            .with_killed(flush_killed)
-            .merge(CollectError)
-            .extract_error()
-            .plan();
-            let result = plan.execute().await.map(|_| ());
+                let start = Instant::now();
+                let plan = PlanBuilder::new_with_rpc_interceptors(
+                    flush_pd,
+                    flush_keyspace,
+                    flush_request,
+                    flush_lock_resolver_rpc_context.rpc_interceptors.clone(),
+                )
+                .resolve_lock_in_context(
+                    flush_resolve_locks_ctx,
+                    flush_start_version,
+                    flush_lock_backoff,
+                    flush_killed.clone(),
+                    flush_keyspace,
+                    flush_lock_resolver_rpc_context,
+                )
+                .retry_multi_region_with_concurrency(flush_region_backoff, flush_concurrency)
+                .with_killed(flush_killed)
+                .merge(CollectError)
+                .extract_error()
+                .plan();
+                let result = plan.execute().await.map(|_| ());
 
-            let sample_ms = start.elapsed().as_millis() as f64;
-            let mut flush_ewma = match flush_ewma.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            flush_ewma.observe(sample_ms);
+                let sample_ms = start.elapsed().as_millis() as f64;
+                let mut flush_ewma = match flush_ewma.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                flush_ewma.observe(sample_ms);
 
-            result
-        });
+                result
+            });
         self.pipelined
             .as_mut()
             .ok_or_else(|| {
@@ -2977,6 +3072,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         );
         committer.for_update_ts_constraints = self.for_update_ts_checks.clone();
         committer.rpc_interceptors = self.rpc_interceptors.clone();
+        committer.background_task_lifecycle_hooks = self.background_task_lifecycle_hooks.clone();
         committer.vars = self.vars.clone();
         if let Some(state) = self.pipelined.as_ref() {
             committer.pipelined_generation = state.generation;
@@ -3110,6 +3206,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.start_instant,
         );
         committer.rpc_interceptors = self.rpc_interceptors.clone();
+        committer.background_task_lifecycle_hooks = self.background_task_lifecycle_hooks.clone();
         committer.vars = self.vars.clone();
         committer.resolve_locks_ctx = self.resolve_locks_ctx.clone();
         committer.resolve_lock_detail = Some(self.resolve_lock_detail.clone());
@@ -3134,7 +3231,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 rolled_back: true,
                 is_completed: false,
             };
-            tokio::spawn(async move {
+            spawn_with_lifecycle_hooks(self.background_task_lifecycle_hooks.clone(), async move {
                 if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
                     debug!("broadcast_txn_status_to_all_stores failed: {err}");
                 }
@@ -3144,6 +3241,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 self.rpc.clone(),
                 self.keyspace,
                 self.rpc_interceptors.clone(),
+                self.background_task_lifecycle_hooks.clone(),
                 self.options.clone(),
                 self.resource_group_tagger.clone(),
                 start_ts,
@@ -4500,6 +4598,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         let heart_beat_kv_context = lock_resolver_rpc_context.context.clone();
         let resource_group_tag_set = lock_resolver_rpc_context.resource_group_tag_set;
         let resource_group_tagger = lock_resolver_rpc_context.resource_group_tagger.clone();
+        let background_task_lifecycle_hooks = self.background_task_lifecycle_hooks.clone();
+        let heartbeat_task_lifecycle_hooks = background_task_lifecycle_hooks.clone();
         let mut max_txn_ttl = rpc.max_txn_ttl();
         if broadcast_pipelined_txn_status {
             max_txn_ttl = max_txn_ttl.max(MAX_PIPELINED_TXN_TTL);
@@ -4608,7 +4708,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                         rolled_back: false,
                         is_completed: false,
                     };
-                    tokio::spawn(async move {
+                    let hooks = heartbeat_task_lifecycle_hooks.clone();
+                    spawn_with_lifecycle_hooks(hooks, async move {
                         if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await
                         {
                             debug!("broadcast_txn_status_to_all_stores failed: {err}");
@@ -4619,7 +4720,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             Ok::<(), Error>(())
         };
 
-        tokio::spawn(async move {
+        spawn_with_lifecycle_hooks(background_task_lifecycle_hooks, async move {
             if let Err(err) = heartbeat_task.await {
                 log::error!("Error: While sending heartbeat. {}", err);
             }
@@ -4998,6 +5099,7 @@ fn spawn_pipelined_resolve_locks_and_broadcast_completion<PdC: PdClient + 'stati
     rpc: Arc<PdC>,
     keyspace: Keyspace,
     rpc_interceptors: RpcInterceptors,
+    background_task_lifecycle_hooks: LifecycleHooks,
     options: TransactionOptions,
     resource_group_tagger: Option<ResourceGroupTagger>,
     start_ts: u64,
@@ -5031,7 +5133,7 @@ fn spawn_pipelined_resolve_locks_and_broadcast_completion<PdC: PdClient + 'stati
         }
     }
 
-    tokio::spawn(async move {
+    spawn_with_lifecycle_hooks(background_task_lifecycle_hooks, async move {
         let plan = PlanBuilder::new_with_rpc_interceptors(
             rpc.clone(),
             keyspace,
@@ -5906,6 +6008,8 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     #[new(default)]
     rpc_interceptors: RpcInterceptors,
     #[new(default)]
+    background_task_lifecycle_hooks: LifecycleHooks,
+    #[new(default)]
     vars: Variables,
     #[new(default)]
     resource_group_tagger: Option<ResourceGroupTagger>,
@@ -6111,11 +6215,15 @@ impl<PdC: PdClient> Committer<PdC> {
             is_async_commit: self.options.async_commit,
             is_one_pc: self.options.try_one_pc,
         };
-        tokio::spawn(self.commit_secondary(commit_ts.clone()).map(|res| {
-            if let Err(e) = res {
-                log::warn!("Failed to commit secondary keys: {}", e);
-            }
-        }));
+        let hooks = self.background_task_lifecycle_hooks.clone();
+        spawn_with_lifecycle_hooks(
+            hooks,
+            self.commit_secondary(commit_ts.clone()).map(|res| {
+                if let Err(e) = res {
+                    log::warn!("Failed to commit secondary keys: {}", e);
+                }
+            }),
+        );
         (Ok(Some(commit_ts)), info)
     }
 
@@ -6262,16 +6370,21 @@ impl<PdC: PdClient> Committer<PdC> {
                     rolled_back: true,
                     is_completed: false,
                 };
-                tokio::spawn(async move {
-                    if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
-                        debug!("broadcast_txn_status_to_all_stores failed: {err}");
-                    }
-                });
+                spawn_with_lifecycle_hooks(
+                    self.background_task_lifecycle_hooks.clone(),
+                    async move {
+                        if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await
+                        {
+                            debug!("broadcast_txn_status_to_all_stores failed: {err}");
+                        }
+                    },
+                );
 
                 spawn_pipelined_resolve_locks_and_broadcast_completion(
                     self.rpc.clone(),
                     self.keyspace,
                     self.rpc_interceptors.clone(),
+                    self.background_task_lifecycle_hooks.clone(),
                     self.options.clone(),
                     self.resource_group_tagger.clone(),
                     start_ts,
@@ -6303,16 +6416,21 @@ impl<PdC: PdClient> Committer<PdC> {
                     rolled_back: true,
                     is_completed: false,
                 };
-                tokio::spawn(async move {
-                    if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
-                        debug!("broadcast_txn_status_to_all_stores failed: {err}");
-                    }
-                });
+                spawn_with_lifecycle_hooks(
+                    self.background_task_lifecycle_hooks.clone(),
+                    async move {
+                        if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await
+                        {
+                            debug!("broadcast_txn_status_to_all_stores failed: {err}");
+                        }
+                    },
+                );
 
                 spawn_pipelined_resolve_locks_and_broadcast_completion(
                     self.rpc.clone(),
                     self.keyspace,
                     self.rpc_interceptors.clone(),
+                    self.background_task_lifecycle_hooks.clone(),
                     self.options.clone(),
                     self.resource_group_tagger.clone(),
                     start_ts,
@@ -6332,6 +6450,7 @@ impl<PdC: PdClient> Committer<PdC> {
             self.rpc.clone(),
             self.keyspace,
             self.rpc_interceptors.clone(),
+            self.background_task_lifecycle_hooks.clone(),
             self.options.clone(),
             self.resource_group_tagger.clone(),
             self.start_version.version(),
@@ -12023,6 +12142,101 @@ mod tests {
             .expect_err("auto heartbeat requires a primary key");
         assert!(matches!(err, Error::InternalError { .. }));
         assert_eq!(txn.heartbeat_running_generation.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_with_lifecycle_hooks_calls_post_on_abort() {
+        let pre_calls = Arc::new(AtomicUsize::new(0));
+        let post_calls = Arc::new(AtomicUsize::new(0));
+
+        let pre_calls_captured = pre_calls.clone();
+        let post_calls_captured = post_calls.clone();
+
+        let hooks = super::LifecycleHooks::new()
+            .with_pre(move || {
+                pre_calls_captured.fetch_add(1, Ordering::SeqCst);
+            })
+            .with_post(move || {
+                post_calls_captured.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let handle = super::spawn_with_lifecycle_hooks(hooks, async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        assert_eq!(pre_calls.load(Ordering::SeqCst), 1);
+        handle.abort();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while post_calls.load(Ordering::SeqCst) != 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("post hook should run when task is aborted");
+    }
+
+    #[tokio::test]
+    async fn test_background_task_lifecycle_hooks_fire_for_auto_heartbeat() {
+        let pre_calls = Arc::new(AtomicUsize::new(0));
+        let post_calls = Arc::new(AtomicUsize::new(0));
+
+        let pre_calls_captured = pre_calls.clone();
+        let post_calls_captured = post_calls.clone();
+
+        let hooks = super::LifecycleHooks::new()
+            .with_pre(move || {
+                pre_calls_captured.fetch_add(1, Ordering::SeqCst);
+            })
+            .with_post(move || {
+                post_calls_captured.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let heartbeat_calls = Arc::new(AtomicUsize::new(0));
+        let heartbeat_calls_captured = heartbeat_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::TxnHeartBeatRequest>().is_some() {
+                    heartbeat_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    return Err(Error::StringError("heartbeat failed".to_owned()));
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+        pd_client.set_ttl_refreshed_txn_size(0);
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_millis(10)))
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_background_task_lifecycle_hooks(hooks);
+        txn.put("k".to_owned(), "v").await.unwrap();
+        txn.start_auto_heartbeat().await.unwrap();
+
+        assert_eq!(pre_calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while heartbeat_calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("heartbeat should fire");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while post_calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("post hook should fire when heartbeat task stops");
+
+        assert_eq!(post_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

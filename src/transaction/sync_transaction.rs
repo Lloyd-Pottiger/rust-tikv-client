@@ -1,8 +1,8 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
     transaction::Mutation, AssertionLevel, BoundRange, CommandPriority, DiskFullOpt, Error, Key,
-    KvPair, LockWaitTimeout, PrewriteEncounterLockPolicy, ResolveLockDetail, Result,
-    SchemaLeaseChecker, Timestamp, Transaction, Value, Variables,
+    KvPair, LifecycleHooks, LockWaitTimeout, PrewriteEncounterLockPolicy, ResolveLockDetail,
+    Result, SchemaLeaseChecker, Timestamp, Transaction, Value, Variables,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -97,6 +97,18 @@ impl SyncTransaction {
     /// Clear the commit callback.
     pub fn clear_commit_callback(&mut self) {
         self.inner.clear_commit_callback();
+    }
+
+    /// Set lifecycle hooks for background tasks spawned by this transaction.
+    ///
+    /// This maps to client-go `KVTxn.SetBackgroundGoroutineLifecycleHooks`.
+    pub fn set_background_task_lifecycle_hooks(&mut self, hooks: LifecycleHooks) {
+        self.inner.set_background_task_lifecycle_hooks(hooks);
+    }
+
+    /// Clear lifecycle hooks for background tasks.
+    pub fn clear_background_task_lifecycle_hooks(&mut self) {
+        self.inner.clear_background_task_lifecycle_hooks();
     }
 
     /// Set a hook that is triggered when the local mutation buffer memory footprint changes.
