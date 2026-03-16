@@ -4743,11 +4743,11 @@ fn pipelined_broadcast_grace_period() -> Duration {
     PIPELINED_BROADCAST_GRACE_PERIOD
 }
 
-fn maybe_mock_zero_min_commit_ts(start_version: u64, min_commit_ts: u64) -> u64 {
+fn maybe_mock_zero_min_commit_ts(_start_version: u64, min_commit_ts: u64) -> u64 {
     fail_point!("mock_zero_min_commit_ts", |val| {
         let inject = val
             .and_then(|val| val.parse::<u64>().ok())
-            .map(|target_start_version| target_start_version == start_version)
+            .map(|target_start_version| target_start_version == _start_version)
             .unwrap_or(true);
         if inject {
             0
@@ -6727,6 +6727,7 @@ impl<PdC: PdClient> Committer<PdC> {
             // Truncate mutation to a new length as `percent/100`.
             // Return error when truncate to zero.
             let fp = || -> Result<usize> {
+                #[allow(unused_mut)]
                 let mut new_len = mutations_len;
                 fail_point!("before-commit-secondary", |percent| {
                     let Some(percent) = percent.and_then(|val| val.parse::<usize>().ok()) else {

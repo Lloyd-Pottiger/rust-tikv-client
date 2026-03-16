@@ -838,11 +838,11 @@ impl<PdC: PdClient> Snapshot<PdC> {
                     return Ok(None);
                 }
 
-                let last_key = batch
-                    .last()
-                    .expect("non-empty scan batch should have a last key")
-                    .key()
-                    .clone();
+                let Some(last_key) = batch.last().map(|pair| pair.key().clone()) else {
+                    return Err(crate::internal_err!(
+                        "non-empty scan batch should have a last key"
+                    ));
+                };
                 state.next_start = last_key.next_key();
                 state.pending = batch.into_iter();
             }
@@ -902,11 +902,11 @@ impl<PdC: PdClient> Snapshot<PdC> {
                     return Ok(None);
                 }
 
-                let last_key = batch
-                    .last()
-                    .expect("non-empty scan_reverse batch should have a last key")
-                    .key()
-                    .clone();
+                let Some(last_key) = batch.last().map(|pair| pair.key().clone()) else {
+                    return Err(crate::internal_err!(
+                        "non-empty scan_reverse batch should have a last key"
+                    ));
+                };
                 state.next_end = last_key;
                 state.pending = batch.into_iter();
             }
