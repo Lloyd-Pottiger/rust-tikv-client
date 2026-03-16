@@ -284,7 +284,9 @@ impl SyncTransaction {
     ///
     /// This maps to client-go `KVTxn.SetKVFilter`.
     ///
-    /// Note: currently this is only applied to non-pipelined optimistic commits.
+    /// Note: currently this is only applied to non-pipelined commits. In pessimistic mode, skipped
+    /// write mutations are converted to lock-only mutations so any acquired pessimistic locks are
+    /// still released.
     pub fn set_kv_filter(&mut self, filter: Arc<dyn KvFilter>) {
         self.inner.set_kv_filter(filter);
     }

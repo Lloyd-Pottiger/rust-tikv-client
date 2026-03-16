@@ -945,7 +945,9 @@ impl<PdC: PdClient> Transaction<PdC> {
     ///
     /// This maps to client-go `KVTxn.SetKVFilter`.
     ///
-    /// Note: currently this is only applied to non-pipelined optimistic commits.
+    /// Note: currently this is only applied to non-pipelined commits. In pessimistic mode, skipped
+    /// write mutations are converted to lock-only mutations so any acquired pessimistic locks are
+    /// still released.
     pub fn set_kv_filter(&mut self, filter: Arc<dyn KvFilter>) {
         self.kv_filter = Some(filter);
     }
@@ -3190,12 +3192,11 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
 
         let mut mutations = self.buffer.to_proto_mutations();
-        if matches!(self.options.kind, TransactionKind::Optimistic)
-            && self.options.pipelined_txn.is_none()
-        {
+        if self.options.pipelined_txn.is_none() {
             if let Some(filter) = self.kv_filter.as_ref() {
+                let is_pessimistic = matches!(self.options.kind, TransactionKind::Pessimistic(_));
                 let mut filtered = Vec::with_capacity(mutations.len());
-                for mutation in mutations {
+                for mut mutation in mutations {
                     let op = match mutation.op {
                         op if op == kvrpcpb::Op::Put as i32 => Some(KvFilterOp::Put),
                         op if op == kvrpcpb::Op::Insert as i32 => Some(KvFilterOp::Insert),
@@ -3213,6 +3214,11 @@ impl<PdC: PdClient> Transaction<PdC> {
                             KvFilterOp::Delete => &[],
                         };
                         if filter.is_unnecessary_key_value(&mutation.key, value, op)? {
+                            if is_pessimistic {
+                                mutation.op = kvrpcpb::Op::Lock.into();
+                                mutation.value.clear();
+                                filtered.push(mutation);
+                            }
                             continue;
                         }
                     }
@@ -13388,6 +13394,84 @@ mod tests {
 
         assert_eq!(*prewrite_keys.lock().unwrap(), vec![b"k1".to_vec()]);
         assert_eq!(*commit_keys.lock().unwrap(), vec![b"k1".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_kv_filter_converts_mutations_to_locks_in_pessimistic_commit() {
+        use tokio::sync::Notify;
+
+        let lock_requests = Arc::new(AtomicUsize::new(0));
+        let prewrite_mutations = Arc::new(Mutex::new(Vec::new()));
+        let commit_k2_requests = Arc::new(AtomicUsize::new(0));
+        let commit_notify = Arc::new(Notify::new());
+
+        let lock_requests_captured = lock_requests.clone();
+        let prewrite_mutations_captured = prewrite_mutations.clone();
+        let commit_k2_requests_captured = commit_k2_requests.clone();
+        let commit_notify_captured = commit_notify.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                *prewrite_mutations_captured.lock().unwrap() = req.mutations.clone();
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                if req.keys.iter().any(|key| key.as_slice() == b"k2") {
+                    commit_k2_requests_captured.fetch_add(1, Ordering::SeqCst);
+                    commit_notify_captured.notify_one();
+                }
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            Err(Error::StringError("unexpected request".to_owned()))
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(10));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(7),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_pessimistic(true).unwrap();
+        txn.set_kv_filter(Arc::new(SkipKeyKvFilter {
+            skip_key: b"k2".to_vec(),
+        }));
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+        txn.put("k2".to_owned(), "v2").await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert!(lock_requests.load(Ordering::SeqCst) > 0);
+
+        let mutations = prewrite_mutations.lock().unwrap().clone();
+        assert_eq!(mutations.len(), 2);
+
+        let put_mutation = mutations
+            .iter()
+            .find(|mutation| mutation.key == b"k1".to_vec())
+            .expect("expected k1 mutation");
+        assert_eq!(put_mutation.op, kvrpcpb::Op::Put as i32);
+        assert_eq!(put_mutation.value, b"v1".to_vec());
+
+        let lock_mutation = mutations
+            .iter()
+            .find(|mutation| mutation.key == b"k2".to_vec())
+            .expect("expected k2 mutation");
+        assert_eq!(lock_mutation.op, kvrpcpb::Op::Lock as i32);
+        assert!(lock_mutation.value.is_empty());
+
+        tokio::time::timeout(Duration::from_secs(2), commit_notify.notified())
+            .await
+            .expect("expected secondary commit request for k2");
+        assert_eq!(commit_k2_requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]
