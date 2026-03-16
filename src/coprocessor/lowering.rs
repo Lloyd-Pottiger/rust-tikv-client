@@ -7,8 +7,10 @@ use crate::BoundRange;
 use crate::Timestamp;
 use crate::TimestampExt;
 
+use super::BatchRequest;
 use super::CoprocessorStreamRequest;
 use super::KeyRange;
+use super::RegionInfo;
 use super::Request;
 
 fn to_key_range(range: BoundRange) -> KeyRange {
@@ -52,6 +54,26 @@ where
     R: Into<BoundRange>,
 {
     new_coprocessor_request(tp, data, ranges, start_ts).into()
+}
+
+pub fn new_batch_coprocessor_request<I>(
+    tp: i64,
+    data: Vec<u8>,
+    regions: I,
+    start_ts: Timestamp,
+    schema_ver: i64,
+) -> BatchRequest
+where
+    I: IntoIterator<Item = RegionInfo>,
+{
+    BatchRequest {
+        tp,
+        data,
+        regions: regions.into_iter().collect(),
+        start_ts: start_ts.version(),
+        schema_ver,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -103,5 +125,28 @@ mod tests {
         assert_eq!(inner.tp, 11);
         assert_eq!(inner.data, b"stream".to_vec());
         assert_eq!(inner.start_ts, 99);
+    }
+
+    #[test]
+    fn new_batch_coprocessor_request_sets_fields() {
+        let start_ts = <Timestamp as TimestampExt>::from_version(123);
+
+        let request = new_batch_coprocessor_request(
+            22,
+            b"batch".to_vec(),
+            vec![RegionInfo {
+                region_id: 7,
+                ..Default::default()
+            }],
+            start_ts,
+            456,
+        );
+
+        assert_eq!(request.tp, 22);
+        assert_eq!(request.data, b"batch".to_vec());
+        assert_eq!(request.start_ts, 123);
+        assert_eq!(request.schema_ver, 456);
+        assert_eq!(request.regions.len(), 1);
+        assert_eq!(request.regions[0].region_id, 7);
     }
 }
