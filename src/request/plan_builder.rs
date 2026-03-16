@@ -66,8 +66,9 @@ impl PlanBuilderPhase for Targetted {}
 impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
     pub fn new(pd_client: Arc<PdC>, keyspace: Keyspace, mut request: Req) -> Self {
         request.set_api_version(keyspace.api_version());
-        if let Keyspace::Enable { keyspace_id } = keyspace {
-            if let Some(ctx) = request.context_mut() {
+        if let Some(ctx) = request.context_mut() {
+            ctx.cluster_id = pd_client.cluster_id();
+            if let Keyspace::Enable { keyspace_id } = keyspace {
                 ctx.keyspace_id = keyspace_id;
             }
         }
@@ -103,8 +104,9 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
         rpc_interceptors: RpcInterceptors,
     ) -> PlanBuilder<PdC, DispatchWithInterceptor<Req>, NoTarget> {
         request.set_api_version(keyspace.api_version());
-        if let Keyspace::Enable { keyspace_id } = keyspace {
-            if let Some(ctx) = request.context_mut() {
+        if let Some(ctx) = request.context_mut() {
+            ctx.cluster_id = pd_client.cluster_id();
+            if let Keyspace::Enable { keyspace_id } = keyspace {
                 ctx.keyspace_id = keyspace_id;
             }
         }

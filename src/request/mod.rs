@@ -255,6 +255,33 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_cluster_id_is_set_on_requests() {
+        let seen_cluster_id = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let seen_cluster_id_cloned = seen_cluster_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                seen_cluster_id_cloned.lock().unwrap().push(ctx.cluster_id);
+
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        let key: Key = "key".to_owned().into();
+        let req = new_get_request(key, Timestamp::default());
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, req)
+            .retry_multi_region(Backoff::no_jitter_backoff(0, 0, 1))
+            .plan();
+        let _ = plan.execute().await.unwrap();
+
+        assert_eq!(*seen_cluster_id.lock().unwrap(), vec![42]);
+    }
+
+    #[tokio::test]
     async fn test_extract_error() {
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             |_: &dyn Any| {

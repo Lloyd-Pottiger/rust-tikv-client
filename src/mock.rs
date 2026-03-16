@@ -126,6 +126,8 @@ pub struct MockPdClient {
         value = "Arc::new(AtomicU64::new(u64::try_from(crate::config::DEFAULT_MAX_TXN_TTL.as_millis()).unwrap_or(u64::MAX)))"
     )]
     max_txn_ttl_ms: Arc<AtomicU64>,
+    #[new(value = "42")]
+    cluster_id: u64,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
     get_external_timestamp_calls: Arc<AtomicUsize>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
@@ -536,6 +538,10 @@ impl PdClient for MockPdClient {
 
     fn max_txn_ttl(&self) -> Duration {
         Duration::from_millis(self.max_txn_ttl_ms.load(Ordering::SeqCst))
+    }
+
+    fn cluster_id(&self) -> u64 {
+        self.cluster_id
     }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {

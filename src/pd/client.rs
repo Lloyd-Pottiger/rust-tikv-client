@@ -417,6 +417,15 @@ pub trait PdClient: Send + Sync + 'static {
         crate::config::DEFAULT_MAX_TXN_TTL
     }
 
+    /// Returns the TiKV cluster ID.
+    ///
+    /// When non-zero, this is attached to KV requests via `kvrpcpb::Context.cluster_id`.
+    ///
+    /// The default implementation returns `0`.
+    fn cluster_id(&self) -> u64 {
+        0
+    }
+
     /// Groups consecutive keys by region.
     ///
     /// The input keys must be sorted in increasing key order so that keys from the same region are
@@ -708,6 +717,10 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     fn max_txn_ttl(&self) -> Duration {
         self.max_txn_ttl
+    }
+
+    fn cluster_id(&self) -> u64 {
+        self.pd.cluster_id()
     }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {

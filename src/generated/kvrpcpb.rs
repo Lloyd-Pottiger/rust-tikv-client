@@ -1267,6 +1267,10 @@ pub struct Context {
     pub resource_control_context: ::core::option::Option<ResourceControlContext>,
     /// The keyspace that the request is sent to.
     /// NOTE: This field is only meaningful while the api_version is V2.
+    #[prost(string, tag = "31")]
+    pub keyspace_name: ::prost::alloc::string::String,
+    /// The keyspace that the request is sent to.
+    /// NOTE: This field is only meaningful while the api_version is V2.
     #[prost(uint32, tag = "32")]
     pub keyspace_id: u32,
     /// The buckets version that the request is sent to.
@@ -1277,6 +1281,21 @@ pub struct Context {
     /// This is for tests only and thus can be safely changed/removed without affecting compatibility.
     #[prost(message, optional, tag = "34")]
     pub source_stmt: ::core::option::Option<SourceStmt>,
+    /// The cluster id of the request
+    #[prost(uint64, tag = "35")]
+    pub cluster_id: u64,
+    /// The trace id of the request, will be used for tracing the request's execution's inner steps.
+    #[prost(bytes = "vec", tag = "36")]
+    pub trace_id: ::prost::alloc::vec::Vec<u8>,
+    /// Control flags for trace logging behavior.
+    /// Bit 0: immediate_log - Force immediate logging without buffering
+    /// Bit 1: category_req_resp - Enable request/response tracing
+    /// Bit 2: category_write_details - Enable detailed write tracing
+    /// Bit 3: category_read_details - Enable detailed read tracing
+    /// Bits 4-63: Reserved for future use
+    /// This field is set by client-go based on an extractor function provided by TiDB.
+    #[prost(uint64, tag = "37")]
+    pub trace_control_flags: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
