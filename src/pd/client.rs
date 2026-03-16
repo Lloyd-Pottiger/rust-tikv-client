@@ -459,6 +459,11 @@ pub trait PdClient: Send + Sync + 'static {
         }
 
         let (start_key, end_key) = range.into_keys();
+        if let Some(end_key) = end_key.as_ref() {
+            if !end_key.is_empty() && &start_key >= end_key {
+                return futures::stream::empty::<Result<RegionWithLeader>>().boxed();
+            }
+        }
         stream_fn(
             RegionsForRangeState {
                 next_start: Some(start_key),
@@ -1683,6 +1688,184 @@ pub mod test {
         assert_eq!(stream.next().unwrap().unwrap().id(), 1);
         assert_eq!(stream.next().unwrap().unwrap().id(), 2);
         assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn test_regions_for_range_empty_range_returns_empty_stream() {
+        #[derive(Clone)]
+        struct EmptyRangePdClient;
+
+        #[async_trait]
+        impl PdClient for EmptyRangePdClient {
+            type KvClient = MockKvClient;
+
+            async fn map_region_to_store(
+                self: Arc<Self>,
+                _region: RegionWithLeader,
+            ) -> Result<RegionStore> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn region_for_key(&self, _key: &Key) -> Result<RegionWithLeader> {
+                panic!("regions_for_range should not call region_for_key for empty ranges");
+            }
+
+            async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn scan_regions(
+                self: Arc<Self>,
+                _start_key: Key,
+                _end_key: Option<Key>,
+                _limit: i32,
+            ) -> Result<Vec<RegionWithLeader>> {
+                panic!("regions_for_range should not call scan_regions for empty ranges");
+            }
+
+            async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn all_stores(&self) -> Result<Vec<Store>> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn update_leader(
+                &self,
+                _ver_id: RegionVerId,
+                _leader: metapb::Peer,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {}
+
+            async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+        }
+
+        let client = Arc::new(EmptyRangePdClient);
+        let k1: Key = vec![10].into();
+        let k2: Key = vec![10].into();
+        let mut stream = executor::block_on_stream(client.regions_for_range((k1, k2).into()));
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn test_regions_for_range_falls_back_when_scan_regions_returns_empty() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        #[derive(Clone)]
+        struct EmptyScanPdClient {
+            scan_calls: Arc<AtomicUsize>,
+            get_region_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl PdClient for EmptyScanPdClient {
+            type KvClient = MockKvClient;
+
+            async fn map_region_to_store(
+                self: Arc<Self>,
+                _region: RegionWithLeader,
+            ) -> Result<RegionStore> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn region_for_key(&self, key: &Key) -> Result<RegionWithLeader> {
+                self.get_region_calls.fetch_add(1, Ordering::SeqCst);
+
+                let key = <&[u8]>::from(key);
+                let first = key.first().copied().unwrap_or(0);
+                if first < 10 {
+                    Ok(region(1, vec![], vec![10]))
+                } else if first < 20 {
+                    Ok(region(2, vec![10], vec![20]))
+                } else {
+                    Ok(region(3, vec![20], vec![]))
+                }
+            }
+
+            async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn scan_regions(
+                self: Arc<Self>,
+                _start_key: Key,
+                _end_key: Option<Key>,
+                _limit: i32,
+            ) -> Result<Vec<RegionWithLeader>> {
+                self.scan_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            }
+
+            async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn all_stores(&self) -> Result<Vec<Store>> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn update_leader(
+                &self,
+                _ver_id: RegionVerId,
+                _leader: metapb::Peer,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {}
+
+            async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+        }
+
+        fn region(id: u64, start_key: Vec<u8>, end_key: Vec<u8>) -> RegionWithLeader {
+            RegionWithLeader {
+                region: metapb::Region {
+                    id,
+                    start_key,
+                    end_key,
+                    region_epoch: Some(metapb::RegionEpoch::default()),
+                    ..Default::default()
+                },
+                leader: None,
+            }
+        }
+
+        let scan_calls = Arc::new(AtomicUsize::new(0));
+        let get_region_calls = Arc::new(AtomicUsize::new(0));
+        let client = Arc::new(EmptyScanPdClient {
+            scan_calls: scan_calls.clone(),
+            get_region_calls: get_region_calls.clone(),
+        });
+
+        let start: Key = vec![5].into();
+        let end: Key = vec![15].into();
+        let mut stream = executor::block_on_stream(client.regions_for_range((start, end).into()));
+        assert_eq!(stream.next().unwrap().unwrap().id(), 1);
+        assert_eq!(stream.next().unwrap().unwrap().id(), 2);
+        assert!(stream.next().is_none());
+        assert_eq!(scan_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(get_region_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
