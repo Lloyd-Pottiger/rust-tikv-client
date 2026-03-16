@@ -115,6 +115,18 @@ mod tests {
     use crate::mock::{MockKvClient, MockPdClient};
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
+    use tonic::Status;
+
+    #[test]
+    fn test_is_unimplemented_error_matches_unimplemented_variants() {
+        assert!(is_unimplemented_error(&Error::Unimplemented));
+        assert!(is_unimplemented_error(&Error::GrpcAPI(
+            Status::unimplemented("unimplemented",)
+        )));
+        assert!(!is_unimplemented_error(&Error::GrpcAPI(
+            Status::unavailable("unavailable",)
+        )));
+    }
 
     #[tokio::test]
     async fn test_refresh_health_feedback_once_queries_all_stores() {
