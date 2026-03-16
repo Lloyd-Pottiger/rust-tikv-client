@@ -3286,6 +3286,14 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.commit_ts.as_ref().map(|ts| ts.version()).unwrap_or(0)
     }
 
+    /// Returns the TiKV cluster ID attached to requests.
+    ///
+    /// This maps to client-go `KVTxn.GetClusterID`.
+    #[must_use]
+    pub fn cluster_id(&self) -> u64 {
+        self.rpc.cluster_id()
+    }
+
     /// Returns whether this transaction has only performed read operations so far.
     ///
     /// This maps to client-go `KVTxn.IsReadOnly`.
@@ -13004,6 +13012,18 @@ mod tests {
         assert_eq!(txn.vars().backoff_lock_fast_ms, 123);
         assert_eq!(txn.vars().backoff_weight, 7);
         assert!(txn.vars().killed.is_some());
+    }
+
+    #[test]
+    fn test_transaction_cluster_id_matches_pd_client() {
+        let txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        assert_eq!(txn.cluster_id(), 42);
     }
 
     #[tokio::test]

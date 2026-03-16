@@ -32,6 +32,14 @@ impl SyncTransaction {
         self.inner.txn_scope()
     }
 
+    /// Returns the TiKV cluster ID attached to requests.
+    ///
+    /// This maps to client-go `KVTxn.GetClusterID`.
+    #[must_use]
+    pub fn cluster_id(&self) -> u64 {
+        self.inner.cluster_id()
+    }
+
     /// Set the KV variables used by this transaction.
     ///
     /// This maps to client-go `KVTxn.SetVars`.
