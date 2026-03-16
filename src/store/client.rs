@@ -17,6 +17,7 @@ use tonic::transport::Channel;
 use super::batch::BatchCommandsClient;
 use super::Request;
 use crate::pd::HealthFeedbackObserver;
+use crate::proto::coprocessor;
 use crate::proto::kvrpcpb;
 use crate::proto::tikvpb;
 use crate::proto::tikvpb::tikv_client::TikvClient;
@@ -236,6 +237,25 @@ impl KvRpcClient {
                         }
                         other => Err(Error::StringError(format!(
                             "unexpected batch_commands response for scan: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request.as_any().downcast_ref::<coprocessor::Request>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::Coprocessor(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::Coprocessor(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for coprocessor: {other:?}"
                         ))),
                     }
                 }

@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::proto::coprocessor;
 use crate::proto::kvrpcpb;
 use crate::Error;
 
@@ -68,6 +69,7 @@ has_region_error!(kvrpcpb::RawBatchScanResponse);
 has_region_error!(kvrpcpb::RawCasResponse);
 has_region_error!(kvrpcpb::RawCoprocessorResponse);
 has_region_error!(kvrpcpb::RawChecksumResponse);
+has_region_error!(coprocessor::Response);
 has_region_error!(kvrpcpb::GetLockWaitInfoResponse);
 has_region_error!(kvrpcpb::GetLockWaitHistoryResponse);
 
@@ -128,6 +130,18 @@ has_str_error!(kvrpcpb::RemoveLockObserverResponse);
 has_str_error!(kvrpcpb::PhysicalScanLockResponse);
 has_str_error!(kvrpcpb::GetLockWaitInfoResponse);
 has_str_error!(kvrpcpb::GetLockWaitHistoryResponse);
+
+impl HasKeyErrors for coprocessor::Response {
+    fn key_errors(&mut self) -> Option<Vec<Error>> {
+        if self.other_error.is_empty() {
+            None
+        } else {
+            Some(vec![Error::KvError {
+                message: std::mem::take(&mut self.other_error),
+            }])
+        }
+    }
+}
 
 impl HasRegionError for kvrpcpb::RegisterLockObserverResponse {
     fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
