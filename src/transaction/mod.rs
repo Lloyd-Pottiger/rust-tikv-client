@@ -36,6 +36,8 @@ pub use transaction::AssertionLevel;
 pub use transaction::CheckLevel;
 #[doc(hidden)]
 pub use transaction::HeartbeatOption;
+pub use transaction::KvFilter;
+pub use transaction::KvFilterOp;
 pub use transaction::LifecycleHooks;
 pub use transaction::LockWaitTimeout;
 pub use transaction::Mutation;

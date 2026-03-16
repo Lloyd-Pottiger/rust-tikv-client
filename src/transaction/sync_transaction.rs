@@ -1,8 +1,8 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
     transaction::Mutation, AssertionLevel, BoundRange, CommandPriority, DiskFullOpt, Error, Key,
-    KvPair, LifecycleHooks, LockWaitTimeout, PrewriteEncounterLockPolicy, ResolveLockDetail,
-    Result, SchemaLeaseChecker, Timestamp, Transaction, Value, Variables,
+    KvFilter, KvPair, LifecycleHooks, LockWaitTimeout, PrewriteEncounterLockPolicy,
+    ResolveLockDetail, Result, SchemaLeaseChecker, Timestamp, Transaction, Value, Variables,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -278,6 +278,20 @@ impl SyncTransaction {
     /// This maps to client-go `KVTxn.SetSessionID`.
     pub fn set_session_id(&mut self, session_id: u64) {
         self.inner.set_session_id(session_id);
+    }
+
+    /// Set the KV filter used to skip unnecessary mutations during commit.
+    ///
+    /// This maps to client-go `KVTxn.SetKVFilter`.
+    ///
+    /// Note: currently this is only applied to non-pipelined optimistic commits.
+    pub fn set_kv_filter(&mut self, filter: Arc<dyn KvFilter>) {
+        self.inner.set_kv_filter(filter);
+    }
+
+    /// Clear the configured KV filter.
+    pub fn clear_kv_filter(&mut self) {
+        self.inner.clear_kv_filter();
     }
 
     /// Enable forcing TiKV to always sync logs for transactional write requests.

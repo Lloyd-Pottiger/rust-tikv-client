@@ -159,6 +159,22 @@ pub trait SchemaLeaseChecker: Send + Sync {
     fn check_by_schema_ver(&self, txn_ts: Timestamp, start_schema_ver: i64) -> Result<()>;
 }
 
+/// A filter used to skip unnecessary KV mutations during commit.
+///
+/// This mirrors client-go v2 `KVFilter` as configured via `KVTxn.SetKVFilter`.
+pub trait KvFilter: Send + Sync {
+    /// Returns whether the given KV mutation should be skipped during commit.
+    fn is_unnecessary_key_value(&self, key: &[u8], value: &[u8], op: KvFilterOp) -> Result<bool>;
+}
+
+/// KV mutation operation type passed to [`KvFilter`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KvFilterOp {
+    Put,
+    Delete,
+    Insert,
+}
+
 /// How strict to enforce mutation assertions during prewrite/flush.
 ///
 /// This maps to client-go `KVTxn.SetAssertionLevel`.
@@ -268,6 +284,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     gc_safe_point: GcSafePointCache<PdC>,
     resolve_lock_detail: Arc<ResolveLockDetailCollector>,
     options: TransactionOptions,
+    kv_filter: Option<Arc<dyn KvFilter>>,
     request_source_descriptor: Option<crate::RequestSource>,
     rpc_interceptors: RpcInterceptors,
     snapshot_runtime_stats: Option<Arc<SnapshotRuntimeStats>>,
@@ -466,6 +483,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             gc_safe_point,
             resolve_lock_detail: Arc::new(ResolveLockDetailCollector::default()),
             options,
+            kv_filter: None,
             request_source_descriptor: None,
             rpc_interceptors: Default::default(),
             snapshot_runtime_stats: None,
@@ -921,6 +939,20 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// The session id is used for client-side logging and diagnostics.
     pub fn set_session_id(&mut self, session_id: u64) {
         self.session_id = session_id;
+    }
+
+    /// Set the KV filter used to skip unnecessary mutations during commit.
+    ///
+    /// This maps to client-go `KVTxn.SetKVFilter`.
+    ///
+    /// Note: currently this is only applied to non-pipelined optimistic commits.
+    pub fn set_kv_filter(&mut self, filter: Arc<dyn KvFilter>) {
+        self.kv_filter = Some(filter);
+    }
+
+    /// Clear the configured KV filter.
+    pub fn clear_kv_filter(&mut self) {
+        self.kv_filter = None;
     }
 
     /// Enable forcing TiKV to always sync logs for transactional write requests.
@@ -3157,7 +3189,39 @@ impl<PdC: PdClient> Transaction<PdC> {
             flush_wait_ms = elapsed_ms.min(u128::from(i64::MAX as u64)) as i64;
         }
 
-        let mutations = self.buffer.to_proto_mutations();
+        let mut mutations = self.buffer.to_proto_mutations();
+        if matches!(self.options.kind, TransactionKind::Optimistic)
+            && self.options.pipelined_txn.is_none()
+        {
+            if let Some(filter) = self.kv_filter.as_ref() {
+                let mut filtered = Vec::with_capacity(mutations.len());
+                for mutation in mutations {
+                    let op = match mutation.op {
+                        op if op == kvrpcpb::Op::Put as i32 => Some(KvFilterOp::Put),
+                        op if op == kvrpcpb::Op::Insert as i32 => Some(KvFilterOp::Insert),
+                        op if op == kvrpcpb::Op::Del as i32
+                            || op == kvrpcpb::Op::CheckNotExists as i32 =>
+                        {
+                            Some(KvFilterOp::Delete)
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(op) = op {
+                        let value = match op {
+                            KvFilterOp::Put | KvFilterOp::Insert => mutation.value.as_slice(),
+                            KvFilterOp::Delete => &[],
+                        };
+                        if filter.is_unnecessary_key_value(&mutation.key, value, op)? {
+                            continue;
+                        }
+                    }
+
+                    filtered.push(mutation);
+                }
+                mutations = filtered;
+            }
+        }
         let buffer_primary_key = self.buffer.get_primary_key();
         let has_flushed_range = self
             .pipelined
@@ -3165,7 +3229,6 @@ impl<PdC: PdClient> Transaction<PdC> {
             .map(PipelinedState::has_flushed_range)
             .unwrap_or(false);
         if mutations.is_empty() && !has_flushed_range {
-            assert!(buffer_primary_key.is_none());
             return Ok(None);
         }
 
@@ -3219,6 +3282,22 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Err(err);
         }
 
+        let mut write_size = 0u64;
+        for mutation in &mutations {
+            match mutation.op {
+                op if op == kvrpcpb::Op::Put as i32 || op == kvrpcpb::Op::Insert as i32 => {
+                    let key_len = u64::try_from(mutation.key.len()).unwrap_or(u64::MAX);
+                    let value_len = u64::try_from(mutation.value.len()).unwrap_or(u64::MAX);
+                    write_size = write_size.saturating_add(key_len).saturating_add(value_len);
+                }
+                op if op == kvrpcpb::Op::Del as i32 => {
+                    let key_len = u64::try_from(mutation.key.len()).unwrap_or(u64::MAX);
+                    write_size = write_size.saturating_add(key_len);
+                }
+                _ => {}
+            }
+        }
+
         let mut committer = Committer::new(
             primary_key,
             mutations,
@@ -3226,7 +3305,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.rpc.clone(),
             self.options.clone(),
             self.keyspace,
-            self.buffer.get_write_size() as u64,
+            write_size,
             self.start_instant,
         );
         committer.for_update_ts_constraints = self.for_update_ts_checks.clone();
@@ -13243,6 +13322,72 @@ mod tests {
         assert_eq!(txn.session_id, 0);
         txn.set_session_id(42);
         assert_eq!(txn.session_id, 42);
+    }
+
+    struct SkipKeyKvFilter {
+        skip_key: Vec<u8>,
+    }
+
+    impl super::KvFilter for SkipKeyKvFilter {
+        fn is_unnecessary_key_value(
+            &self,
+            key: &[u8],
+            _value: &[u8],
+            op: super::KvFilterOp,
+        ) -> crate::Result<bool> {
+            Ok(op == super::KvFilterOp::Put && key == self.skip_key.as_slice())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transaction_kv_filter_skips_mutations_in_optimistic_commit() {
+        let prewrite_keys = Arc::new(Mutex::new(Vec::new()));
+        let commit_keys = Arc::new(Mutex::new(Vec::new()));
+
+        let prewrite_keys_captured = prewrite_keys.clone();
+        let commit_keys_captured = commit_keys.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                let keys = req
+                    .mutations
+                    .iter()
+                    .map(|mutation| mutation.key.clone())
+                    .collect();
+                *prewrite_keys_captured.lock().unwrap() = keys;
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                *commit_keys_captured.lock().unwrap() = req.keys.clone();
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            Err(Error::StringError("unexpected request".to_owned()))
+        });
+
+        let pd_client = Arc::new(FixedTimestampPdClient {
+            inner: Arc::new(MockPdClient::new(client)),
+            timestamp: Timestamp::from_version(42),
+            timestamp_calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(7),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_kv_filter(Arc::new(SkipKeyKvFilter {
+            skip_key: b"k2".to_vec(),
+        }));
+        txn.put("k1".to_owned(), "v1").await.unwrap();
+        txn.put("k2".to_owned(), "v2").await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert_eq!(*prewrite_keys.lock().unwrap(), vec![b"k1".to_vec()]);
+        assert_eq!(*commit_keys.lock().unwrap(), vec![b"k1".to_vec()]);
     }
 
     #[test]
