@@ -213,25 +213,6 @@ impl Client<PdRpcClient> {
             safe_ts: self.safe_ts.clone(),
         }
     }
-
-    /// Set to use the atomic mode.
-    ///
-    /// The only reason of using atomic mode is the
-    /// [`compare_and_swap`](Client::compare_and_swap) operation. To guarantee
-    /// the atomicity of CAS, write operations like [`put`](Client::put) or
-    /// [`delete`](Client::delete) in atomic mode are more expensive. Some
-    /// operations are not supported in the mode.
-    #[must_use]
-    pub fn with_atomic_for_cas(&self) -> Self {
-        Client {
-            rpc: self.rpc.clone(),
-            cf: self.cf.clone(),
-            backoff: self.backoff.clone(),
-            atomic: true,
-            keyspace: self.keyspace,
-            safe_ts: self.safe_ts.clone(),
-        }
-    }
 }
 
 impl<PdC: PdClient> Client<PdC> {
@@ -256,6 +237,25 @@ impl<PdC: PdClient> Client<PdC> {
     /// to `0`.
     pub async fn min_safe_ts(&self) -> Result<u64> {
         self.safe_ts.min_safe_ts().await
+    }
+
+    /// Set to use the atomic mode.
+    ///
+    /// The only reason of using atomic mode is the
+    /// [`compare_and_swap`](Client::compare_and_swap) operation. To guarantee
+    /// the atomicity of CAS, write operations like [`put`](Client::put) or
+    /// [`delete`](Client::delete) in atomic mode are more expensive. Some
+    /// operations are not supported in the mode.
+    #[must_use]
+    pub fn with_atomic_for_cas(&self) -> Self {
+        Client {
+            rpc: self.rpc.clone(),
+            cf: self.cf.clone(),
+            backoff: self.backoff.clone(),
+            atomic: true,
+            keyspace: self.keyspace,
+            safe_ts: self.safe_ts.clone(),
+        }
     }
 
     /// Get the minimum `safe_ts` for a transaction scope.
@@ -994,6 +994,7 @@ mod tests {
     use std::any::Any;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use super::*;
@@ -1378,5 +1379,179 @@ mod tests {
             keyspace: Keyspace::Disable,
         };
         assert!(Arc::ptr_eq(&client.pd_client(), &pd_client));
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_empty_keys_multi_region() -> Result<()> {
+        let seen_ranges = Arc::new(Mutex::new(Vec::<(Vec<u8>, Vec<u8>)>::new()));
+        let seen_ranges_captured = seen_ranges.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::RawDeleteRangeRequest>()
+                    .expect("expected raw delete_range request");
+                seen_ranges_captured
+                    .lock()
+                    .unwrap()
+                    .push((req.start_key.clone(), req.end_key.clone()));
+                Ok(Box::new(kvrpcpb::RawDeleteRangeResponse {
+                    error: "".to_owned(),
+                    region_error: None,
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        };
+
+        client.delete_range(..).await?;
+
+        let mut seen_ranges = seen_ranges.lock().unwrap().clone();
+        seen_ranges.sort();
+        assert_eq!(
+            seen_ranges,
+            vec![
+                (vec![], vec![10]),
+                (vec![10], vec![250, 250]),
+                (vec![250, 250], vec![]),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_rejects_atomic_mode() {
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls_captured = dispatch_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |_req: &dyn Any| {
+                dispatch_calls_captured.fetch_add(1, Ordering::SeqCst);
+                Err(Error::Unimplemented)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        };
+
+        let client = client.with_atomic_for_cas();
+        let err = client.delete_range(..).await.unwrap_err();
+        assert!(matches!(err, Error::UnsupportedMode));
+        assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_swap_requires_atomic_mode() {
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls_captured = dispatch_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |_req: &dyn Any| {
+                dispatch_calls_captured.fetch_add(1, Ordering::SeqCst);
+                Err(Error::Unimplemented)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        };
+
+        let err = client
+            .compare_and_swap(vec![42], None::<Value>, vec![100])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::UnsupportedMode));
+        assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_swap_sets_previous_not_exist_and_processes_response() -> Result<()> {
+        let expected_key = vec![42];
+        let expected_value = vec![100];
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::RawCasRequest>()
+                    .expect("expected raw cas request");
+                assert_eq!(req.key, expected_key);
+                assert_eq!(req.value, expected_value);
+                assert!(req.previous_not_exist);
+
+                Ok(Box::new(kvrpcpb::RawCasResponse {
+                    previous_not_exist: true,
+                    succeed: true,
+                    ..Default::default()
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        }
+        .with_atomic_for_cas();
+
+        let (previous, swapped) = client
+            .compare_and_swap(vec![42], None::<Value>, vec![100])
+            .await?;
+        assert_eq!(previous, None);
+        assert!(swapped);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_swap_propagates_kv_error() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                req.downcast_ref::<kvrpcpb::RawCasRequest>()
+                    .expect("expected raw cas request");
+                Ok(Box::new(kvrpcpb::RawCasResponse {
+                    error: "injected cas error".to_owned(),
+                    ..Default::default()
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        }
+        .with_atomic_for_cas();
+
+        let err = client
+            .compare_and_swap(vec![42], None::<Value>, vec![100])
+            .await
+            .unwrap_err();
+        match err {
+            Error::KvError { message } => assert_eq!(message, "injected cas error"),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
