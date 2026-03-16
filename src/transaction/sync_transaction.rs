@@ -173,6 +173,14 @@ impl SyncTransaction {
         self.inner.set_causal_consistency(enabled);
     }
 
+    /// Returns whether the transaction uses causal consistency instead of linearizability.
+    ///
+    /// This maps to client-go `KVTxn.IsCasualConsistency`.
+    #[must_use]
+    pub fn is_causal_consistency(&self) -> bool {
+        self.inner.is_causal_consistency()
+    }
+
     /// Set how strict to enforce mutation assertions during prewrite/flush.
     ///
     /// This maps to client-go `KVTxn.SetAssertionLevel`.

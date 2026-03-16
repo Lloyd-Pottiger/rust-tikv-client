@@ -949,6 +949,14 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.causal_consistency = enabled;
     }
 
+    /// Returns whether the transaction uses causal consistency instead of linearizability.
+    ///
+    /// This maps to client-go `KVTxn.IsCasualConsistency`.
+    #[must_use]
+    pub fn is_causal_consistency(&self) -> bool {
+        self.options.causal_consistency
+    }
+
     /// Set how strict to enforce mutation assertions during prewrite/flush.
     ///
     /// This maps to client-go `KVTxn.SetAssertionLevel`.
@@ -13057,6 +13065,20 @@ mod tests {
 
         txn.clear_disk_full_opt();
         assert_eq!(txn.disk_full_opt(), DiskFullOpt::NotAllowedOnFull);
+    }
+
+    #[test]
+    fn test_transaction_is_causal_consistency_reflects_setting() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        assert!(!txn.is_causal_consistency());
+        txn.set_causal_consistency(true);
+        assert!(txn.is_causal_consistency());
     }
 
     #[tokio::test]
