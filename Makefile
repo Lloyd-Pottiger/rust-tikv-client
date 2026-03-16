@@ -19,6 +19,7 @@ generate:
 	cargo run -p tikv-client-proto-build
 
 check: generate
+	cargo check --lib --features "${ALL_FEATURES}"
 	cargo check --all --all-targets --features "${ALL_FEATURES}"
 	cargo fmt -- --check
 	cargo clippy --all-targets --features "${ALL_FEATURES}" -- -D clippy::all

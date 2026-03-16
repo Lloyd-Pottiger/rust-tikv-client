@@ -2116,9 +2116,9 @@ pub mod test {
 
         let start: Key = key(0).into();
         let end: Key = key(1025).into();
-        let mut stream = executor::block_on_stream(client.regions_for_range((start, end).into()));
+        let stream = executor::block_on_stream(client.regions_for_range((start, end).into()));
         let mut expected_id = 1u64;
-        while let Some(region) = stream.next() {
+        for region in stream {
             let region = region.unwrap();
             assert_eq!(region.id(), expected_id);
             expected_id += 1;
