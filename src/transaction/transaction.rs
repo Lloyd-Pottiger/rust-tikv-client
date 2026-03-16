@@ -5546,6 +5546,7 @@ impl TransactionOptions {
     #[must_use]
     pub fn read_only(mut self) -> TransactionOptions {
         self.read_only = true;
+        self.pipelined_txn = None;
         self
     }
 
@@ -7973,6 +7974,36 @@ mod tests {
             txn.scan(vec![0u8]..vec![2u8], 10).await,
             Err(Error::StringError(msg)) if msg == "scan is not supported for pipelined transactions"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_read_only_clears_pipelined_options_for_scan() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::ScanRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::ScanResponse>::default() as Box<dyn Any>);
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let pairs = snapshot
+            .scan(vec![0u8]..vec![2u8], 10)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert!(pairs.is_empty());
     }
 
     #[tokio::test]
