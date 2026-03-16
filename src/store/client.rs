@@ -988,6 +988,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_coprocessor_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = coprocessor::Request::default();
+        request.tp = 1;
+        request.start_ts = 7;
+        request.ranges = vec![coprocessor::KeyRange {
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
+        }];
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "coprocessor dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::Coprocessor(sent_req) => {
+                assert_eq!(sent_req.tp, 1);
+                assert_eq!(sent_req.start_ts, 7);
+                assert_eq!(sent_req.ranges.len(), 1);
+                assert_eq!(sent_req.ranges[0].start, b"a".to_vec());
+                assert_eq!(sent_req.ranges[0].end, b"z".to_vec());
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for coprocessor: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Coprocessor(
+                    coprocessor::Response {
+                        data: b"v".to_vec(),
+                        ..Default::default()
+                    },
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<coprocessor::Response>()
+            .map_err(|_| Error::StringError("expected coprocessor response".to_owned()))?;
+        assert_eq!(resp.data, b"v".to_vec());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_kv_rpc_client_dispatches_raw_get_via_batch_commands() -> Result<()> {
         let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
 
