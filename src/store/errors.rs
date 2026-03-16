@@ -133,12 +133,26 @@ has_str_error!(kvrpcpb::GetLockWaitHistoryResponse);
 
 impl HasKeyErrors for coprocessor::Response {
     fn key_errors(&mut self) -> Option<Vec<Error>> {
-        if self.other_error.is_empty() {
+        let mut errors = Vec::new();
+
+        if !self.other_error.is_empty() {
+            errors.push(Error::KvError {
+                message: std::mem::take(&mut self.other_error),
+            });
+        }
+
+        for response in self.batch_responses.iter_mut() {
+            if !response.other_error.is_empty() {
+                errors.push(Error::KvError {
+                    message: std::mem::take(&mut response.other_error),
+                });
+            }
+        }
+
+        if errors.is_empty() {
             None
         } else {
-            Some(vec![Error::KvError {
-                message: std::mem::take(&mut self.other_error),
-            }])
+            Some(errors)
         }
     }
 }

@@ -187,11 +187,19 @@ fn flatten_lock_info(lock: kvrpcpb::LockInfo) -> Vec<kvrpcpb::LockInfo> {
 
 impl HasLocks for coprocessor_pb::Response {
     fn take_locks(&mut self) -> Vec<kvrpcpb::LockInfo> {
-        self.locked
-            .take()
-            .into_iter()
-            .flat_map(flatten_lock_info)
-            .collect()
+        let mut locks = Vec::new();
+
+        if let Some(lock) = self.locked.take() {
+            locks.extend(flatten_lock_info(lock));
+        }
+
+        for response in self.batch_responses.iter_mut() {
+            if let Some(lock) = response.locked.take() {
+                locks.extend(flatten_lock_info(lock));
+            }
+        }
+
+        locks
     }
 }
 
@@ -199,6 +207,7 @@ impl HasLocks for coprocessor_pb::Response {
 mod tests {
     use super::*;
     use crate::mock::MockPdClient;
+    use crate::store::HasKeyErrors;
 
     #[tokio::test]
     async fn test_coprocessor_request_shards_split_and_group_by_region() {
@@ -355,5 +364,55 @@ mod tests {
         assert_eq!(locks[0].key, shared_1.key);
         assert_eq!(locks[1].key, shared_2.key);
         assert!(response.locked.is_none());
+    }
+
+    #[test]
+    fn test_coprocessor_response_take_locks_includes_batch_responses() {
+        let mut top_lock = kvrpcpb::LockInfo::default();
+        top_lock.key = b"top".to_vec();
+
+        let mut batch_lock = kvrpcpb::LockInfo::default();
+        batch_lock.key = b"batch".to_vec();
+
+        let mut response = coprocessor_pb::Response {
+            locked: Some(top_lock),
+            batch_responses: vec![coprocessor_pb::StoreBatchTaskResponse {
+                locked: Some(batch_lock),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let locks = response.take_locks();
+        assert_eq!(locks.len(), 2);
+        assert_eq!(locks[0].key, b"top".to_vec());
+        assert_eq!(locks[1].key, b"batch".to_vec());
+        assert!(response.locked.is_none());
+        assert!(response.batch_responses[0].locked.is_none());
+    }
+
+    #[test]
+    fn test_coprocessor_response_key_errors_includes_batch_responses() {
+        let mut response = coprocessor_pb::Response {
+            other_error: "top".to_owned(),
+            batch_responses: vec![coprocessor_pb::StoreBatchTaskResponse {
+                other_error: "batch".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let errors = response.key_errors().expect("errors");
+        assert_eq!(errors.len(), 2);
+        assert!(matches!(
+            errors[0],
+            Error::KvError { ref message } if message == "top"
+        ));
+        assert!(matches!(
+            errors[1],
+            Error::KvError { ref message } if message == "batch"
+        ));
+        assert!(response.other_error.is_empty());
+        assert!(response.batch_responses[0].other_error.is_empty());
     }
 }
