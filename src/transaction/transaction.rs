@@ -4893,10 +4893,6 @@ impl PipelinedState {
                 _ => {}
             }
 
-            if m.op == kvrpcpb::Op::CheckNotExists as i32 {
-                continue;
-            }
-
             let key = Key::from(m.key.clone());
             if range_start.as_ref().map_or(true, |start| &key < start) {
                 range_start = Some(key.clone());
@@ -6090,9 +6086,6 @@ impl<PdC: PdClient> Committer<PdC> {
         let mut pending_range_start: Option<Key> = None;
         let mut pending_range_end_inclusive: Option<Key> = None;
         for m in &self.mutations {
-            if m.op == kvrpcpb::Op::CheckNotExists as i32 {
-                continue;
-            }
             let key = Key::from(m.key.clone());
             if pending_range_start
                 .as_ref()
@@ -7980,6 +7973,239 @@ mod tests {
             txn.scan(vec![0u8]..vec![2u8], 10).await,
             Err(Error::StringError(msg)) if msg == "scan is not supported for pipelined transactions"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_commit_includes_check_not_exists_in_pending_resolve_range() {
+        use tokio::sync::Notify;
+
+        let scenario = FailScenario::setup();
+        fail::cfg("pipelined_broadcast_grace_period_ms", "return(0)").unwrap();
+
+        let flushed = Arc::new(Mutex::new(Vec::<kvrpcpb::FlushRequest>::new()));
+        let resolved = Arc::new(Mutex::new(Vec::<kvrpcpb::ResolveLockRequest>::new()));
+
+        let broadcasts = Arc::new(AtomicUsize::new(0));
+        let broadcasts_captured = broadcasts.clone();
+        let broadcast_notified = Arc::new(Notify::new());
+        let broadcast_notified_captured = broadcast_notified.clone();
+
+        let flushed_cloned = flushed.clone();
+        let resolved_cloned = resolved.clone();
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::FlushRequest>() {
+                    flushed_cloned.lock().unwrap().push(req.clone());
+                    return Ok(Box::new(kvrpcpb::FlushResponse::default()) as Box<dyn Any>);
+                }
+                if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    return Ok(Box::new(kvrpcpb::CommitResponse::default()) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    resolved_cloned.lock().unwrap().push(req.clone());
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>() {
+                    assert_eq!(req.txn_status.len(), 1);
+                    let status = &req.txn_status[0];
+                    assert_eq!(status.start_ts, 5);
+                    assert_eq!(status.min_commit_ts, 0);
+                    assert_eq!(status.commit_ts, 100);
+                    assert!(!status.rolled_back);
+                    assert!(status.is_completed);
+
+                    let count = broadcasts_captured.fetch_add(1, Ordering::SeqCst) + 1;
+                    if count == 2 {
+                        broadcast_notified_captured.notify_one();
+                    }
+                    return Ok(
+                        Box::<kvrpcpb::BroadcastTxnStatusResponse>::default() as Box<dyn Any>
+                    );
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            }))
+            .with_tso_sequence(100),
+        );
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                ..Default::default()
+            })
+            .await;
+
+        let start_ts = Timestamp::from_version(5);
+        let options = TransactionOptions::new_optimistic()
+            .pipelined()
+            .heartbeat_option(HeartbeatOption::NoHeartbeat);
+        let mut txn = Transaction::new(start_ts, pd_client, options, Keyspace::Disable);
+
+        // Create a `CheckNotExists` mutation in region1 by inserting then deleting the same key.
+        txn.insert(vec![1u8], b"v".to_vec()).await.unwrap();
+        txn.delete(vec![1u8]).await.unwrap();
+
+        // Create a normal write in region2 to ensure the primary key is a non-check mutation.
+        txn.put(vec![11u8], b"v2".to_vec()).await.unwrap();
+
+        txn.commit().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), broadcast_notified.notified())
+            .await
+            .expect("completion broadcast should be dispatched to all stores");
+
+        let flushed_region_ids: Vec<u64> = flushed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|req| req.context.as_ref().unwrap().region_id)
+            .collect();
+        assert!(
+            flushed_region_ids.contains(&1) && flushed_region_ids.contains(&2),
+            "expected flush requests in both regions, got: {flushed_region_ids:?}"
+        );
+
+        let resolved_for_txn: Vec<_> = resolved
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|req| req.start_version == 5 && req.commit_version == 100)
+            .cloned()
+            .collect();
+        let resolved_region_ids: Vec<u64> = resolved_for_txn
+            .iter()
+            .map(|req| req.context.as_ref().unwrap().region_id)
+            .collect();
+        assert!(
+            resolved_region_ids.contains(&1) && resolved_region_ids.contains(&2),
+            "expected resolve-lock in both regions, got: {resolved_region_ids:?}"
+        );
+
+        scenario.teardown();
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_commit_includes_check_not_exists_in_flushed_resolve_range() {
+        use tokio::sync::Notify;
+
+        let scenario = FailScenario::setup();
+        fail::cfg("pipelined_broadcast_grace_period_ms", "return(0)").unwrap();
+
+        let flushed = Arc::new(Mutex::new(Vec::<kvrpcpb::FlushRequest>::new()));
+        let resolved = Arc::new(Mutex::new(Vec::<kvrpcpb::ResolveLockRequest>::new()));
+
+        let broadcasts = Arc::new(AtomicUsize::new(0));
+        let broadcasts_captured = broadcasts.clone();
+        let broadcast_notified = Arc::new(Notify::new());
+        let broadcast_notified_captured = broadcast_notified.clone();
+
+        let flushed_cloned = flushed.clone();
+        let resolved_cloned = resolved.clone();
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::FlushRequest>() {
+                    flushed_cloned.lock().unwrap().push(req.clone());
+                    return Ok(Box::new(kvrpcpb::FlushResponse::default()) as Box<dyn Any>);
+                }
+                if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                    return Ok(Box::new(kvrpcpb::CommitResponse::default()) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::ResolveLockRequest>() {
+                    resolved_cloned.lock().unwrap().push(req.clone());
+                    return Ok(Box::new(kvrpcpb::ResolveLockResponse::default()) as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>() {
+                    assert_eq!(req.txn_status.len(), 1);
+                    let status = &req.txn_status[0];
+                    assert_eq!(status.start_ts, 5);
+                    assert_eq!(status.min_commit_ts, 0);
+                    assert_eq!(status.commit_ts, 100);
+                    assert!(!status.rolled_back);
+                    assert!(status.is_completed);
+
+                    let count = broadcasts_captured.fetch_add(1, Ordering::SeqCst) + 1;
+                    if count == 2 {
+                        broadcast_notified_captured.notify_one();
+                    }
+                    return Ok(
+                        Box::<kvrpcpb::BroadcastTxnStatusResponse>::default() as Box<dyn Any>
+                    );
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            }))
+            .with_tso_sequence(100),
+        );
+
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 2,
+                ..Default::default()
+            })
+            .await;
+
+        let start_ts = Timestamp::from_version(5);
+        let options = TransactionOptions::new_optimistic()
+            .pipelined()
+            .heartbeat_option(HeartbeatOption::NoHeartbeat);
+        let mut txn = Transaction::new(start_ts, pd_client, options, Keyspace::Disable);
+
+        // Create a `CheckNotExists` mutation in region1 by inserting then deleting the same key.
+        txn.insert(vec![1u8], b"v".to_vec()).await.unwrap();
+        txn.delete(vec![1u8]).await.unwrap();
+
+        // Create a normal write in region2 to ensure the primary key is a non-check mutation.
+        txn.put(vec![11u8], b"v2".to_vec()).await.unwrap();
+
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        txn.commit().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), broadcast_notified.notified())
+            .await
+            .expect("completion broadcast should be dispatched to all stores");
+
+        let flushed_region_ids: Vec<u64> = flushed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|req| req.context.as_ref().unwrap().region_id)
+            .collect();
+        assert!(
+            flushed_region_ids.contains(&1) && flushed_region_ids.contains(&2),
+            "expected flush requests in both regions, got: {flushed_region_ids:?}"
+        );
+
+        let resolved_for_txn: Vec<_> = resolved
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|req| req.start_version == 5 && req.commit_version == 100)
+            .cloned()
+            .collect();
+        let resolved_region_ids: Vec<u64> = resolved_for_txn
+            .iter()
+            .map(|req| req.context.as_ref().unwrap().region_id)
+            .collect();
+        assert!(
+            resolved_region_ids.contains(&1) && resolved_region_ids.contains(&2),
+            "expected resolve-lock in both regions, got: {resolved_region_ids:?}"
+        );
+
+        scenario.teardown();
     }
 
     #[tokio::test]
