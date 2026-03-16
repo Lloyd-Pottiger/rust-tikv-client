@@ -165,6 +165,64 @@ pub trait SchemaLeaseChecker: Send + Sync {
 pub trait KvFilter: Send + Sync {
     /// Returns whether the given KV mutation should be skipped during commit.
     fn is_unnecessary_key_value(&self, key: &[u8], value: &[u8], op: KvFilterOp) -> Result<bool>;
+
+    /// Returns whether the given KV mutation should be skipped during commit.
+    ///
+    /// This mirrors client-go v2 `KVFilter.IsUnnecessaryKeyValue` and provides per-key metadata
+    /// (a subset of `kv.KeyFlags`), allowing filters to distinguish `Op::Del` from
+    /// `Op::CheckNotExists` and handle pessimistic-locked keys.
+    ///
+    /// By default this maps `flags.op()` to [`KvFilterOp`] and delegates to
+    /// [`KvFilter::is_unnecessary_key_value`]. Override this method if you need the additional
+    /// metadata.
+    fn is_unnecessary_key_value_with_flags(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        flags: KvFilterKeyFlags,
+    ) -> Result<bool> {
+        let op = match flags.op() {
+            KvFilterMutationOp::Put => KvFilterOp::Put,
+            KvFilterMutationOp::Insert => KvFilterOp::Insert,
+            KvFilterMutationOp::Delete | KvFilterMutationOp::CheckNotExists => KvFilterOp::Delete,
+        };
+        self.is_unnecessary_key_value(key, value, op)
+    }
+}
+
+/// Metadata passed to [`KvFilter::is_unnecessary_key_value_with_flags`].
+///
+/// This mirrors (a subset of) client-go v2 `kv.KeyFlags`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct KvFilterKeyFlags {
+    op: KvFilterMutationOp,
+    locked: bool,
+}
+
+impl KvFilterKeyFlags {
+    #[must_use]
+    pub const fn new(op: KvFilterMutationOp, locked: bool) -> Self {
+        Self { op, locked }
+    }
+
+    #[must_use]
+    pub const fn op(self) -> KvFilterMutationOp {
+        self.op
+    }
+
+    #[must_use]
+    pub const fn is_locked(self) -> bool {
+        self.locked
+    }
+}
+
+/// KV mutation operation type passed to [`KvFilterKeyFlags`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KvFilterMutationOp {
+    Put,
+    Delete,
+    Insert,
+    CheckNotExists,
 }
 
 /// KV mutation operation type passed to [`KvFilter`].
@@ -966,21 +1024,25 @@ impl<PdC: PdClient> Transaction<PdC> {
         let mut filtered = Vec::with_capacity(mutations.len());
         for mut mutation in mutations {
             let op = match mutation.op {
-                op if op == kvrpcpb::Op::Put as i32 => Some(KvFilterOp::Put),
-                op if op == kvrpcpb::Op::Insert as i32 => Some(KvFilterOp::Insert),
-                op if op == kvrpcpb::Op::Del as i32 || op == kvrpcpb::Op::CheckNotExists as i32 => {
-                    Some(KvFilterOp::Delete)
+                op if op == kvrpcpb::Op::Put as i32 => Some(KvFilterMutationOp::Put),
+                op if op == kvrpcpb::Op::Insert as i32 => Some(KvFilterMutationOp::Insert),
+                op if op == kvrpcpb::Op::Del as i32 => Some(KvFilterMutationOp::Delete),
+                op if op == kvrpcpb::Op::CheckNotExists as i32 => {
+                    Some(KvFilterMutationOp::CheckNotExists)
                 }
                 _ => None,
             };
 
             if let Some(op) = op {
                 let value = match op {
-                    KvFilterOp::Put | KvFilterOp::Insert => mutation.value.as_slice(),
-                    KvFilterOp::Delete => &[],
+                    KvFilterMutationOp::Put | KvFilterMutationOp::Insert => {
+                        mutation.value.as_slice()
+                    }
+                    KvFilterMutationOp::Delete | KvFilterMutationOp::CheckNotExists => &[],
                 };
-                if filter.is_unnecessary_key_value(&mutation.key, value, op)? {
-                    if is_pessimistic {
+                let flags = KvFilterKeyFlags::new(op, is_pessimistic);
+                if filter.is_unnecessary_key_value_with_flags(&mutation.key, value, flags)? {
+                    if is_pessimistic && flags.is_locked() {
                         mutation.op = kvrpcpb::Op::Lock.into();
                         mutation.value.clear();
                         filtered.push(mutation);
@@ -13399,6 +13461,88 @@ mod tests {
 
         assert_eq!(*prewrite_keys.lock().unwrap(), vec![b"k1".to_vec()]);
         assert_eq!(*commit_keys.lock().unwrap(), vec![b"k1".to_vec()]);
+    }
+
+    struct SkipDeletesButKeepCheckNotExistsKvFilter;
+
+    impl super::KvFilter for SkipDeletesButKeepCheckNotExistsKvFilter {
+        fn is_unnecessary_key_value(
+            &self,
+            _key: &[u8],
+            _value: &[u8],
+            _op: super::KvFilterOp,
+        ) -> crate::Result<bool> {
+            Ok(false)
+        }
+
+        fn is_unnecessary_key_value_with_flags(
+            &self,
+            _key: &[u8],
+            _value: &[u8],
+            flags: super::KvFilterKeyFlags,
+        ) -> crate::Result<bool> {
+            Ok(matches!(flags.op(), super::KvFilterMutationOp::Delete))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transaction_kv_filter_flags_differentiates_check_not_exists_from_delete() {
+        let prewrite_mutations = Arc::new(Mutex::new(Vec::new()));
+        let prewrite_mutations_captured = prewrite_mutations.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_mutations_captured
+                    .lock()
+                    .unwrap()
+                    .extend(req.mutations.clone());
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+            if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            Err(Error::StringError("unexpected request".to_owned()))
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(10));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(7),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_kv_filter(Arc::new(SkipDeletesButKeepCheckNotExistsKvFilter));
+
+        txn.put(vec![0u8], b"v0".to_vec()).await.unwrap();
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        txn.delete(vec![1u8]).await.unwrap();
+
+        txn.insert(vec![2u8], b"v2".to_vec()).await.unwrap();
+        txn.delete(vec![2u8]).await.unwrap();
+
+        txn.commit().await.unwrap();
+
+        let muts = prewrite_mutations.lock().unwrap().clone();
+        assert!(
+            muts.iter()
+                .any(|m| m.key.as_slice() == [0u8] && m.op == kvrpcpb::Op::Put as i32),
+            "expected put mutation for k0, got: {muts:?}"
+        );
+        assert!(
+            !muts.iter().any(|m| m.key.as_slice() == [1u8]),
+            "expected delete mutation for k1 to be filtered out, got: {muts:?}"
+        );
+
+        let check_mutation = muts
+            .iter()
+            .find(|m| m.key.as_slice() == [2u8])
+            .expect("expected check-not-exists mutation for k2");
+        assert_eq!(check_mutation.op, kvrpcpb::Op::CheckNotExists as i32);
     }
 
     #[tokio::test]
