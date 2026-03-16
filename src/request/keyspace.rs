@@ -87,11 +87,8 @@ impl EncodeKeyspace for BoundRange {
                 Bound::Excluded(key.encode_keyspace(keyspace, key_mode))
             }
             _ => match keyspace {
-                Keyspace::Enable { keyspace_id } => Bound::Excluded(Key::EMPTY.encode_keyspace(
-                    Keyspace::Enable {
-                        keyspace_id: keyspace_id + 1,
-                    },
-                    key_mode,
+                Keyspace::Enable { keyspace_id } => Bound::Excluded(Key::from(
+                    keyspace_end_prefix(keyspace_id, key_mode).to_vec(),
                 )),
                 _ => Bound::Excluded(Key::EMPTY),
             },
@@ -289,12 +286,26 @@ impl EncodeKeyspace for Vec<crate::proto::kvrpcpb::LockInfo> {
 }
 
 fn keyspace_prefix(keyspace_id: u32, key_mode: KeyMode) -> [u8; KEYSPACE_PREFIX_LEN] {
-    let mut prefix = keyspace_id.to_be_bytes();
-    prefix[0] = match key_mode {
-        KeyMode::Raw => RAW_KEY_PREFIX,
-        KeyMode::Txn => TXN_KEY_PREFIX,
-    };
-    prefix
+    let keyspace_id = keyspace_id.to_be_bytes();
+    debug_assert!(
+        keyspace_id[0] == 0,
+        "keyspace_id must fit within 24 bits for API v2"
+    );
+
+    [
+        match key_mode {
+            KeyMode::Raw => RAW_KEY_PREFIX,
+            KeyMode::Txn => TXN_KEY_PREFIX,
+        },
+        keyspace_id[1],
+        keyspace_id[2],
+        keyspace_id[3],
+    ]
+}
+
+fn keyspace_end_prefix(keyspace_id: u32, key_mode: KeyMode) -> [u8; KEYSPACE_PREFIX_LEN] {
+    let start = keyspace_prefix(keyspace_id, key_mode);
+    u32::from_be_bytes(start).wrapping_add(1).to_be_bytes()
 }
 
 fn prepend_bytes<const N: usize>(vec: &mut Vec<u8>, prefix: &[u8; N]) {
@@ -405,6 +416,26 @@ mod tests {
                 vec![b'x', 0, 0xDE, 0xAD, b's', b'2']
             ]
         );
+    }
+
+    #[test]
+    fn test_encode_version_max_keyspace_id_bounds_use_mode_byte_carry() {
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0x00FF_FFFF,
+        };
+
+        let bound: BoundRange = (..).into();
+
+        let expected_raw: BoundRange =
+            (Key::from(vec![b'r', 0xFF, 0xFF, 0xFF])..Key::from(vec![b's', 0, 0, 0])).into();
+        assert_eq!(
+            bound.clone().encode_keyspace(keyspace, KeyMode::Raw),
+            expected_raw
+        );
+
+        let expected_txn: BoundRange =
+            (Key::from(vec![b'x', 0xFF, 0xFF, 0xFF])..Key::from(vec![b'y', 0, 0, 0])).into();
+        assert_eq!(bound.encode_keyspace(keyspace, KeyMode::Txn), expected_txn);
     }
 
     #[test]
