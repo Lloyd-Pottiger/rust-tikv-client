@@ -68,6 +68,20 @@ impl Cluster {
         req.send(&mut self.client, timeout).await
     }
 
+    pub async fn scan_regions(
+        &mut self,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        limit: i32,
+        timeout: Duration,
+    ) -> Result<pdpb::ScanRegionsResponse> {
+        let mut req = pd_request!(self.id, pdpb::ScanRegionsRequest);
+        req.start_key = start_key;
+        req.end_key = end_key;
+        req.limit = limit;
+        req.send(&mut self.client, timeout).await
+    }
+
     pub async fn get_store(
         &mut self,
         id: u64,
@@ -606,6 +620,16 @@ impl PdMessage for pdpb::GetRegionByIdRequest {
 }
 
 #[async_trait]
+impl PdMessage for pdpb::ScanRegionsRequest {
+    type Client = pdpb::pd_client::PdClient<Channel>;
+    type Response = pdpb::ScanRegionsResponse;
+
+    async fn rpc(req: Request<Self>, client: &mut Self::Client) -> GrpcResult<Self::Response> {
+        Ok(client.scan_regions(req).await?.into_inner())
+    }
+}
+
+#[async_trait]
 impl PdMessage for pdpb::GetStoreRequest {
     type Client = pdpb::pd_client::PdClient<Channel>;
     type Response = pdpb::GetStoreResponse;
@@ -756,6 +780,12 @@ impl PdResponse for pdpb::GetStoreResponse {
 }
 
 impl PdResponse for pdpb::GetRegionResponse {
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+impl PdResponse for pdpb::ScanRegionsResponse {
     fn header(&self) -> Option<&pdpb::ResponseHeader> {
         self.header.as_ref()
     }

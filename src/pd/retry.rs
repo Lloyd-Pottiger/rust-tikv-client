@@ -42,6 +42,16 @@ pub trait RetryClientTrait {
 
     async fn get_region_by_id(self: Arc<Self>, region_id: RegionId) -> Result<RegionWithLeader>;
 
+    async fn scan_regions(
+        self: Arc<Self>,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        limit: i32,
+    ) -> Result<Vec<RegionWithLeader>> {
+        let _ = (start_key, end_key, limit);
+        Err(Error::Unimplemented)
+    }
+
     async fn get_store(self: Arc<Self>, id: StoreId) -> Result<metapb::Store>;
 
     async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>>;
@@ -269,6 +279,24 @@ impl RetryClientTrait for RetryClient<Cluster> {
         })
     }
 
+    async fn scan_regions(
+        self: Arc<Self>,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        limit: i32,
+    ) -> Result<Vec<RegionWithLeader>> {
+        retry_mut!(self, "scan_regions", |cluster| {
+            let start_key = start_key.clone();
+            let end_key = end_key.clone();
+            async {
+                cluster
+                    .scan_regions(start_key, end_key, limit, self.timeout)
+                    .await
+                    .and_then(scan_regions_from_response)
+            }
+        })
+    }
+
     async fn get_store(self: Arc<Self>, id: StoreId) -> Result<metapb::Store> {
         retry_mut!(self, "get_store", |cluster| async {
             cluster
@@ -452,6 +480,48 @@ fn region_from_response(
     Ok(RegionWithLeader::new(region, resp.leader.take()))
 }
 
+fn scan_regions_from_response(resp: pdpb::ScanRegionsResponse) -> Result<Vec<RegionWithLeader>> {
+    if !resp.regions.is_empty() {
+        resp.regions
+            .into_iter()
+            .map(|region_info| {
+                let region = region_info.region.ok_or_else(|| {
+                    internal_err!("missing region in PD ScanRegionsResponse.regions entry")
+                })?;
+                if region.region_epoch.is_none() {
+                    return Err(internal_err!(
+                        "missing region_epoch in PD ScanRegionsResponse for region_id {}",
+                        region.id
+                    ));
+                }
+                Ok(RegionWithLeader::new(region, region_info.leader))
+            })
+            .collect()
+    } else {
+        if !resp.leaders.is_empty() && resp.region_metas.len() != resp.leaders.len() {
+            return Err(internal_err!(
+                "PD ScanRegionsResponse region_metas/leaders length mismatch: {} vs {}",
+                resp.region_metas.len(),
+                resp.leaders.len()
+            ));
+        }
+        resp.region_metas
+            .into_iter()
+            .enumerate()
+            .map(|(idx, region)| {
+                if region.region_epoch.is_none() {
+                    return Err(internal_err!(
+                        "missing region_epoch in PD ScanRegionsResponse for region_id {}",
+                        region.id
+                    ));
+                }
+                let leader = resp.leaders.get(idx).cloned();
+                Ok(RegionWithLeader::new(region, leader))
+            })
+            .collect()
+    }
+}
+
 fn store_from_response(resp: pdpb::GetStoreResponse, store_id: StoreId) -> Result<metapb::Store> {
     resp.store.ok_or_else(|| {
         internal_err!(
@@ -599,6 +669,94 @@ mod test {
         resp.region = Some(region);
 
         region_from_response(resp, || Error::Unimplemented).unwrap();
+    }
+
+    #[test]
+    fn test_scan_regions_from_response_uses_regions_field_when_present() {
+        let mut region = metapb::Region::default();
+        region.id = 1;
+        region.start_key = vec![1];
+        region.end_key = vec![2];
+        region.region_epoch = Some(metapb::RegionEpoch::default());
+
+        let leader = metapb::Peer {
+            store_id: 9,
+            ..Default::default()
+        };
+
+        let resp = pdpb::ScanRegionsResponse {
+            regions: vec![pdpb::Region {
+                region: Some(region.clone()),
+                leader: Some(leader.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let regions = scan_regions_from_response(resp).unwrap();
+        assert_eq!(regions, vec![RegionWithLeader::new(region, Some(leader))]);
+    }
+
+    #[test]
+    fn test_scan_regions_from_response_uses_region_metas_when_regions_empty() {
+        let mut region = metapb::Region::default();
+        region.id = 1;
+        region.start_key = vec![1];
+        region.end_key = vec![2];
+        region.region_epoch = Some(metapb::RegionEpoch::default());
+
+        let leader = metapb::Peer {
+            store_id: 9,
+            ..Default::default()
+        };
+
+        let resp = pdpb::ScanRegionsResponse {
+            region_metas: vec![region.clone()],
+            leaders: vec![leader.clone()],
+            ..Default::default()
+        };
+
+        let regions = scan_regions_from_response(resp).unwrap();
+        assert_eq!(regions, vec![RegionWithLeader::new(region, Some(leader))]);
+    }
+
+    #[test]
+    fn test_scan_regions_from_response_missing_epoch_returns_error() {
+        let mut region = metapb::Region::default();
+        region.id = 1;
+        region.start_key = vec![1];
+        region.end_key = vec![2];
+
+        let resp = pdpb::ScanRegionsResponse {
+            region_metas: vec![region],
+            ..Default::default()
+        };
+
+        let err = scan_regions_from_response(resp).unwrap_err().to_string();
+        assert!(err.contains("missing region_epoch"));
+    }
+
+    #[test]
+    fn test_scan_regions_from_response_length_mismatch_returns_error() {
+        let mut region = metapb::Region::default();
+        region.id = 1;
+        region.start_key = vec![1];
+        region.end_key = vec![2];
+        region.region_epoch = Some(metapb::RegionEpoch::default());
+
+        let leader = metapb::Peer {
+            store_id: 9,
+            ..Default::default()
+        };
+
+        let resp = pdpb::ScanRegionsResponse {
+            region_metas: vec![region],
+            leaders: vec![leader.clone(), leader],
+            ..Default::default()
+        };
+
+        let err = scan_regions_from_response(resp).unwrap_err().to_string();
+        assert!(err.contains("length mismatch"));
     }
 
     #[test]
