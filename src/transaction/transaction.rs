@@ -271,6 +271,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     rpc_interceptors: RpcInterceptors,
     snapshot_runtime_stats: Option<Arc<SnapshotRuntimeStats>>,
     vars: Variables,
+    session_id: u64,
     resource_group_tagger: Option<ResourceGroupTagger>,
     replica_read_adjuster: Option<ReplicaReadAdjuster>,
     schema_ver: Option<i64>,
@@ -467,6 +468,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             rpc_interceptors: Default::default(),
             snapshot_runtime_stats: None,
             vars: Variables::default(),
+            session_id: 0,
             resource_group_tagger: None,
             replica_read_adjuster: None,
             schema_ver: None,
@@ -833,6 +835,15 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// This maps to client-go `KVTxn.SetTxnSource` and writes to `kvrpcpb::Context.txn_source`.
     pub fn set_txn_source(&mut self, txn_source: u64) {
         self.options.txn_source = txn_source;
+    }
+
+    /// Set the session ID of the transaction.
+    ///
+    /// This maps to client-go `KVTxn.SetSessionID`.
+    ///
+    /// The session id is used for client-side logging and diagnostics.
+    pub fn set_session_id(&mut self, session_id: u64) {
+        self.session_id = session_id;
     }
 
     /// Enable forcing TiKV to always sync logs for transactional write requests.
@@ -13141,6 +13152,20 @@ mod tests {
 
         txn.clear_disk_full_opt();
         assert_eq!(txn.disk_full_opt(), DiskFullOpt::NotAllowedOnFull);
+    }
+
+    #[test]
+    fn test_transaction_set_session_id_updates_field() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        assert_eq!(txn.session_id, 0);
+        txn.set_session_id(42);
+        assert_eq!(txn.session_id, 42);
     }
 
     #[test]

@@ -273,6 +273,13 @@ impl SyncTransaction {
         self.inner.set_txn_source(txn_source);
     }
 
+    /// Set the session ID of the transaction.
+    ///
+    /// This maps to client-go `KVTxn.SetSessionID`.
+    pub fn set_session_id(&mut self, session_id: u64) {
+        self.inner.set_session_id(session_id);
+    }
+
     /// Enable forcing TiKV to always sync logs for transactional write requests.
     pub fn enable_force_sync_log(&mut self) {
         self.inner.enable_force_sync_log();
