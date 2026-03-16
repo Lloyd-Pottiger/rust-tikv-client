@@ -69,9 +69,24 @@ has_region_error!(kvrpcpb::RawBatchScanResponse);
 has_region_error!(kvrpcpb::RawCasResponse);
 has_region_error!(kvrpcpb::RawCoprocessorResponse);
 has_region_error!(kvrpcpb::RawChecksumResponse);
-has_region_error!(coprocessor::Response);
 has_region_error!(kvrpcpb::GetLockWaitInfoResponse);
 has_region_error!(kvrpcpb::GetLockWaitHistoryResponse);
+
+impl HasRegionError for coprocessor::Response {
+    fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
+        if let Some(error) = self.region_error.take() {
+            return Some(error);
+        }
+
+        for response in self.batch_responses.iter_mut() {
+            if let Some(error) = response.region_error.take() {
+                return Some(error);
+            }
+        }
+
+        None
+    }
+}
 
 macro_rules! has_key_error {
     ($type:ty) => {

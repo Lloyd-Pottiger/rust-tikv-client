@@ -207,7 +207,9 @@ impl HasLocks for coprocessor_pb::Response {
 mod tests {
     use super::*;
     use crate::mock::MockPdClient;
+    use crate::proto::errorpb;
     use crate::store::HasKeyErrors;
+    use crate::store::HasRegionError;
 
     #[tokio::test]
     async fn test_coprocessor_request_shards_split_and_group_by_region() {
@@ -414,5 +416,23 @@ mod tests {
         ));
         assert!(response.other_error.is_empty());
         assert!(response.batch_responses[0].other_error.is_empty());
+    }
+
+    #[test]
+    fn test_coprocessor_response_region_error_includes_batch_responses() {
+        let mut response = coprocessor_pb::Response {
+            batch_responses: vec![coprocessor_pb::StoreBatchTaskResponse {
+                region_error: Some(errorpb::Error {
+                    message: "batch".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let err = response.region_error().expect("region error");
+        assert_eq!(err.message, "batch");
+        assert!(response.batch_responses[0].region_error.is_none());
     }
 }
