@@ -70,6 +70,9 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
             ctx.cluster_id = pd_client.cluster_id();
             if let Keyspace::Enable { keyspace_id } = keyspace {
                 ctx.keyspace_id = keyspace_id;
+                if keyspace_id == 0 {
+                    ctx.keyspace_name = "DEFAULT".to_owned();
+                }
             }
         }
         PlanBuilder {
@@ -108,6 +111,9 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
             ctx.cluster_id = pd_client.cluster_id();
             if let Keyspace::Enable { keyspace_id } = keyspace {
                 ctx.keyspace_id = keyspace_id;
+                if keyspace_id == 0 {
+                    ctx.keyspace_name = "DEFAULT".to_owned();
+                }
             }
         }
         PlanBuilder {

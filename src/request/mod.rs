@@ -282,6 +282,38 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_keyspace_name_is_set_for_default_keyspace_id() {
+        let seen_keyspace_name = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_keyspace_id = Arc::new(std::sync::Mutex::new(0_u32));
+
+        let seen_keyspace_name_cloned = seen_keyspace_name.clone();
+        let seen_keyspace_id_cloned = seen_keyspace_id.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                *seen_keyspace_name_cloned.lock().unwrap() = ctx.keyspace_name.clone();
+                *seen_keyspace_id_cloned.lock().unwrap() = ctx.keyspace_id;
+
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        let key: Key = "key".to_owned().into();
+        let req = new_get_request(key, Timestamp::default());
+        let plan =
+            crate::request::PlanBuilder::new(pd_client, Keyspace::Enable { keyspace_id: 0 }, req)
+                .retry_multi_region(Backoff::no_jitter_backoff(0, 0, 1))
+                .plan();
+        let _ = plan.execute().await.unwrap();
+
+        assert_eq!(*seen_keyspace_id.lock().unwrap(), 0);
+        assert_eq!(*seen_keyspace_name.lock().unwrap(), "DEFAULT");
+    }
+
+    #[tokio::test]
     async fn test_extract_error() {
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             |_: &dyn Any| {
