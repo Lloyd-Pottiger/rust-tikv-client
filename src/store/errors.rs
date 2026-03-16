@@ -172,6 +172,18 @@ impl HasKeyErrors for coprocessor::Response {
     }
 }
 
+impl HasKeyErrors for coprocessor::BatchResponse {
+    fn key_errors(&mut self) -> Option<Vec<Error>> {
+        if self.other_error.is_empty() {
+            return None;
+        }
+
+        Some(vec![Error::KvError {
+            message: std::mem::take(&mut self.other_error),
+        }])
+    }
+}
+
 impl HasRegionError for kvrpcpb::RegisterLockObserverResponse {
     fn region_error(&mut self) -> Option<crate::proto::errorpb::Error> {
         None
@@ -379,6 +391,7 @@ mod test {
     use super::HasKeyErrors;
     use crate::common::Error;
     use crate::internal_err;
+    use crate::proto::coprocessor;
     use crate::proto::kvrpcpb;
     #[test]
     fn result_haslocks() {
@@ -570,5 +583,21 @@ mod test {
             Error::KvError { message } => assert_eq!(message, "compact in progress"),
             other => panic!("expected kv error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn batch_coprocessor_batch_response_key_errors_maps_other_error() {
+        let mut resp = coprocessor::BatchResponse {
+            other_error: "batch".to_owned(),
+            ..Default::default()
+        };
+
+        let errors = resp.key_errors().expect("expected key errors");
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            Error::KvError { ref message } if message == "batch"
+        ));
+        assert!(resp.other_error.is_empty());
     }
 }

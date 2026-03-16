@@ -100,6 +100,8 @@
 
 pub mod backoff;
 #[doc(hidden)]
+pub mod coprocessor;
+#[doc(hidden)]
 pub mod raw;
 pub mod request;
 #[doc(hidden)]
@@ -108,7 +110,6 @@ pub mod transaction;
 mod common;
 mod compat;
 mod config;
-mod coprocessor;
 mod gc_safe_point;
 mod kv;
 mod pd;
@@ -158,6 +159,8 @@ pub use config::GrpcCompressionType;
 
 #[doc(inline)]
 pub use crate::backoff::Backoff;
+#[doc(hidden)]
+pub use crate::coprocessor::lowering as coprocessor_lowering;
 #[doc(inline)]
 pub use crate::kv::BoundRange;
 #[doc(inline)]

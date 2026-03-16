@@ -28,8 +28,22 @@ impl KvRequest for coprocessor_pb::Request {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CoprocessorStreamRequest {
+pub struct CoprocessorStreamRequest {
     inner: coprocessor_pb::Request,
+}
+
+impl CoprocessorStreamRequest {
+    pub fn inner(&self) -> &coprocessor_pb::Request {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut coprocessor_pb::Request {
+        &mut self.inner
+    }
+
+    pub fn into_inner(self) -> coprocessor_pb::Request {
+        self.inner
+    }
 }
 
 impl From<coprocessor_pb::Request> for CoprocessorStreamRequest {
