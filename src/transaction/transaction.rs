@@ -9551,6 +9551,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_set_snapshot_ts_clears_read_lock_tracker() {
+        let pd_client = Arc::new(MockPdClient::default());
+
+        let mut snapshot = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        snapshot
+            .read_lock_tracker
+            .extend(vec![1, 2], vec![3, 4])
+            .await;
+
+        let (mut resolved, mut committed) = snapshot.read_lock_tracker.snapshot().await;
+        resolved.sort_unstable();
+        committed.sort_unstable();
+        assert_eq!(resolved, vec![1, 2]);
+        assert_eq!(committed, vec![3, 4]);
+
+        snapshot
+            .set_snapshot_ts(Timestamp::from_version(10))
+            .expect("set_snapshot_ts");
+
+        let (resolved, committed) = snapshot.read_lock_tracker.snapshot().await;
+        assert!(resolved.is_empty());
+        assert!(committed.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_snapshot_replica_read_adjuster_can_disable_replica_read_for_point_get() {
         let store_id = Arc::new(AtomicU64::new(0));
         let replica_read = Arc::new(AtomicBool::new(true));
