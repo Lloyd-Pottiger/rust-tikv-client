@@ -810,6 +810,21 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.options.disk_full_opt = opt;
     }
 
+    /// Returns the configured disk-full behavior for requests.
+    ///
+    /// This maps to client-go `KVTxn.GetDiskFullOpt`.
+    #[must_use]
+    pub fn disk_full_opt(&self) -> DiskFullOpt {
+        self.options.disk_full_opt
+    }
+
+    /// Reset the disk-full behavior to the default value.
+    ///
+    /// This maps to client-go `KVTxn.ClearDiskFullOpt`.
+    pub fn clear_disk_full_opt(&mut self) {
+        self.options.disk_full_opt = DiskFullOpt::NotAllowedOnFull;
+    }
+
     /// Set the source of the transaction.
     ///
     /// This maps to client-go `KVTxn.SetTxnSource` and writes to `kvrpcpb::Context.txn_source`.
@@ -13024,6 +13039,24 @@ mod tests {
         );
 
         assert_eq!(txn.cluster_id(), 42);
+    }
+
+    #[test]
+    fn test_transaction_disk_full_opt_get_and_clear() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        assert_eq!(txn.disk_full_opt(), DiskFullOpt::NotAllowedOnFull);
+
+        txn.set_disk_full_opt(DiskFullOpt::AllowedOnAlmostFull);
+        assert_eq!(txn.disk_full_opt(), DiskFullOpt::AllowedOnAlmostFull);
+
+        txn.clear_disk_full_opt();
+        assert_eq!(txn.disk_full_opt(), DiskFullOpt::NotAllowedOnFull);
     }
 
     #[tokio::test]

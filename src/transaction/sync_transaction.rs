@@ -238,6 +238,21 @@ impl SyncTransaction {
         self.inner.set_disk_full_opt(opt);
     }
 
+    /// Returns the configured disk-full behavior for requests.
+    ///
+    /// This maps to client-go `KVTxn.GetDiskFullOpt`.
+    #[must_use]
+    pub fn disk_full_opt(&self) -> DiskFullOpt {
+        self.inner.disk_full_opt()
+    }
+
+    /// Reset the disk-full behavior to the default value.
+    ///
+    /// This maps to client-go `KVTxn.ClearDiskFullOpt`.
+    pub fn clear_disk_full_opt(&mut self) {
+        self.inner.clear_disk_full_opt();
+    }
+
     /// Set the source of the transaction.
     pub fn set_txn_source(&mut self, txn_source: u64) {
         self.inner.set_txn_source(txn_source);
