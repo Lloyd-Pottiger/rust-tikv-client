@@ -728,9 +728,9 @@ fn is_retryable_txn_bank_transfer_error(err: &Error) -> bool {
         | Error::WriteConflict(_)
         | Error::WriteConflictInLatch { .. }
         | Error::Deadlock(_) => true,
-        Error::ExtractedErrors(errors) | Error::MultipleKeyErrors(errors) => errors
-            .iter()
-            .all(|inner| is_retryable_txn_bank_transfer_error(inner)),
+        Error::ExtractedErrors(errors) | Error::MultipleKeyErrors(errors) => {
+            errors.iter().all(is_retryable_txn_bank_transfer_error)
+        }
         Error::PessimisticLockError { inner, .. } => is_retryable_txn_bank_transfer_error(inner),
         Error::UndeterminedError(_) => false,
         _ => false,
