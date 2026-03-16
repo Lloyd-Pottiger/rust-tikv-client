@@ -443,6 +443,37 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_version_keyspace_end_prefix_carries_across_bytes() {
+        let bound: BoundRange = (..).into();
+
+        let keyspace = Keyspace::Enable { keyspace_id: 0xFF };
+        let expected: BoundRange =
+            (Key::from(vec![b'x', 0, 0, 0xFF])..Key::from(vec![b'x', 0, 1, 0])).into();
+        assert_eq!(
+            bound.clone().encode_keyspace(keyspace, KeyMode::Txn),
+            expected
+        );
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xFFFF,
+        };
+        let expected: BoundRange =
+            (Key::from(vec![b'x', 0, 0xFF, 0xFF])..Key::from(vec![b'x', 1, 0, 0])).into();
+        assert_eq!(
+            bound.clone().encode_keyspace(keyspace, KeyMode::Txn),
+            expected
+        );
+
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0x00FF_FFFE,
+        };
+        let expected: BoundRange = (Key::from(vec![b'r', 0xFF, 0xFF, 0xFE])
+            ..Key::from(vec![b'r', 0xFF, 0xFF, 0xFF]))
+            .into();
+        assert_eq!(bound.encode_keyspace(keyspace, KeyMode::Raw), expected);
+    }
+
+    #[test]
     fn test_encode_and_truncate_lock_info_with_shared_lock_infos() {
         let keyspace = Keyspace::Enable {
             keyspace_id: 0xDEAD,
