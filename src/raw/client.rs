@@ -1,6 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 use core::ops::Range;
 
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -340,6 +341,48 @@ impl<PdC: PdClient> Client<PdC> {
                 .map(|pair| pair.truncate_keyspace(self.keyspace))
                 .collect()
         })
+    }
+
+    /// Create a new 'batch get values' request.
+    ///
+    /// This is similar to [`Client::batch_get`], but preserves the input key order and includes a
+    /// placeholder for missing keys.
+    ///
+    /// The returned `Vec` has the same length as the input keys. Missing keys are represented as
+    /// `None`.
+    pub async fn batch_get_values(
+        &self,
+        keys: impl IntoIterator<Item = impl Into<Key>>,
+    ) -> Result<Vec<Option<Value>>> {
+        debug!("invoking raw batch_get_values request");
+
+        let keys: Vec<Key> = keys.into_iter().map(Into::into).collect();
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let keyspace = self.keyspace;
+        let request_keys = keys
+            .iter()
+            .cloned()
+            .map(|key| key.encode_keyspace(keyspace, KeyMode::Raw));
+
+        let request = new_raw_batch_get_request(request_keys, self.cf.clone());
+        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), keyspace, request)
+            .retry_multi_region(self.backoff.clone())
+            .merge(Collect)
+            .plan();
+
+        let mut values_by_key = HashMap::with_capacity(keys.len());
+        for pair in plan.execute().await? {
+            let KvPair(key, value) = pair.truncate_keyspace(keyspace);
+            values_by_key.insert(key, value);
+        }
+
+        Ok(keys
+            .into_iter()
+            .map(|key| values_by_key.get(&key).cloned())
+            .collect())
     }
 
     /// Create a new 'get key ttl' request.
@@ -1432,6 +1475,49 @@ mod tests {
         assert_eq!(client.min_safe_ts().await?, 42);
         client.safe_ts.refresh().await?;
         assert_eq!(client.min_safe_ts().await?, 42);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_values_preserves_key_order_and_includes_missing_keys() -> Result<()> {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                req.downcast_ref::<kvrpcpb::RawBatchGetRequest>()
+                    .expect("expected raw batch get request");
+
+                let resp = kvrpcpb::RawBatchGetResponse {
+                    region_error: None,
+                    pairs: vec![
+                        kvrpcpb::KvPair {
+                            key: vec![13],
+                            value: vec![3],
+                            ..Default::default()
+                        },
+                        kvrpcpb::KvPair {
+                            key: vec![11],
+                            value: vec![1],
+                            ..Default::default()
+                        },
+                    ],
+                };
+
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            keyspace: Keyspace::Disable,
+        };
+
+        let values = client
+            .batch_get_values(vec![vec![11], vec![12], vec![13]])
+            .await?;
+        assert_eq!(values, vec![Some(vec![1]), None, Some(vec![3])]);
+
         Ok(())
     }
 
