@@ -54,6 +54,10 @@ impl Buffer {
         }
     }
 
+    pub(crate) fn set_is_pessimistic(&mut self, is_pessimistic: bool) {
+        self.is_pessimistic = is_pessimistic;
+    }
+
     pub(crate) fn mutation_count(&self) -> usize {
         self.mutation_count
     }

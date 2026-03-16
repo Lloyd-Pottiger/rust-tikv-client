@@ -258,6 +258,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     timestamp: Timestamp,
     commit_ts: Option<Timestamp>,
     buffer: Buffer,
+    pessimistic_lock_requested: bool,
     aggressive_locking: Option<AggressiveLockingState>,
     for_update_ts_checks: HashMap<Key, u64>,
     read_lock_tracker: ReadLockTracker,
@@ -450,6 +451,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             timestamp,
             commit_ts: None,
             buffer: Buffer::new(options.is_pessimistic()),
+            pessimistic_lock_requested: false,
             aggressive_locking: None,
             for_update_ts_checks: HashMap::new(),
             read_lock_tracker,
@@ -701,6 +703,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.timestamp = timestamp;
         self.commit_ts = None;
         self.buffer = Buffer::new(self.is_pessimistic());
+        self.pessimistic_lock_requested = false;
         self.read_lock_tracker = ReadLockTracker::default();
         Ok(())
     }
@@ -1004,6 +1007,51 @@ impl<PdC: PdClient> Transaction<PdC> {
     #[must_use]
     pub fn commit_wait_until_tso_timeout(&self) -> Duration {
         self.commit_wait_until_tso_timeout
+    }
+
+    /// Set whether the transaction should use pessimistic locking.
+    ///
+    /// This maps to client-go `KVTxn.SetPessimistic`.
+    ///
+    /// Unlike client-go, this method never panics.
+    ///
+    /// Returns an error if:
+    /// - enabling pessimistic mode on a pipelined transaction, or
+    /// - disabling pessimistic mode after any pessimistic lock request has been made.
+    pub fn set_pessimistic(&mut self, enabled: bool) -> Result<()> {
+        if enabled == self.is_pessimistic() {
+            return Ok(());
+        }
+
+        if enabled && self.is_pipelined() {
+            return Err(Error::StringError(
+                "can not set a txn with pipelined memdb to pessimistic mode".to_owned(),
+            ));
+        }
+
+        if !enabled {
+            if self.pessimistic_lock_requested {
+                return Err(Error::StringError(
+                    "cannot switch a transaction to optimistic mode after requesting pessimistic locks"
+                        .to_owned(),
+                ));
+            }
+
+            if self.aggressive_locking.is_some() {
+                return Err(Error::StringError(
+                    "cannot switch a transaction to optimistic mode while aggressive locking is enabled"
+                        .to_owned(),
+                ));
+            }
+        }
+
+        self.options.kind = if enabled {
+            TransactionKind::Pessimistic(Timestamp::from_version(0))
+        } else {
+            TransactionKind::Optimistic
+        };
+        self.buffer.set_is_pessimistic(enabled);
+        Ok(())
     }
 
     /// Get a timestamp version that can be used as the commit timestamp for this transaction.
@@ -3621,6 +3669,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         if !matches!(self.options.kind, TransactionKind::Pessimistic(_)) {
             return Err(Error::InvalidTransactionType);
         }
+        self.pessimistic_lock_requested = true;
 
         let mut locks: Vec<(Key, kvrpcpb::Assertion)> = keys
             .into_iter()
@@ -13138,6 +13187,93 @@ mod tests {
         );
         assert!(pessimistic_txn.is_pessimistic());
         assert!(!pessimistic_txn.is_pipelined());
+    }
+
+    #[test]
+    fn test_transaction_set_pessimistic_rejects_pipelined() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let err = txn
+            .set_pessimistic(true)
+            .expect_err("expected pipelined pessimistic toggle error");
+        assert!(matches!(
+            err,
+            Error::StringError(msg)
+                if msg == "can not set a txn with pipelined memdb to pessimistic mode"
+        ));
+    }
+
+    #[test]
+    fn test_transaction_set_pessimistic_can_disable_before_locking() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_pessimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        assert!(txn.is_pessimistic());
+        txn.set_pessimistic(false).unwrap();
+        assert!(!txn.is_pessimistic());
+    }
+
+    #[tokio::test]
+    async fn test_transaction_set_pessimistic_enables_pessimistic_locking_on_put() {
+        let start_version = 5;
+        let for_update_ts_version = 10;
+
+        let lock_calls = Arc::new(AtomicUsize::new(0));
+        let lock_calls_cloned = lock_calls.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() else {
+                panic!("unexpected request type: {:?}", req.type_id());
+            };
+
+            lock_calls_cloned.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(req.start_version, start_version);
+            assert_eq!(req.for_update_ts, for_update_ts_version);
+            assert_eq!(req.mutations.len(), 1);
+            assert_eq!(req.mutations[0].key, b"k".to_vec());
+            assert!(!req.return_values);
+
+            Ok(Box::new(ok_pessimistic_lock_response_for_request(req)) as Box<dyn Any>)
+        });
+
+        let pd_client =
+            Arc::new(MockPdClient::new(client).with_tso_sequence(for_update_ts_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+
+        assert!(!txn.is_pessimistic());
+        txn.set_pessimistic(true).unwrap();
+        assert!(txn.is_pessimistic());
+
+        txn.put(b"k".to_vec(), b"v".to_vec()).await.unwrap();
+        assert_eq!(lock_calls.load(Ordering::SeqCst), 1);
+
+        let err = txn
+            .set_pessimistic(false)
+            .expect_err("expected switching back to optimistic to fail");
+        assert!(matches!(
+            err,
+            Error::StringError(msg)
+                if msg
+                    == "cannot switch a transaction to optimistic mode after requesting pessimistic locks"
+        ));
     }
 
     #[test]

@@ -221,6 +221,13 @@ impl SyncTransaction {
         self.inner.commit_wait_until_tso_timeout()
     }
 
+    /// Set whether the transaction should use pessimistic locking.
+    ///
+    /// This maps to client-go `KVTxn.SetPessimistic`.
+    pub fn set_pessimistic(&mut self, enabled: bool) -> Result<()> {
+        self.inner.set_pessimistic(enabled)
+    }
+
     /// Get a timestamp version that can be used as the commit timestamp for this transaction.
     ///
     /// This maps to client-go `KVTxn.GetTimestampForCommit`.
