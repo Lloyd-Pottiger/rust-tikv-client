@@ -61,6 +61,7 @@ use crate::ReplicaReadAdjuster;
 use crate::ReplicaReadType;
 use crate::Result;
 use crate::StoreLabel;
+use crate::TraceControlFlags;
 use crate::Value;
 
 /// A callback used to fill `kvrpcpb::Context.resource_group_tag` when no explicit tag is configured.
@@ -225,6 +226,8 @@ struct SnapshotReadContext {
     resource_group_tag: Option<Vec<u8>>,
     resource_group_name: Option<String>,
     request_source: Option<String>,
+    trace_id: Option<Vec<u8>>,
+    trace_control_flags: TraceControlFlags,
     record_time_stat: bool,
     record_scan_stat: bool,
 }
@@ -426,6 +429,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                 resource_group_tag: self.options.resource_group_tag.clone(),
                 resource_group_name: self.options.resource_group_name.clone(),
                 request_source: self.options.request_source.clone(),
+                trace_id: self.options.trace_id.clone(),
+                trace_control_flags: self.options.trace_control_flags,
                 record_time_stat: should_record_runtime_stats,
                 record_scan_stat: should_record_runtime_stats,
             }
@@ -435,6 +440,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                 resource_group_tag: self.options.resource_group_tag.clone(),
                 resource_group_name: self.options.resource_group_name.clone(),
                 request_source: self.options.request_source.clone(),
+                trace_id: self.options.trace_id.clone(),
+                trace_control_flags: self.options.trace_control_flags,
                 record_time_stat: should_record_runtime_stats,
                 record_scan_stat: should_record_runtime_stats,
                 ..SnapshotReadContext::default()
@@ -471,6 +478,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         ctx.record_time_stat = opts.record_time_stat;
         ctx.record_scan_stat = opts.record_scan_stat;
         ctx.resource_group_tag = opts.resource_group_tag.unwrap_or_default();
+        ctx.trace_id = opts.trace_id.unwrap_or_default();
+        ctx.trace_control_flags = opts.trace_control_flags.bits();
         ctx.resource_control_context =
             opts.resource_group_name
                 .map(|resource_group_name| kvrpcpb::ResourceControlContext {
@@ -694,6 +703,25 @@ impl<PdC: PdClient> Transaction<PdC> {
 
     pub(crate) fn request_source(&self) -> Option<&str> {
         self.options.request_source.as_deref()
+    }
+
+    /// Set trace id for requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.trace_id`.
+    pub fn set_trace_id(&mut self, trace_id: Vec<u8>) {
+        self.options.trace_id = Some(trace_id);
+    }
+
+    /// Clear the configured trace id.
+    pub fn clear_trace_id(&mut self) {
+        self.options.trace_id = None;
+    }
+
+    /// Set trace control flags for requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.trace_control_flags`.
+    pub fn set_trace_control_flags(&mut self, flags: TraceControlFlags) {
+        self.options.trace_control_flags = flags;
     }
 
     /// Set whether current operation is allowed in each TiKV disk usage level.
@@ -5102,6 +5130,10 @@ pub struct TransactionOptions {
     resource_group_name: Option<String>,
     /// The source tag for metrics (`kvrpcpb::Context.request_source`).
     request_source: Option<String>,
+    /// Trace id for request tracing (`kvrpcpb::Context.trace_id`).
+    trace_id: Option<Vec<u8>>,
+    /// Trace logging control flags (`kvrpcpb::Context.trace_control_flags`).
+    trace_control_flags: TraceControlFlags,
     /// The source of the current transaction (`kvrpcpb::Context.txn_source`).
     txn_source: u64,
     /// Whether operations are allowed on different disk usage levels (`kvrpcpb::Context.disk_full_opt`).
@@ -5328,6 +5360,8 @@ impl TransactionOptions {
             resource_group_tag: None,
             resource_group_name: None,
             request_source: None,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             txn_source: 0,
             disk_full_opt: DiskFullOpt::NotAllowedOnFull,
             sync_log: false,
@@ -5367,6 +5401,8 @@ impl TransactionOptions {
             resource_group_tag: None,
             resource_group_name: None,
             request_source: None,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
             txn_source: 0,
             disk_full_opt: DiskFullOpt::NotAllowedOnFull,
             sync_log: false,
@@ -5514,6 +5550,24 @@ impl TransactionOptions {
     #[must_use]
     pub fn request_source(mut self, source: impl Into<String>) -> TransactionOptions {
         self.request_source = Some(source.into());
+        self
+    }
+
+    /// Set trace id for requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.trace_id`.
+    #[must_use]
+    pub fn trace_id(mut self, trace_id: impl Into<Vec<u8>>) -> TransactionOptions {
+        self.trace_id = Some(trace_id.into());
+        self
+    }
+
+    /// Set trace control flags for requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.trace_control_flags`.
+    #[must_use]
+    pub fn trace_control_flags(mut self, flags: TraceControlFlags) -> TransactionOptions {
+        self.trace_control_flags = flags;
         self
     }
 
@@ -5739,6 +5793,8 @@ impl TransactionOptions {
         if let Some(request_source) = &self.request_source {
             ctx.request_source = request_source.clone();
         }
+        ctx.trace_id = self.trace_id.clone().unwrap_or_default();
+        ctx.trace_control_flags = self.trace_control_flags.bits();
     }
 
     fn lock_resolver_rpc_context(
@@ -6973,6 +7029,7 @@ mod tests {
     use crate::PipelinedTxnOptions;
     use crate::ReplicaReadType;
     use crate::StoreLabel;
+    use crate::TraceControlFlags;
     use crate::Transaction;
     use crate::TransactionOptions;
 
@@ -11117,6 +11174,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_trace_fields_propagate_to_context() {
+        let seen_trace_id = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_trace_control_flags = Arc::new(AtomicU64::new(0));
+
+        let trace_id = b"trace-123".to_vec();
+        let flags = TraceControlFlags::IMMEDIATE_LOG.with(TraceControlFlags::TIKV_CATEGORY_REQUEST);
+
+        let seen_trace_id_cloned = seen_trace_id.clone();
+        let seen_trace_control_flags_cloned = seen_trace_control_flags.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                *seen_trace_id_cloned.lock().unwrap() = ctx.trace_id.clone();
+                seen_trace_control_flags_cloned.store(ctx.trace_control_flags, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .trace_id(trace_id.clone())
+                .trace_control_flags(flags),
+            Keyspace::Disable,
+        );
+        let key: Key = vec![0].into();
+        let _ = snapshot.get(key).await.unwrap();
+
+        assert_eq!(*seen_trace_id.lock().unwrap(), trace_id);
+        assert_eq!(
+            seen_trace_control_flags.load(Ordering::SeqCst),
+            flags.bits()
+        );
+    }
+
+    #[tokio::test]
     async fn test_txn_source_disk_full_opt_request_source_propagates_to_commit_requests() {
         let prewrite_txn_source = Arc::new(AtomicU64::new(0));
         let commit_txn_source = Arc::new(AtomicU64::new(0));
@@ -11260,6 +11359,68 @@ mod tests {
         assert_eq!(
             *commit_resource_group_name.lock().unwrap(),
             resource_group_name
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trace_fields_propagate_to_commit_requests() {
+        let prewrite_trace_id = Arc::new(Mutex::new(Vec::new()));
+        let commit_trace_id = Arc::new(Mutex::new(Vec::new()));
+        let prewrite_trace_control_flags = Arc::new(AtomicU64::new(0));
+        let commit_trace_control_flags = Arc::new(AtomicU64::new(0));
+
+        let trace_id = b"trace-commit".to_vec();
+        let flags = TraceControlFlags::IMMEDIATE_LOG
+            .with(TraceControlFlags::TIKV_CATEGORY_REQUEST)
+            .with(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS);
+
+        let prewrite_trace_id_cloned = prewrite_trace_id.clone();
+        let commit_trace_id_cloned = commit_trace_id.clone();
+        let prewrite_trace_control_flags_cloned = prewrite_trace_control_flags.clone();
+        let commit_trace_control_flags_cloned = commit_trace_control_flags.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    *prewrite_trace_id_cloned.lock().unwrap() = ctx.trace_id.clone();
+                    prewrite_trace_control_flags_cloned
+                        .store(ctx.trace_control_flags, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    *commit_trace_id_cloned.lock().unwrap() = ctx.trace_id.clone();
+                    commit_trace_control_flags_cloned
+                        .store(ctx.trace_control_flags, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .trace_id(trace_id.clone())
+                .trace_control_flags(flags)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.put("key".to_owned(), "value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert_eq!(*prewrite_trace_id.lock().unwrap(), trace_id);
+        assert_eq!(*commit_trace_id.lock().unwrap(), trace_id);
+        assert_eq!(
+            prewrite_trace_control_flags.load(Ordering::SeqCst),
+            flags.bits()
+        );
+        assert_eq!(
+            commit_trace_control_flags.load(Ordering::SeqCst),
+            flags.bits()
         );
     }
 

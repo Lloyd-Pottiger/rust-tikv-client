@@ -43,6 +43,51 @@ pub enum DiskFullOpt {
     AllowedOnAlreadyFull = 2,
 }
 
+/// Control flags for trace logging behavior (`kvrpcpb::Context.trace_control_flags`).
+///
+/// This mirrors client-go's `trace.TraceControlFlags` bitset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct TraceControlFlags(u64);
+
+impl TraceControlFlags {
+    /// Forces immediate logging without buffering.
+    pub const IMMEDIATE_LOG: Self = Self(1 << 0);
+    /// Enables TiKV request category tracing.
+    pub const TIKV_CATEGORY_REQUEST: Self = Self(1 << 1);
+    /// Enables TiKV detailed write operation tracing.
+    pub const TIKV_CATEGORY_WRITE_DETAILS: Self = Self(1 << 2);
+    /// Enables TiKV detailed read operation tracing.
+    pub const TIKV_CATEGORY_READ_DETAILS: Self = Self(1 << 3);
+
+    /// Returns the raw flag bits.
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// Returns true if `flag` is set.
+    pub const fn has(self, flag: TraceControlFlags) -> bool {
+        (self.0 & flag.0) != 0
+    }
+
+    /// Returns a new flags value with `flag` set.
+    #[must_use]
+    pub const fn with(self, flag: TraceControlFlags) -> TraceControlFlags {
+        TraceControlFlags(self.0 | flag.0)
+    }
+}
+
+impl From<u64> for TraceControlFlags {
+    fn from(bits: u64) -> Self {
+        TraceControlFlags(bits)
+    }
+}
+
+impl From<TraceControlFlags> for u64 {
+    fn from(flags: TraceControlFlags) -> Self {
+        flags.bits()
+    }
+}
+
 /// A structured builder for the `kvrpcpb::Context.request_source` label.
 ///
 /// This matches the label format used by TiKV's Go client:
@@ -128,7 +173,7 @@ pub(crate) fn is_internal_request_source(request_source: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_internal_request_source, RequestSource};
+    use super::{is_internal_request_source, RequestSource, TraceControlFlags};
 
     #[test]
     fn test_request_source_formatting_matches_client_go() {
@@ -174,5 +219,27 @@ mod tests {
         assert!(is_internal_request_source("internal_gc_stats"));
         assert!(!is_internal_request_source("external_gc"));
         assert!(!is_internal_request_source("unknown"));
+    }
+
+    #[test]
+    fn test_trace_control_flags_bits_match_client_go() {
+        assert_eq!(TraceControlFlags::IMMEDIATE_LOG.bits(), 1 << 0);
+        assert_eq!(TraceControlFlags::TIKV_CATEGORY_REQUEST.bits(), 1 << 1);
+        assert_eq!(
+            TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS.bits(),
+            1 << 2
+        );
+        assert_eq!(TraceControlFlags::TIKV_CATEGORY_READ_DETAILS.bits(), 1 << 3);
+    }
+
+    #[test]
+    fn test_trace_control_flags_has_and_with() {
+        let flags = TraceControlFlags::default()
+            .with(TraceControlFlags::IMMEDIATE_LOG)
+            .with(TraceControlFlags::TIKV_CATEGORY_REQUEST);
+
+        assert!(flags.has(TraceControlFlags::IMMEDIATE_LOG));
+        assert!(flags.has(TraceControlFlags::TIKV_CATEGORY_REQUEST));
+        assert!(!flags.has(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS));
     }
 }

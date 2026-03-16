@@ -190,6 +190,8 @@ pub use crate::request_context::IsolationLevel;
 #[doc(inline)]
 pub use crate::request_context::RequestSource;
 #[doc(inline)]
+pub use crate::request_context::TraceControlFlags;
+#[doc(inline)]
 pub use crate::rpc_interceptor::chain_rpc_interceptors;
 #[doc(inline)]
 pub use crate::rpc_interceptor::FnRpcInterceptor;

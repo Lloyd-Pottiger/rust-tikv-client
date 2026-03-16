@@ -291,6 +291,25 @@ impl SyncTransaction {
         self.inner.set_request_source(source);
     }
 
+    /// Set trace id for requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.trace_id`.
+    pub fn set_trace_id(&mut self, trace_id: Vec<u8>) {
+        self.inner.set_trace_id(trace_id);
+    }
+
+    /// Clear the configured trace id.
+    pub fn clear_trace_id(&mut self) {
+        self.inner.clear_trace_id();
+    }
+
+    /// Set trace control flags for requests.
+    ///
+    /// This option writes to `kvrpcpb::Context.trace_control_flags`.
+    pub fn set_trace_control_flags(&mut self, flags: crate::TraceControlFlags) {
+        self.inner.set_trace_control_flags(flags);
+    }
+
     /// Get the value associated with the given key.
     pub fn get(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         safe_block_on(&self.runtime, self.inner.get(key))

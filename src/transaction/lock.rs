@@ -1461,6 +1461,8 @@ impl LockResolverRpcContext {
             ctx.priority = template.priority;
             ctx.max_execution_duration_ms = template.max_execution_duration_ms;
             ctx.resource_control_context = template.resource_control_context.clone();
+            ctx.trace_id = template.trace_id.clone();
+            ctx.trace_control_flags = template.trace_control_flags;
             if self.resource_group_tag_set {
                 ctx.resource_group_tag = template.resource_group_tag.clone();
             }
