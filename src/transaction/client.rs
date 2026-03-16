@@ -1394,6 +1394,7 @@ mod tests {
     use crate::safe_ts::SafeTsCache;
     use crate::timestamp::TimestampExt;
     use crate::transaction::lock::ResolveLocksOptions;
+    use crate::transaction::DeleteRangeTask;
     use crate::transaction::HeartbeatOption;
     use crate::transaction::ResolveLocksContext;
     use crate::Backoff;
@@ -1871,6 +1872,129 @@ mod tests {
             crate::Error::StringError(msg) if msg.contains("concurrency must be greater than 0")
         ));
         assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_task_executes_delete_range_and_reports_completed_regions() {
+        let keyspace = Keyspace::Disable;
+
+        let seen_ranges = Arc::new(Mutex::new(Vec::<(Vec<u8>, Vec<u8>)>::new()));
+        let seen_ranges_cloned = seen_ranges.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req: &kvrpcpb::DeleteRangeRequest = req.downcast_ref().unwrap();
+                assert!(!req.notify_only);
+                seen_ranges_cloned
+                    .lock()
+                    .unwrap()
+                    .push((req.start_key.clone(), req.end_key.clone()));
+
+                Ok(Box::new(kvrpcpb::DeleteRangeResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let mut task = DeleteRangeTask::new(client, vec![1]..vec![11], 2);
+        task.execute().await.unwrap();
+        assert_eq!(task.completed_regions(), 2);
+
+        let mut seen_ranges = seen_ranges.lock().unwrap().clone();
+        seen_ranges.sort();
+        assert_eq!(seen_ranges, vec![(vec![1], vec![10]), (vec![10], vec![11])]);
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_task_notify_only_sends_notify_requests() {
+        let keyspace = Keyspace::Disable;
+
+        let seen_notify_only = Arc::new(AtomicUsize::new(0));
+        let seen_notify_only_cloned = seen_notify_only.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req: &kvrpcpb::DeleteRangeRequest = req.downcast_ref().unwrap();
+                if req.notify_only {
+                    seen_notify_only_cloned.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(Box::new(kvrpcpb::DeleteRangeResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let mut task = DeleteRangeTask::new_notify(client, vec![1]..vec![11], 2);
+        task.execute().await.unwrap();
+        assert_eq!(task.completed_regions(), 2);
+        assert_eq!(seen_notify_only.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_task_reports_completed_regions_on_error() {
+        let keyspace = Keyspace::Disable;
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req: &kvrpcpb::DeleteRangeRequest = req.downcast_ref().unwrap();
+                if req.start_key == vec![10] {
+                    return Err(Error::StringError("injected delete range error".to_owned()));
+                }
+                Ok(Box::new(kvrpcpb::DeleteRangeResponse {
+                    region_error: None,
+                    error: "".to_owned(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let mut task = DeleteRangeTask::new(client, vec![1]..vec![11], 1);
+        let err = task.execute().await.unwrap_err();
+        assert_eq!(task.completed_regions(), 1);
+        match err {
+            Error::StringError(message) => {
+                assert!(message.contains("range task runner delete-range failed"));
+                assert!(message.contains("injected delete range error"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]

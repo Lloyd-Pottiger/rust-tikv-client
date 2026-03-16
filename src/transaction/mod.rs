@@ -13,6 +13,7 @@ pub use client::ProtoCompactResponse;
 pub use client::ProtoLockInfo;
 pub use client::ProtoTiFlashSystemTableResponse;
 pub use client::ProtoWaitForEntry;
+pub use delete_range_task::DeleteRangeTask;
 pub(crate) use lock::resolve_locks_for_read;
 pub(crate) use lock::resolve_locks_with_options;
 pub(crate) use lock::HasLocks;
@@ -46,6 +47,7 @@ pub use vars::Variables;
 
 mod buffer;
 mod client;
+mod delete_range_task;
 mod latches;
 mod lock;
 pub mod lowering;

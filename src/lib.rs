@@ -218,6 +218,8 @@ pub use crate::transaction::CheckLevel;
 #[doc(inline)]
 pub use crate::transaction::Client as TransactionClient;
 #[doc(inline)]
+pub use crate::transaction::DeleteRangeTask;
+#[doc(inline)]
 pub use crate::transaction::Lock;
 #[doc(inline)]
 pub use crate::transaction::LockResolver;
