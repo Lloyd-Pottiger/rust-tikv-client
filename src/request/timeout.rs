@@ -101,3 +101,89 @@ where
         self.inner.apply_store(store)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use tonic::transport::Channel;
+
+    use crate::proto::tikvpb::tikv_client::TikvClient;
+
+    #[derive(Clone, Default)]
+    struct RecordingRequest {
+        seen: Arc<Mutex<Vec<Duration>>>,
+    }
+
+    #[async_trait]
+    impl Request for RecordingRequest {
+        async fn dispatch(
+            &self,
+            _client: &TikvClient<Channel>,
+            timeout: Duration,
+        ) -> Result<Box<dyn Any>> {
+            self.seen.lock().unwrap().push(timeout);
+            Ok(Box::new(()) as Box<dyn Any>)
+        }
+
+        fn label(&self) -> &'static str {
+            "recording"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn set_leader(&mut self, _leader: &RegionWithLeader) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_api_version(&mut self, _api_version: kvrpcpb::ApiVersion) {}
+
+        fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+
+        fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+            None
+        }
+    }
+
+    fn noop_client() -> TikvClient<Channel> {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        TikvClient::new(channel)
+    }
+
+    #[tokio::test]
+    async fn test_request_with_timeout_passes_through_when_zero() {
+        let request = RecordingRequest::default();
+        let wrapped = RequestWithTimeout::new(request.clone(), Duration::ZERO);
+
+        wrapped
+            .dispatch(&noop_client(), Duration::from_secs(2))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            request.seen.lock().unwrap().as_slice(),
+            &[Duration::from_secs(2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_with_timeout_overrides_when_non_zero() {
+        let request = RecordingRequest::default();
+        let wrapped = RequestWithTimeout::new(request.clone(), Duration::from_secs(5));
+
+        wrapped
+            .dispatch(&noop_client(), Duration::from_secs(2))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            request.seen.lock().unwrap().as_slice(),
+            &[Duration::from_secs(5)]
+        );
+    }
+}
