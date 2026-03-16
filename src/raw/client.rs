@@ -865,7 +865,7 @@ impl<PdC: PdClient> Client<PdC> {
                 return Err(Error::Unimplemented);
             }
 
-            while remaining > 0 && &current_upper > &range_start {
+            while remaining > 0 && current_upper > range_start {
                 let scan_args = ScanInnerArgs {
                     from_key: range_start.clone(),
                     to_key: Some(current_upper.clone()),
@@ -884,10 +884,10 @@ impl<PdC: PdClient> Client<PdC> {
                     result.append(&mut kvs);
                 }
 
-                if next_upper.is_empty() || &next_upper <= &range_start {
+                if next_upper.is_empty() || next_upper <= range_start {
                     break;
                 }
-                if &next_upper >= &current_upper {
+                if next_upper >= current_upper {
                     return Err(Error::StringError(
                         "raw reverse scan returned a non-advancing range".to_owned(),
                     ));
@@ -922,7 +922,7 @@ impl<PdC: PdClient> Client<PdC> {
                 {
                     break;
                 }
-                if &next_start <= &current_start {
+                if next_start <= current_start {
                     return Err(Error::StringError(
                         "raw scan returned a non-advancing range".to_owned(),
                     ));
