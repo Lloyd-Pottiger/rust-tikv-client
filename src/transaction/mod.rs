@@ -33,6 +33,8 @@ pub use sync_client::SyncTransactionClient;
 pub use sync_snapshot::SyncSnapshot;
 pub use sync_transaction::SyncTransaction;
 pub use transaction::AssertionLevel;
+pub use transaction::BinlogExecutor;
+pub use transaction::BinlogWriteResult;
 pub use transaction::CheckLevel;
 #[doc(hidden)]
 pub use transaction::HeartbeatOption;

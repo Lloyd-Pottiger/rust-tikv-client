@@ -159,6 +159,46 @@ pub trait SchemaLeaseChecker: Send + Sync {
     fn check_by_schema_ver(&self, txn_ts: Timestamp, start_schema_ver: i64) -> Result<()>;
 }
 
+/// Result returned by [`BinlogExecutor::prewrite`].
+///
+/// This mirrors client-go's `BinlogWriteResult` interface. When `skipped` is true, the executor
+/// indicates that binlog replication should be skipped for this transaction.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BinlogWriteResult {
+    skipped: bool,
+}
+
+impl BinlogWriteResult {
+    /// Create a new binlog prewrite result.
+    pub const fn new(skipped: bool) -> Self {
+        Self { skipped }
+    }
+
+    /// Returns whether the executor indicates binlog replication should be skipped.
+    pub const fn skipped(&self) -> bool {
+        self.skipped
+    }
+}
+
+/// Executor for replicating binlogs during transaction commit.
+///
+/// This mirrors client-go v2 `BinlogExecutor` as configured via `KVTxn.SetBinlogExecutor`.
+///
+/// When configured, async-commit and 1PC are disabled to match client-go behavior.
+#[async_trait::async_trait]
+pub trait BinlogExecutor: Send + Sync {
+    /// Trigger binlog prewrite for the transaction's primary key.
+    async fn prewrite(&self, primary: Vec<u8>) -> Result<BinlogWriteResult>;
+
+    /// Notify the executor of the final commit timestamp.
+    ///
+    /// Called with `commit_ts = 0` when the transaction fails to commit.
+    async fn commit(&self, commit_ts: u64) -> Result<()>;
+
+    /// Skip binlog replication for this transaction.
+    async fn skip(&self) -> Result<()>;
+}
+
 /// A filter used to skip unnecessary KV mutations during commit.
 ///
 /// This mirrors client-go v2 `KVFilter` as configured via `KVTxn.SetKVFilter`.
@@ -353,6 +393,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     schema_ver: Option<i64>,
     schema_lease_checker: Option<Arc<dyn SchemaLeaseChecker>>,
     commit_callback: Option<CommitCallback>,
+    binlog_executor: Option<Arc<dyn BinlogExecutor>>,
     background_task_lifecycle_hooks: LifecycleHooks,
     commit_wait_until_tso: u64,
     commit_wait_until_tso_timeout: Duration,
@@ -552,6 +593,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             schema_ver: None,
             schema_lease_checker: None,
             commit_callback: None,
+            binlog_executor: None,
             background_task_lifecycle_hooks: LifecycleHooks::default(),
             commit_wait_until_tso: 0,
             commit_wait_until_tso_timeout: DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT,
@@ -1415,6 +1457,21 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Clear the commit callback.
     pub fn clear_commit_callback(&mut self) {
         self.commit_callback = None;
+    }
+
+    /// Set a binlog executor used to replicate binlogs during commit.
+    ///
+    /// This maps to client-go `KVTxn.SetBinlogExecutor`.
+    ///
+    /// Note: client-go disables async-commit and 1PC when a binlog executor is configured. This
+    /// client matches that behavior during commit.
+    pub fn set_binlog_executor(&mut self, executor: Arc<dyn BinlogExecutor>) {
+        self.binlog_executor = Some(executor);
+    }
+
+    /// Clear the configured binlog executor.
+    pub fn clear_binlog_executor(&mut self) {
+        self.binlog_executor = None;
     }
 
     /// Set lifecycle hooks for background tasks spawned by this transaction.
@@ -3385,6 +3442,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         committer.rpc_interceptors = self.rpc_interceptors.clone();
         committer.background_task_lifecycle_hooks = self.background_task_lifecycle_hooks.clone();
         committer.vars = self.vars.clone();
+        committer.binlog_executor = self.binlog_executor.clone();
         if let Some(state) = self.pipelined.as_ref() {
             committer.pipelined_generation = state.generation;
             committer.pipelined_range_start = state.flushed_range_start.clone();
@@ -6376,6 +6434,10 @@ struct Committer<PdC: PdClient = PdRpcClient> {
     #[new(default)]
     commit_ts_upper_bound_check: Option<CommitTsUpperBoundCheck>,
     #[new(default)]
+    binlog_executor: Option<Arc<dyn BinlogExecutor>>,
+    #[new(default)]
+    binlog_skipped: bool,
+    #[new(default)]
     pipelined_generation: u64,
     #[new(default)]
     pipelined_range_start: Option<Key>,
@@ -6441,6 +6503,26 @@ impl<PdC: PdClient> Committer<PdC> {
         ctx
     }
 
+    fn spawn_binlog_finalize(&self, commit_ts: u64) {
+        let Some(executor) = self.binlog_executor.clone() else {
+            return;
+        };
+
+        let hooks = self.background_task_lifecycle_hooks.clone();
+        let skipped = self.binlog_skipped;
+        spawn_with_lifecycle_hooks(hooks, async move {
+            let result = if skipped {
+                executor.skip().await
+            } else {
+                executor.commit(commit_ts).await
+            };
+
+            if let Err(err) = result {
+                warn!("binlog executor finalization failed: {err}");
+            }
+        });
+    }
+
     #[cfg(test)]
     async fn commit(self) -> Result<Option<Timestamp>> {
         let (res, _mode_info) = self.commit_with_mode_info().await;
@@ -6476,6 +6558,13 @@ impl<PdC: PdClient> Committer<PdC> {
             self.options.async_commit = false;
         }
 
+        // Match client-go: async-commit / 1PC are disabled when a binlog executor is configured
+        // because binlog replication relies on unique commit timestamps.
+        if self.binlog_executor.is_some() {
+            self.options.try_one_pc = false;
+            self.options.async_commit = false;
+        }
+
         // Keep parity with client-go by reporting fallbacks only when we actually tried to use the
         // commit mode (not when it is disabled by configuration).
         let has_tried_async_commit = self.options.async_commit;
@@ -6484,6 +6573,7 @@ impl<PdC: PdClient> Committer<PdC> {
         let min_commit_ts = match self.prewrite().await {
             Ok(min_commit_ts) => min_commit_ts,
             Err(err) => {
+                self.spawn_binlog_finalize(0);
                 let info = CommitModeInfo {
                     has_tried_async_commit,
                     has_tried_one_pc,
@@ -6501,6 +6591,7 @@ impl<PdC: PdClient> Committer<PdC> {
             is_one_pc: self.options.try_one_pc,
         };
         fail_point!("after-prewrite", |_| {
+            self.spawn_binlog_finalize(0);
             (
                 Err(Error::StringError(
                     "failpoint: after-prewrite return error".to_owned(),
@@ -6527,6 +6618,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     let err = Error::StringError(
                         "invalid min_commit_ts after async-commit prewrite".to_owned(),
                     );
+                    self.spawn_binlog_finalize(0);
                     let info = CommitModeInfo {
                         has_tried_async_commit,
                         has_tried_one_pc,
@@ -6545,6 +6637,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     } else {
                         e
                     };
+                    self.spawn_binlog_finalize(0);
                     let info = CommitModeInfo {
                         has_tried_async_commit,
                         has_tried_one_pc,
@@ -6555,6 +6648,8 @@ impl<PdC: PdClient> Committer<PdC> {
                 }
             }
         };
+
+        self.spawn_binlog_finalize(commit_ts.version());
 
         let info = CommitModeInfo {
             has_tried_async_commit,
@@ -6595,6 +6690,12 @@ impl<PdC: PdClient> Committer<PdC> {
                 "[pipelined dml] primary key should be set before pipelined flush".to_owned(),
             )
         })?;
+
+        let binlog_prewrite_handle = self.binlog_executor.clone().map(|executor| {
+            let hooks = self.background_task_lifecycle_hooks.clone();
+            let primary = primary_key.clone().into();
+            spawn_with_lifecycle_hooks(hooks, async move { executor.prewrite(primary).await })
+        });
 
         let mut range_start = self.pipelined_range_start.clone();
         let mut range_end = self.pipelined_range_end.clone();
@@ -6640,6 +6741,7 @@ impl<PdC: PdClient> Committer<PdC> {
             }
         };
 
+        let mut flush_error: Option<Error> = None;
         if !self.mutations.is_empty() {
             let generation = self.pipelined_generation.saturating_add(1);
             let pipelined_ewma = self.pipelined_flush_duration_ewma.clone();
@@ -6708,49 +6810,65 @@ impl<PdC: PdClient> Committer<PdC> {
                 ewma.observe(sample_ms);
             }
             if let Err(err) = flush_result {
-                let start_ts = self.start_version.version();
-                let rpc = self.rpc.clone();
-                let status = kvrpcpb::TxnStatus {
-                    start_ts,
-                    min_commit_ts: start_ts.saturating_add(1),
-                    commit_ts: 0,
-                    rolled_back: true,
-                    is_completed: false,
-                };
-                spawn_with_lifecycle_hooks(
-                    self.background_task_lifecycle_hooks.clone(),
-                    async move {
-                        if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await
-                        {
-                            debug!("broadcast_txn_status_to_all_stores failed: {err}");
-                        }
-                    },
-                );
-
-                spawn_pipelined_resolve_locks_and_broadcast_completion(
-                    self.rpc.clone(),
-                    self.keyspace,
-                    self.rpc_interceptors.clone(),
-                    self.background_task_lifecycle_hooks.clone(),
-                    self.options.clone(),
-                    self.resource_group_tagger.clone(),
-                    start_ts,
-                    0,
-                    true,
-                    range_start.clone(),
-                    range_end.clone(),
-                    self.region_backoff(),
-                    self.vars.killed.clone(),
-                    pipelined.resolve_lock_concurrency(),
-                );
-                return Err(err);
+                flush_error = Some(err);
             }
+        }
+
+        let mut binlog_error: Option<Error> = None;
+        if let Some(handle) = binlog_prewrite_handle {
+            match handle.await? {
+                Ok(result) => {
+                    if result.skipped() {
+                        self.binlog_skipped = true;
+                    }
+                }
+                Err(err) => {
+                    binlog_error = Some(err);
+                }
+            }
+        }
+
+        if let Some(err) = binlog_error.or(flush_error) {
+            let start_ts = self.start_version.version();
+            let rpc = self.rpc.clone();
+            let status = kvrpcpb::TxnStatus {
+                start_ts,
+                min_commit_ts: start_ts.saturating_add(1),
+                commit_ts: 0,
+                rolled_back: true,
+                is_completed: false,
+            };
+            spawn_with_lifecycle_hooks(self.background_task_lifecycle_hooks.clone(), async move {
+                if let Err(err) = rpc.broadcast_txn_status_to_all_stores(vec![status]).await {
+                    debug!("broadcast_txn_status_to_all_stores failed: {err}");
+                }
+            });
+
+            spawn_pipelined_resolve_locks_and_broadcast_completion(
+                self.rpc.clone(),
+                self.keyspace,
+                self.rpc_interceptors.clone(),
+                self.background_task_lifecycle_hooks.clone(),
+                self.options.clone(),
+                self.resource_group_tagger.clone(),
+                start_ts,
+                0,
+                true,
+                range_start.clone(),
+                range_end.clone(),
+                self.region_backoff(),
+                self.vars.killed.clone(),
+                pipelined.resolve_lock_concurrency(),
+            );
+            self.spawn_binlog_finalize(0);
+            return Err(err);
         }
 
         let commit_ts = match self.commit_primary_with_retry().await {
             Ok(commit_ts) => commit_ts,
             Err(e) => {
                 if self.undetermined {
+                    self.spawn_binlog_finalize(0);
                     return Err(Error::UndeterminedError(Box::new(e)));
                 }
 
@@ -6789,6 +6907,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     self.vars.killed.clone(),
                     pipelined.resolve_lock_concurrency(),
                 );
+                self.spawn_binlog_finalize(0);
                 return Err(e);
             }
         };
@@ -6809,6 +6928,8 @@ impl<PdC: PdClient> Committer<PdC> {
             self.vars.killed.clone(),
             pipelined.resolve_lock_concurrency(),
         );
+
+        self.spawn_binlog_finalize(commit_ts.version());
 
         Ok(Some(commit_ts))
     }
@@ -6918,9 +7039,15 @@ impl<PdC: PdClient> Committer<PdC> {
                 current_ts.saturating_add(safe_window_ms.saturating_mul(1_u64 << 18));
         }
 
+        let binlog_prewrite_handle = self.binlog_executor.clone().map(|executor| {
+            let hooks = self.background_task_lifecycle_hooks.clone();
+            let primary = primary_lock_key.clone().into();
+            spawn_with_lifecycle_hooks(hooks, async move { executor.prewrite(primary).await })
+        });
+
         let killed = self.vars.killed.clone();
         let committer_concurrency = self.rpc.committer_concurrency();
-        let response = match self.options.prewrite_encounter_lock_policy {
+        let response_result = match self.options.prewrite_encounter_lock_policy {
             PrewriteEncounterLockPolicy::TryResolve => {
                 let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
                 let lock_backoff = self.lock_backoff();
@@ -6945,7 +7072,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 .merge(CollectError)
                 .extract_error()
                 .plan();
-                plan.execute().await?
+                plan.execute().await
             }
             PrewriteEncounterLockPolicy::NoResolve => {
                 let region_backoff = self.region_backoff();
@@ -6960,9 +7087,22 @@ impl<PdC: PdClient> Committer<PdC> {
                 .merge(CollectError)
                 .extract_error()
                 .plan();
-                plan.execute().await?
+                plan.execute().await
             }
         };
+
+        if let Some(handle) = binlog_prewrite_handle {
+            match handle.await? {
+                Ok(result) => {
+                    if result.skipped() {
+                        self.binlog_skipped = true;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        let response = response_result?;
 
         if self.options.try_one_pc && response.len() == 1 {
             if response[0].one_pc_commit_ts == 0 {
@@ -13167,6 +13307,263 @@ mod tests {
             info.get("flush_wait_ms").and_then(|value| value.as_i64()),
             Some(0)
         );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum BinlogCall {
+        Prewrite(Vec<u8>),
+        Commit(u64),
+        Skip,
+    }
+
+    #[derive(Clone, Copy)]
+    enum BinlogPrewriteBehavior {
+        Ok(super::BinlogWriteResult),
+        Err(&'static str),
+    }
+
+    struct MockBinlogExecutor {
+        calls: tokio::sync::mpsc::UnboundedSender<BinlogCall>,
+        prewrite_behavior: BinlogPrewriteBehavior,
+    }
+
+    #[async_trait]
+    impl super::BinlogExecutor for MockBinlogExecutor {
+        async fn prewrite(&self, primary: Vec<u8>) -> crate::Result<super::BinlogWriteResult> {
+            let _ = self.calls.send(BinlogCall::Prewrite(primary));
+            match self.prewrite_behavior {
+                BinlogPrewriteBehavior::Ok(result) => Ok(result),
+                BinlogPrewriteBehavior::Err(message) => Err(Error::StringError(message.to_owned())),
+            }
+        }
+
+        async fn commit(&self, commit_ts: u64) -> crate::Result<()> {
+            let _ = self.calls.send(BinlogCall::Commit(commit_ts));
+            Ok(())
+        }
+
+        async fn skip(&self) -> crate::Result<()> {
+            let _ = self.calls.send(BinlogCall::Skip);
+            Ok(())
+        }
+    }
+
+    async fn recv_binlog_call(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<BinlogCall>,
+    ) -> BinlogCall {
+        tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timed out waiting for binlog call")
+            .expect("binlog call channel closed")
+    }
+
+    #[tokio::test]
+    async fn test_transaction_binlog_executor_calls_commit_and_disables_async_commit_and_one_pc() {
+        let start_version = 7;
+        let commit_version = 8;
+
+        let (calls_tx, mut calls_rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = Arc::new(MockBinlogExecutor {
+            calls: calls_tx,
+            prewrite_behavior: BinlogPrewriteBehavior::Ok(super::BinlogWriteResult::new(false)),
+        });
+
+        let prewrite_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
+        let prewrite_count_captured = prewrite_count.clone();
+        let commit_count_captured = commit_count.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                prewrite_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                assert!(!req.use_async_commit);
+                assert!(!req.try_one_pc);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                commit_count_captured.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, commit_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+
+        txn.set_enable_async_commit(true);
+        txn.set_enable_one_pc(true);
+        txn.set_binlog_executor(executor);
+
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+
+        assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
+        assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            recv_binlog_call(&mut calls_rx).await,
+            BinlogCall::Prewrite(b"k".to_vec())
+        );
+        assert_eq!(
+            recv_binlog_call(&mut calls_rx).await,
+            BinlogCall::Commit(commit_version)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transaction_binlog_executor_skip_is_respected() {
+        let start_version = 7;
+        let commit_version = 8;
+
+        let (calls_tx, mut calls_rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = Arc::new(MockBinlogExecutor {
+            calls: calls_tx,
+            prewrite_behavior: BinlogPrewriteBehavior::Ok(super::BinlogWriteResult::new(true)),
+        });
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert_eq!(req.start_version, start_version);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, commit_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+
+        txn.set_binlog_executor(executor);
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+
+        assert_eq!(
+            recv_binlog_call(&mut calls_rx).await,
+            BinlogCall::Prewrite(b"k".to_vec())
+        );
+        assert_eq!(recv_binlog_call(&mut calls_rx).await, BinlogCall::Skip);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_binlog_executor_prewrite_error_aborts_commit_and_commits_zero() {
+        let start_version = 7;
+        let commit_version = 8;
+
+        let (calls_tx, mut calls_rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = Arc::new(MockBinlogExecutor {
+            calls: calls_tx,
+            prewrite_behavior: BinlogPrewriteBehavior::Err("binlog prewrite error"),
+        });
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert_eq!(req.start_version, start_version);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                panic!("unexpected commit request on binlog prewrite error");
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+
+        txn.set_binlog_executor(executor);
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+
+        let err = txn.commit().await.expect_err("expected commit error");
+        assert!(err.to_string().contains("binlog prewrite error"));
+
+        assert_eq!(
+            recv_binlog_call(&mut calls_rx).await,
+            BinlogCall::Prewrite(b"k".to_vec())
+        );
+        assert_eq!(recv_binlog_call(&mut calls_rx).await, BinlogCall::Commit(0));
+    }
+
+    #[tokio::test]
+    async fn test_transaction_binlog_executor_skip_survives_prewrite_failure() {
+        let start_version = 7;
+
+        let (calls_tx, mut calls_rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = Arc::new(MockBinlogExecutor {
+            calls: calls_tx,
+            prewrite_behavior: BinlogPrewriteBehavior::Ok(super::BinlogWriteResult::new(true)),
+        });
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert_eq!(req.start_version, start_version);
+                return Err(Error::StringError("prewrite failed".to_owned()));
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+
+        txn.set_binlog_executor(executor);
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+
+        let err = txn.commit().await.expect_err("expected commit error");
+        assert!(err.to_string().contains("prewrite failed"));
+
+        assert_eq!(
+            recv_binlog_call(&mut calls_rx).await,
+            BinlogCall::Prewrite(b"k".to_vec())
+        );
+        assert_eq!(recv_binlog_call(&mut calls_rx).await, BinlogCall::Skip);
     }
 
     #[tokio::test]

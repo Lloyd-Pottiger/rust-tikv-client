@@ -214,6 +214,10 @@ pub use crate::transaction::AssertionLevel;
 #[doc(inline)]
 pub use crate::transaction::BackoffRuntimeStats;
 #[doc(inline)]
+pub use crate::transaction::BinlogExecutor;
+#[doc(inline)]
+pub use crate::transaction::BinlogWriteResult;
+#[doc(inline)]
 pub use crate::transaction::BoundLockResolver;
 #[doc(inline)]
 pub use crate::transaction::CheckLevel;

@@ -1,8 +1,9 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
-    transaction::Mutation, AssertionLevel, BoundRange, CommandPriority, DiskFullOpt, Error, Key,
-    KvFilter, KvPair, LifecycleHooks, LockWaitTimeout, PrewriteEncounterLockPolicy,
-    ResolveLockDetail, Result, SchemaLeaseChecker, Timestamp, Transaction, Value, Variables,
+    transaction::Mutation, AssertionLevel, BinlogExecutor, BoundRange, CommandPriority,
+    DiskFullOpt, Error, Key, KvFilter, KvPair, LifecycleHooks, LockWaitTimeout,
+    PrewriteEncounterLockPolicy, ResolveLockDetail, Result, SchemaLeaseChecker, Timestamp,
+    Transaction, Value, Variables,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -105,6 +106,18 @@ impl SyncTransaction {
     /// Clear the commit callback.
     pub fn clear_commit_callback(&mut self) {
         self.inner.clear_commit_callback();
+    }
+
+    /// Set a binlog executor used to replicate binlogs during commit.
+    ///
+    /// This maps to client-go `KVTxn.SetBinlogExecutor`.
+    pub fn set_binlog_executor(&mut self, executor: Arc<dyn BinlogExecutor>) {
+        self.inner.set_binlog_executor(executor);
+    }
+
+    /// Clear the configured binlog executor.
+    pub fn clear_binlog_executor(&mut self) {
+        self.inner.clear_binlog_executor();
     }
 
     /// Set lifecycle hooks for background tasks spawned by this transaction.
