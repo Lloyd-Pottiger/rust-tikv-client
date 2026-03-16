@@ -4830,6 +4830,21 @@ impl<PdC: PdClient> Drop for Transaction<PdC> {
     }
 }
 
+impl<PdC: PdClient> std::fmt::Display for Transaction<PdC> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.start_ts())?;
+        if let Some(state) = self.aggressive_locking.as_ref() {
+            write!(
+                f,
+                " (aggressiveLocking: prev {} keys, current {} keys)",
+                state.last_retry_unnecessary_locks.len(),
+                state.current_locked_keys.len()
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// The default max TTL of a lock in milliseconds. Also called `ManagedLockTTL` in TiDB.
 const MAX_TTL: u64 = 20000;
 /// The default TTL of a lock in milliseconds.
@@ -13123,6 +13138,48 @@ mod tests {
         );
         assert!(pessimistic_txn.is_pessimistic());
         assert!(!pessimistic_txn.is_pipelined());
+    }
+
+    #[test]
+    fn test_transaction_display_matches_client_go_stringer() {
+        let txn = Transaction::new(
+            Timestamp::from_version(7),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        assert_eq!(txn.to_string(), "7");
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(7),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_pessimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let mut last_retry_unnecessary_locks = std::collections::HashMap::new();
+        last_retry_unnecessary_locks.insert(Key::from(b"k1".to_vec()), 0);
+
+        let mut current_locked_keys = std::collections::HashMap::new();
+        current_locked_keys.insert(Key::from(b"k2".to_vec()), 0);
+        current_locked_keys.insert(Key::from(b"k3".to_vec()), 0);
+
+        let now = Instant::now();
+        txn.aggressive_locking = Some(super::AggressiveLockingState {
+            primary_key_at_start: None,
+            last_primary_key: None,
+            primary_key: None,
+            last_attempt_start: now,
+            attempt_start: now,
+            max_locked_with_conflict_ts: 0,
+            last_retry_unnecessary_locks,
+            current_locked_keys,
+        });
+
+        assert_eq!(
+            txn.to_string(),
+            "7 (aggressiveLocking: prev 1 keys, current 2 keys)"
+        );
     }
 
     #[tokio::test]
