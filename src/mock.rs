@@ -661,6 +661,23 @@ impl PdClient for MockPdClient {
         Ok(region)
     }
 
+    async fn region_for_end_key(&self, key: &Key) -> Result<RegionWithLeader> {
+        let bytes: &[_] = key.into();
+        if bytes.is_empty() {
+            return Err(Error::Unimplemented);
+        }
+
+        let region = if bytes <= &[10][..] {
+            Self::region1()
+        } else if bytes <= &[250, 250][..] {
+            Self::region2()
+        } else {
+            Self::region3()
+        };
+
+        Ok(region)
+    }
+
     async fn region_for_id(&self, id: RegionId) -> Result<RegionWithLeader> {
         match id {
             1 => Ok(Self::region1()),

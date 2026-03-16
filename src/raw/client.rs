@@ -574,10 +574,10 @@ impl<PdC: PdClient> Client<PdC> {
     /// only the first `limit` pairs are returned, ordered by the key.
     ///
     ///
-    /// Reverse Scan queries continuous kv pairs in range [startKey, endKey),
-    /// from startKey(lowerBound) to endKey(upperBound) in reverse order, up to limit pairs.
+    /// Reverse Scan queries continuous kv pairs in range [endKey, startKey),
+    /// from startKey(upperBound) to endKey(lowerBound) in reverse order, up to limit pairs.
     /// The returned keys are in reversed lexicographical order.
-    /// If you want to include the endKey or exclude the startKey, push a '\0' to the key.
+    /// If you want to include the startKey or exclude the endKey, push a '\0' to the key.
     /// It doesn't support Scanning from "", because locating the last Region is not yet implemented.
     /// # Examples
     /// ```rust,no_run
@@ -643,7 +643,7 @@ impl<PdC: PdClient> Client<PdC> {
     /// # futures::executor::block_on(async {
     /// # let client = RawClient::new(vec!["192.168.0.100"]).await.unwrap();
     /// let inclusive_range = "TiKV"..="TiDB";
-    /// let req = client.scan_keys(inclusive_range.into_owned(), 2);
+    /// let req = client.scan_keys_reverse(inclusive_range.into_owned(), 2);
     /// let result: Vec<Key> = req.await.unwrap();
     /// # });
     /// ```
@@ -652,7 +652,7 @@ impl<PdC: PdClient> Client<PdC> {
         range: impl Into<BoundRange>,
         limit: u32,
     ) -> Result<Vec<Key>> {
-        debug!("invoking raw scan_keys request");
+        debug!("invoking raw scan_keys_reverse request");
         Ok(self
             .scan_inner(range, limit, true, true)
             .await?
@@ -839,40 +839,95 @@ impl<PdC: PdClient> Client<PdC> {
             });
         }
         let backoff = DEFAULT_STORE_BACKOFF;
-        let mut range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let mut result = Vec::new();
-        let mut current_limit = limit;
-        let (start_key, end_key) = range.clone().into_keys();
+        let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
+        let (range_start, range_end) = range.into_keys();
+
         // An empty end key means "unbounded" in TiKV APIs, so normalize it to `None` to avoid
         // prematurely terminating multi-region scans.
-        let end_key = end_key.filter(|key| !key.is_empty());
-        let mut current_key: Key = start_key;
+        let range_end = range_end.filter(|key| !key.is_empty());
 
-        while current_limit > 0 {
-            let scan_args = ScanInnerArgs {
-                start_key: current_key.clone(),
-                end_key: end_key.clone(),
-                limit: current_limit,
-                key_only,
-                reverse,
-                backoff: backoff.clone(),
-            };
-            let (res, next_key) = self.retryable_scan(scan_args).await?;
-
-            let mut kvs = res
-                .map(|r| r.kvs.into_iter().map(Into::into).collect::<Vec<KvPair>>())
-                .unwrap_or(Vec::new());
-
-            if !kvs.is_empty() {
-                current_limit -= kvs.len() as u32;
-                result.append(&mut kvs);
+        if let Some(range_end) = range_end.as_ref() {
+            if &range_start >= range_end {
+                return Ok(Vec::new());
             }
-            if (!reverse && next_key.is_empty()) || end_key.clone().is_some_and(|ek| ek <= next_key)
-            {
-                break;
-            } else {
-                current_key = next_key;
-                range = BoundRange::new(std::ops::Bound::Included(current_key.clone()), range.to);
+        }
+
+        let mut result = Vec::new();
+        let mut remaining = limit;
+
+        if reverse {
+            // Reverse scan requires an explicit upper bound because locating the last region is
+            // not implemented.
+            let Some(mut current_upper) = range_end.clone() else {
+                return Err(Error::Unimplemented);
+            };
+            if current_upper.is_empty() {
+                return Err(Error::Unimplemented);
+            }
+
+            while remaining > 0 && &current_upper > &range_start {
+                let scan_args = ScanInnerArgs {
+                    from_key: range_start.clone(),
+                    to_key: Some(current_upper.clone()),
+                    limit: remaining,
+                    key_only,
+                    reverse,
+                    backoff: backoff.clone(),
+                };
+                let (res, next_upper) = self.retryable_scan(scan_args).await?;
+
+                let mut kvs = res
+                    .map(|r| r.kvs.into_iter().map(Into::into).collect::<Vec<KvPair>>())
+                    .unwrap_or_default();
+                if !kvs.is_empty() {
+                    remaining -= kvs.len() as u32;
+                    result.append(&mut kvs);
+                }
+
+                if next_upper.is_empty() || &next_upper <= &range_start {
+                    break;
+                }
+                if &next_upper >= &current_upper {
+                    return Err(Error::StringError(
+                        "raw reverse scan returned a non-advancing range".to_owned(),
+                    ));
+                }
+                current_upper = next_upper;
+            }
+        } else {
+            let mut current_start = range_start;
+            while remaining > 0 {
+                let scan_args = ScanInnerArgs {
+                    from_key: current_start.clone(),
+                    to_key: range_end.clone(),
+                    limit: remaining,
+                    key_only,
+                    reverse,
+                    backoff: backoff.clone(),
+                };
+                let (res, next_start) = self.retryable_scan(scan_args).await?;
+
+                let mut kvs = res
+                    .map(|r| r.kvs.into_iter().map(Into::into).collect::<Vec<KvPair>>())
+                    .unwrap_or_default();
+                if !kvs.is_empty() {
+                    remaining -= kvs.len() as u32;
+                    result.append(&mut kvs);
+                }
+
+                if next_start.is_empty()
+                    || range_end
+                        .as_ref()
+                        .is_some_and(|range_end| range_end <= &next_start)
+                {
+                    break;
+                }
+                if &next_start <= &current_start {
+                    return Err(Error::StringError(
+                        "raw scan returned a non-advancing range".to_owned(),
+                    ));
+                }
+                current_start = next_start;
             }
         }
 
@@ -889,13 +944,20 @@ impl<PdC: PdClient> Client<PdC> {
         &self,
         mut scan_args: ScanInnerArgs,
     ) -> Result<(Option<RawScanResponse>, Key)> {
-        let start_key = scan_args.start_key;
-        let end_key = scan_args.end_key;
+        let from_key = scan_args.from_key;
+        let to_key = scan_args.to_key;
         loop {
-            let region = self.rpc.clone().region_for_key(&start_key).await?;
+            let region = if scan_args.reverse {
+                let Some(to_key) = to_key.as_ref() else {
+                    return Err(Error::Unimplemented);
+                };
+                self.rpc.clone().region_for_end_key(to_key).await?
+            } else {
+                self.rpc.clone().region_for_key(&from_key).await?
+            };
             let store = self.rpc.clone().store_for_id(region.id()).await?;
             let request = new_raw_scan_request(
-                (start_key.clone(), end_key.clone()).into(),
+                (from_key.clone(), to_key.clone()).into(),
                 scan_args.limit,
                 scan_args.key_only,
                 scan_args.reverse,
@@ -917,7 +979,12 @@ impl<PdC: PdClient> Client<PdC> {
                             return Err(RegionError(Box::new(err)));
                         }
                     }
-                    Ok((Some(r), region.end_key()))
+                    let next_key = if scan_args.reverse {
+                        region.start_key()
+                    } else {
+                        region.end_key()
+                    };
+                    Ok((Some(r), next_key))
                 }
                 Err(err) => Err(err),
             };
@@ -981,8 +1048,8 @@ impl<PdC: PdClient> Client<PdC> {
 
 #[derive(Clone)]
 struct ScanInnerArgs {
-    start_key: Key,
-    end_key: Option<Key>,
+    from_key: Key,
+    to_key: Option<Key>,
     limit: u32,
     key_only: bool,
     reverse: bool,
@@ -1027,32 +1094,58 @@ mod tests {
                     None => (Vec::new(), Vec::new()),
                 };
 
-                let effective_start = std::cmp::max(req.start_key.clone(), region_start);
-                let effective_end = match (req.end_key.is_empty(), region_end.is_empty()) {
-                    (true, true) => Vec::new(),
-                    (true, false) => region_end,
-                    (false, true) => req.end_key.clone(),
-                    (false, false) => std::cmp::min(req.end_key.clone(), region_end),
+                let (range_start, range_end) = if req.reverse {
+                    (req.end_key.clone(), req.start_key.clone())
+                } else {
+                    (req.start_key.clone(), req.end_key.clone())
                 };
 
-                let kvs = data
-                    .iter()
-                    .filter(|(key, _)| key.as_slice() >= effective_start.as_slice())
-                    .filter(|(key, _)| {
-                        effective_end.is_empty() || key.as_slice() < effective_end.as_slice()
-                    })
-                    .take(req.limit as usize)
-                    .map(|(key, value)| kvrpcpb::KvPair {
-                        error: None,
-                        key: key.clone(),
-                        value: if req.key_only {
-                            Vec::new()
-                        } else {
-                            value.clone()
-                        },
-                        commit_ts: 0,
-                    })
-                    .collect();
+                let effective_start = std::cmp::max(range_start, region_start);
+                let effective_end = match (range_end.is_empty(), region_end.is_empty()) {
+                    (true, true) => Vec::new(),
+                    (true, false) => region_end,
+                    (false, true) => range_end,
+                    (false, false) => std::cmp::min(range_end, region_end),
+                };
+
+                let kvs = if req.reverse {
+                    data.iter()
+                        .rev()
+                        .filter(|(key, _)| key.as_slice() >= effective_start.as_slice())
+                        .filter(|(key, _)| {
+                            effective_end.is_empty() || key.as_slice() < effective_end.as_slice()
+                        })
+                        .take(req.limit as usize)
+                        .map(|(key, value)| kvrpcpb::KvPair {
+                            error: None,
+                            key: key.clone(),
+                            value: if req.key_only {
+                                Vec::new()
+                            } else {
+                                value.clone()
+                            },
+                            commit_ts: 0,
+                        })
+                        .collect()
+                } else {
+                    data.iter()
+                        .filter(|(key, _)| key.as_slice() >= effective_start.as_slice())
+                        .filter(|(key, _)| {
+                            effective_end.is_empty() || key.as_slice() < effective_end.as_slice()
+                        })
+                        .take(req.limit as usize)
+                        .map(|(key, value)| kvrpcpb::KvPair {
+                            error: None,
+                            key: key.clone(),
+                            value: if req.key_only {
+                                Vec::new()
+                            } else {
+                                value.clone()
+                            },
+                            commit_ts: 0,
+                        })
+                        .collect()
+                };
 
                 let resp = kvrpcpb::RawScanResponse {
                     region_error: None,
@@ -1116,6 +1209,62 @@ mod tests {
         let keys: Vec<Vec<u8>> = res.into_iter().map(|pair| pair.0.into()).collect();
         assert_eq!(keys, vec![vec![1], vec![2], vec![10], vec![11], vec![12]]);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_reverse_across_regions_returns_descending_keys() -> Result<()> {
+        let client = new_mock_raw_client_with_scan_data(Arc::new(vec![
+            (vec![1], b"v1".to_vec()),
+            (vec![2], b"v2".to_vec()),
+            (vec![10], b"v10".to_vec()),
+            (vec![11], b"v11".to_vec()),
+            (vec![12], b"v12".to_vec()),
+        ]));
+
+        let res = client.scan_reverse(..=vec![12], 10).await?;
+        let keys: Vec<Vec<u8>> = res.into_iter().map(|pair| pair.0.into()).collect();
+        assert_eq!(keys, vec![vec![12], vec![11], vec![10], vec![2], vec![1]]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_keys_reverse_across_regions_returns_descending_keys() -> Result<()> {
+        let client = new_mock_raw_client_with_scan_data(Arc::new(vec![
+            (vec![1], b"v1".to_vec()),
+            (vec![2], b"v2".to_vec()),
+            (vec![10], b"v10".to_vec()),
+            (vec![11], b"v11".to_vec()),
+            (vec![12], b"v12".to_vec()),
+        ]));
+
+        let res = client.scan_keys_reverse(..=vec![12], 10).await?;
+        let keys: Vec<Vec<u8>> = res.into_iter().map(Into::into).collect();
+        assert_eq!(keys, vec![vec![12], vec![11], vec![10], vec![2], vec![1]]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_reverse_respects_exclusive_upper_bound() -> Result<()> {
+        let client = new_mock_raw_client_with_scan_data(Arc::new(vec![
+            (vec![1], b"v1".to_vec()),
+            (vec![2], b"v2".to_vec()),
+            (vec![10], b"v10".to_vec()),
+            (vec![11], b"v11".to_vec()),
+            (vec![12], b"v12".to_vec()),
+        ]));
+
+        let res = client.scan_reverse(..vec![12], 10).await?;
+        let keys: Vec<Vec<u8>> = res.into_iter().map(|pair| pair.0.into()).collect();
+        assert_eq!(keys, vec![vec![11], vec![10], vec![2], vec![1]]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_reverse_requires_bounded_upper() -> Result<()> {
+        let client = new_mock_raw_client_with_scan_data(Arc::new(vec![(vec![1], b"v1".to_vec())]));
+        let err = client.scan_reverse(.., 10).await.unwrap_err();
+        assert!(matches!(err, Error::Unimplemented));
         Ok(())
     }
 

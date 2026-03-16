@@ -77,6 +77,16 @@ pub trait PdClient: Send + Sync + 'static {
     /// In transactional API, the key and returned region are both decoded (keys in raw format).
     async fn region_for_key(&self, key: &Key) -> Result<RegionWithLeader>;
 
+    /// Locate the region that contains the last key strictly less than `key`.
+    ///
+    /// This mirrors client-go `RegionCache.LocateEndKey` behavior and is used by raw reverse scans.
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn region_for_end_key(&self, key: &Key) -> Result<RegionWithLeader> {
+        let _ = key;
+        Err(Error::Unimplemented)
+    }
+
     /// In transactional API, the returned region is decoded (keys in raw format)
     async fn region_for_id(&self, id: RegionId) -> Result<RegionWithLeader>;
 
@@ -718,6 +728,29 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
         let region = self.region_cache.get_region_by_key(&key).await?;
         Self::decode_region(region, enable_codec)
+    }
+
+    async fn region_for_end_key(&self, key: &Key) -> Result<RegionWithLeader> {
+        if key.is_empty() {
+            return Err(Error::Unimplemented);
+        }
+
+        let enable_codec = self.enable_codec;
+        let key = if enable_codec {
+            key.to_encoded()
+        } else {
+            key.clone()
+        };
+        let key_bytes: &[u8] = (&key).into();
+
+        let region = self.region_cache.get_region_by_key(&key).await?;
+        if key_bytes > region.region.start_key.as_slice() {
+            return Self::decode_region(region, enable_codec);
+        }
+
+        let prev_region = self.pd.clone().get_prev_region(key.into()).await?;
+        self.region_cache.add_region(prev_region.clone()).await;
+        Self::decode_region(prev_region, enable_codec)
     }
 
     async fn region_for_id(&self, id: RegionId) -> Result<RegionWithLeader> {

@@ -40,6 +40,16 @@ pub trait RetryClientTrait {
     // It does not know about encoding. Caller should take care of it.
     async fn get_region(self: Arc<Self>, key: Vec<u8>) -> Result<RegionWithLeader>;
 
+    /// Return the region whose end boundary is `key` (i.e. the region immediately before `key`).
+    ///
+    /// This maps to PD `GetPrevRegion` and is used by reverse raw scans (`LocateEndKey` behavior).
+    ///
+    /// The default implementation returns [`Error::Unimplemented`].
+    async fn get_prev_region(self: Arc<Self>, key: Vec<u8>) -> Result<RegionWithLeader> {
+        let _ = key;
+        Err(Error::Unimplemented)
+    }
+
     async fn get_region_by_id(self: Arc<Self>, region_id: RegionId) -> Result<RegionWithLeader>;
 
     async fn scan_regions(
@@ -260,6 +270,20 @@ impl RetryClientTrait for RetryClient<Cluster> {
             async {
                 cluster
                     .get_region(key.clone(), self.timeout)
+                    .await
+                    .and_then(|resp| {
+                        region_from_response(resp, || Error::RegionForKeyNotFound { key })
+                    })
+            }
+        })
+    }
+
+    async fn get_prev_region(self: Arc<Self>, key: Vec<u8>) -> Result<RegionWithLeader> {
+        retry_mut!(self, "get_prev_region", |cluster| {
+            let key = key.clone();
+            async {
+                cluster
+                    .get_prev_region(key.clone(), self.timeout)
                     .await
                     .and_then(|resp| {
                         region_from_response(resp, || Error::RegionForKeyNotFound { key })
