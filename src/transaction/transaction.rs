@@ -4529,8 +4529,20 @@ impl<PdC: PdClient> Transaction<PdC> {
             .await
     }
 
-    fn is_pessimistic(&self) -> bool {
+    /// Returns true if this transaction is a pessimistic transaction.
+    ///
+    /// This maps to client-go `KVTxn.IsPessimistic`.
+    #[must_use]
+    pub fn is_pessimistic(&self) -> bool {
         matches!(self.options.kind, TransactionKind::Pessimistic(_))
+    }
+
+    /// Returns true if this transaction uses pipelined DML mode.
+    ///
+    /// This maps to client-go `KVTxn.IsPipelined`.
+    #[must_use]
+    pub fn is_pipelined(&self) -> bool {
+        self.options.pipelined_txn.is_some()
     }
 
     fn lock_backoff(&self) -> Backoff {
@@ -13079,6 +13091,38 @@ mod tests {
         assert!(!txn.is_causal_consistency());
         txn.set_causal_consistency(true);
         assert!(txn.is_causal_consistency());
+    }
+
+    #[test]
+    fn test_transaction_is_pessimistic_and_is_pipelined() {
+        let txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        assert!(!txn.is_pessimistic());
+        assert!(!txn.is_pipelined());
+
+        let pipelined_txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        assert!(!pipelined_txn.is_pessimistic());
+        assert!(pipelined_txn.is_pipelined());
+
+        let pessimistic_txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_pessimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        assert!(pessimistic_txn.is_pessimistic());
+        assert!(!pessimistic_txn.is_pipelined());
     }
 
     #[tokio::test]

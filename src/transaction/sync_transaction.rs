@@ -527,6 +527,22 @@ impl SyncTransaction {
         self.inner.is_read_only()
     }
 
+    /// Returns true if this transaction is a pessimistic transaction.
+    ///
+    /// This maps to client-go `KVTxn.IsPessimistic`.
+    #[must_use]
+    pub fn is_pessimistic(&self) -> bool {
+        self.inner.is_pessimistic()
+    }
+
+    /// Returns true if this transaction uses pipelined DML mode.
+    ///
+    /// This maps to client-go `KVTxn.IsPipelined`.
+    #[must_use]
+    pub fn is_pipelined(&self) -> bool {
+        self.inner.is_pipelined()
+    }
+
     /// Returns whether the transaction is valid.
     ///
     /// A transaction becomes invalid after commit or rollback. This maps to client-go `KVTxn.Valid`.
