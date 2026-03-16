@@ -112,6 +112,10 @@ impl TruncateKeyspace for Key {
             return self;
         }
 
+        if self.0.len() < KEYSPACE_PREFIX_LEN {
+            return self;
+        }
+
         pretruncate_bytes::<KEYSPACE_PREFIX_LEN>(&mut self.0);
 
         self
@@ -561,6 +565,28 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(vec![lock].truncate_keyspace(keyspace), vec![expected_lock]);
+    }
+
+    #[test]
+    fn test_truncate_keyspace_short_key_is_noop() {
+        let keyspace = Keyspace::Enable {
+            keyspace_id: 0xDEAD,
+        };
+
+        let key = Key::from(vec![b'k']);
+        assert_eq!(key.clone().truncate_keyspace(keyspace), key);
+
+        let empty = Key::from(Vec::new());
+        assert_eq!(empty.clone().truncate_keyspace(keyspace), empty);
+
+        let pair = KvPair(key.clone(), vec![b'v']);
+        assert_eq!(pair.clone().truncate_keyspace(keyspace), pair);
+
+        let range = Range {
+            start: key,
+            end: empty,
+        };
+        assert_eq!(range.clone().truncate_keyspace(keyspace), range);
     }
 
     #[test]
