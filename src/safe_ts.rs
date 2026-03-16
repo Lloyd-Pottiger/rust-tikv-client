@@ -238,13 +238,9 @@ impl<PdC: PdClient> SafeTsCacheInner<PdC> {
             state.store_safe_ts.insert(store_id, new_safe_ts);
         }
 
-        let mut scope_to_store_ids: HashMap<String, Vec<StoreId>> = HashMap::new();
+        let mut zone_to_store_ids: HashMap<String, Vec<StoreId>> = HashMap::new();
         for store in &stores {
-            scope_to_store_ids
-                .entry(GLOBAL_TXN_SCOPE.to_owned())
-                .or_default()
-                .push(store.meta.id);
-
+            let store_id = store.meta.id;
             if let Some(zone) = store
                 .meta
                 .labels
@@ -252,15 +248,16 @@ impl<PdC: PdClient> SafeTsCacheInner<PdC> {
                 .find(|label| label.key == ZONE_LABEL_KEY)
                 .map(|label| label.value.clone())
             {
-                scope_to_store_ids
-                    .entry(zone)
-                    .or_default()
-                    .push(store.meta.id);
+                zone_to_store_ids.entry(zone).or_default().push(store_id);
             }
         }
 
-        let mut min_safe_ts = HashMap::with_capacity(scope_to_store_ids.len());
-        for (scope, store_ids) in scope_to_store_ids {
+        let mut min_safe_ts = HashMap::with_capacity(zone_to_store_ids.len() + 1);
+        min_safe_ts.insert(
+            GLOBAL_TXN_SCOPE.to_owned(),
+            compute_min_safe_ts(&state.store_safe_ts, &store_ids),
+        );
+        for (scope, store_ids) in zone_to_store_ids {
             min_safe_ts.insert(scope, compute_min_safe_ts(&state.store_safe_ts, &store_ids));
         }
         state.min_safe_ts = min_safe_ts;
@@ -298,8 +295,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
+    use tokio::sync::Notify;
 
     use super::SafeTsCache;
     use crate::mock::MockKvClient;
@@ -418,6 +417,64 @@ mod tests {
                 self.stores.iter().map(|store| store.meta.id).collect();
             assert_eq!(store_ids, expected_store_ids.as_slice());
             Ok((42, self.store_safe_ts.clone()))
+        }
+
+        async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {}
+
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+    }
+
+    #[derive(Clone)]
+    struct BlockingSafeTsPdClient {
+        called: Arc<Notify>,
+        ready: Arc<Notify>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl PdClient for BlockingSafeTsPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            _region: RegionWithLeader,
+        ) -> Result<RegionStore> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_key(&self, _key: &crate::Key) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn all_stores(&self) -> Result<Vec<Store>> {
+            Ok(Vec::new())
+        }
+
+        async fn all_stores_for_safe_ts(&self) -> Result<Vec<Store>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.called.notify_one();
+            self.ready.notified().await;
+            Err(Error::StringError("injected safe-ts error".to_owned()))
         }
 
         async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
@@ -622,6 +679,63 @@ mod tests {
         assert_eq!(safe_ts.min_safe_ts().await?, 10);
         assert_eq!(safe_ts.min_safe_ts_with_txn_scope("dc1").await?, 100);
         assert_eq!(safe_ts.min_safe_ts_with_txn_scope("dc2").await?, 10);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_safe_ts_refresh_dedupes_concurrent_errors() -> Result<()> {
+        let called = Arc::new(Notify::new());
+        let ready = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let pd_client = Arc::new(BlockingSafeTsPdClient {
+            called: called.clone(),
+            ready: ready.clone(),
+            calls: calls.clone(),
+        });
+        let safe_ts = SafeTsCache::new(pd_client, Keyspace::Disable);
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(11));
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let safe_ts = safe_ts.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                safe_ts.refresh().await
+            }));
+        }
+        barrier.wait().await;
+
+        tokio::time::timeout(Duration::from_secs(1), called.notified())
+            .await
+            .expect("pd all_stores_for_safe_ts called");
+
+        {
+            let refresh = safe_ts.inner.refresh.lock().await;
+            assert!(refresh.in_flight, "refresh should be singleflighted");
+        }
+
+        ready.notify_waiters();
+
+        for handle in handles {
+            let err = tokio::time::timeout(Duration::from_secs(1), handle)
+                .await
+                .expect("refresh task should finish")
+                .unwrap()
+                .unwrap_err();
+            match err {
+                Error::StringError(message) => assert_eq!(message, "injected safe-ts error"),
+                other => panic!("expected StringError, got {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "concurrent refresh errors should be singleflighted"
+        );
 
         Ok(())
     }
