@@ -348,6 +348,27 @@ impl SyncTransaction {
         self.inner.set_request_source(source);
     }
 
+    /// Set whether this request source is considered internal.
+    ///
+    /// This maps to client-go `KVTxn.SetRequestSourceInternal`.
+    pub fn set_request_source_internal(&mut self, internal: bool) {
+        self.inner.set_request_source_internal(internal);
+    }
+
+    /// Set the primary request source type.
+    ///
+    /// This maps to client-go `KVTxn.SetRequestSourceType`.
+    pub fn set_request_source_type(&mut self, source_type: impl Into<String>) {
+        self.inner.set_request_source_type(source_type);
+    }
+
+    /// Set the explicit request source type (for example, a session or task type).
+    ///
+    /// This maps to client-go `KVTxn.SetExplicitRequestSourceType`.
+    pub fn set_explicit_request_source_type(&mut self, explicit_type: impl Into<String>) {
+        self.inner.set_explicit_request_source_type(explicit_type);
+    }
+
     /// Set trace id for requests.
     ///
     /// This option writes to `kvrpcpb::Context.trace_id`.

@@ -268,6 +268,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     gc_safe_point: GcSafePointCache<PdC>,
     resolve_lock_detail: Arc<ResolveLockDetailCollector>,
     options: TransactionOptions,
+    request_source_descriptor: Option<crate::RequestSource>,
     rpc_interceptors: RpcInterceptors,
     snapshot_runtime_stats: Option<Arc<SnapshotRuntimeStats>>,
     vars: Variables,
@@ -465,6 +466,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             gc_safe_point,
             resolve_lock_detail: Arc::new(ResolveLockDetailCollector::default()),
             options,
+            request_source_descriptor: None,
             rpc_interceptors: Default::default(),
             snapshot_runtime_stats: None,
             vars: Variables::default(),
@@ -783,6 +785,81 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// use [`RequestSource`](crate::RequestSource).
     pub fn set_request_source(&mut self, source: impl Into<String>) {
         self.options.request_source = Some(source.into());
+        self.request_source_descriptor = None;
+    }
+
+    fn current_request_source_descriptor(&self) -> crate::RequestSource {
+        fn parse_request_source(label: &str) -> crate::RequestSource {
+            if label.is_empty() || label == "unknown" {
+                return crate::RequestSource::new();
+            }
+
+            let Some((origin, rest)) = label.split_once('_') else {
+                return crate::RequestSource::new();
+            };
+
+            let internal = match origin {
+                "internal" => true,
+                "external" => false,
+                _ => return crate::RequestSource::new(),
+            };
+
+            let (source, explicit) = match rest.split_once('_') {
+                Some((source, explicit)) => (source, Some(explicit)),
+                None => (rest, None),
+            };
+
+            let mut req = crate::RequestSource::new().internal(internal);
+            if !source.is_empty() && source != "unknown" {
+                req = req.source_type(source.to_owned());
+            }
+            if let Some(explicit) = explicit {
+                req = req.explicit_type(explicit.to_owned());
+            }
+            req
+        }
+
+        if let Some(descriptor) = self.request_source_descriptor.as_ref() {
+            return descriptor.clone();
+        }
+        self.options
+            .request_source
+            .as_deref()
+            .map(parse_request_source)
+            .unwrap_or_default()
+    }
+
+    fn set_request_source_descriptor(&mut self, descriptor: crate::RequestSource) {
+        self.options.request_source = Some(descriptor.to_string());
+        self.request_source_descriptor = Some(descriptor);
+    }
+
+    /// Set whether this request source is considered internal.
+    ///
+    /// This maps to client-go `KVTxn.SetRequestSourceInternal`.
+    pub fn set_request_source_internal(&mut self, internal: bool) {
+        let descriptor = self.current_request_source_descriptor().internal(internal);
+        self.set_request_source_descriptor(descriptor);
+    }
+
+    /// Set the primary request source type.
+    ///
+    /// This maps to client-go `KVTxn.SetRequestSourceType`.
+    pub fn set_request_source_type(&mut self, source_type: impl Into<String>) {
+        let descriptor = self
+            .current_request_source_descriptor()
+            .source_type(source_type);
+        self.set_request_source_descriptor(descriptor);
+    }
+
+    /// Set the explicit request source type (for example, a session or task type).
+    ///
+    /// This maps to client-go `KVTxn.SetExplicitRequestSourceType`.
+    pub fn set_explicit_request_source_type(&mut self, explicit_type: impl Into<String>) {
+        let descriptor = self
+            .current_request_source_descriptor()
+            .explicit_type(explicit_type);
+        self.set_request_source_descriptor(descriptor);
     }
 
     pub(crate) fn request_source(&self) -> Option<&str> {
@@ -13166,6 +13243,36 @@ mod tests {
         assert_eq!(txn.session_id, 0);
         txn.set_session_id(42);
         assert_eq!(txn.session_id, 42);
+    }
+
+    #[test]
+    fn test_transaction_request_source_helper_setters_match_client_go() {
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            Arc::new(MockPdClient::default()),
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        assert!(txn.request_source().is_none());
+
+        txn.set_request_source_internal(true);
+        assert_eq!(txn.request_source(), Some("unknown"));
+
+        txn.set_request_source_type("gc");
+        assert_eq!(txn.request_source(), Some("internal_gc"));
+
+        txn.set_explicit_request_source_type("stats");
+        assert_eq!(txn.request_source(), Some("internal_gc_stats"));
+
+        txn.set_request_source_internal(false);
+        assert_eq!(txn.request_source(), Some("external_gc_stats"));
+
+        txn.set_request_source("internal_gc");
+        assert_eq!(txn.request_source(), Some("internal_gc"));
+
+        txn.set_explicit_request_source_type("stats");
+        assert_eq!(txn.request_source(), Some("internal_gc_stats"));
     }
 
     #[test]
