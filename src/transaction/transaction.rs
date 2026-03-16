@@ -2920,11 +2920,14 @@ impl<PdC: PdClient> Transaction<PdC> {
             None
         };
 
-        if latch_guard.as_ref().is_some_and(|guard| guard.is_stale()) {
-            let start_ts = latch_guard.as_ref().unwrap().start_ts();
-            let guard = latch_guard.take().unwrap();
-            guard.unlock().await;
-            return Err(Error::WriteConflictInLatch { start_ts });
+        if let Some(guard) = latch_guard.as_ref() {
+            if guard.is_stale() {
+                let start_ts = guard.start_ts();
+                if let Some(guard) = latch_guard.take() {
+                    guard.unlock().await;
+                }
+                return Err(Error::WriteConflictInLatch { start_ts });
+            }
         }
 
         if let Err(err) = self.start_auto_heartbeat().await {
@@ -4709,7 +4712,7 @@ const PIPELINED_BROADCAST_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 fn pipelined_min_flush_keys() -> u64 {
     fail_point!("pipelined_memdb_min_flush_keys", |val| {
-        val.map(|val| val.parse::<u64>().unwrap())
+        val.and_then(|val| val.parse::<u64>().ok())
             .unwrap_or(PIPELINED_MIN_FLUSH_KEYS)
     });
     PIPELINED_MIN_FLUSH_KEYS
@@ -4717,7 +4720,7 @@ fn pipelined_min_flush_keys() -> u64 {
 
 fn pipelined_min_flush_mem_size() -> u64 {
     fail_point!("pipelined_memdb_min_flush_size", |val| {
-        val.map(|val| val.parse::<u64>().unwrap())
+        val.and_then(|val| val.parse::<u64>().ok())
             .unwrap_or(PIPELINED_MIN_FLUSH_MEM_SIZE)
     });
     PIPELINED_MIN_FLUSH_MEM_SIZE
@@ -4725,7 +4728,7 @@ fn pipelined_min_flush_mem_size() -> u64 {
 
 fn pipelined_force_flush_mem_size_threshold() -> u64 {
     fail_point!("pipelined_memdb_force_flush_size_threshold", |val| {
-        val.map(|val| val.parse::<u64>().unwrap())
+        val.and_then(|val| val.parse::<u64>().ok())
             .unwrap_or(PIPELINED_FORCE_FLUSH_MEM_SIZE_THRESHOLD)
     });
     PIPELINED_FORCE_FLUSH_MEM_SIZE_THRESHOLD
@@ -4733,7 +4736,8 @@ fn pipelined_force_flush_mem_size_threshold() -> u64 {
 
 fn pipelined_broadcast_grace_period() -> Duration {
     fail_point!("pipelined_broadcast_grace_period_ms", |val| {
-        val.map(|val| Duration::from_millis(val.parse::<u64>().unwrap()))
+        val.and_then(|val| val.parse::<u64>().ok())
+            .map(Duration::from_millis)
             .unwrap_or(PIPELINED_BROADCAST_GRACE_PERIOD)
     });
     PIPELINED_BROADCAST_GRACE_PERIOD
@@ -6725,7 +6729,12 @@ impl<PdC: PdClient> Committer<PdC> {
             let fp = || -> Result<usize> {
                 let mut new_len = mutations_len;
                 fail_point!("before-commit-secondary", |percent| {
-                    let percent = percent.unwrap().parse::<usize>().unwrap();
+                    let Some(percent) = percent.and_then(|val| val.parse::<usize>().ok()) else {
+                        return Err(Error::StringError(
+                            "failpoint: before-commit-secondary expects a numeric percent"
+                                .to_owned(),
+                        ));
+                    };
                     new_len = mutations_len * percent / 100;
                     if new_len == 0 {
                         Err(Error::StringError(
