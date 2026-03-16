@@ -53,7 +53,6 @@ pub fn new_raw_batch_put_request(
 ) -> kvrpcpb::RawBatchPutRequest {
     let pairs = pairs.map(Into::into).collect::<Vec<_>>();
     let ttls = ttls.take(pairs.len()).collect::<Vec<_>>();
-    assert_eq!(pairs.len(), ttls.len());
     requests::new_raw_batch_put_request(pairs, ttls, cf, atomic)
 }
 

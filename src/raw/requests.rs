@@ -207,12 +207,32 @@ impl Shardable for kvrpcpb::RawBatchPutRequest {
         pd_client: &Arc<impl PdClient>,
     ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>> {
         let kvs = self.pairs.clone();
-        let ttls = self.ttls.clone();
-        let mut kv_ttl: Vec<KvPairTTL> = kvs
-            .into_iter()
-            .zip(ttls)
-            .map(|(kv, ttl)| KvPairTTL(kv, ttl))
-            .collect();
+        if kvs.is_empty() {
+            return stream::empty().boxed();
+        }
+
+        let mut kv_ttl: Vec<KvPairTTL> = match self.ttls.len() {
+            0 => kvs.into_iter().map(|kv| KvPairTTL(kv, 0)).collect(),
+            1 => {
+                let ttl = self.ttls[0];
+                kvs.into_iter().map(|kv| KvPairTTL(kv, ttl)).collect()
+            }
+            n if n == kvs.len() => kvs
+                .into_iter()
+                .zip(self.ttls.clone())
+                .map(|(kv, ttl)| KvPairTTL(kv, ttl))
+                .collect(),
+            n => {
+                return stream::iter(std::iter::once(Err(crate::Error::StringError(
+                    format!(
+                        "raw batch put ttls length mismatch (pairs={}, ttls={}); ttls must be empty, 1, or equal to pairs length",
+                        kvs.len(),
+                        n
+                    ),
+                ))))
+                .boxed();
+            }
+        };
         kv_ttl.sort_by(|a, b| a.0.key.cmp(&b.0.key));
         region_stream_for_keys(kv_ttl.into_iter(), pd_client.clone())
             .flat_map(|result| match result {
