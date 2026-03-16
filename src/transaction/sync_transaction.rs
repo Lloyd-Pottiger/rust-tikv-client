@@ -559,6 +559,50 @@ impl SyncTransaction {
         )
     }
 
+    /// Start aggressive locking mode for pessimistic transactions.
+    ///
+    /// This mirrors client-go `KVTxn.StartAggressiveLocking`.
+    pub fn start_aggressive_locking(&mut self) -> Result<()> {
+        self.inner.start_aggressive_locking()
+    }
+
+    /// Returns whether aggressive locking mode is enabled.
+    ///
+    /// This mirrors client-go `KVTxn.IsInAggressiveLockingMode`.
+    #[must_use]
+    pub fn is_in_aggressive_locking_mode(&self) -> bool {
+        self.inner.is_in_aggressive_locking_mode()
+    }
+
+    /// Returns whether `key` is locked during the current aggressive locking stage.
+    ///
+    /// This mirrors client-go `KVTxn.IsInAggressiveLockingStage`.
+    #[must_use]
+    pub fn is_in_aggressive_locking_stage(&self, key: impl AsRef<Key>) -> bool {
+        self.inner.is_in_aggressive_locking_stage(key)
+    }
+
+    /// Prepare for retrying a statement under aggressive locking mode.
+    ///
+    /// This mirrors client-go `KVTxn.RetryAggressiveLocking`.
+    pub fn retry_aggressive_locking(&mut self) -> Result<()> {
+        safe_block_on(&self.runtime, self.inner.retry_aggressive_locking())
+    }
+
+    /// Finish aggressive locking mode and keep locks for commit.
+    ///
+    /// This mirrors client-go `KVTxn.DoneAggressiveLocking`.
+    pub fn done_aggressive_locking(&mut self) -> Result<()> {
+        safe_block_on(&self.runtime, self.inner.done_aggressive_locking())
+    }
+
+    /// Cancel aggressive locking mode and rollback acquired locks.
+    ///
+    /// This mirrors client-go `KVTxn.CancelAggressiveLocking`.
+    pub fn cancel_aggressive_locking(&mut self) -> Result<()> {
+        safe_block_on(&self.runtime, self.inner.cancel_aggressive_locking())
+    }
+
     /// Get the start timestamp version of this transaction.
     ///
     /// This maps to client-go `KVTxn.StartTS`.

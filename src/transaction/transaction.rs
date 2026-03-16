@@ -3139,6 +3139,17 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.aggressive_locking.is_some()
     }
 
+    /// Returns whether `key` is locked during the current aggressive locking stage.
+    ///
+    /// This mirrors client-go `KVTxn.IsInAggressiveLockingStage`.
+    #[must_use]
+    pub fn is_in_aggressive_locking_stage(&self, key: impl AsRef<Key>) -> bool {
+        let Some(state) = self.aggressive_locking.as_ref() else {
+            return false;
+        };
+        state.current_locked_keys.contains_key(key.as_ref())
+    }
+
     /// Prepare for retrying a statement under aggressive locking mode.
     ///
     /// This rolls back locks that were acquired in the previous attempt but were not reused in the
@@ -16735,6 +16746,38 @@ mod tests {
             Err(Error::StringError(msg))
                 if msg == "batch_get_with_commit_ts is only supported for read-only snapshots"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_is_in_aggressive_locking_stage_reflects_current_locked_keys() {
+        let client = MockKvClient::with_dispatch_hook(|req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                let resp = ok_pessimistic_lock_response_for_request(req);
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            Err(Error::StringError("unexpected request".to_owned()))
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(100));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.start_aggressive_locking().unwrap();
+        assert!(!txn.is_in_aggressive_locking_stage(b"k1".to_vec()));
+
+        txn.lock_keys(vec![b"k1".to_vec()]).await.unwrap();
+        assert!(txn.is_in_aggressive_locking_stage(b"k1".to_vec()));
+        assert!(!txn.is_in_aggressive_locking_stage(b"k2".to_vec()));
+
+        txn.retry_aggressive_locking().await.unwrap();
+        assert!(!txn.is_in_aggressive_locking_stage(b"k1".to_vec()));
     }
 
     #[tokio::test]
