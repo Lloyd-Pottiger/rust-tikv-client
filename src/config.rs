@@ -330,9 +330,11 @@ impl Config {
     /// Set the maximum number of requests coalesced into a single outbound `BatchCommandsRequest`.
     ///
     /// This only affects the `BatchCommands` stream when `enable_batch_rpc` is set.
+    ///
+    /// Values less than 1 are treated as 1.
     #[must_use]
     pub fn with_batch_rpc_max_batch_size(mut self, max_batch_size: usize) -> Self {
-        self.batch_rpc_max_batch_size = max_batch_size;
+        self.batch_rpc_max_batch_size = max_batch_size.max(1);
         self
     }
 
@@ -488,6 +490,12 @@ mod tests {
         assert_eq!(config.region_cache_ttl, Duration::from_secs(600));
         assert_eq!(config.region_cache_ttl_jitter, Duration::from_secs(60));
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_with_batch_rpc_max_batch_size_clamps_to_one() {
+        let config = Config::default().with_batch_rpc_max_batch_size(0);
+        assert_eq!(config.batch_rpc_max_batch_size, 1);
     }
 
     #[test]
