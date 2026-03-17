@@ -374,6 +374,28 @@ impl KvRpcClient {
 
         if let Some(req) = request
             .as_any()
+            .downcast_ref::<kvrpcpb::DeleteRangeRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::DeleteRange(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::DeleteRange(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for delete_range: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
             .downcast_ref::<kvrpcpb::PessimisticRollbackRequest>()
         {
             let cmd =
@@ -2039,6 +2061,67 @@ mod tests {
         let resp = dispatch.await?;
         resp.downcast::<kvrpcpb::ResolveLockResponse>()
             .map_err(|_| Error::StringError("expected resolve_lock response".to_owned()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_delete_range_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::DeleteRangeRequest::default();
+        request.start_key = b"k1".to_vec();
+        request.end_key = b"k3".to_vec();
+        request.notify_only = true;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "delete_range dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::DeleteRange(sent_req) => {
+                assert_eq!(sent_req.start_key, b"k1".to_vec());
+                assert_eq!(sent_req.end_key, b"k3".to_vec());
+                assert!(sent_req.notify_only);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for delete_range: {other:?}"
+                )));
+            }
+        }
+
+        let mut resp = kvrpcpb::DeleteRangeResponse::default();
+        resp.error = "oops".to_owned();
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::DeleteRange(
+                    resp,
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::DeleteRangeResponse>()
+            .map_err(|_| Error::StringError("expected delete_range response".to_owned()))?;
+        assert_eq!(resp.error, "oops");
         Ok(())
     }
 
