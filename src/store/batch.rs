@@ -19,6 +19,8 @@ use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::Error;
 use crate::Result;
 
+const BATCH_COMMANDS_OUTBOUND_MAX_REQUESTS: usize = 128;
+
 #[derive(Clone, Debug)]
 pub(crate) struct BatchDispatchResult {
     pub(crate) cmd: tikvpb::batch_commands_response::response::Cmd,
@@ -46,12 +48,51 @@ impl Drop for BatchCommandsClientInner {
     }
 }
 
+struct OutboundRequestState {
+    receiver: mpsc::Receiver<tikvpb::BatchCommandsRequest>,
+    pending: Option<tikvpb::BatchCommandsRequest>,
+}
+
+fn outbound_stream(
+    receiver: mpsc::Receiver<tikvpb::BatchCommandsRequest>,
+    max_requests: usize,
+) -> impl Stream<Item = tikvpb::BatchCommandsRequest> + Send {
+    let max_requests = max_requests.max(1);
+    let state = OutboundRequestState {
+        receiver,
+        pending: None,
+    };
+    stream::unfold(state, move |mut state| async move {
+        let mut head = if let Some(request) = state.pending.take() {
+            request
+        } else {
+            state.receiver.recv().await?
+        };
+
+        while head.requests.len() < max_requests {
+            match state.receiver.try_recv() {
+                Ok(mut next) => {
+                    if head.requests.len() + next.requests.len() <= max_requests {
+                        head.requests.append(&mut next.requests);
+                        head.request_ids.append(&mut next.request_ids);
+                    } else {
+                        state.pending = Some(next);
+                        break;
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+
+        Some((head, state))
+    })
+}
+
 impl BatchCommandsClient {
     pub(crate) async fn connect(client: TikvClient<Channel>) -> Result<Self> {
         let (outbound_tx, outbound_rx) = mpsc::channel(1024);
-        let outbound_stream = stream::unfold(outbound_rx, |mut rx| async move {
-            rx.recv().await.map(|request| (request, rx))
-        });
+        let outbound_stream = outbound_stream(outbound_rx, BATCH_COMMANDS_OUTBOUND_MAX_REQUESTS);
 
         let req = outbound_stream.into_streaming_request();
         let response = client
@@ -327,6 +368,60 @@ mod tests {
             r2.cmd,
             tikvpb::batch_commands_response::response::Cmd::Empty(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_outbound_stream_batches_ready_requests() {
+        let (out_tx, out_rx) = mpsc::channel(8);
+        let mut stream = Box::pin(outbound_stream(out_rx, 8));
+
+        let mk_req = |request_id| tikvpb::BatchCommandsRequest {
+            requests: vec![tikvpb::batch_commands_request::Request {
+                cmd: Some(tikvpb::batch_commands_request::request::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyRequest::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+        };
+
+        out_tx.send(mk_req(1)).await.expect("send req 1");
+        out_tx.send(mk_req(2)).await.expect("send req 2");
+
+        let merged = stream.next().await.expect("merged request");
+        assert_eq!(merged.requests.len(), 2);
+        assert_eq!(merged.request_ids, vec![1, 2]);
+
+        for req in merged.requests.into_iter() {
+            match req.cmd.expect("cmd should be present") {
+                tikvpb::batch_commands_request::request::Cmd::Empty(_) => {}
+                other => panic!("unexpected cmd in merged request: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_outbound_stream_respects_batch_limit() {
+        let (out_tx, out_rx) = mpsc::channel(8);
+        let mut stream = Box::pin(outbound_stream(out_rx, 2));
+
+        let mk_req = |request_id| tikvpb::BatchCommandsRequest {
+            requests: vec![tikvpb::batch_commands_request::Request {
+                cmd: Some(tikvpb::batch_commands_request::request::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyRequest::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+        };
+
+        out_tx.send(mk_req(1)).await.expect("send req 1");
+        out_tx.send(mk_req(2)).await.expect("send req 2");
+        out_tx.send(mk_req(3)).await.expect("send req 3");
+
+        let first = stream.next().await.expect("first batch");
+        assert_eq!(first.request_ids, vec![1, 2]);
+
+        let second = stream.next().await.expect("second batch");
+        assert_eq!(second.request_ids, vec![3]);
     }
 
     #[tokio::test]
