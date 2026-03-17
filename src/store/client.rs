@@ -267,6 +267,44 @@ impl KvRpcClient {
             };
         }
 
+        if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::PrewriteRequest>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::Prewrite(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::Prewrite(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for prewrite: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::CommitRequest>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::Commit(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::Commit(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for commit: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
         if let Some(req) = request.as_any().downcast_ref::<coprocessor::Request>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Coprocessor(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
@@ -1131,6 +1169,138 @@ mod tests {
         assert_eq!(resp.pairs.len(), 1);
         assert_eq!(resp.pairs[0].key, b"a".to_vec());
         assert_eq!(resp.pairs[0].value, b"v".to_vec());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_prewrite_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::PrewriteRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.mutations = vec![kvrpcpb::Mutation {
+            op: kvrpcpb::Op::Put as i32,
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+            ..Default::default()
+        }];
+        request.primary_lock = b"p".to_vec();
+        request.start_version = 7;
+        request.lock_ttl = 123;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "prewrite dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::Prewrite(sent_req) => {
+                assert_eq!(sent_req.primary_lock, b"p".to_vec());
+                assert_eq!(sent_req.start_version, 7);
+                assert_eq!(sent_req.lock_ttl, 123);
+                assert_eq!(sent_req.mutations.len(), 1);
+                assert_eq!(sent_req.mutations[0].key, b"k".to_vec());
+                assert_eq!(sent_req.mutations[0].value, b"v".to_vec());
+                assert_eq!(sent_req.mutations[0].op, kvrpcpb::Op::Put as i32);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for prewrite: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Prewrite(
+                    kvrpcpb::PrewriteResponse::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::PrewriteResponse>()
+            .map_err(|_| Error::StringError("expected prewrite response".to_owned()))?;
+        assert!(resp.region_error.is_none());
+        assert!(resp.errors.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_commit_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::CommitRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.start_version = 7;
+        request.keys = vec![b"k".to_vec()];
+        request.commit_version = 8;
+        request.is_txn_file = true;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "commit dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::Commit(sent_req) => {
+                assert_eq!(sent_req.start_version, 7);
+                assert_eq!(sent_req.keys, vec![b"k".to_vec()]);
+                assert_eq!(sent_req.commit_version, 8);
+                assert!(sent_req.is_txn_file);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for commit: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Commit(
+                    kvrpcpb::CommitResponse::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::CommitResponse>()
+            .map_err(|_| Error::StringError("expected commit response".to_owned()))?;
+        assert!(resp.region_error.is_none());
+        assert!(resp.error.is_none());
         Ok(())
     }
 
