@@ -547,6 +547,47 @@ impl KvRpcClient {
             };
         }
 
+        if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::FlushRequest>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::Flush(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::Flush(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for flush: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::BufferBatchGetRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::BufferBatchGet(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::BufferBatchGet(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for buffer_batch_get: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
         if let Some(req) = request
             .as_any()
             .downcast_ref::<kvrpcpb::PessimisticRollbackRequest>()
@@ -2735,6 +2776,162 @@ mod tests {
             .downcast::<kvrpcpb::FlashbackToVersionResponse>()
             .map_err(|_| Error::StringError("expected flashback_to_version response".to_owned()))?;
         assert_eq!(resp.error, "oops");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_flush_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let request = kvrpcpb::FlushRequest {
+            context: Some(kvrpcpb::Context::default()),
+            mutations: vec![kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put as i32,
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+                ..Default::default()
+            }],
+            primary_key: b"p".to_vec(),
+            start_ts: 42,
+            min_commit_ts: 43,
+            generation: 7,
+            lock_ttl: 1234,
+            assertion_level: kvrpcpb::AssertionLevel::Strict as i32,
+        };
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "flush dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::Flush(sent_req) => {
+                assert_eq!(sent_req.primary_key, b"p".to_vec());
+                assert_eq!(sent_req.start_ts, 42);
+                assert_eq!(sent_req.min_commit_ts, 43);
+                assert_eq!(sent_req.generation, 7);
+                assert_eq!(sent_req.lock_ttl, 1234);
+                assert_eq!(
+                    sent_req.assertion_level,
+                    kvrpcpb::AssertionLevel::Strict as i32
+                );
+                assert_eq!(sent_req.mutations.len(), 1);
+                assert_eq!(sent_req.mutations[0].op, kvrpcpb::Op::Put as i32);
+                assert_eq!(sent_req.mutations[0].key, b"k1".to_vec());
+                assert_eq!(sent_req.mutations[0].value, b"v1".to_vec());
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for flush: {other:?}"
+                )));
+            }
+        }
+
+        let resp = kvrpcpb::FlushResponse {
+            errors: vec![kvrpcpb::KeyError {
+                abort: "oops".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Flush(resp)),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::FlushResponse>()
+            .map_err(|_| Error::StringError("expected flush response".to_owned()))?;
+        assert_eq!(
+            resp.errors
+                .first()
+                .expect("flush response should contain a key error")
+                .abort,
+            "oops"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_buffer_batch_get_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let request = kvrpcpb::BufferBatchGetRequest {
+            context: Some(kvrpcpb::Context::default()),
+            keys: vec![b"k1".to_vec(), b"k2".to_vec()],
+            version: 7,
+        };
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "buffer_batch_get dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::BufferBatchGet(sent_req) => {
+                assert_eq!(sent_req.keys, vec![b"k1".to_vec(), b"k2".to_vec()]);
+                assert_eq!(sent_req.version, 7);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for buffer_batch_get: {other:?}"
+                )));
+            }
+        }
+
+        let resp = kvrpcpb::BufferBatchGetResponse {
+            pairs: vec![kvrpcpb::KvPair {
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::BufferBatchGet(resp)),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::BufferBatchGetResponse>()
+            .map_err(|_| Error::StringError("expected buffer_batch_get response".to_owned()))?;
+        assert_eq!(resp.pairs.len(), 1);
+        assert_eq!(resp.pairs[0].key, b"k1".to_vec());
+        assert_eq!(resp.pairs[0].value, b"v1".to_vec());
         Ok(())
     }
 

@@ -14,7 +14,7 @@ pub mod batch_commands_request {
     pub struct Request {
         #[prost(
             oneof = "request::Cmd",
-            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 39, 40, 255"
+            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 37, 38, 39, 40, 255"
         )]
         pub cmd: ::core::option::Option<request::Cmd>,
     }
@@ -89,6 +89,10 @@ pub mod batch_commands_request {
             PrepareFlashbackToVersion(
                 super::super::super::kvrpcpb::PrepareFlashbackToVersionRequest,
             ),
+            #[prost(message, tag = "37")]
+            Flush(super::super::super::kvrpcpb::FlushRequest),
+            #[prost(message, tag = "38")]
+            BufferBatchGet(super::super::super::kvrpcpb::BufferBatchGetRequest),
             #[prost(message, tag = "39")]
             GetHealthFeedback(super::super::super::kvrpcpb::GetHealthFeedbackRequest),
             #[prost(message, tag = "40")]
@@ -119,7 +123,7 @@ pub mod batch_commands_response {
     pub struct Response {
         #[prost(
             oneof = "response::Cmd",
-            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 39, 40, 255"
+            tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33, 34, 35, 36, 37, 38, 39, 40, 255"
         )]
         pub cmd: ::core::option::Option<response::Cmd>,
     }
@@ -194,6 +198,10 @@ pub mod batch_commands_response {
             PrepareFlashbackToVersion(
                 super::super::super::kvrpcpb::PrepareFlashbackToVersionResponse,
             ),
+            #[prost(message, tag = "37")]
+            Flush(super::super::super::kvrpcpb::FlushResponse),
+            #[prost(message, tag = "38")]
+            BufferBatchGet(super::super::super::kvrpcpb::BufferBatchGetResponse),
             #[prost(message, tag = "39")]
             GetHealthFeedback(super::super::super::kvrpcpb::GetHealthFeedbackResponse),
             #[prost(message, tag = "40")]

@@ -186,6 +186,9 @@ message BatchCommandsRequest {
             kvrpcpb.FlashbackToVersionRequest FlashbackToVersion = 35;
             kvrpcpb.PrepareFlashbackToVersionRequest PrepareFlashbackToVersion = 36;
 
+            kvrpcpb.FlushRequest Flush = 37;
+            kvrpcpb.BufferBatchGetRequest BufferBatchGet = 38;
+
             kvrpcpb.GetHealthFeedbackRequest GetHealthFeedback = 39;
             kvrpcpb.BroadcastTxnStatusRequest BroadcastTxnStatus = 40;
 
@@ -243,6 +246,9 @@ message BatchCommandsResponse {
 
             kvrpcpb.FlashbackToVersionResponse FlashbackToVersion = 35;
             kvrpcpb.PrepareFlashbackToVersionResponse PrepareFlashbackToVersion = 36;
+
+            kvrpcpb.FlushResponse Flush = 37;
+            kvrpcpb.BufferBatchGetResponse BufferBatchGet = 38;
 
             kvrpcpb.GetHealthFeedbackResponse GetHealthFeedback = 39;
             kvrpcpb.BroadcastTxnStatusResponse BroadcastTxnStatus = 40;
