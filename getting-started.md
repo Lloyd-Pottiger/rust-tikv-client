@@ -49,9 +49,13 @@ use tikv_client::{Config, TransactionClient};
 
 let config = Config::default()
     .with_txn_local_latches_capacity(1024)
+    .with_enable_region_cache_preload(true)
     .with_enable_batch_rpc(true);
 let txn_client = TransactionClient::new_with_config(vec!["127.0.0.1:2379"], config).await?;
 ```
+
+Region cache preload is best-effort and runs asynchronously in the background: the client scans
+regions from PD on startup and warms the local region cache. Errors are logged and ignored.
 
 The batch RPC feature is best-effort and falls back to unary RPCs when batch RPC is unavailable.
 Use `Config::with_batch_rpc_max_batch_size` to tune how many requests are coalesced into each
