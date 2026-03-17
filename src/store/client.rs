@@ -311,6 +311,25 @@ impl KvRpcClient {
             };
         }
 
+        if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::CleanupRequest>() {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::Cleanup(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::Cleanup(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for cleanup: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
         if let Some(req) = request.as_any().downcast_ref::<coprocessor::Request>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Coprocessor(req.clone());
             return match batch.dispatch(cmd, self.timeout).await {
@@ -1394,6 +1413,68 @@ mod tests {
             .map_err(|_| Error::StringError("expected commit response".to_owned()))?;
         assert!(resp.region_error.is_none());
         assert!(resp.error.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_cleanup_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::CleanupRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.key = b"k".to_vec();
+        request.start_version = 7;
+        request.current_ts = 123;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "cleanup dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::Cleanup(sent_req) => {
+                assert_eq!(sent_req.key, b"k".to_vec());
+                assert_eq!(sent_req.start_version, 7);
+                assert_eq!(sent_req.current_ts, 123);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for cleanup: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Cleanup(
+                    kvrpcpb::CleanupResponse {
+                        commit_version: 42,
+                        ..Default::default()
+                    },
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::CleanupResponse>()
+            .map_err(|_| Error::StringError("expected cleanup response".to_owned()))?;
+        assert_eq!(resp.commit_version, 42);
         Ok(())
     }
 
