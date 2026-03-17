@@ -1578,12 +1578,10 @@ impl<PdC: PdClient> Transaction<PdC> {
             .pipelined
             .as_ref()
             .map(|state| state.flushed_deletes.clone());
-        let pipelined_flushed_range = self.pipelined.as_ref().and_then(|state| {
-            match (&state.flushed_range_start, &state.flushed_range_end) {
-                (Some(start), Some(end)) => Some((start.clone(), end.clone())),
-                _ => None,
-            }
-        });
+        let pipelined_flushed_ranges = self
+            .pipelined
+            .as_ref()
+            .and_then(|state| state.flushed_ranges.clone());
         let pipelined_flushing_puts = self
             .pipelined
             .as_ref()
@@ -1609,10 +1607,11 @@ impl<PdC: PdClient> Transaction<PdC> {
                         }
                     }
 
-                    if pipelined_flushed_range
-                        .as_ref()
-                        .is_some_and(|(start, end)| &key >= start && &key < end)
-                    {
+                    if pipelined_flushed_ranges.as_ref().is_some_and(|ranges| {
+                        ranges
+                            .iter()
+                            .any(|(start, end)| &key >= start && &key < end)
+                    }) {
                         let mut request = new_buffer_batch_get_request(
                             iter::once(key.clone()),
                             timestamp.clone(),
@@ -1999,12 +1998,10 @@ impl<PdC: PdClient> Transaction<PdC> {
             .pipelined
             .as_ref()
             .map(|state| state.flushed_deletes.clone());
-        let pipelined_flushed_range = self.pipelined.as_ref().and_then(|state| {
-            match (&state.flushed_range_start, &state.flushed_range_end) {
-                (Some(start), Some(end)) => Some((start.clone(), end.clone())),
-                _ => None,
-            }
-        });
+        let pipelined_flushed_ranges = self
+            .pipelined
+            .as_ref()
+            .and_then(|state| state.flushed_ranges.clone());
         let pipelined_flushing_puts = self
             .pipelined
             .as_ref()
@@ -2053,11 +2050,15 @@ impl<PdC: PdClient> Transaction<PdC> {
                             return Ok(buffer_pairs);
                         }
 
-                        let buffer_lookup_keys = pipelined_flushed_range
+                        let buffer_lookup_keys = pipelined_flushed_ranges
                             .as_ref()
-                            .map(|(start, end)| {
+                            .map(|ranges| {
                                 keys.iter()
-                                    .filter(|key| *key >= start && *key < end)
+                                    .filter(|key| {
+                                        ranges
+                                            .iter()
+                                            .any(|(start, end)| *key >= start && *key < end)
+                                    })
                                     .cloned()
                                     .collect::<Vec<_>>()
                             })
@@ -2651,17 +2652,16 @@ impl<PdC: PdClient> Transaction<PdC> {
                     return Err(Error::DuplicateKeyInsertion);
                 }
 
-                let pipelined_flushed_range = self.pipelined.as_ref().and_then(|state| {
-                    match (&state.flushed_range_start, &state.flushed_range_end) {
-                        (Some(start), Some(end)) => Some((start.clone(), end.clone())),
-                        _ => None,
-                    }
-                });
-
-                if pipelined_flushed_range
+                let pipelined_flushed_ranges = self
+                    .pipelined
                     .as_ref()
-                    .is_some_and(|(start, end)| &key >= start && &key < end)
-                {
+                    .and_then(|state| state.flushed_ranges.clone());
+
+                if pipelined_flushed_ranges.as_ref().is_some_and(|ranges| {
+                    ranges
+                        .iter()
+                        .any(|(start, end)| &key >= start && &key < end)
+                }) {
                     let timestamp = self.timestamp.clone();
                     let rpc = self.rpc.clone();
                     let keyspace = self.keyspace;
@@ -5333,6 +5333,7 @@ struct PipelinedState {
     ttl_manager_closed: Arc<AtomicBool>,
     flushed_range_start: Option<Key>,
     flushed_range_end: Option<Key>,
+    flushed_ranges: Option<Arc<Vec<(Key, Key)>>>,
     flush_duration_ewma: Arc<Mutex<FlushDurationEwma>>,
 }
 
@@ -5347,6 +5348,7 @@ impl PipelinedState {
             ttl_manager_closed: Arc::new(AtomicBool::new(false)),
             flushed_range_start: None,
             flushed_range_end: None,
+            flushed_ranges: None,
             flush_duration_ewma: Arc::new(Mutex::new(FlushDurationEwma::default())),
         }
     }
@@ -5459,6 +5461,9 @@ impl PipelinedState {
         };
         let range_end = range_end_inclusive.next_key();
 
+        let flush_range_start = range_start.clone();
+        let flush_range_end = range_end.clone();
+
         self.flushed_range_start = match self.flushed_range_start.take() {
             Some(existing) => Some(existing.min(range_start)),
             None => Some(range_start),
@@ -5467,6 +5472,29 @@ impl PipelinedState {
             Some(existing) => Some(existing.max(range_end)),
             None => Some(range_end),
         };
+
+        let mut ranges = self
+            .flushed_ranges
+            .as_deref()
+            .map(|ranges| ranges.as_slice())
+            .unwrap_or(&[])
+            .to_vec();
+        ranges.push((flush_range_start, flush_range_end));
+        ranges.sort_by(|(start_a, _), (start_b, _)| start_a.cmp(start_b));
+
+        let mut merged = Vec::new();
+        for (start, end) in ranges {
+            if let Some((_, last_end)) = merged.last_mut() {
+                if &start <= last_end {
+                    if &end > last_end {
+                        *last_end = end;
+                    }
+                    continue;
+                }
+            }
+            merged.push((start, end));
+        }
+        self.flushed_ranges = Some(Arc::new(merged));
     }
 
     async fn flush_wait(&mut self) -> Result<()> {
@@ -8221,6 +8249,66 @@ mod tests {
         assert_eq!(txn.get(vec![1u8]).await.unwrap(), Some(b"v1".to_vec()));
         assert_eq!(flush_calls.load(Ordering::SeqCst), 1);
         assert_eq!(buffer_batch_get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_get_skips_remote_buffer_for_sparse_flushed_ranges() {
+        let flush_calls = Arc::new(AtomicUsize::new(0));
+        let buffer_batch_get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls = Arc::new(AtomicUsize::new(0));
+
+        let flush_calls_cloned = flush_calls.clone();
+        let buffer_batch_get_calls_cloned = buffer_batch_get_calls.clone();
+        let get_calls_cloned = get_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                if req
+                    .downcast_ref::<kvrpcpb::BufferBatchGetRequest>()
+                    .is_some()
+                {
+                    buffer_batch_get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::BufferBatchGetResponse>::default() as Box<dyn Any>);
+                }
+                if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
+                    get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req.version, 5);
+                    assert_eq!(req.key, vec![50u8]);
+
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    resp.value = b"v50".to_vec();
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        txn.put(vec![100u8], b"v100".to_vec()).await.unwrap();
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        assert_eq!(txn.get(vec![50u8]).await.unwrap(), Some(b"v50".to_vec()));
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(buffer_batch_get_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(get_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
