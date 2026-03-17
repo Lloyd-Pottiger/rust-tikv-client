@@ -307,6 +307,28 @@ impl KvRpcClient {
 
         if let Some(req) = request
             .as_any()
+            .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::PessimisticLock(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::PessimisticLock(resp) => {
+                            Ok(Some(Box::new(resp) as Box<dyn Any>))
+                        }
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for pessimistic_lock: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
             .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::CheckTxnStatus(req.clone());
@@ -1900,6 +1922,84 @@ mod tests {
         assert_eq!(resp.locks.len(), 1);
         assert_eq!(resp.locks[0].key, b"k".to_vec());
         assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_pessimistic_lock_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::PessimisticLockRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.mutations = vec![kvrpcpb::Mutation {
+            op: kvrpcpb::Op::PessimisticLock as i32,
+            key: b"k".to_vec(),
+            ..Default::default()
+        }];
+        request.primary_lock = b"p".to_vec();
+        request.start_version = 7;
+        request.lock_ttl = 123;
+        request.for_update_ts = 8;
+        request.is_first_lock = true;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "pessimistic_lock dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::PessimisticLock(sent_req) => {
+                assert_eq!(sent_req.primary_lock, b"p".to_vec());
+                assert_eq!(sent_req.start_version, 7);
+                assert_eq!(sent_req.lock_ttl, 123);
+                assert_eq!(sent_req.for_update_ts, 8);
+                assert!(sent_req.is_first_lock);
+                assert_eq!(sent_req.mutations.len(), 1);
+                assert_eq!(sent_req.mutations[0].key, b"k".to_vec());
+                assert_eq!(
+                    sent_req.mutations[0].op,
+                    kvrpcpb::Op::PessimisticLock as i32
+                );
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for pessimistic_lock: {other:?}"
+                )));
+            }
+        }
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(
+                    tikvpb::batch_commands_response::response::Cmd::PessimisticLock(
+                        kvrpcpb::PessimisticLockResponse::default(),
+                    ),
+                ),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::PessimisticLockResponse>()
+            .map_err(|_| Error::StringError("expected pessimistic_lock response".to_owned()))?;
+        assert!(resp.region_error.is_none());
+        assert!(resp.errors.is_empty());
         Ok(())
     }
 
