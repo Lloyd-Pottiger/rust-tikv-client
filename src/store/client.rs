@@ -41,6 +41,7 @@ pub struct TikvConnect {
     grpc_max_decoding_message_size: usize,
     grpc_compression_type: GrpcCompressionType,
     enable_batch_rpc: bool,
+    batch_rpc_max_batch_size: usize,
     health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
 }
 
@@ -51,6 +52,7 @@ impl TikvConnect {
         grpc_max_decoding_message_size: usize,
         grpc_compression_type: GrpcCompressionType,
         enable_batch_rpc: bool,
+        batch_rpc_max_batch_size: usize,
     ) -> TikvConnect {
         TikvConnect {
             security_mgr,
@@ -58,6 +60,7 @@ impl TikvConnect {
             grpc_max_decoding_message_size,
             grpc_compression_type,
             enable_batch_rpc,
+            batch_rpc_max_batch_size,
             health_feedback_observer: Arc::new(Mutex::new(None)),
         }
     }
@@ -100,6 +103,7 @@ impl KvConnect for TikvConnect {
         let grpc_max_decoding_message_size = self.grpc_max_decoding_message_size;
         let grpc_compression_type = self.grpc_compression_type;
         let enable_batch_rpc = self.enable_batch_rpc;
+        let batch_rpc_max_batch_size = self.batch_rpc_max_batch_size;
         let health_feedback_observer = Arc::clone(&self.health_feedback_observer);
 
         let rpc_client = self
@@ -117,6 +121,7 @@ impl KvConnect for TikvConnect {
             rpc_client,
             timeout,
             enable_batch_rpc,
+            batch_rpc_max_batch_size,
             health_feedback_observer,
         )
         .await)
@@ -143,10 +148,11 @@ impl KvRpcClient {
         rpc_client: TikvClient<Channel>,
         timeout: Duration,
         enable_batch_rpc: bool,
+        batch_rpc_max_batch_size: usize,
         health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
     ) -> KvRpcClient {
         let batch = if enable_batch_rpc {
-            match BatchCommandsClient::connect(rpc_client.clone()).await {
+            match BatchCommandsClient::connect(rpc_client.clone(), batch_rpc_max_batch_size).await {
                 Ok(client) => Some(client),
                 Err(Error::GrpcAPI(status)) if status.code() == tonic::Code::Unimplemented => None,
                 Err(err) => {

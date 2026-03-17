@@ -63,6 +63,14 @@ pub struct Config {
     /// When enabled, the client attempts to dispatch supported requests over a persistent
     /// `BatchCommands` stream and falls back to unary RPCs when batch RPC is unavailable.
     pub enable_batch_rpc: bool,
+    /// Maximum number of requests coalesced into a single outbound `BatchCommandsRequest`.
+    ///
+    /// When batch RPC is enabled, the client merges immediately-available queued requests into a
+    /// single `BatchCommandsRequest` up to this limit. This improves throughput under high
+    /// concurrency without adding extra wait time.
+    ///
+    /// This maps to client-go `TiKVClient.MaxBatchSize` (default: 128).
+    pub batch_rpc_max_batch_size: usize,
     /// Timeout for establishing gRPC connections (client-go `dialTimeout`).
     ///
     /// Set to `Duration::ZERO` to disable the connect timeout (use the system default).
@@ -133,6 +141,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const DEFAULT_COMMITTER_CONCURRENCY: usize = 128;
 pub(crate) const DEFAULT_MAX_TXN_TTL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
+pub(crate) const DEFAULT_BATCH_RPC_MAX_BATCH_SIZE: usize = 128;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
 const DEFAULT_GRPC_CONNECTION_COUNT: usize = 4;
 const DEFAULT_GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -160,6 +169,7 @@ impl Default for Config {
             grpc_connection_count: DEFAULT_GRPC_CONNECTION_COUNT,
             grpc_compression_type: GrpcCompressionType::None,
             enable_batch_rpc: false,
+            batch_rpc_max_batch_size: DEFAULT_BATCH_RPC_MAX_BATCH_SIZE,
             grpc_connect_timeout: DEFAULT_GRPC_CONNECT_TIMEOUT,
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
@@ -195,6 +205,11 @@ impl Config {
         if self.grpc_connection_count == 0 {
             return Err(crate::Error::StringError(
                 "grpc-connection-count should be greater than 0".to_owned(),
+            ));
+        }
+        if self.batch_rpc_max_batch_size == 0 {
+            return Err(crate::Error::StringError(
+                "batch-rpc-max-batch-size should be greater than 0".to_owned(),
             ));
         }
         if self.grpc_keepalive_timeout < MIN_GRPC_KEEPALIVE_TIMEOUT {
@@ -309,6 +324,15 @@ impl Config {
     #[must_use]
     pub fn with_enable_batch_rpc(mut self, enable: bool) -> Self {
         self.enable_batch_rpc = enable;
+        self
+    }
+
+    /// Set the maximum number of requests coalesced into a single outbound `BatchCommandsRequest`.
+    ///
+    /// This only affects the `BatchCommands` stream when `enable_batch_rpc` is set.
+    #[must_use]
+    pub fn with_batch_rpc_max_batch_size(mut self, max_batch_size: usize) -> Self {
+        self.batch_rpc_max_batch_size = max_batch_size;
         self
     }
 
@@ -450,6 +474,10 @@ mod tests {
         assert_eq!(config.grpc_connection_count, 4);
         assert_eq!(config.grpc_compression_type, GrpcCompressionType::None);
         assert!(!config.enable_batch_rpc);
+        assert_eq!(
+            config.batch_rpc_max_batch_size,
+            DEFAULT_BATCH_RPC_MAX_BATCH_SIZE
+        );
         assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
         assert_eq!(config.committer_concurrency, DEFAULT_COMMITTER_CONCURRENCY);
         assert_eq!(config.max_txn_ttl, DEFAULT_MAX_TXN_TTL);
@@ -489,6 +517,14 @@ mod tests {
     fn test_config_validate_grpc_connection_count_min() {
         let mut config = Config::default();
         config.grpc_connection_count = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, crate::Error::StringError(_)));
+    }
+
+    #[test]
+    fn test_config_validate_batch_rpc_max_batch_size_min() {
+        let mut config = Config::default();
+        config.batch_rpc_max_batch_size = 0;
         let err = config.validate().unwrap_err();
         assert!(matches!(err, crate::Error::StringError(_)));
     }

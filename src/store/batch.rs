@@ -19,8 +19,6 @@ use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::Error;
 use crate::Result;
 
-const BATCH_COMMANDS_OUTBOUND_MAX_REQUESTS: usize = 128;
-
 #[derive(Clone, Debug)]
 pub(crate) struct BatchDispatchResult {
     pub(crate) cmd: tikvpb::batch_commands_response::response::Cmd,
@@ -90,9 +88,12 @@ fn outbound_stream(
 }
 
 impl BatchCommandsClient {
-    pub(crate) async fn connect(client: TikvClient<Channel>) -> Result<Self> {
+    pub(crate) async fn connect(
+        client: TikvClient<Channel>,
+        max_outbound_requests: usize,
+    ) -> Result<Self> {
         let (outbound_tx, outbound_rx) = mpsc::channel(1024);
-        let outbound_stream = outbound_stream(outbound_rx, BATCH_COMMANDS_OUTBOUND_MAX_REQUESTS);
+        let outbound_stream = outbound_stream(outbound_rx, max_outbound_requests);
 
         let req = outbound_stream.into_streaming_request();
         let response = client

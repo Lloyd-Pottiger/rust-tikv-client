@@ -1065,6 +1065,7 @@ impl PdRpcClient<TikvConnect, Cluster> {
                     config.grpc_max_decoding_message_size,
                     config.grpc_compression_type,
                     config.enable_batch_rpc,
+                    config.batch_rpc_max_batch_size,
                 )
             },
             |security_mgr| {
