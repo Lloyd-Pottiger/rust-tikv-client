@@ -42,7 +42,7 @@ txn.commit().await?;
 
 Both clients accept a `Config` via `new_with_config`. For example, enable transaction local latches
 (optimistic commits only) or enable the optional `BatchCommands` streaming RPC for supported
-read-only requests:
+requests:
 
 ```rust
 use tikv_client::{Config, TransactionClient};
@@ -54,6 +54,8 @@ let txn_client = TransactionClient::new_with_config(vec!["127.0.0.1:2379"], conf
 ```
 
 The batch RPC feature is best-effort and falls back to unary RPCs when batch RPC is unavailable.
+Use `Config::with_batch_rpc_max_batch_size` to tune how many requests are coalesced into each
+outbound `BatchCommandsRequest` (default: 128).
 
 Stale reads (replica reads) are supported on read-only snapshots; see `examples/stale_read.rs` for a runnable example.
 
