@@ -503,6 +503,52 @@ impl KvRpcClient {
 
         if let Some(req) = request
             .as_any()
+            .downcast_ref::<kvrpcpb::PrepareFlashbackToVersionRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::PrepareFlashbackToVersion(
+                req.clone(),
+            );
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::PrepareFlashbackToVersion(
+                            resp,
+                        ) => Ok(Some(Box::new(resp) as Box<dyn Any>)),
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for prepare_flashback_to_version: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
+            .downcast_ref::<kvrpcpb::FlashbackToVersionRequest>()
+        {
+            let cmd = tikvpb::batch_commands_request::request::Cmd::FlashbackToVersion(req.clone());
+            return match batch.dispatch(cmd, self.timeout).await {
+                Ok(result) => {
+                    self.observe_health_feedback(result.health_feedback.as_ref());
+                    match result.cmd {
+                        tikvpb::batch_commands_response::response::Cmd::FlashbackToVersion(
+                            resp,
+                        ) => Ok(Some(Box::new(resp) as Box<dyn Any>)),
+                        other => Err(Error::StringError(format!(
+                            "unexpected batch_commands response for flashback_to_version: {other:?}"
+                        ))),
+                    }
+                }
+                Err(Error::GrpcAPI(_)) => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Some(req) = request
+            .as_any()
             .downcast_ref::<kvrpcpb::PessimisticRollbackRequest>()
         {
             let cmd =
@@ -2557,6 +2603,137 @@ mod tests {
         let resp = resp
             .downcast::<kvrpcpb::DeleteRangeResponse>()
             .map_err(|_| Error::StringError("expected delete_range response".to_owned()))?;
+        assert_eq!(resp.error, "oops");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_prepare_flashback_to_version_via_batch_commands(
+    ) -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::PrepareFlashbackToVersionRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.start_key = b"k1".to_vec();
+        request.end_key = b"k3".to_vec();
+        request.start_ts = 42;
+        request.version = 123;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "prepare_flashback_to_version dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::PrepareFlashbackToVersion(sent_req) => {
+                assert_eq!(sent_req.start_key, b"k1".to_vec());
+                assert_eq!(sent_req.end_key, b"k3".to_vec());
+                assert_eq!(sent_req.start_ts, 42);
+                assert_eq!(sent_req.version, 123);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for prepare_flashback_to_version: {other:?}"
+                )));
+            }
+        }
+
+        let mut resp = kvrpcpb::PrepareFlashbackToVersionResponse::default();
+        resp.error = "oops".to_owned();
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(
+                    tikvpb::batch_commands_response::response::Cmd::PrepareFlashbackToVersion(resp),
+                ),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::PrepareFlashbackToVersionResponse>()
+            .map_err(|_| {
+                Error::StringError("expected prepare_flashback_to_version response".to_owned())
+            })?;
+        assert_eq!(resp.error, "oops");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatches_flashback_to_version_via_batch_commands() -> Result<()> {
+        let (client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::FlashbackToVersionRequest::default();
+        request.context = Some(kvrpcpb::Context::default());
+        request.start_key = b"k1".to_vec();
+        request.end_key = b"k3".to_vec();
+        request.start_ts = 42;
+        request.commit_ts = 43;
+        request.version = 123;
+
+        let dispatch = client.dispatch(&request);
+        tokio::pin!(dispatch);
+
+        let sent = tokio::select! {
+            sent = out_rx.recv() => sent.expect("batch request"),
+            result = &mut dispatch => {
+                return Err(Error::StringError(format!(
+                    "flashback_to_version dispatch finished before seeing batch request: {result:?}"
+                )));
+            }
+        };
+
+        let request_id = *sent.request_ids.first().expect("request id");
+        assert_eq!(sent.request_ids.len(), 1);
+        assert_eq!(sent.requests.len(), 1);
+
+        let cmd = sent.requests.into_iter().next().unwrap().cmd.unwrap();
+        match cmd {
+            tikvpb::batch_commands_request::request::Cmd::FlashbackToVersion(sent_req) => {
+                assert_eq!(sent_req.start_key, b"k1".to_vec());
+                assert_eq!(sent_req.end_key, b"k3".to_vec());
+                assert_eq!(sent_req.start_ts, 42);
+                assert_eq!(sent_req.commit_ts, 43);
+                assert_eq!(sent_req.version, 123);
+            }
+            other => {
+                return Err(Error::StringError(format!(
+                    "unexpected cmd for flashback_to_version: {other:?}"
+                )));
+            }
+        }
+
+        let mut resp = kvrpcpb::FlashbackToVersionResponse::default();
+        resp.error = "oops".to_owned();
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::FlashbackToVersion(resp)),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let resp = dispatch.await?;
+        let resp = resp
+            .downcast::<kvrpcpb::FlashbackToVersionResponse>()
+            .map_err(|_| Error::StringError("expected flashback_to_version response".to_owned()))?;
         assert_eq!(resp.error, "oops");
         Ok(())
     }
