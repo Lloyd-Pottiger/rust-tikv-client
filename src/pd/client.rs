@@ -691,6 +691,49 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     pd_http_use_https: bool,
 }
 
+const REGION_CACHE_PRELOAD_LIMIT: i32 = 10_000;
+
+impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC, Cluster> {
+    pub(crate) fn spawn_region_cache_preload(self: Arc<Self>, start_key: Key, end_key: Key) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            warn!("region cache preload skipped: no tokio runtime");
+            return;
+        };
+
+        handle.spawn(async move {
+            let enable_codec = self.enable_codec;
+            let start_key = if enable_codec {
+                start_key.to_encoded()
+            } else {
+                start_key
+            };
+            let end_key = if end_key.is_empty() {
+                end_key
+            } else if enable_codec {
+                end_key.to_encoded()
+            } else {
+                end_key
+            };
+
+            match self
+                .region_cache
+                .preload_region_index(start_key, end_key, REGION_CACHE_PRELOAD_LIMIT)
+                .await
+            {
+                Ok(loaded) => {
+                    debug!("region cache preload finished: loaded {loaded} regions");
+                }
+                Err(Error::Unimplemented) => {
+                    debug!("region cache preload skipped: PD ScanRegions unimplemented");
+                }
+                Err(err) => {
+                    warn!("region cache preload failed: {err}");
+                }
+            }
+        });
+    }
+}
+
 impl<KvC: KvConnect + Send + Sync + 'static> HealthFeedbackObserver for PdRpcClient<KvC, Cluster> {
     fn observe_health_feedback(&self, feedback: &kvrpcpb::HealthFeedback) {
         if feedback.slow_score >= HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD {

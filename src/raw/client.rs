@@ -118,6 +118,7 @@ impl Client<PdRpcClient> {
         config: Config,
     ) -> Result<Self> {
         let enable_codec = config.keyspace.is_some();
+        let enable_region_cache_preload = config.enable_region_cache_preload;
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let health_feedback_update_interval = config.health_feedback_update_interval;
         let rpc =
@@ -133,6 +134,10 @@ impl Client<PdRpcClient> {
             }
             None => Keyspace::Disable,
         };
+        if enable_region_cache_preload {
+            let (start_key, end_key) = keyspace.prefix_range(KeyMode::Raw);
+            rpc.clone().spawn_region_cache_preload(start_key, end_key);
+        }
         Ok(Client {
             safe_ts: SafeTsCache::new(rpc.clone(), keyspace),
             rpc,

@@ -181,6 +181,7 @@ impl Client {
         config: Config,
     ) -> Result<Client> {
         debug!("creating new transactional client");
+        let enable_region_cache_preload = config.enable_region_cache_preload;
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let health_feedback_update_interval = config.health_feedback_update_interval;
         let txn_local_latches_capacity = config.txn_local_latches_capacity;
@@ -196,6 +197,10 @@ impl Client {
             }
             None => Keyspace::Disable,
         };
+        if enable_region_cache_preload {
+            let (start_key, end_key) = keyspace.prefix_range(KeyMode::Txn);
+            pd.clone().spawn_region_cache_preload(start_key, end_key);
+        }
         let txn_latches = (txn_local_latches_capacity > 0)
             .then(|| Arc::new(TxnLocalLatches::new(txn_local_latches_capacity)));
         Ok(Client {
@@ -225,12 +230,17 @@ impl Client {
         }
 
         debug!("creating new transactional client (api-v2-no-prefix)");
+        let enable_region_cache_preload = config.enable_region_cache_preload;
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let health_feedback_update_interval = config.health_feedback_update_interval;
         let txn_local_latches_capacity = config.txn_local_latches_capacity;
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
         pd.install_health_feedback_observer();
         crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
+        if enable_region_cache_preload {
+            let (start_key, end_key) = Keyspace::ApiV2NoPrefix.prefix_range(KeyMode::Txn);
+            pd.clone().spawn_region_cache_preload(start_key, end_key);
+        }
         let txn_latches = (txn_local_latches_capacity > 0)
             .then(|| Arc::new(TxnLocalLatches::new(txn_local_latches_capacity)));
         Ok(Client {

@@ -41,6 +41,16 @@ impl Keyspace {
             Keyspace::ApiV2NoPrefix => kvrpcpb::ApiVersion::V2,
         }
     }
+
+    pub(crate) fn prefix_range(self, key_mode: KeyMode) -> (Key, Key) {
+        match self {
+            Keyspace::Enable { keyspace_id } => (
+                Key::from(keyspace_prefix(keyspace_id, key_mode).to_vec()),
+                Key::from(keyspace_end_prefix(keyspace_id, key_mode).to_vec()),
+            ),
+            _ => (Key::EMPTY, Key::EMPTY),
+        }
+    }
 }
 
 pub trait EncodeKeyspace {

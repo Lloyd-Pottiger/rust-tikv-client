@@ -201,7 +201,7 @@ impl<Client> RegionCache<Client> {
     }
 }
 
-impl<C: RetryClientTrait> RegionCache<C> {
+impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     // Retrieve cache entry by key. If there's no entry, query PD and update cache.
     pub async fn get_region_by_key(&self, key: &Key) -> Result<RegionWithLeader> {
         let region_cache_guard = self.region_cache.read().await;
@@ -313,6 +313,65 @@ impl<C: RetryClientTrait> RegionCache<C> {
         let region = self.inner_client.clone().get_region(key.into()).await?;
         self.add_region(region.clone()).await;
         Ok(region)
+    }
+
+    /// Preload region metadata from PD by scanning regions in key order.
+    ///
+    /// This is a best-effort helper intended to reduce cold-start latency by warming the local
+    /// region cache (similar to client-go `EnablePreload` + `refreshRegionIndex`).
+    ///
+    /// - `start_key` and `end_key` should be in the same key encoding used by PD/TiKV (the caller
+    ///   is responsible for applying any API version / keyspace / memcomparable encoding).
+    /// - Regions without leaders are skipped (callers can still fall back to read-through).
+    ///
+    /// Returns the number of regions added to the cache.
+    pub async fn preload_region_index(
+        &self,
+        mut start_key: Key,
+        end_key: Key,
+        limit: i32,
+    ) -> Result<usize> {
+        if limit <= 0 {
+            return Ok(0);
+        }
+
+        let end_key_bytes: Vec<u8> = end_key.clone().into();
+        let mut total = 0usize;
+
+        loop {
+            let regions = self
+                .inner_client
+                .clone()
+                .scan_regions(start_key.clone().into(), end_key_bytes.clone(), limit)
+                .await?;
+            if regions.is_empty() {
+                break;
+            }
+
+            for region in &regions {
+                if region.leader.is_none() {
+                    continue;
+                }
+                self.add_region(region.clone()).await;
+                total += 1;
+            }
+
+            let Some(last_end_key) = regions.last().map(RegionWithLeader::end_key) else {
+                break;
+            };
+            if last_end_key.is_empty() {
+                break;
+            }
+            if last_end_key == start_key {
+                break;
+            }
+            if !end_key_bytes.is_empty() && last_end_key >= end_key {
+                break;
+            }
+            start_key = last_end_key;
+        }
+
+        Ok(total)
     }
 
     /// Force read through (query from PD) and update cache
@@ -551,12 +610,16 @@ mod test {
     use crate::Key;
     use crate::Result;
 
+    type ScanRegionsCall = (Vec<u8>, Vec<u8>, i32);
+
     #[derive(Default)]
     struct MockRetryClient {
         pub regions: Mutex<HashMap<RegionId, RegionWithLeader>>,
         pub stores: Mutex<Vec<metapb::Store>>,
         pub get_region_count: AtomicU64,
         pub get_store_count: AtomicU64,
+        pub scan_regions_count: AtomicU64,
+        pub scan_regions_calls: Mutex<Vec<ScanRegionsCall>>,
     }
 
     #[async_trait]
@@ -589,6 +652,50 @@ mod test {
                 .map(|(_, r)| r.clone())
                 .next()
                 .ok_or_else(|| Error::StringError("MockRetryClient: region not found".to_owned()))
+        }
+
+        async fn scan_regions(
+            self: Arc<Self>,
+            start_key: Vec<u8>,
+            end_key: Vec<u8>,
+            limit: i32,
+        ) -> Result<Vec<RegionWithLeader>> {
+            self.scan_regions_count.fetch_add(1, SeqCst);
+            self.scan_regions_calls
+                .lock()
+                .await
+                .push((start_key.clone(), end_key.clone(), limit));
+
+            if limit <= 0 {
+                return Ok(Vec::new());
+            }
+
+            let start_key = Key::from(start_key);
+            let end_key = Key::from(end_key);
+
+            let mut regions: Vec<RegionWithLeader> =
+                self.regions.lock().await.values().cloned().collect();
+            regions.sort_by(|left, right| left.region.start_key.cmp(&right.region.start_key));
+
+            let Some(start_idx) = regions
+                .iter()
+                .position(|region| region.contains(&start_key))
+            else {
+                return Ok(Vec::new());
+            };
+
+            let mut out = Vec::new();
+            for region in regions.into_iter().skip(start_idx) {
+                if !end_key.is_empty() && region.start_key() >= end_key {
+                    break;
+                }
+                out.push(region);
+                if out.len() >= limit as usize {
+                    break;
+                }
+            }
+
+            Ok(out)
         }
 
         async fn get_store(
@@ -696,6 +803,85 @@ mod test {
             cache.get_region_by_id(2).await?.leader.unwrap().store_id,
             102
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_preload_region_index_populates_cache_and_skips_no_leader() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        retry_client.regions.lock().await.insert(
+            1,
+            RegionWithLeader {
+                region: metapb::Region {
+                    id: 1,
+                    start_key: vec![],
+                    end_key: vec![100],
+                    region_epoch: Some(RegionEpoch {
+                        conf_ver: 0,
+                        version: 0,
+                    }),
+                    ..Default::default()
+                },
+                leader: Some(metapb::Peer {
+                    store_id: 1,
+                    ..Default::default()
+                }),
+            },
+        );
+        retry_client.regions.lock().await.insert(
+            2,
+            RegionWithLeader {
+                region: metapb::Region {
+                    id: 2,
+                    start_key: vec![100],
+                    end_key: vec![200],
+                    region_epoch: Some(RegionEpoch {
+                        conf_ver: 0,
+                        version: 0,
+                    }),
+                    ..Default::default()
+                },
+                leader: None,
+            },
+        );
+        retry_client.regions.lock().await.insert(
+            3,
+            RegionWithLeader {
+                region: metapb::Region {
+                    id: 3,
+                    start_key: vec![200],
+                    end_key: vec![],
+                    region_epoch: Some(RegionEpoch {
+                        conf_ver: 0,
+                        version: 0,
+                    }),
+                    ..Default::default()
+                },
+                leader: Some(metapb::Peer {
+                    store_id: 3,
+                    ..Default::default()
+                }),
+            },
+        );
+
+        let loaded = cache
+            .preload_region_index(Key::EMPTY, Key::EMPTY, 2)
+            .await?;
+        assert_eq!(loaded, 2);
+        assert_eq!(retry_client.scan_regions_count.load(SeqCst), 2);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+
+        // Region with leader should be served from cache.
+        assert_eq!(cache.get_region_by_id(1).await?.id(), 1);
+        assert_eq!(cache.get_region_by_key(&Key::from(vec![1])).await?.id(), 1);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+
+        // Region without leader should not be preloaded.
+        assert_eq!(cache.get_region_by_id(2).await?.id(), 2);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 1);
 
         Ok(())
     }

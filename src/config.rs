@@ -121,6 +121,15 @@ pub struct Config {
     ///
     /// Set to `Duration::ZERO` to disable jitter.
     pub region_cache_ttl_jitter: Duration,
+    /// Whether to preload region metadata into the local region cache.
+    ///
+    /// When enabled, the client will asynchronously scan regions from PD on startup and warm the
+    /// local region cache. Errors are logged and ignored.
+    ///
+    /// This maps to client-go `EnablePreload`.
+    ///
+    /// Defaults to disabled (`false`).
+    pub enable_region_cache_preload: bool,
     /// How often to refresh TiKV store health feedback (slow score).
     ///
     /// When non-zero, the client periodically issues `GetHealthFeedback` to all stores and uses
@@ -180,6 +189,7 @@ impl Default for Config {
             ttl_refreshed_txn_size: DEFAULT_TTL_REFRESHED_TXN_SIZE,
             region_cache_ttl: DEFAULT_REGION_CACHE_TTL,
             region_cache_ttl_jitter: DEFAULT_REGION_CACHE_TTL_JITTER,
+            enable_region_cache_preload: false,
             health_feedback_update_interval: Duration::ZERO,
             txn_local_latches_capacity: 0,
         }
@@ -440,6 +450,13 @@ impl Config {
     #[must_use]
     pub fn with_region_cache_ttl_jitter(mut self, jitter: Duration) -> Self {
         self.region_cache_ttl_jitter = jitter;
+        self
+    }
+
+    /// Enable or disable region cache preload on client startup (client-go `EnablePreload`).
+    #[must_use]
+    pub fn with_enable_region_cache_preload(mut self, enable: bool) -> Self {
+        self.enable_region_cache_preload = enable;
         self
     }
 
