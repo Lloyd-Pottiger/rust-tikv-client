@@ -10,6 +10,7 @@ use serial_test::serial;
 use std::collections::HashMap;
 use tikv_client::transaction::Mutation;
 use tikv_client::Config;
+use tikv_client::Error;
 use tikv_client::Key;
 use tikv_client::Result;
 use tikv_client::SyncTransactionClient;
@@ -1030,5 +1031,35 @@ fn txn_sync_send_heart_beat() -> Result<()> {
     );
     txn.rollback()?;
 
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn txn_sync_pipelined_iter_is_not_supported() -> Result<()> {
+    init_sync()?;
+
+    let client = sync_client()?;
+    let mut txn = client.begin_with_options(TransactionOptions::new_optimistic().pipelined())?;
+
+    let err = txn
+        .iter(b"a".to_vec(), b"z".to_vec())
+        .collect::<Result<Vec<_>>>()
+        .expect_err("expected pipelined iter to be unsupported");
+    assert!(matches!(
+        err,
+        Error::StringError(msg) if msg == "iter is not supported for pipelined transactions"
+    ));
+
+    let err = txn
+        .iter_reverse(b"z".to_vec(), b"a".to_vec())
+        .collect::<Result<Vec<_>>>()
+        .expect_err("expected pipelined iter_reverse to be unsupported");
+    assert!(matches!(
+        err,
+        Error::StringError(msg) if msg == "iter_reverse is not supported for pipelined transactions"
+    ));
+
+    txn.rollback()?;
     Ok(())
 }

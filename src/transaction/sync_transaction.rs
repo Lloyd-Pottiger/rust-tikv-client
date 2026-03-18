@@ -28,10 +28,18 @@ struct SyncTransactionScanIterator<'a> {
     pending: std::vec::IntoIter<KvPair>,
     finished: bool,
     batch_size: u32,
+    unsupported: Option<Error>,
 }
 
 impl<'a> SyncTransactionScanIterator<'a> {
     fn forward(transaction: &'a mut SyncTransaction, start_key: Key, upper_bound: Key) -> Self {
+        let unsupported = if transaction.is_pipelined() {
+            Some(Error::StringError(
+                "iter is not supported for pipelined transactions".to_owned(),
+            ))
+        } else {
+            None
+        };
         Self {
             batch_size: super::snapshot::DEFAULT_SCAN_BATCH_SIZE,
             transaction,
@@ -41,10 +49,18 @@ impl<'a> SyncTransactionScanIterator<'a> {
             },
             pending: Vec::<KvPair>::new().into_iter(),
             finished: false,
+            unsupported,
         }
     }
 
     fn reverse(transaction: &'a mut SyncTransaction, start_key: Key, lower_bound: Key) -> Self {
+        let unsupported = if transaction.is_pipelined() {
+            Some(Error::StringError(
+                "iter_reverse is not supported for pipelined transactions".to_owned(),
+            ))
+        } else {
+            None
+        };
         Self {
             batch_size: super::snapshot::DEFAULT_SCAN_BATCH_SIZE,
             transaction,
@@ -54,6 +70,7 @@ impl<'a> SyncTransactionScanIterator<'a> {
             },
             pending: Vec::<KvPair>::new().into_iter(),
             finished: false,
+            unsupported,
         }
     }
 }
@@ -64,6 +81,11 @@ impl Iterator for SyncTransactionScanIterator<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished {
             return None;
+        }
+
+        if let Some(err) = self.unsupported.take() {
+            self.finished = true;
+            return Some(Err(err));
         }
 
         if let Some(pair) = self.pending.next() {
