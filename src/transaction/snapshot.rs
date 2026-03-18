@@ -946,7 +946,8 @@ mod tests {
     use crate::timestamp::TimestampExt;
     use crate::Timestamp;
     use crate::{
-        Backoff, CheckLevel, Error, RetryOptions, SnapshotRuntimeStats, TransactionOptions,
+        Backoff, CheckLevel, CommandPriority, Error, RetryOptions, SnapshotRuntimeStats,
+        TransactionOptions,
     };
 
     use super::*;
@@ -1831,5 +1832,82 @@ mod tests {
         assert_eq!(scan_detail.rocksdb_block_cache_hit_count, 17);
         assert_eq!(scan_detail.rocksdb_block_read_count, 19);
         assert_eq!(scan_detail.rocksdb_block_read_byte, 23);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_snapshot_inherits_read_settings() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                assert_eq!(req.version, 10);
+                let ctx = req.context.as_ref().expect("GetRequest context");
+                assert_eq!(ctx.priority, CommandPriority::High as i32);
+                assert_eq!(ctx.request_source, "external_snapshot_test");
+                assert_eq!(
+                    ctx.resource_control_context
+                        .as_ref()
+                        .expect("resource_control_context")
+                        .resource_group_name,
+                    "rg-name"
+                );
+                assert_eq!(ctx.resource_group_tag, b"rg-tag".to_vec());
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.value = b"v".to_vec();
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.set_priority(CommandPriority::High);
+        txn.set_request_source("external_snapshot_test");
+        txn.set_resource_group_name("rg-name");
+        txn.set_resource_group_tagger(|label| {
+            assert_eq!(label, "kv_get");
+            b"rg-tag".to_vec()
+        });
+
+        let mut snapshot = txn.snapshot();
+        let value = snapshot.get(b"k".to_vec()).await.unwrap();
+        assert_eq!(value, Some(b"v".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_transaction_snapshot_skips_self_locks() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                let ctx = req.context.as_ref().expect("GetRequest context");
+                assert_eq!(ctx.resolved_locks, vec![10]);
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = true;
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let mut snapshot = txn.snapshot();
+        let value = snapshot.get(b"k".to_vec()).await.unwrap();
+        assert_eq!(value, None);
     }
 }

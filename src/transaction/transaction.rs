@@ -23,6 +23,7 @@ use super::LockResolverRpcContext;
 use super::ReadLockTracker;
 use super::ResolveLockDetail;
 use super::ResolveLocksContext;
+use super::Snapshot;
 use super::SnapshotRuntimeStats;
 use super::Variables;
 use crate::backoff::Backoff;
@@ -3648,6 +3649,47 @@ impl<PdC: PdClient> Transaction<PdC> {
     #[must_use]
     pub fn start_ts(&self) -> u64 {
         self.timestamp.version()
+    }
+
+    fn snapshot_transaction(&self) -> Transaction<PdC> {
+        let mut transaction = Self::new_with_resolve_locks_ctx(
+            self.timestamp.clone(),
+            self.rpc.clone(),
+            self.options.clone().read_only(),
+            self.keyspace,
+            self.resolve_locks_ctx.clone(),
+            self.gc_safe_point.clone(),
+            self.txn_latches.clone(),
+        );
+        transaction.request_source_descriptor = self.request_source_descriptor.clone();
+        transaction.rpc_interceptors = self.rpc_interceptors.clone();
+        transaction.snapshot_runtime_stats = self.snapshot_runtime_stats.clone();
+        transaction.vars = self.vars.clone();
+        transaction.session_id = self.session_id;
+        transaction.resource_group_tagger = self.resource_group_tagger.clone();
+        transaction.replica_read_adjuster = self.replica_read_adjuster.clone();
+        transaction.schema_ver = self.schema_ver;
+        transaction.schema_lease_checker = self.schema_lease_checker.clone();
+        if self.is_pipelined() {
+            // Match client-go `KVTxn.GetSnapshot`: pipelined snapshots must skip the transaction's
+            // own flushed locks (`lock.ts == start_ts`) during resolve-lock-for-read.
+            transaction.read_lock_tracker =
+                ReadLockTracker::new_with_resolved_locks([self.timestamp.version()]);
+        }
+        transaction
+    }
+
+    /// Create a read-only snapshot bound to this transaction's start timestamp.
+    ///
+    /// The returned snapshot copies the transaction's current read settings (for example replica
+    /// read mode, request metadata, interceptors, and resource-group callbacks) while maintaining
+    /// its own snapshot-local cache. If a runtime stats collector is already attached, the
+    /// returned snapshot reuses it.
+    ///
+    /// This maps to client-go `KVTxn.GetSnapshot`.
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot<PdC> {
+        Snapshot::new(self.snapshot_transaction())
     }
 
     /// Get the commit timestamp of this transaction (if committed).

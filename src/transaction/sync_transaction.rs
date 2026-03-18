@@ -1,7 +1,7 @@
 use crate::transaction::sync_client::safe_block_on;
 use crate::{
-    transaction::Mutation, AssertionLevel, BinlogExecutor, BoundRange, CommandPriority,
-    DiskFullOpt, Error, Key, KvFilter, KvPair, LifecycleHooks, LockWaitTimeout,
+    transaction::Mutation, transaction::SyncSnapshot, AssertionLevel, BinlogExecutor, BoundRange,
+    CommandPriority, DiskFullOpt, Error, Key, KvFilter, KvPair, LifecycleHooks, LockWaitTimeout,
     PrewriteEncounterLockPolicy, ResolveLockDetail, Result, SchemaLeaseChecker, Timestamp,
     Transaction, Value, Variables,
 };
@@ -609,6 +609,14 @@ impl SyncTransaction {
     #[must_use]
     pub fn start_ts(&self) -> u64 {
         self.inner.start_ts()
+    }
+
+    /// Create a read-only snapshot bound to this transaction's start timestamp.
+    ///
+    /// This maps to client-go `KVTxn.GetSnapshot`.
+    #[must_use]
+    pub fn snapshot(&self) -> SyncSnapshot {
+        SyncSnapshot::new(self.inner.snapshot(), Arc::clone(&self.runtime))
     }
 
     /// Get the commit timestamp of this transaction (if committed).
