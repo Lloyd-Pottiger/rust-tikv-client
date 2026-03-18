@@ -2,12 +2,14 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 
 use crate::proto::kvrpcpb;
 use crate::BoundRange;
+use crate::Error;
 use crate::Key;
 use crate::KvPair;
 use crate::Result;
@@ -17,6 +19,13 @@ use super::transaction::Mutation;
 
 type MemoryFootprintChangeHook = Arc<dyn Fn(u64) + Send + Sync>;
 
+#[derive(Debug)]
+struct BufferStaging {
+    handle: u64,
+    primary_key_at_start: Option<Key>,
+    undo_entries: HashMap<Key, Option<BufferEntry>>,
+}
+
 /// A caching layer which buffers reads and writes in a transaction.
 pub struct Buffer {
     primary_key: Option<Key>,
@@ -25,6 +34,8 @@ pub struct Buffer {
     mutation_count: usize,
     mutation_size: u64,
     memory_footprint_change_hook: Option<MemoryFootprintChangeHook>,
+    staging: Vec<BufferStaging>,
+    next_staging_handle: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,7 +62,91 @@ impl Buffer {
             mutation_count: 0,
             mutation_size: 0,
             memory_footprint_change_hook: None,
+            staging: Vec::new(),
+            next_staging_handle: 0,
         }
+    }
+
+    fn record_undo_entry(&mut self, key: &Key) {
+        let Some(staging) = self.staging.last_mut() else {
+            return;
+        };
+        if staging.undo_entries.contains_key(key) {
+            return;
+        }
+        let prev_entry = self.entry_map.get(key).cloned();
+        staging.undo_entries.insert(key.clone(), prev_entry);
+    }
+
+    fn remove_entry(&mut self, key: &Key) {
+        let Some(entry) = self.entry_map.remove(key) else {
+            return;
+        };
+
+        let prev_mem = self.mutation_size;
+        if !matches!(entry, BufferEntry::Cached(_)) {
+            self.mutation_count = self.mutation_count.saturating_sub(1);
+            let size = mutation_size_for_entry(key.len(), &entry);
+            self.mutation_size = self.mutation_size.saturating_sub(size);
+        }
+        if prev_mem != self.mutation_size {
+            self.report_memory_footprint();
+        }
+    }
+
+    pub(crate) fn staging(&mut self) -> u64 {
+        let handle = self.next_staging_handle;
+        self.next_staging_handle = self.next_staging_handle.saturating_add(1);
+        self.staging.push(BufferStaging {
+            handle,
+            primary_key_at_start: self.primary_key.clone(),
+            undo_entries: HashMap::new(),
+        });
+        handle
+    }
+
+    pub(crate) fn release_staging(&mut self, handle: u64) -> Result<()> {
+        let staging = self
+            .staging
+            .pop()
+            .ok_or_else(|| Error::StringError("staging handle not found".to_owned()))?;
+        if staging.handle != handle {
+            self.staging.push(staging);
+            return Err(Error::StringError(format!(
+                "staging handle mismatch: expected {handle}, found {}",
+                self.staging.last().map(|s| s.handle).unwrap_or_default()
+            )));
+        }
+
+        if let Some(parent) = self.staging.last_mut() {
+            for (key, entry) in staging.undo_entries {
+                parent.undo_entries.entry(key).or_insert(entry);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_staging(&mut self, handle: u64) -> Result<()> {
+        let staging = self
+            .staging
+            .pop()
+            .ok_or_else(|| Error::StringError("staging handle not found".to_owned()))?;
+        if staging.handle != handle {
+            self.staging.push(staging);
+            return Err(Error::StringError(format!(
+                "staging handle mismatch: expected {handle}, found {}",
+                self.staging.last().map(|s| s.handle).unwrap_or_default()
+            )));
+        }
+
+        for (key, entry) in staging.undo_entries {
+            match entry {
+                Some(entry) => self.insert_entry(key, entry),
+                None => self.remove_entry(&key),
+            }
+        }
+        self.primary_key = staging.primary_key_at_start;
+        Ok(())
     }
 
     pub(crate) fn set_is_pessimistic(&mut self, is_pessimistic: bool) {
@@ -267,6 +362,7 @@ impl Buffer {
 
     /// Lock the given key if necessary.
     pub fn lock(&mut self, key: Key) {
+        self.record_undo_entry(&key);
         self.primary_key.get_or_insert_with(|| key.clone());
         let key_len = u64::try_from(key.len()).unwrap_or(u64::MAX);
         let prev_mem = self.mutation_size;
@@ -300,6 +396,7 @@ impl Buffer {
     }
 
     pub(crate) fn lock_shared(&mut self, key: Key) {
+        self.record_undo_entry(&key);
         let key_len = u64::try_from(key.len()).unwrap_or(u64::MAX);
         let prev_mem = self.mutation_size;
 
@@ -356,6 +453,8 @@ impl Buffer {
             return;
         }
 
+        self.record_undo_entry(key);
+
         let prev_mem = self.mutation_size;
         let key_len = u64::try_from(key.len()).unwrap_or(u64::MAX);
 
@@ -377,6 +476,7 @@ impl Buffer {
 
     /// Put a value into the buffer (does not write through).
     pub fn put(&mut self, key: Key, value: Value) {
+        self.record_undo_entry(&key);
         if matches!(
             self.entry_map.get(&key),
             Some(BufferEntry::Insert(_)) | Some(BufferEntry::CheckNotExist)
@@ -389,6 +489,7 @@ impl Buffer {
 
     /// Mark a value as Insert mutation into the buffer (does not write through).
     pub fn insert(&mut self, key: Key, value: Value) {
+        self.record_undo_entry(&key);
         if matches!(self.entry_map.get(&key), Some(BufferEntry::Del)) {
             self.insert_entry(key, BufferEntry::Put(value));
             return;
@@ -398,6 +499,7 @@ impl Buffer {
 
     /// Mark a value as deleted.
     pub fn delete(&mut self, key: Key) {
+        self.record_undo_entry(&key);
         if !self.is_pessimistic
             && matches!(
                 self.entry_map.get(&key),
@@ -429,6 +531,10 @@ impl Buffer {
     ///
     /// This is used by pipelined transactions that flush buffered mutations during execution.
     pub(crate) fn take_mutations(&mut self) -> Vec<kvrpcpb::Mutation> {
+        debug_assert!(
+            self.staging.is_empty(),
+            "pipelined take_mutations is not compatible with staging"
+        );
         let prev_mem = self.mutation_size;
         let mut cached_entries = BTreeMap::new();
         let mut mutations = Vec::new();
@@ -717,6 +823,91 @@ mod tests {
             .collect::<Vec<_>>(),
             vec![KvPair(Key::from(b"key1".to_vec()), b"value".to_vec()),]
         );
+    }
+
+    #[test]
+    fn staging_cleanup_rolls_back_changes() {
+        let k1: Key = b"key1".to_vec().into();
+        let k2: Key = b"key2".to_vec().into();
+
+        let mut buffer = Buffer::new(false);
+        buffer.put(k1.clone(), b"value1".to_vec());
+        let handle = buffer.staging();
+
+        buffer.put(k1.clone(), b"value2".to_vec());
+        buffer.put(k2.clone(), b"value3".to_vec());
+        buffer.delete(k1.clone());
+
+        buffer.cleanup_staging(handle).unwrap();
+
+        assert!(matches!(
+            buffer.entry_map.get(&k1),
+            Some(BufferEntry::Put(v)) if v == b"value1"
+        ));
+        assert!(!buffer.entry_map.contains_key(&k2));
+        assert_eq!(buffer.get_primary_key(), Some(k1));
+    }
+
+    #[test]
+    fn staging_cleanup_restores_nested_state() {
+        let k1: Key = b"key1".to_vec().into();
+
+        let mut buffer = Buffer::new(false);
+        buffer.put(k1.clone(), b"value1".to_vec());
+        let outer = buffer.staging();
+        buffer.put(k1.clone(), b"value2".to_vec());
+
+        let inner = buffer.staging();
+        buffer.put(k1.clone(), b"value3".to_vec());
+        buffer.cleanup_staging(inner).unwrap();
+
+        assert!(matches!(
+            buffer.entry_map.get(&k1),
+            Some(BufferEntry::Put(v)) if v == b"value2"
+        ));
+
+        buffer.cleanup_staging(outer).unwrap();
+        assert!(matches!(
+            buffer.entry_map.get(&k1),
+            Some(BufferEntry::Put(v)) if v == b"value1"
+        ));
+    }
+
+    #[test]
+    fn staging_release_merges_undo_into_parent() {
+        let k1: Key = b"key1".to_vec().into();
+        let k2: Key = b"key2".to_vec().into();
+
+        let mut buffer = Buffer::new(false);
+        buffer.put(k1.clone(), b"value1".to_vec());
+        let outer = buffer.staging();
+        buffer.put(k2.clone(), b"value2".to_vec());
+
+        let inner = buffer.staging();
+        buffer.put(k1.clone(), b"value3".to_vec());
+        buffer.release_staging(inner).unwrap();
+
+        buffer.cleanup_staging(outer).unwrap();
+        assert!(matches!(
+            buffer.entry_map.get(&k1),
+            Some(BufferEntry::Put(v)) if v == b"value1"
+        ));
+        assert!(!buffer.entry_map.contains_key(&k2));
+    }
+
+    #[test]
+    fn staging_handle_mismatch_errors_and_preserves_stack() {
+        let mut buffer = Buffer::new(false);
+        let outer = buffer.staging();
+        let inner = buffer.staging();
+
+        let err = buffer.cleanup_staging(outer).unwrap_err();
+        assert!(matches!(err, Error::StringError(msg) if msg.contains("mismatch")));
+        assert_eq!(buffer.staging.len(), 2);
+
+        buffer.cleanup_staging(inner).unwrap();
+        buffer.cleanup_staging(outer).unwrap();
+        assert!(buffer.staging.is_empty());
     }
 
     #[test]

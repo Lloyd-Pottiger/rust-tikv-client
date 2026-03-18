@@ -852,6 +852,27 @@ impl SyncTransaction {
         self.inner.size()
     }
 
+    /// Create a new staging buffer (savepoint) for local mutations.
+    ///
+    /// See [`Transaction::staging`].
+    pub fn staging(&mut self) -> Result<u64> {
+        self.inner.staging()
+    }
+
+    /// Release a staging buffer created by [`SyncTransaction::staging`], keeping its changes.
+    ///
+    /// See [`Transaction::release_staging`].
+    pub fn release_staging(&mut self, handle: u64) -> Result<()> {
+        self.inner.release_staging(handle)
+    }
+
+    /// Roll back changes in a staging buffer created by [`SyncTransaction::staging`].
+    ///
+    /// See [`Transaction::cleanup_staging`].
+    pub fn cleanup_staging(&mut self, handle: u64) -> Result<()> {
+        self.inner.cleanup_staging(handle)
+    }
+
     /// Commit the transaction.
     pub fn commit(&mut self) -> Result<Option<Timestamp>> {
         safe_block_on(&self.runtime, self.inner.commit())

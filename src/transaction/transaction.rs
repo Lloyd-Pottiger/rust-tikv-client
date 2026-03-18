@@ -3921,6 +3921,85 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.buffer.mutation_size()
     }
 
+    /// Create a new staging buffer (savepoint) for local mutations.
+    ///
+    /// This mirrors the staging mechanism exposed by client-go's `MemBuffer`. A staging handle can
+    /// later be passed to [`Transaction::release_staging`] (keep changes) or
+    /// [`Transaction::cleanup_staging`] (rollback changes).
+    ///
+    /// Note: staging is only supported for non-pipelined optimistic transactions.
+    pub fn staging(&mut self) -> Result<u64> {
+        match self.get_status() {
+            TransactionStatus::ReadOnly | TransactionStatus::Active => {}
+            TransactionStatus::Committed
+            | TransactionStatus::Rolledback
+            | TransactionStatus::StartedCommit
+            | TransactionStatus::StartedRollback
+            | TransactionStatus::Dropped => return Err(Error::OperationAfterCommitError),
+        }
+        if self.is_pessimistic() {
+            return Err(Error::StringError(
+                "staging is not supported for pessimistic transactions".to_owned(),
+            ));
+        }
+        if self.is_pipelined() {
+            return Err(Error::StringError(
+                "staging is not supported for pipelined transactions".to_owned(),
+            ));
+        }
+        Ok(self.buffer.staging())
+    }
+
+    /// Release a staging buffer created by [`Transaction::staging`], keeping its changes.
+    ///
+    /// Note: staging is only supported for non-pipelined optimistic transactions.
+    pub fn release_staging(&mut self, handle: u64) -> Result<()> {
+        match self.get_status() {
+            TransactionStatus::ReadOnly | TransactionStatus::Active => {}
+            TransactionStatus::Committed
+            | TransactionStatus::Rolledback
+            | TransactionStatus::StartedCommit
+            | TransactionStatus::StartedRollback
+            | TransactionStatus::Dropped => return Err(Error::OperationAfterCommitError),
+        }
+        if self.is_pessimistic() {
+            return Err(Error::StringError(
+                "staging is not supported for pessimistic transactions".to_owned(),
+            ));
+        }
+        if self.is_pipelined() {
+            return Err(Error::StringError(
+                "staging is not supported for pipelined transactions".to_owned(),
+            ));
+        }
+        self.buffer.release_staging(handle)
+    }
+
+    /// Roll back changes in a staging buffer created by [`Transaction::staging`].
+    ///
+    /// Note: staging is only supported for non-pipelined optimistic transactions.
+    pub fn cleanup_staging(&mut self, handle: u64) -> Result<()> {
+        match self.get_status() {
+            TransactionStatus::ReadOnly | TransactionStatus::Active => {}
+            TransactionStatus::Committed
+            | TransactionStatus::Rolledback
+            | TransactionStatus::StartedCommit
+            | TransactionStatus::StartedRollback
+            | TransactionStatus::Dropped => return Err(Error::OperationAfterCommitError),
+        }
+        if self.is_pessimistic() {
+            return Err(Error::StringError(
+                "staging is not supported for pessimistic transactions".to_owned(),
+            ));
+        }
+        if self.is_pipelined() {
+            return Err(Error::StringError(
+                "staging is not supported for pipelined transactions".to_owned(),
+            ));
+        }
+        self.buffer.cleanup_staging(handle)
+    }
+
     /// Set a hook that is triggered when the local mutation buffer memory footprint changes.
     ///
     /// This maps to client-go `KVTxn.SetMemoryFootprintChangeHook`.
