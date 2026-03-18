@@ -700,8 +700,13 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC, Cluster> {
             return;
         };
 
+        let weak = Arc::downgrade(&self);
         handle.spawn(async move {
-            let enable_codec = self.enable_codec;
+            let Some(client) = weak.upgrade() else {
+                return;
+            };
+
+            let enable_codec = client.enable_codec;
             let start_key = if enable_codec {
                 start_key.to_encoded()
             } else {
@@ -715,7 +720,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC, Cluster> {
                 end_key
             };
 
-            match self
+            match client
                 .region_cache
                 .preload_region_index(start_key, end_key, REGION_CACHE_PRELOAD_LIMIT)
                 .await
