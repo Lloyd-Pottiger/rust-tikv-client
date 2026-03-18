@@ -268,6 +268,13 @@ impl SyncSnapshot {
         self.inner.set_snapshot_ts(timestamp)
     }
 
+    /// Mark this snapshot as reading through a pipelined transaction's start timestamp.
+    ///
+    /// This maps to client-go `KVSnapshot.SetPipelined`.
+    pub fn set_pipelined(&mut self, start_ts: u64) {
+        self.inner.set_pipelined(start_ts);
+    }
+
     /// Set the geographical scope of this snapshot.
     ///
     /// This maps to client-go `KVSnapshot.SetTxnScope` / `KVSnapshot.SetReadReplicaScope`.

@@ -229,6 +229,17 @@ impl<PdC: PdClient> Snapshot<PdC> {
         Ok(())
     }
 
+    /// Mark this snapshot as reading through a pipelined transaction's start timestamp.
+    ///
+    /// This makes resolve-lock-for-read skip locks whose `lock.ts == start_ts`, matching
+    /// client-go `KVSnapshot.SetPipelined`.
+    ///
+    /// Call this before issuing reads when the snapshot may encounter locks flushed by the same
+    /// pipelined transaction.
+    pub fn set_pipelined(&mut self, start_ts: u64) {
+        self.transaction.set_snapshot_pipelined(start_ts);
+    }
+
     /// Set the geographical scope of this snapshot.
     ///
     /// When `txn_scope` is `"global"` (or empty), this uses the global TSO allocator
@@ -1907,6 +1918,37 @@ mod tests {
         );
 
         let mut snapshot = txn.snapshot();
+        let value = snapshot.get(b"k".to_vec()).await.unwrap();
+        assert_eq!(value, None);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_set_pipelined_skips_self_locks() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                let ctx = req.context.as_ref().expect("GetRequest context");
+                assert_eq!(ctx.resolved_locks, vec![10]);
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = true;
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+        snapshot.set_pipelined(10);
+
         let value = snapshot.get(b"k".to_vec()).await.unwrap();
         assert_eq!(value, None);
     }

@@ -831,6 +831,11 @@ impl<PdC: PdClient> Transaction<PdC> {
         Ok(())
     }
 
+    pub(crate) fn set_snapshot_pipelined(&mut self, start_ts: u64) {
+        debug_assert!(self.options.read_only);
+        self.read_lock_tracker = ReadLockTracker::new_with_resolved_locks([start_ts]);
+    }
+
     pub(crate) fn clean_snapshot_read_cache(&mut self, keys: impl IntoIterator<Item = Key>) {
         self.buffer.clean_cached_reads(keys);
     }
@@ -3673,8 +3678,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         if self.is_pipelined() {
             // Match client-go `KVTxn.GetSnapshot`: pipelined snapshots must skip the transaction's
             // own flushed locks (`lock.ts == start_ts`) during resolve-lock-for-read.
-            transaction.read_lock_tracker =
-                ReadLockTracker::new_with_resolved_locks([self.timestamp.version()]);
+            transaction.set_snapshot_pipelined(self.timestamp.version());
         }
         transaction
     }
