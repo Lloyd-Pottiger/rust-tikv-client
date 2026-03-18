@@ -388,6 +388,17 @@ impl ReadLockTracker {
         }
     }
 
+    pub(crate) fn insert_resolved_lock(&self, resolved_lock: u64) {
+        loop {
+            if let Ok(mut state) = self.inner.try_write() {
+                state.resolved_locks.insert(resolved_lock);
+                return;
+            }
+
+            std::thread::yield_now();
+        }
+    }
+
     pub(crate) async fn snapshot(&self) -> (Vec<u64>, Vec<u64>) {
         let state = self.inner.read().await;
         let resolved_locks = state.resolved_locks.iter().copied().collect();

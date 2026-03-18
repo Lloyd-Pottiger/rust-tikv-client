@@ -1952,4 +1952,91 @@ mod tests {
         let value = snapshot.get(b"k".to_vec()).await.unwrap();
         assert_eq!(value, None);
     }
+
+    #[tokio::test]
+    async fn test_snapshot_set_pipelined_preserves_resolved_lock_tracker_state() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls_cloned = Arc::clone(&get_calls);
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() {
+                    let attempt = get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    let ctx = req.context.as_ref().expect("GetRequest context");
+                    let mut resolved_locks = ctx.resolved_locks.clone();
+                    resolved_locks.sort_unstable();
+
+                    match attempt {
+                        0 => {
+                            assert!(ctx.committed_locks.is_empty());
+                            assert!(resolved_locks.is_empty());
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            let mut key_err = kvrpcpb::KeyError::default();
+                            let mut lock = kvrpcpb::LockInfo::default();
+                            lock.key = b"k1".to_vec();
+                            lock.primary_lock = b"k1".to_vec();
+                            lock.lock_version = 1;
+                            lock.lock_ttl = 100;
+                            lock.txn_size = 1;
+                            lock.lock_type = kvrpcpb::Op::Put as i32;
+                            key_err.locked = Some(lock);
+                            resp.error = Some(key_err);
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        1 => {
+                            assert!(ctx.committed_locks.is_empty());
+                            assert_eq!(resolved_locks, vec![1]);
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            resp.value = b"v1".to_vec();
+                            resp.not_found = false;
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        2 => {
+                            assert!(ctx.committed_locks.is_empty());
+                            assert_eq!(resolved_locks, vec![1, 10]);
+
+                            let mut resp = kvrpcpb::GetResponse::default();
+                            resp.value = b"v2".to_vec();
+                            resp.not_found = false;
+                            return Ok(Box::new(resp) as Box<dyn Any>);
+                        }
+                        _ => panic!("unexpected get attempt {attempt}"),
+                    }
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
+                    .is_some()
+                {
+                    let mut resp = kvrpcpb::CheckTxnStatusResponse::default();
+                    resp.action = kvrpcpb::Action::NoAction as i32;
+                    resp.commit_version = 20;
+                    resp.lock_ttl = 0;
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                panic!("unexpected request type in snapshot set_pipelined tracker test");
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+
+        let first = snapshot.get(b"k1".to_vec()).await.unwrap();
+        assert_eq!(first, Some(b"v1".to_vec()));
+
+        snapshot.set_pipelined(10);
+
+        let second = snapshot.get(b"k2".to_vec()).await.unwrap();
+        assert_eq!(second, Some(b"v2".to_vec()));
+        assert_eq!(get_calls.load(Ordering::SeqCst), 3);
+    }
 }

@@ -833,7 +833,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
     pub(crate) fn set_snapshot_pipelined(&mut self, start_ts: u64) {
         debug_assert!(self.options.read_only);
-        self.read_lock_tracker = ReadLockTracker::new_with_resolved_locks([start_ts]);
+        self.read_lock_tracker.insert_resolved_lock(start_ts);
     }
 
     pub(crate) fn clean_snapshot_read_cache(&mut self, keys: impl IntoIterator<Item = Key>) {
