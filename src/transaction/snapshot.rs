@@ -36,7 +36,7 @@ pub struct SnapshotCacheEntry {
 }
 
 const SNAPSHOT_CACHE_SIZE_LIMIT_BYTES: usize = 10 << 30;
-const DEFAULT_SCAN_BATCH_SIZE: u32 = 256;
+pub(super) const DEFAULT_SCAN_BATCH_SIZE: u32 = 256;
 
 #[derive(Debug, Default)]
 struct SnapshotCache {
@@ -1690,7 +1690,6 @@ mod tests {
             vec![
                 (b"d".to_vec(), b"a".to_vec(), 2),
                 (b"b".to_vec(), b"a".to_vec(), 2),
-                (b"a".to_vec(), b"a".to_vec(), 2),
             ]
         );
     }

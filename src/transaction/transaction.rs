@@ -2560,6 +2560,158 @@ impl<PdC: PdClient> Transaction<PdC> {
             .map(KvPair::into_key))
     }
 
+    /// Create a streaming iterator over key-value pairs starting at `start_key`.
+    ///
+    /// The returned stream yields all pairs whose keys are in the range `[start_key, upper_bound)`.
+    /// When `upper_bound` is empty, it means upper unbounded.
+    ///
+    /// Note: this operation is not supported for pipelined transactions.
+    ///
+    /// This maps to client-go `KVTxn.Iter`.
+    pub fn iter(
+        &mut self,
+        start_key: impl Into<Key>,
+        upper_bound: impl Into<Key>,
+    ) -> impl futures::Stream<Item = Result<KvPair>> + '_ {
+        struct State<'a, PdC: PdClient> {
+            transaction: &'a mut Transaction<PdC>,
+            next_start: Key,
+            upper_bound: Key,
+            pending: std::vec::IntoIter<KvPair>,
+            finished: bool,
+            batch_size: u32,
+            unsupported: Option<Error>,
+        }
+
+        let batch_size = super::snapshot::DEFAULT_SCAN_BATCH_SIZE;
+        let unsupported = self.options.pipelined_txn.as_ref().map(|_| {
+            Error::StringError("iter is not supported for pipelined transactions".to_owned())
+        });
+        let state = State {
+            transaction: self,
+            next_start: start_key.into(),
+            upper_bound: upper_bound.into(),
+            pending: Vec::<KvPair>::new().into_iter(),
+            finished: false,
+            batch_size,
+            unsupported,
+        };
+
+        futures::stream::try_unfold(state, |mut state| async move {
+            loop {
+                if state.finished {
+                    return Ok(None);
+                }
+
+                if let Some(err) = state.unsupported.take() {
+                    return Err(err);
+                }
+
+                if let Some(pair) = state.pending.next() {
+                    return Ok(Some((pair, state)));
+                }
+
+                let batch: Vec<KvPair> = state
+                    .transaction
+                    .scan(
+                        state.next_start.clone()..state.upper_bound.clone(),
+                        state.batch_size,
+                    )
+                    .await?
+                    .collect();
+                if batch.is_empty() {
+                    state.finished = true;
+                    return Ok(None);
+                }
+
+                let Some(last_key) = batch.last().map(|pair| pair.key().clone()) else {
+                    return Err(crate::internal_err!(
+                        "non-empty scan batch should have a last key"
+                    ));
+                };
+                state.next_start = last_key.next_key();
+                state.pending = batch.into_iter();
+            }
+        })
+    }
+
+    /// Create a reversed streaming iterator positioned on the first entry with key < `start_key`.
+    ///
+    /// The returned stream yields all pairs whose keys are in the range `[lower_bound, start_key)`,
+    /// in descending order. When `lower_bound` is empty, it means lower unbounded.
+    ///
+    /// Note: this operation is not supported for pipelined transactions.
+    ///
+    /// This maps to client-go `KVTxn.IterReverse`.
+    pub fn iter_reverse(
+        &mut self,
+        start_key: impl Into<Key>,
+        lower_bound: impl Into<Key>,
+    ) -> impl futures::Stream<Item = Result<KvPair>> + '_ {
+        struct State<'a, PdC: PdClient> {
+            transaction: &'a mut Transaction<PdC>,
+            lower_bound: Key,
+            next_end: Key,
+            pending: std::vec::IntoIter<KvPair>,
+            finished: bool,
+            batch_size: u32,
+            unsupported: Option<Error>,
+        }
+
+        let batch_size = super::snapshot::DEFAULT_SCAN_BATCH_SIZE;
+        let unsupported = self.options.pipelined_txn.as_ref().map(|_| {
+            Error::StringError(
+                "iter_reverse is not supported for pipelined transactions".to_owned(),
+            )
+        });
+        let state = State {
+            transaction: self,
+            lower_bound: lower_bound.into(),
+            next_end: start_key.into(),
+            pending: Vec::<KvPair>::new().into_iter(),
+            finished: false,
+            batch_size,
+            unsupported,
+        };
+
+        futures::stream::try_unfold(state, |mut state| async move {
+            loop {
+                if state.finished {
+                    return Ok(None);
+                }
+
+                if let Some(err) = state.unsupported.take() {
+                    return Err(err);
+                }
+
+                if let Some(pair) = state.pending.next() {
+                    return Ok(Some((pair, state)));
+                }
+
+                let batch: Vec<KvPair> = state
+                    .transaction
+                    .scan_reverse(
+                        state.lower_bound.clone()..state.next_end.clone(),
+                        state.batch_size,
+                    )
+                    .await?
+                    .collect();
+                if batch.is_empty() {
+                    state.finished = true;
+                    return Ok(None);
+                }
+
+                let Some(last_key) = batch.last().map(|pair| pair.key().clone()) else {
+                    return Err(crate::internal_err!(
+                        "non-empty scan_reverse batch should have a last key"
+                    ));
+                };
+                state.next_end = last_key;
+                state.pending = batch.into_iter();
+            }
+        })
+    }
+
     pub(crate) async fn scan_with_key_only(
         &mut self,
         range: impl Into<BoundRange>,
@@ -7717,6 +7869,7 @@ mod tests {
     use crate::Error;
     use crate::IsolationLevel;
     use crate::Key;
+    use crate::KvPair;
     use crate::PipelinedTxnOptions;
     use crate::ReplicaReadType;
     use crate::StoreLabel;
@@ -8822,6 +8975,230 @@ mod tests {
             .unwrap()
             .collect::<Vec<_>>();
         assert!(pairs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_transaction_iter_scans_in_batches_until_upper_bound_and_applies_buffer() {
+        use futures::TryStreamExt;
+
+        let seen = Arc::new(Mutex::new(Vec::<(Vec<u8>, Vec<u8>, u32)>::new()));
+        let seen_captured = seen.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::ScanRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+                assert!(!req.reverse);
+
+                seen_captured.lock().unwrap().push((
+                    req.start_key.clone(),
+                    req.end_key.clone(),
+                    req.limit,
+                ));
+
+                let mut resp = kvrpcpb::ScanResponse::default();
+                match req.start_key.as_slice() {
+                    b"a" => {
+                        resp.pairs.push(kvrpcpb::KvPair {
+                            key: b"a".to_vec(),
+                            value: b"v".to_vec(),
+                            error: None,
+                            commit_ts: 0,
+                        });
+                        resp.pairs.push(kvrpcpb::KvPair {
+                            key: b"b".to_vec(),
+                            value: b"v".to_vec(),
+                            error: None,
+                            commit_ts: 0,
+                        });
+                    }
+                    b"b\x00" => {
+                        resp.pairs.push(kvrpcpb::KvPair {
+                            key: b"c".to_vec(),
+                            value: b"v".to_vec(),
+                            error: None,
+                            commit_ts: 0,
+                        });
+                    }
+                    _ => {}
+                }
+
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.put(b"b".to_vec(), b"local".to_vec()).await.unwrap();
+
+        let pairs: Vec<KvPair> = txn
+            .iter(b"a".to_vec(), b"d".to_vec())
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                KvPair(b"a".to_vec().into(), b"v".to_vec()),
+                KvPair(b"b".to_vec().into(), b"local".to_vec()),
+                KvPair(b"c".to_vec().into(), b"v".to_vec()),
+            ]
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (
+                    b"a".to_vec(),
+                    b"d".to_vec(),
+                    super::super::snapshot::DEFAULT_SCAN_BATCH_SIZE,
+                ),
+                (
+                    b"b\x00".to_vec(),
+                    b"d".to_vec(),
+                    super::super::snapshot::DEFAULT_SCAN_BATCH_SIZE,
+                ),
+                (
+                    b"c\x00".to_vec(),
+                    b"d".to_vec(),
+                    super::super::snapshot::DEFAULT_SCAN_BATCH_SIZE,
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transaction_iter_reverse_scans_in_batches_until_lower_bound_and_applies_buffer() {
+        use futures::TryStreamExt;
+
+        let seen = Arc::new(Mutex::new(Vec::<(Vec<u8>, Vec<u8>, u32)>::new()));
+        let seen_captured = seen.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::ScanRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+                assert!(req.reverse);
+
+                seen_captured.lock().unwrap().push((
+                    req.start_key.clone(),
+                    req.end_key.clone(),
+                    req.limit,
+                ));
+
+                let mut resp = kvrpcpb::ScanResponse::default();
+                match req.start_key.as_slice() {
+                    b"d" => {
+                        resp.pairs.push(kvrpcpb::KvPair {
+                            key: b"c".to_vec(),
+                            value: b"v".to_vec(),
+                            error: None,
+                            commit_ts: 0,
+                        });
+                        resp.pairs.push(kvrpcpb::KvPair {
+                            key: b"b".to_vec(),
+                            value: b"v".to_vec(),
+                            error: None,
+                            commit_ts: 0,
+                        });
+                    }
+                    b"b" => {
+                        resp.pairs.push(kvrpcpb::KvPair {
+                            key: b"a".to_vec(),
+                            value: b"v".to_vec(),
+                            error: None,
+                            commit_ts: 0,
+                        });
+                    }
+                    _ => {}
+                }
+
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.put(b"b".to_vec(), b"local".to_vec()).await.unwrap();
+
+        let pairs: Vec<KvPair> = txn
+            .iter_reverse(b"d".to_vec(), b"a".to_vec())
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                KvPair(b"c".to_vec().into(), b"v".to_vec()),
+                KvPair(b"b".to_vec().into(), b"local".to_vec()),
+                KvPair(b"a".to_vec().into(), b"v".to_vec()),
+            ]
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (
+                    b"d".to_vec(),
+                    b"a".to_vec(),
+                    super::super::snapshot::DEFAULT_SCAN_BATCH_SIZE,
+                ),
+                (
+                    b"b".to_vec(),
+                    b"a".to_vec(),
+                    super::super::snapshot::DEFAULT_SCAN_BATCH_SIZE,
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_iter_is_not_supported() {
+        use futures::TryStreamExt;
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(|_| {
+            Err(Error::StringError("unexpected request".to_owned()))
+        })));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let err = txn
+            .iter(b"a".to_vec(), b"z".to_vec())
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::StringError(msg) if msg == "iter is not supported for pipelined transactions"
+        ));
+
+        let err = txn
+            .iter_reverse(b"z".to_vec(), b"a".to_vec())
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::StringError(msg) if msg == "iter_reverse is not supported for pipelined transactions"
+        ));
     }
 
     #[tokio::test]
