@@ -249,6 +249,26 @@ pub(crate) fn observe_backoff_seconds(label: &str, duration: Duration) {
         .observe(duration_to_sec(duration));
 }
 
+pub(crate) fn observe_request_retry_times(retry_times: u32) {
+    if retry_times == 0 {
+        return;
+    }
+    if let Some(histogram) = TIKV_CLIENT_RUST_REQUEST_RETRY_TIMES_HISTOGRAM.as_ref() {
+        histogram.observe(f64::from(retry_times));
+    }
+}
+
+pub(crate) fn observe_stale_read_hit_miss(is_stale_read: bool, retry_times: u32) {
+    if !is_stale_read {
+        return;
+    }
+    let Some(counter) = TIKV_CLIENT_RUST_STALE_READ_COUNTER_VEC.as_ref() else {
+        return;
+    };
+    let result = if retry_times == 0 { "hit" } else { "miss" };
+    counter.with_label_values(&[result]).inc();
+}
+
 #[allow(dead_code)]
 pub fn observe_tso_batch(batch_size: usize) {
     if let Some(histogram) = PD_TSO_BATCH_SIZE_HISTOGRAM.as_ref() {
@@ -635,6 +655,25 @@ fn register_histogram(name: &'static str, help: &'static str) -> Option<Histogra
     Some(metric)
 }
 
+fn register_histogram_with_buckets(
+    name: &'static str,
+    help: &'static str,
+    buckets: Vec<f64>,
+) -> Option<Histogram> {
+    let metric = match Histogram::with_opts(HistogramOpts::new(name, help).buckets(buckets)) {
+        Ok(metric) => metric,
+        Err(err) => {
+            warn!("failed to build prometheus histogram {name}: {err}");
+            return None;
+        }
+    };
+    if let Err(err) = prometheus::register(Box::new(metric.clone())) {
+        warn!("failed to register prometheus histogram {name}: {err}");
+        return None;
+    }
+    Some(metric)
+}
+
 lazy_static::lazy_static! {
     static ref TIKV_REQUEST_DURATION_HISTOGRAM_VEC: Option<HistogramVec> = register_histogram_vec(
         "tikv_request_duration_seconds",
@@ -737,6 +776,13 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["type"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_REQUEST_RETRY_TIMES_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_request_retry_times";
+        let help = "Bucketed histogram of how many times a request retries.";
+        let buckets = vec![1.0, 2.0, 3.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_READ_REQUEST_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_read_request_bytes";
         let help = "Bucketed histogram of total bytes sent/received for read requests.";
@@ -760,6 +806,12 @@ lazy_static::lazy_static! {
         "tikv_client_rust_stale_read_bytes",
         "Bytes sent/received for stale read requests.",
         &["result", "direction"],
+    );
+
+    static ref TIKV_CLIENT_RUST_STALE_READ_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
+        "tikv_client_rust_stale_read_counter",
+        "Counter of stale read hit/miss.",
+        &["result"],
     );
 
     static ref TIKV_CLIENT_RUST_REGION_CACHE_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
@@ -825,7 +877,8 @@ mod tests {
 
     use super::{
         observe_backoff_seconds, observe_kv_request_traffic_metrics, observe_load_region_cache,
-        region_cache_operation, tikv_stats_with_context,
+        observe_request_retry_times, observe_stale_read_hit_miss, region_cache_operation,
+        tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -915,6 +968,90 @@ mod tests {
         assert!(
             bytes_out_found && bytes_in_found,
             "expected stale read bytes metrics with labels not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_request_retry_times_histogram_records_observations() {
+        let before_sum = {
+            let families = prometheus::gather();
+            let family = families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_request_retry_times")
+                .map(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .map(|metric| metric.get_histogram().get_sample_sum())
+                        .sum::<f64>()
+                })
+                .unwrap_or(0.0);
+            family
+        };
+
+        observe_request_retry_times(123);
+
+        let after_sum = {
+            let families = prometheus::gather();
+            let family = families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_request_retry_times")
+                .expect("request retry times histogram not registered");
+            family
+                .get_metric()
+                .iter()
+                .map(|metric| metric.get_histogram().get_sample_sum())
+                .sum::<f64>()
+        };
+
+        assert!(
+            after_sum >= before_sum + 123.0,
+            "expected request retry times histogram sample sum to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_stale_read_counter_records_hit_and_miss() {
+        fn counter_value(families: &[prometheus::proto::MetricFamily], result: &str) -> f64 {
+            families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_stale_read_counter")
+                .and_then(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .find(|metric| label_value(metric, "result") == Some(result))
+                        .map(|metric| metric.get_counter().get_value())
+                })
+                .unwrap_or(0.0)
+        }
+
+        let before = prometheus::gather();
+        let before_hit = counter_value(&before, "hit");
+        let before_miss = counter_value(&before, "miss");
+
+        for _ in 0..50 {
+            observe_stale_read_hit_miss(true, 0);
+        }
+        for _ in 0..70 {
+            observe_stale_read_hit_miss(true, 1);
+        }
+        observe_stale_read_hit_miss(false, 0);
+        observe_stale_read_hit_miss(false, 10);
+
+        let after = prometheus::gather();
+        let after_hit = counter_value(&after, "hit");
+        let after_miss = counter_value(&after, "miss");
+
+        assert!(
+            after_hit >= before_hit + 50.0,
+            "expected stale read hit counter to increase"
+        );
+        assert!(
+            after_miss >= before_miss + 70.0,
+            "expected stale read miss counter to increase"
         );
     }
 

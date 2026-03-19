@@ -34,6 +34,8 @@ use crate::rpc_interceptor::RpcInterceptors;
 use crate::rpc_interceptor::RpcRequest;
 use crate::stats::observe_backoff_seconds;
 use crate::stats::observe_kv_request_traffic_metrics;
+use crate::stats::observe_request_retry_times;
+use crate::stats::observe_stale_read_hit_miss;
 use crate::stats::tikv_stats_with_context;
 use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
@@ -1798,6 +1800,7 @@ where
         killed: Option<Arc<AtomicU32>>,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        stale_read: bool,
         replica_read: Option<ReplicaReadState>,
         match_store_ids: Arc<Vec<u64>>,
         match_store_labels: Arc<Vec<StoreLabel>>,
@@ -1824,6 +1827,7 @@ where
                 killed.clone(),
                 permits.clone(),
                 preserve_region_results,
+                stale_read,
                 replica_read,
                 match_store_ids,
                 match_store_labels,
@@ -1861,6 +1865,7 @@ where
         killed: Option<Arc<AtomicU32>>,
         permits: Arc<Semaphore>,
         preserve_region_results: bool,
+        stale_read: bool,
         replica_read: Option<ReplicaReadState>,
         match_store_ids: Arc<Vec<u64>>,
         match_store_labels: Arc<Vec<StoreLabel>>,
@@ -2175,6 +2180,8 @@ where
                     replica_read,
                     match_store_ids,
                     match_store_labels,
+                    stale_read,
+                    false,
                     Error::LeaderNotFound { region },
                 )
                 .await;
@@ -2240,18 +2247,26 @@ where
                     replica_read,
                     match_store_ids,
                     match_store_labels,
+                    stale_read,
+                    true,
                     e,
                 )
                 .await;
             }
             Err(e) => {
                 debug!("single_shard_handler:execute: error: {:?}", e);
+                let retry_times = backoff.current_attempts();
+                observe_request_retry_times(retry_times);
+                observe_stale_read_hit_miss(stale_read, retry_times);
                 return Err(e);
             }
         };
 
         if let Some(e) = resp.key_errors() {
             debug!("single_shard_handler:execute: key errors: {:?}", e);
+            let retry_times = backoff.current_attempts();
+            observe_request_retry_times(retry_times);
+            observe_stale_read_hit_miss(stale_read, retry_times);
             Ok(vec![Err(collapse_key_errors(e))])
         } else if let Some(e) = resp.region_error() {
             debug!("single_shard_handler:execute: region error: {:?}", e);
@@ -2363,15 +2378,24 @@ where
                         killed,
                         permits,
                         preserve_region_results,
+                        stale_read,
                         replica_read,
                         match_store_ids,
                         match_store_labels,
                     )
                     .await
                 }
-                None => Err(Error::RegionError(Box::new(e))),
+                None => {
+                    let retry_times = backoff.current_attempts();
+                    observe_request_retry_times(retry_times);
+                    observe_stale_read_hit_miss(stale_read, retry_times);
+                    Err(Error::RegionError(Box::new(e)))
+                }
             }
         } else {
+            let retry_times = backoff.current_attempts();
+            observe_request_retry_times(retry_times);
+            observe_stale_read_hit_miss(stale_read, retry_times);
             Ok(vec![Ok(resp)])
         }
     }
@@ -2389,6 +2413,8 @@ where
         replica_read: Option<ReplicaReadState>,
         match_store_ids: Arc<Vec<u64>>,
         match_store_labels: Arc<Vec<StoreLabel>>,
+        stale_read: bool,
+        executed: bool,
         e: Error,
     ) -> Result<<Self as Plan>::Result> {
         debug!("handle_other_error: {:?}", e);
@@ -2433,13 +2459,21 @@ where
                     killed,
                     permits,
                     preserve_region_results,
+                    stale_read,
                     replica_read,
                     match_store_ids,
                     match_store_labels,
                 )
                 .await
             }
-            None => Err(e),
+            None => {
+                if executed {
+                    let retry_times = backoff.current_attempts();
+                    observe_request_retry_times(retry_times);
+                    observe_stale_read_hit_miss(stale_read, retry_times);
+                }
+                Err(e)
+            }
         }
     }
 }
@@ -2660,6 +2694,7 @@ where
             self.killed.clone(),
             concurrency_permits.clone(),
             self.preserve_region_results,
+            stale_read,
             self.replica_read
                 .map(|read_type| ReplicaReadState::new(read_type, stale_read)),
             self.match_store_ids.clone(),
@@ -3684,6 +3719,7 @@ mod test {
 
     use futures::stream::BoxStream;
     use futures::stream::{self};
+    use serial_test::serial;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -3929,6 +3965,7 @@ mod test {
                 Backoff::no_backoff(),
                 None,
                 permits,
+                false,
                 false,
                 None,
                 match_store_ids,
@@ -5573,6 +5610,113 @@ mod test {
             seen,
             vec![(51, true, false), (41, false, false), (61, false, true)],
             "stale read retries should fall back to leader read once, then switch to replica read when the leader is healthy"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_retry_times_and_stale_read_hit_miss_metrics_recorded() {
+        fn metric_label_value<'a>(
+            metric: &'a prometheus::proto::Metric,
+            name: &str,
+        ) -> Option<&'a str> {
+            metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.get_name() == name)
+                .map(|pair| pair.get_value())
+        }
+
+        fn histogram_sample_sum(name: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == name)
+                .map(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .map(|metric| metric.get_histogram().get_sample_sum())
+                        .sum::<f64>()
+                })
+                .unwrap_or(0.0)
+        }
+
+        fn stale_read_counter_value(result: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_stale_read_counter")
+                .and_then(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .find(|metric| metric_label_value(metric, "result") == Some(result))
+                        .map(|metric| metric.get_counter().get_value())
+                })
+                .unwrap_or(0.0)
+        }
+
+        let before_retry_sum = histogram_sample_sum("tikv_client_rust_request_retry_times");
+        let before_miss = stale_read_counter_value("miss");
+
+        // Execute a stale-read request that retries twice (2 region errors, then success) to get
+        // a deterministic + noticeable delta even when other tests run.
+        const RUNS: usize = 20;
+        for _ in 0..RUNS {
+            let call_count = Arc::new(AtomicUsize::new(0));
+            let call_count_captured = call_count.clone();
+            let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+                move |req: &dyn Any| {
+                    let req = req
+                        .downcast_ref::<kvrpcpb::GetRequest>()
+                        .expect("expected get request");
+                    let ctx = req.context.as_ref().expect("expected context");
+                    let peer = ctx.peer.as_ref().expect("expected peer");
+                    let call = call_count_captured.fetch_add(1, Ordering::SeqCst);
+                    let mut resp = kvrpcpb::GetResponse::default();
+                    if call < 2 {
+                        let mut region_error = errorpb::Error::default();
+                        region_error.data_is_not_ready = Some(errorpb::DataIsNotReady {
+                            region_id: 1,
+                            peer_id: peer.id,
+                            safe_ts: 0,
+                        });
+                        resp.region_error = Some(region_error);
+                    }
+                    Ok(Box::new(resp) as Box<dyn Any>)
+                },
+            )));
+
+            let mut request = kvrpcpb::GetRequest::default();
+            request.key = vec![1];
+            request.version = 10;
+            request.context = Some(kvrpcpb::Context {
+                stale_read: true,
+                replica_read: false,
+                ..Default::default()
+            });
+
+            let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+                .retry_multi_region_with_replica_read(
+                    Backoff::no_jitter_backoff(0, 0, 10),
+                    ReplicaReadType::Mixed,
+                )
+                .plan();
+
+            let results = plan.execute().await.expect("plan should succeed");
+            assert_eq!(results.len(), 1);
+            assert!(results[0].is_ok());
+        }
+
+        let after_retry_sum = histogram_sample_sum("tikv_client_rust_request_retry_times");
+        let after_miss = stale_read_counter_value("miss");
+
+        assert!(
+            after_retry_sum >= before_retry_sum + (RUNS as f64) * 2.0,
+            "expected request_retry_times histogram to observe retry counts"
+        );
+        assert!(
+            after_miss >= before_miss + RUNS as f64,
+            "expected stale_read_counter miss to increase"
         );
     }
 
