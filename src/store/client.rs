@@ -207,6 +207,16 @@ impl KvRpcClient {
         observer.observe_health_feedback(feedback);
     }
 
+    fn fallback_from_batch_dispatch_error(err: Error) -> Result<Option<Box<dyn Any>>> {
+        match err {
+            Error::GrpcAPI(_) => {
+                crate::stats::inc_batch_client_no_available_connection();
+                Ok(None)
+            }
+            err => Err(err),
+        }
+    }
+
     async fn try_dispatch_batch(&self, request: &dyn Request) -> Result<Option<Box<dyn Any>>> {
         let Some(batch) = self.batch.as_ref() else {
             return Ok(None);
@@ -226,8 +236,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -245,8 +254,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -267,8 +275,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -286,8 +293,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -305,8 +311,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -324,8 +329,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -343,8 +347,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -362,8 +365,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -381,8 +383,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -403,8 +404,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -425,8 +425,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -448,8 +447,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -470,8 +468,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -492,8 +489,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -511,8 +507,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -533,8 +528,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -557,8 +551,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -579,8 +572,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -598,8 +590,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -620,8 +611,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -643,8 +633,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -668,8 +657,7 @@ impl KvRpcClient {
                         "unexpected batch_commands response for get_health_feedback: {other:?}"
                     ))),
                 },
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -690,8 +678,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -709,8 +696,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -731,8 +717,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -750,8 +735,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -772,8 +756,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -791,8 +774,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -813,8 +795,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -835,8 +816,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -854,8 +834,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -876,8 +855,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -898,8 +876,7 @@ impl KvRpcClient {
                         ))),
                     }
                 }
-                Err(Error::GrpcAPI(_)) => Ok(None),
-                Err(err) => Err(err),
+                Err(err) => Self::fallback_from_batch_dispatch_error(err),
             };
         }
 
@@ -937,6 +914,7 @@ mod tests {
     use std::task::Poll;
 
     use futures::stream;
+    use serial_test::serial;
     use tokio::sync::mpsc;
     use tonic::body::BoxBody;
     use tonic::codegen::http;
@@ -1055,6 +1033,60 @@ mod tests {
         };
 
         Ok((client, out_rx, in_tx))
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_kv_rpc_client_records_no_available_connection_on_batch_grpc_error() -> Result<()>
+    {
+        let before = {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| {
+                    family.get_name()
+                        == "tikv_client_rust_batch_client_no_available_connection_total"
+                })
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        };
+
+        let (client, out_rx, _in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+        drop(out_rx);
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = b"k".to_vec();
+        request.version = 7;
+
+        let resp = client.try_dispatch_batch(&request).await?;
+        assert!(
+            resp.is_none(),
+            "expected batch dispatch to fall back to unary"
+        );
+
+        let after = {
+            let families = prometheus::gather();
+            let family = families
+                .iter()
+                .find(|family| {
+                    family.get_name()
+                        == "tikv_client_rust_batch_client_no_available_connection_total"
+                })
+                .expect("batch client no-available-connection counter not registered");
+            family
+                .get_metric()
+                .first()
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        };
+
+        assert!(
+            after >= before + 1.0,
+            "expected no-available-connection counter to increase"
+        );
+
+        Ok(())
     }
 
     #[tokio::test]

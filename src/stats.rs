@@ -8,6 +8,7 @@ use log::warn;
 use prometheus::Histogram;
 use prometheus::HistogramOpts;
 use prometheus::HistogramVec;
+use prometheus::IntCounter;
 use prometheus::IntCounterVec;
 use prometheus::Opts;
 
@@ -296,6 +297,12 @@ pub(crate) fn observe_batch_requests(target: &str, batch_size: usize) {
 pub(crate) fn observe_batch_client_wait_connection_establish(elapsed: Duration) {
     if let Some(histogram) = TIKV_CLIENT_RUST_BATCH_CLIENT_WAIT_ESTABLISH_HISTOGRAM.as_ref() {
         histogram.observe(duration_to_sec(elapsed));
+    }
+}
+
+pub(crate) fn inc_batch_client_no_available_connection() {
+    if let Some(counter) = TIKV_CLIENT_RUST_BATCH_CLIENT_NO_AVAILABLE_CONNECTION_COUNTER.as_ref() {
+        counter.inc();
     }
 }
 
@@ -670,6 +677,21 @@ fn register_int_counter_vec(
     Some(metric)
 }
 
+fn register_int_counter(name: &'static str, help: &'static str) -> Option<IntCounter> {
+    let metric = match IntCounter::with_opts(Opts::new(name, help)) {
+        Ok(metric) => metric,
+        Err(err) => {
+            warn!("failed to build prometheus int counter {name}: {err}");
+            return None;
+        }
+    };
+    if let Err(err) = prometheus::register(Box::new(metric.clone())) {
+        warn!("failed to register prometheus int counter {name}: {err}");
+        return None;
+    }
+    Some(metric)
+}
+
 fn register_histogram(name: &'static str, help: &'static str) -> Option<Histogram> {
     let metric = match Histogram::with_opts(HistogramOpts::new(name, help)) {
         Ok(metric) => metric,
@@ -852,6 +874,11 @@ lazy_static::lazy_static! {
         register_histogram_with_buckets(name, help, buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_BATCH_CLIENT_NO_AVAILABLE_CONNECTION_COUNTER: Option<IntCounter> = register_int_counter(
+        "tikv_client_rust_batch_client_no_available_connection_total",
+        "Counter of no available batch client.",
+    );
+
     static ref TIKV_CLIENT_RUST_READ_REQUEST_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_read_request_bytes";
         let help = "Bucketed histogram of total bytes sent/received for read requests.";
@@ -945,10 +972,11 @@ mod tests {
     use serial_test::serial;
 
     use super::{
-        observe_backoff_seconds, observe_batch_client_wait_connection_establish,
-        observe_batch_pending_requests, observe_batch_requests, observe_kv_request_traffic_metrics,
-        observe_load_region_cache, observe_request_retry_times, observe_stale_read_hit_miss,
-        region_cache_operation, tikv_stats_with_context,
+        inc_batch_client_no_available_connection, observe_backoff_seconds,
+        observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
+        observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
+        observe_request_retry_times, observe_stale_read_hit_miss, region_cache_operation,
+        tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1201,6 +1229,48 @@ mod tests {
         assert!(
             after_sum >= before_sum + 5.0,
             "expected batch client wait-establish histogram sample sum to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_batch_client_no_available_connection_counter_increments() {
+        let before = {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| {
+                    family.get_name()
+                        == "tikv_client_rust_batch_client_no_available_connection_total"
+                })
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        };
+
+        for _ in 0..200 {
+            inc_batch_client_no_available_connection();
+        }
+
+        let after = {
+            let families = prometheus::gather();
+            let family = families
+                .iter()
+                .find(|family| {
+                    family.get_name()
+                        == "tikv_client_rust_batch_client_no_available_connection_total"
+                })
+                .expect("batch client no-available-connection counter not registered");
+            family
+                .get_metric()
+                .first()
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        };
+
+        assert!(
+            after >= before + 200.0,
+            "expected no-available-connection counter to increase"
         );
     }
 
