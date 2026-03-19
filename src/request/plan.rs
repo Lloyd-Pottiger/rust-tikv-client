@@ -38,6 +38,7 @@ use crate::store::KvClient;
 use crate::store::RegionStore;
 use crate::store::{HasKeyErrors, Store};
 use crate::timestamp::TimestampExt;
+use crate::trace::{self, Category, TraceField};
 use crate::transaction::resolve_locks_for_read;
 use crate::transaction::resolve_locks_with_options;
 use crate::transaction::HasLocks;
@@ -112,22 +113,115 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
     type Result = Req::Response;
 
     async fn execute(&self) -> Result<Self::Result> {
-        let stats = tikv_stats(self.request.label());
-        let result = match self.kv_client.as_ref() {
-            Some(kv_client) => kv_client.dispatch(&self.request).await.and_then(|r| {
-                r.downcast::<Req::Response>()
-                    .map(|r| *r)
-                    .map_err(|_| Error::InternalError {
-                        message: format!(
-                            "downcast failed: request and response type mismatch, expected {}",
-                            std::any::type_name::<Req::Response>()
-                        ),
-                    })
-            }),
-            None => Err(Error::InternalError {
+        let label = self.request.label();
+        let stats = tikv_stats(label);
+
+        let Some(kv_client) = self.kv_client.as_ref() else {
+            return stats.done(Err(Error::InternalError {
                 message: "kv_client has not been initialised in Dispatch".to_owned(),
-            }),
+            }));
         };
+
+        let prewrite_req = (&self.request as &dyn Any).downcast_ref::<kvrpcpb::PrewriteRequest>();
+        let commit_req = (&self.request as &dyn Any).downcast_ref::<kvrpcpb::CommitRequest>();
+
+        let kv_trace_enabled = trace::is_category_enabled(Category::KvRequest);
+        let txn_2pc_trace_enabled = (prewrite_req.is_some() || commit_req.is_some())
+            && trace::is_category_enabled(Category::Txn2Pc);
+
+        if kv_trace_enabled {
+            trace::trace(
+                Category::KvRequest,
+                "kv.request.send",
+                &[TraceField::str("label", label)],
+            );
+        }
+
+        if txn_2pc_trace_enabled {
+            if let Some(req) = prewrite_req {
+                let region_id = req.context.as_ref().map(|ctx| ctx.region_id).unwrap_or(0);
+                let is_primary = req.mutations.iter().any(|m| m.key == req.primary_lock);
+                let key_count = u64::try_from(req.mutations.len()).unwrap_or(u64::MAX);
+
+                let fields = vec![
+                    TraceField::u64("startTS", req.start_version),
+                    TraceField::u64("regionID", region_id),
+                    TraceField::bool("isPrimary", is_primary),
+                    TraceField::u64("keyCount", key_count),
+                ];
+                trace::trace(Category::Txn2Pc, "prewrite.batch.start", &fields);
+            }
+
+            if let Some(req) = commit_req {
+                let region_id = req.context.as_ref().map(|ctx| ctx.region_id).unwrap_or(0);
+                let key_count = u64::try_from(req.keys.len()).unwrap_or(u64::MAX);
+
+                let fields = vec![
+                    TraceField::u64("startTS", req.start_version),
+                    TraceField::u64("commitTS", req.commit_version),
+                    TraceField::u64("regionID", region_id),
+                    TraceField::u64("keyCount", key_count),
+                ];
+                trace::trace(Category::Txn2Pc, "commit.batch.start", &fields);
+            }
+        }
+
+        let started_at = if kv_trace_enabled || txn_2pc_trace_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+
+        let result = kv_client.dispatch(&self.request).await.and_then(|r| {
+            r.downcast::<Req::Response>()
+                .map(|r| *r)
+                .map_err(|_| Error::InternalError {
+                    message: format!(
+                        "downcast failed: request and response type mismatch, expected {}",
+                        std::any::type_name::<Req::Response>()
+                    ),
+                })
+        });
+
+        if kv_trace_enabled {
+            let elapsed_ms = started_at
+                .as_ref()
+                .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
+                .unwrap_or(0);
+            let fields = vec![
+                TraceField::str("label", label),
+                TraceField::bool("success", result.is_ok()),
+                TraceField::u64("latency_ms", elapsed_ms),
+            ];
+            trace::trace(Category::KvRequest, "kv.request.result", &fields);
+        }
+
+        if txn_2pc_trace_enabled {
+            let success = result.is_ok();
+
+            if prewrite_req.is_some() {
+                let region_id = prewrite_req
+                    .and_then(|req| req.context.as_ref().map(|ctx| ctx.region_id))
+                    .unwrap_or(0);
+                let fields = vec![
+                    TraceField::u64("regionID", region_id),
+                    TraceField::bool("success", success),
+                ];
+                trace::trace(Category::Txn2Pc, "prewrite.batch.result", &fields);
+            }
+
+            if commit_req.is_some() {
+                let region_id = commit_req
+                    .and_then(|req| req.context.as_ref().map(|ctx| ctx.region_id))
+                    .unwrap_or(0);
+                let fields = vec![
+                    TraceField::u64("regionID", region_id),
+                    TraceField::bool("success", success),
+                ];
+                trace::trace(Category::Txn2Pc, "commit.batch.result", &fields);
+            }
+        }
+
         stats.done(result)
     }
 }
@@ -149,11 +243,70 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
     type Result = Req::Response;
 
     async fn execute(&self) -> Result<Self::Result> {
-        let stats = tikv_stats(self.request.label());
+        let label = self.request.label();
+        let stats = tikv_stats(label);
         let kv_client = self.kv_client.as_ref().ok_or(Error::InternalError {
             message: "kv_client has not been initialised in DispatchWithInterceptor".to_owned(),
         })?;
+        let target = self.store_address.as_deref().unwrap_or("<unknown>");
+
+        let prewrite_trace = (&self.request as &dyn Any)
+            .downcast_ref::<kvrpcpb::PrewriteRequest>()
+            .map(|req| {
+                let region_id = req.context.as_ref().map(|ctx| ctx.region_id).unwrap_or(0);
+                let is_primary = req.mutations.iter().any(|m| m.key == req.primary_lock);
+                let key_count = u64::try_from(req.mutations.len()).unwrap_or(u64::MAX);
+                (req.start_version, region_id, is_primary, key_count)
+            });
+        let commit_trace = (&self.request as &dyn Any)
+            .downcast_ref::<kvrpcpb::CommitRequest>()
+            .map(|req| {
+                let region_id = req.context.as_ref().map(|ctx| ctx.region_id).unwrap_or(0);
+                let key_count = u64::try_from(req.keys.len()).unwrap_or(u64::MAX);
+                (req.start_version, req.commit_version, region_id, key_count)
+            });
+
+        let kv_trace_enabled = trace::is_category_enabled(Category::KvRequest);
+        let txn_2pc_trace_enabled = (prewrite_trace.is_some() || commit_trace.is_some())
+            && trace::is_category_enabled(Category::Txn2Pc);
+
         if self.rpc_interceptors.is_empty() {
+            if kv_trace_enabled {
+                let fields = vec![
+                    TraceField::str("label", label),
+                    TraceField::str("target", target.to_owned()),
+                ];
+                trace::trace(Category::KvRequest, "kv.request.send", &fields);
+            }
+
+            if txn_2pc_trace_enabled {
+                if let Some((start_ts, region_id, is_primary, key_count)) = prewrite_trace {
+                    let fields = vec![
+                        TraceField::u64("startTS", start_ts),
+                        TraceField::u64("regionID", region_id),
+                        TraceField::bool("isPrimary", is_primary),
+                        TraceField::u64("keyCount", key_count),
+                    ];
+                    trace::trace(Category::Txn2Pc, "prewrite.batch.start", &fields);
+                }
+
+                if let Some((start_ts, commit_ts, region_id, key_count)) = commit_trace {
+                    let fields = vec![
+                        TraceField::u64("startTS", start_ts),
+                        TraceField::u64("commitTS", commit_ts),
+                        TraceField::u64("regionID", region_id),
+                        TraceField::u64("keyCount", key_count),
+                    ];
+                    trace::trace(Category::Txn2Pc, "commit.batch.start", &fields);
+                }
+            }
+
+            let started_at = if kv_trace_enabled || txn_2pc_trace_enabled {
+                Some(Instant::now())
+            } else {
+                None
+            };
+
             let result = kv_client.dispatch(&self.request).await.and_then(|r| {
                 r.downcast::<Req::Response>()
                     .map(|r| *r)
@@ -164,10 +317,43 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                         ),
                     })
             });
+
+            if kv_trace_enabled {
+                let elapsed_ms = started_at
+                    .as_ref()
+                    .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
+                    .unwrap_or(0);
+                let fields = vec![
+                    TraceField::str("label", label),
+                    TraceField::str("target", target.to_owned()),
+                    TraceField::bool("success", result.is_ok()),
+                    TraceField::u64("latency_ms", elapsed_ms),
+                ];
+                trace::trace(Category::KvRequest, "kv.request.result", &fields);
+            }
+
+            if txn_2pc_trace_enabled {
+                let success = result.is_ok();
+
+                if let Some((_, region_id, _, _)) = prewrite_trace {
+                    let fields = vec![
+                        TraceField::u64("regionID", region_id),
+                        TraceField::bool("success", success),
+                    ];
+                    trace::trace(Category::Txn2Pc, "prewrite.batch.result", &fields);
+                }
+
+                if let Some((_, _, region_id, _)) = commit_trace {
+                    let fields = vec![
+                        TraceField::u64("regionID", region_id),
+                        TraceField::bool("success", success),
+                    ];
+                    trace::trace(Category::Txn2Pc, "commit.batch.result", &fields);
+                }
+            }
+
             return stats.done(result);
         }
-
-        let target = self.store_address.as_deref().unwrap_or("<unknown>");
 
         let mut request = self.request.clone();
         let label = request.label();
@@ -175,6 +361,58 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         for interceptor in self.rpc_interceptors.iter() {
             interceptor.before(&mut rpc_request);
         }
+
+        let prewrite_trace = (&request as &dyn Any)
+            .downcast_ref::<kvrpcpb::PrewriteRequest>()
+            .map(|req| {
+                let region_id = req.context.as_ref().map(|ctx| ctx.region_id).unwrap_or(0);
+                let is_primary = req.mutations.iter().any(|m| m.key == req.primary_lock);
+                let key_count = u64::try_from(req.mutations.len()).unwrap_or(u64::MAX);
+                (req.start_version, region_id, is_primary, key_count)
+            });
+        let commit_trace = (&request as &dyn Any)
+            .downcast_ref::<kvrpcpb::CommitRequest>()
+            .map(|req| {
+                let region_id = req.context.as_ref().map(|ctx| ctx.region_id).unwrap_or(0);
+                let key_count = u64::try_from(req.keys.len()).unwrap_or(u64::MAX);
+                (req.start_version, req.commit_version, region_id, key_count)
+            });
+
+        if kv_trace_enabled {
+            let fields = vec![
+                TraceField::str("label", label),
+                TraceField::str("target", target.to_owned()),
+            ];
+            trace::trace(Category::KvRequest, "kv.request.send", &fields);
+        }
+
+        if txn_2pc_trace_enabled {
+            if let Some((start_ts, region_id, is_primary, key_count)) = prewrite_trace {
+                let fields = vec![
+                    TraceField::u64("startTS", start_ts),
+                    TraceField::u64("regionID", region_id),
+                    TraceField::bool("isPrimary", is_primary),
+                    TraceField::u64("keyCount", key_count),
+                ];
+                trace::trace(Category::Txn2Pc, "prewrite.batch.start", &fields);
+            }
+
+            if let Some((start_ts, commit_ts, region_id, key_count)) = commit_trace {
+                let fields = vec![
+                    TraceField::u64("startTS", start_ts),
+                    TraceField::u64("commitTS", commit_ts),
+                    TraceField::u64("regionID", region_id),
+                    TraceField::u64("keyCount", key_count),
+                ];
+                trace::trace(Category::Txn2Pc, "commit.batch.start", &fields);
+            }
+        }
+
+        let started_at = if kv_trace_enabled || txn_2pc_trace_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         let result = kv_client.dispatch(&request).await.and_then(|r| {
             r.downcast::<Req::Response>()
@@ -195,6 +433,40 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         };
         for interceptor in self.rpc_interceptors.iter().rev() {
             interceptor.after(&rpc_request, call_result);
+        }
+
+        if kv_trace_enabled {
+            let elapsed_ms = started_at
+                .as_ref()
+                .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
+                .unwrap_or(0);
+            let fields = vec![
+                TraceField::str("label", label),
+                TraceField::str("target", target.to_owned()),
+                TraceField::bool("success", result.is_ok()),
+                TraceField::u64("latency_ms", elapsed_ms),
+            ];
+            trace::trace(Category::KvRequest, "kv.request.result", &fields);
+        }
+
+        if txn_2pc_trace_enabled {
+            let success = result.is_ok();
+
+            if let Some((_, region_id, _, _)) = prewrite_trace {
+                let fields = vec![
+                    TraceField::u64("regionID", region_id),
+                    TraceField::bool("success", success),
+                ];
+                trace::trace(Category::Txn2Pc, "prewrite.batch.result", &fields);
+            }
+
+            if let Some((_, _, region_id, _)) = commit_trace {
+                let fields = vec![
+                    TraceField::u64("regionID", region_id),
+                    TraceField::bool("success", success),
+                ];
+                trace::trace(Category::Txn2Pc, "commit.batch.result", &fields);
+            }
         }
 
         stats.done(result)
@@ -2829,6 +3101,388 @@ mod test {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb::BatchGetResponse;
+
+    struct TraceHookReset;
+
+    impl Drop for TraceHookReset {
+        fn drop(&mut self) {
+            crate::trace::set_trace_event_func(None);
+            crate::trace::set_is_category_enabled_func(None);
+        }
+    }
+
+    fn trace_field_str<'a>(fields: &'a [crate::trace::TraceField], key: &str) -> Option<&'a str> {
+        fields
+            .iter()
+            .find(|field| field.key == key)
+            .and_then(|field| match &field.value {
+                crate::trace::TraceValue::Str(value) => Some(value.as_ref()),
+                _ => None,
+            })
+    }
+
+    fn trace_field_u64(fields: &[crate::trace::TraceField], key: &str) -> Option<u64> {
+        fields
+            .iter()
+            .find(|field| field.key == key)
+            .and_then(|field| match &field.value {
+                crate::trace::TraceValue::U64(value) => Some(*value),
+                _ => None,
+            })
+    }
+
+    fn trace_field_bool(fields: &[crate::trace::TraceField], key: &str) -> Option<bool> {
+        fields
+            .iter()
+            .find(|field| field.key == key)
+            .and_then(|field| match &field.value {
+                crate::trace::TraceValue::Bool(value) => Some(*value),
+                _ => None,
+            })
+    }
+
+    #[derive(Clone, Default)]
+    struct TraceTestRequest;
+
+    #[async_trait::async_trait]
+    impl crate::store::Request for TraceTestRequest {
+        async fn dispatch(
+            &self,
+            _client: &crate::proto::tikvpb::tikv_client::TikvClient<tonic::transport::Channel>,
+            _timeout: std::time::Duration,
+        ) -> crate::Result<Box<dyn Any>> {
+            unreachable!("TraceTestRequest::dispatch should not be called")
+        }
+
+        fn label(&self) -> &'static str {
+            "trace_test_request"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn set_leader(&mut self, _leader: &crate::region::RegionWithLeader) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn set_api_version(&mut self, _api_version: crate::proto::kvrpcpb::ApiVersion) {}
+
+        fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+    }
+
+    impl crate::request::KvRequest for TraceTestRequest {
+        type Response = crate::proto::kvrpcpb::GetResponse;
+    }
+
+    #[tokio::test]
+    async fn test_trace_kv_request_send_and_result_emitted() {
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _reset = TraceHookReset;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
+            crate::trace::Category,
+            String,
+            Vec<crate::trace::TraceField>,
+        )>::new()));
+
+        let seen_event = seen.clone();
+        let event: crate::trace::TraceEventFunc =
+            std::sync::Arc::new(move |category, name, fields| {
+                if category != crate::trace::Category::KvRequest {
+                    return;
+                }
+                if name != "kv.request.send" && name != "kv.request.result" {
+                    return;
+                }
+                if trace_field_str(fields, "label") != Some("trace_test_request") {
+                    return;
+                }
+                seen_event
+                    .lock()
+                    .unwrap()
+                    .push((category, name.to_owned(), fields.to_vec()));
+            });
+        crate::trace::set_trace_event_func(Some(event));
+
+        let enabled: crate::trace::IsCategoryEnabledFunc =
+            std::sync::Arc::new(|category| category == crate::trace::Category::KvRequest);
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+
+        let kv = MockKvClient::with_dispatch_hook(|req| {
+            req.downcast_ref::<TraceTestRequest>()
+                .expect("expected trace test request");
+            Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+        });
+
+        let plan = Dispatch {
+            request: TraceTestRequest,
+            kv_client: Some(std::sync::Arc::new(kv)),
+        };
+
+        let _ = plan.execute().await.unwrap();
+
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+
+        assert_eq!(events[0].0, crate::trace::Category::KvRequest);
+        assert_eq!(events[0].1, "kv.request.send");
+        assert_eq!(
+            trace_field_str(&events[0].2, "label"),
+            Some("trace_test_request")
+        );
+
+        assert_eq!(events[1].0, crate::trace::Category::KvRequest);
+        assert_eq!(events[1].1, "kv.request.result");
+        assert_eq!(
+            trace_field_str(&events[1].2, "label"),
+            Some("trace_test_request")
+        );
+        assert_eq!(trace_field_bool(&events[1].2, "success"), Some(true));
+        assert!(trace_field_u64(&events[1].2, "latency_ms").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_trace_kv_request_includes_target_for_dispatch_with_interceptor() {
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _reset = TraceHookReset;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
+            crate::trace::Category,
+            String,
+            Vec<crate::trace::TraceField>,
+        )>::new()));
+
+        let seen_event = seen.clone();
+        let event: crate::trace::TraceEventFunc =
+            std::sync::Arc::new(move |category, name, fields| {
+                if category != crate::trace::Category::KvRequest {
+                    return;
+                }
+                if name != "kv.request.send" && name != "kv.request.result" {
+                    return;
+                }
+                if trace_field_str(fields, "target") != Some("test-store") {
+                    return;
+                }
+                seen_event
+                    .lock()
+                    .unwrap()
+                    .push((category, name.to_owned(), fields.to_vec()));
+            });
+        crate::trace::set_trace_event_func(Some(event));
+
+        let enabled: crate::trace::IsCategoryEnabledFunc =
+            std::sync::Arc::new(|category| category == crate::trace::Category::KvRequest);
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+
+        let kv = MockKvClient::with_dispatch_hook(|req| {
+            req.downcast_ref::<crate::proto::kvrpcpb::GetRequest>()
+                .expect("expected get request");
+            Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+        });
+
+        let mut req = crate::proto::kvrpcpb::GetRequest::default();
+        req.key = vec![1];
+
+        let rpc_interceptors: crate::rpc_interceptor::RpcInterceptors =
+            std::sync::Arc::new(Vec::new());
+        let plan = DispatchWithInterceptor {
+            request: req,
+            kv_client: Some(std::sync::Arc::new(kv)),
+            store_address: Some("test-store".to_owned()),
+            rpc_interceptors,
+        };
+
+        let _ = plan.execute().await.unwrap();
+
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+
+        assert_eq!(events[0].0, crate::trace::Category::KvRequest);
+        assert_eq!(events[0].1, "kv.request.send");
+        assert_eq!(trace_field_str(&events[0].2, "label"), Some("kv_get"));
+        assert_eq!(trace_field_str(&events[0].2, "target"), Some("test-store"));
+
+        assert_eq!(events[1].0, crate::trace::Category::KvRequest);
+        assert_eq!(events[1].1, "kv.request.result");
+        assert_eq!(trace_field_str(&events[1].2, "label"), Some("kv_get"));
+        assert_eq!(trace_field_str(&events[1].2, "target"), Some("test-store"));
+        assert_eq!(trace_field_bool(&events[1].2, "success"), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_trace_2pc_prewrite_batch_events_emitted() {
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _reset = TraceHookReset;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
+            crate::trace::Category,
+            String,
+            Vec<crate::trace::TraceField>,
+        )>::new()));
+
+        let seen_event = seen.clone();
+        let event: crate::trace::TraceEventFunc =
+            std::sync::Arc::new(move |category, name, fields| {
+                if category != crate::trace::Category::Txn2Pc {
+                    return;
+                }
+                if name != "prewrite.batch.start" && name != "prewrite.batch.result" {
+                    return;
+                }
+                if trace_field_u64(fields, "regionID") != Some(7_000_000_007) {
+                    return;
+                }
+                seen_event
+                    .lock()
+                    .unwrap()
+                    .push((category, name.to_owned(), fields.to_vec()));
+            });
+        crate::trace::set_trace_event_func(Some(event));
+
+        let enabled: crate::trace::IsCategoryEnabledFunc =
+            std::sync::Arc::new(|category| category == crate::trace::Category::Txn2Pc);
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+
+        let kv = MockKvClient::with_dispatch_hook(|req| {
+            req.downcast_ref::<crate::proto::kvrpcpb::PrewriteRequest>()
+                .expect("expected prewrite request");
+            Ok(Box::new(crate::proto::kvrpcpb::PrewriteResponse::default()) as Box<dyn Any>)
+        });
+
+        let primary_key = vec![1];
+        let mut primary_mutation = crate::proto::kvrpcpb::Mutation::default();
+        primary_mutation.op = crate::proto::kvrpcpb::Op::Put as i32;
+        primary_mutation.key = primary_key.clone();
+        primary_mutation.value = vec![10];
+
+        let mut secondary_mutation = crate::proto::kvrpcpb::Mutation::default();
+        secondary_mutation.op = crate::proto::kvrpcpb::Op::Put as i32;
+        secondary_mutation.key = vec![2];
+        secondary_mutation.value = vec![11];
+
+        let mut req = crate::proto::kvrpcpb::PrewriteRequest::default();
+        req.context = Some(crate::proto::kvrpcpb::Context {
+            region_id: 7_000_000_007,
+            ..Default::default()
+        });
+        req.start_version = 42;
+        req.primary_lock = primary_key;
+        req.mutations = vec![primary_mutation, secondary_mutation];
+
+        let plan = Dispatch {
+            request: req,
+            kv_client: Some(std::sync::Arc::new(kv)),
+        };
+        let _ = plan.execute().await.unwrap();
+
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+
+        assert_eq!(events[0].0, crate::trace::Category::Txn2Pc);
+        assert_eq!(events[0].1, "prewrite.batch.start");
+        assert_eq!(trace_field_u64(&events[0].2, "startTS"), Some(42));
+        assert_eq!(
+            trace_field_u64(&events[0].2, "regionID"),
+            Some(7_000_000_007)
+        );
+        assert_eq!(trace_field_bool(&events[0].2, "isPrimary"), Some(true));
+        assert_eq!(trace_field_u64(&events[0].2, "keyCount"), Some(2));
+
+        assert_eq!(events[1].0, crate::trace::Category::Txn2Pc);
+        assert_eq!(events[1].1, "prewrite.batch.result");
+        assert_eq!(
+            trace_field_u64(&events[1].2, "regionID"),
+            Some(7_000_000_007)
+        );
+        assert_eq!(trace_field_bool(&events[1].2, "success"), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_trace_2pc_commit_batch_events_emitted() {
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _reset = TraceHookReset;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
+            crate::trace::Category,
+            String,
+            Vec<crate::trace::TraceField>,
+        )>::new()));
+
+        let seen_event = seen.clone();
+        let event: crate::trace::TraceEventFunc =
+            std::sync::Arc::new(move |category, name, fields| {
+                if category != crate::trace::Category::Txn2Pc {
+                    return;
+                }
+                if name != "commit.batch.start" && name != "commit.batch.result" {
+                    return;
+                }
+                if trace_field_u64(fields, "regionID") != Some(7_000_000_009) {
+                    return;
+                }
+                seen_event
+                    .lock()
+                    .unwrap()
+                    .push((category, name.to_owned(), fields.to_vec()));
+            });
+        crate::trace::set_trace_event_func(Some(event));
+
+        let enabled: crate::trace::IsCategoryEnabledFunc =
+            std::sync::Arc::new(|category| category == crate::trace::Category::Txn2Pc);
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+
+        let kv = MockKvClient::with_dispatch_hook(|req| {
+            req.downcast_ref::<crate::proto::kvrpcpb::CommitRequest>()
+                .expect("expected commit request");
+            Ok(Box::new(crate::proto::kvrpcpb::CommitResponse::default()) as Box<dyn Any>)
+        });
+
+        let mut req = crate::proto::kvrpcpb::CommitRequest::default();
+        req.context = Some(crate::proto::kvrpcpb::Context {
+            region_id: 7_000_000_009,
+            ..Default::default()
+        });
+        req.start_version = 42;
+        req.commit_version = 43;
+        req.keys = vec![vec![1], vec![2]];
+
+        let plan = Dispatch {
+            request: req,
+            kv_client: Some(std::sync::Arc::new(kv)),
+        };
+        let _ = plan.execute().await.unwrap();
+
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+
+        assert_eq!(events[0].0, crate::trace::Category::Txn2Pc);
+        assert_eq!(events[0].1, "commit.batch.start");
+        assert_eq!(trace_field_u64(&events[0].2, "startTS"), Some(42));
+        assert_eq!(trace_field_u64(&events[0].2, "commitTS"), Some(43));
+        assert_eq!(
+            trace_field_u64(&events[0].2, "regionID"),
+            Some(7_000_000_009)
+        );
+        assert_eq!(trace_field_u64(&events[0].2, "keyCount"), Some(2));
+
+        assert_eq!(events[1].0, crate::trace::Category::Txn2Pc);
+        assert_eq!(events[1].1, "commit.batch.result");
+        assert_eq!(
+            trace_field_u64(&events[1].2, "regionID"),
+            Some(7_000_000_009)
+        );
+        assert_eq!(trace_field_bool(&events[1].2, "success"), Some(true));
+    }
 
     #[test]
     fn test_select_replica_read_peer_mixed_skips_unreachable_store() {

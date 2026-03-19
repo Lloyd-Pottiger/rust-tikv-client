@@ -24,6 +24,7 @@ use crate::region::RegionId;
 use crate::region::RegionVerId;
 use crate::region::RegionWithLeader;
 use crate::region::StoreId;
+use crate::trace::{self, Category, TraceField};
 use crate::Key;
 use crate::Result;
 
@@ -204,6 +205,7 @@ impl<Client> RegionCache<Client> {
 impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     // Retrieve cache entry by key. If there's no entry, query PD and update cache.
     pub async fn get_region_by_key(&self, key: &Key) -> Result<RegionWithLeader> {
+        let trace_enabled = trace::is_category_enabled(Category::RegionCache);
         let region_cache_guard = self.region_cache.read().await;
         let mut expired_ver_id: Option<RegionVerId> = None;
         let res = {
@@ -221,6 +223,13 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             {
                 if region.contains(key) {
                     if self.region_cache_ttl_ms == 0 {
+                        if trace_enabled {
+                            trace::trace(
+                                Category::RegionCache,
+                                "region_cache.get_region_by_key.cache_hit",
+                                &[TraceField::u64("regionID", region.id())],
+                            );
+                        }
                         return Ok(region.clone());
                     }
 
@@ -235,10 +244,24 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                             self.region_cache_ttl_ms,
                             self.region_cache_ttl_jitter_ms,
                         ) {
+                            if trace_enabled {
+                                trace::trace(
+                                    Category::RegionCache,
+                                    "region_cache.get_region_by_key.cache_hit",
+                                    &[TraceField::u64("regionID", region.id())],
+                                );
+                            }
                             return Ok(region.clone());
                         }
                     }
 
+                    if trace_enabled {
+                        trace::trace(
+                            Category::RegionCache,
+                            "region_cache.get_region_by_key.cache_expired",
+                            &[TraceField::u64("regionID", region.id())],
+                        );
+                    }
                     expired_ver_id = Some(candidate_region_ver_id);
                 }
             }
@@ -246,12 +269,21 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         drop(region_cache_guard);
         if let Some(ver_id) = expired_ver_id {
             self.invalidate_region_cache(ver_id).await;
+        } else if trace_enabled {
+            let key_bytes: &[u8] = key.into();
+            let key_len = u64::try_from(key_bytes.len()).unwrap_or(u64::MAX);
+            trace::trace(
+                Category::RegionCache,
+                "region_cache.get_region_by_key.cache_miss",
+                &[TraceField::u64("keyLen", key_len)],
+            );
         }
         self.read_through_region_by_key(key.clone()).await
     }
 
     // Retrieve cache entry by RegionId. If there's no entry, query PD and update cache.
     pub async fn get_region_by_id(&self, id: RegionId) -> Result<RegionWithLeader> {
+        let trace_enabled = trace::is_category_enabled(Category::RegionCache);
         for _ in 0..=MAX_RETRY_WAITING_CONCURRENT_REQUEST {
             let region_cache_guard = self.region_cache.read().await;
             let mut expired_ver_id: Option<RegionVerId> = None;
@@ -260,6 +292,13 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             if let Some(ver_id) = region_cache_guard.id_to_ver_id.get(&id) {
                 if let Some(region) = region_cache_guard.ver_id_to_region.get(ver_id) {
                     if self.region_cache_ttl_ms == 0 {
+                        if trace_enabled {
+                            trace::trace(
+                                Category::RegionCache,
+                                "region_cache.get_region_by_id.cache_hit",
+                                &[TraceField::u64("regionID", id)],
+                            );
+                        }
                         return Ok(region.clone());
                     }
 
@@ -271,10 +310,24 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                             self.region_cache_ttl_ms,
                             self.region_cache_ttl_jitter_ms,
                         ) {
+                            if trace_enabled {
+                                trace::trace(
+                                    Category::RegionCache,
+                                    "region_cache.get_region_by_id.cache_hit",
+                                    &[TraceField::u64("regionID", id)],
+                                );
+                            }
                             return Ok(region.clone());
                         }
                     }
 
+                    if trace_enabled {
+                        trace::trace(
+                            Category::RegionCache,
+                            "region_cache.get_region_by_id.cache_expired",
+                            &[TraceField::u64("regionID", id)],
+                        );
+                    }
                     expired_ver_id = Some(ver_id.clone());
                 }
             }
@@ -292,6 +345,13 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 n.await;
                 continue;
             } else {
+                if trace_enabled {
+                    trace::trace(
+                        Category::RegionCache,
+                        "region_cache.get_region_by_id.cache_miss",
+                        &[TraceField::u64("regionID", id)],
+                    );
+                }
                 return self.read_through_region_by_id(id).await;
             }
         }
@@ -310,7 +370,24 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
     /// Force read through (query from PD) and update cache
     pub async fn read_through_region_by_key(&self, key: Key) -> Result<RegionWithLeader> {
+        let trace_enabled = trace::is_category_enabled(Category::RegionCache);
+        if trace_enabled {
+            let key_bytes: &[u8] = (&key).into();
+            let key_len = u64::try_from(key_bytes.len()).unwrap_or(u64::MAX);
+            trace::trace(
+                Category::RegionCache,
+                "region_cache.read_through_region_by_key.pd_request",
+                &[TraceField::u64("keyLen", key_len)],
+            );
+        }
         let region = self.inner_client.clone().get_region(key.into()).await?;
+        if trace_enabled {
+            trace::trace(
+                Category::RegionCache,
+                "region_cache.read_through_region_by_key.pd_response",
+                &[TraceField::u64("regionID", region.id())],
+            );
+        }
         self.add_region(region.clone()).await;
         Ok(region)
     }
@@ -376,6 +453,14 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
     /// Force read through (query from PD) and update cache
     async fn read_through_region_by_id(&self, id: RegionId) -> Result<RegionWithLeader> {
+        let trace_enabled = trace::is_category_enabled(Category::RegionCache);
+        if trace_enabled {
+            trace::trace(
+                Category::RegionCache,
+                "region_cache.read_through_region_by_id.pd_request",
+                &[TraceField::u64("regionID", id)],
+            );
+        }
         // put a notify to let others know the region id is being queried
         let notify = Arc::new(Notify::new());
         {
@@ -387,6 +472,13 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
         let result = match self.inner_client.clone().get_region_by_id(id).await {
             Ok(region) => {
+                if trace_enabled {
+                    trace::trace(
+                        Category::RegionCache,
+                        "region_cache.read_through_region_by_id.pd_response",
+                        &[TraceField::u64("regionID", region.id())],
+                    );
+                }
                 self.add_region(region.clone()).await;
                 Ok(region)
             }
@@ -495,6 +587,17 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     }
 
     pub async fn invalidate_region_cache(&self, ver_id: crate::region::RegionVerId) {
+        trace::trace_if_enabled(
+            Category::RegionCache,
+            "region_cache.invalidate_region_cache",
+            || {
+                vec![
+                    TraceField::u64("regionID", ver_id.id),
+                    TraceField::u64("confVer", ver_id.conf_ver),
+                    TraceField::u64("ver", ver_id.ver),
+                ]
+            },
+        );
         let mut cache = self.region_cache.write().await;
         cache.ver_id_to_ttl_deadline_ms.remove(&ver_id);
         if let Some(region) = cache.ver_id_to_region.remove(&ver_id) {
@@ -611,6 +714,25 @@ mod test {
     use crate::Result;
 
     type ScanRegionsCall = (Vec<u8>, Vec<u8>, i32);
+
+    struct TraceHookReset;
+
+    impl Drop for TraceHookReset {
+        fn drop(&mut self) {
+            crate::trace::set_trace_event_func(None);
+            crate::trace::set_is_category_enabled_func(None);
+        }
+    }
+
+    fn trace_field_u64(fields: &[crate::trace::TraceField], key: &str) -> Option<u64> {
+        fields
+            .iter()
+            .find(|field| field.key == key)
+            .and_then(|field| match &field.value {
+                crate::trace::TraceValue::U64(value) => Some(*value),
+                _ => None,
+            })
+    }
 
     #[derive(Default)]
     struct MockRetryClient {
@@ -803,6 +925,92 @@ mod test {
             cache.get_region_by_id(2).await?.leader.unwrap().store_id,
             102
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_trace_emits_hit_and_miss_events() -> Result<()> {
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _reset = TraceHookReset;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
+            crate::trace::Category,
+            String,
+            Vec<crate::trace::TraceField>,
+        )>::new()));
+
+        let seen_event = seen.clone();
+        let event: crate::trace::TraceEventFunc =
+            std::sync::Arc::new(move |category, name, fields| {
+                if category != crate::trace::Category::RegionCache {
+                    return;
+                }
+
+                match name {
+                    "region_cache.get_region_by_key.cache_miss"
+                    | "region_cache.read_through_region_by_key.pd_request" => {
+                        if trace_field_u64(fields, "keyLen") != Some(77) {
+                            return;
+                        }
+                    }
+                    "region_cache.read_through_region_by_key.pd_response"
+                    | "region_cache.get_region_by_key.cache_hit" => {
+                        if trace_field_u64(fields, "regionID") != Some(424_242) {
+                            return;
+                        }
+                    }
+                    _ => return,
+                }
+
+                seen_event
+                    .lock()
+                    .unwrap()
+                    .push((category, name.to_owned(), fields.to_vec()));
+            });
+        crate::trace::set_trace_event_func(Some(event));
+
+        let enabled: crate::trace::IsCategoryEnabledFunc =
+            std::sync::Arc::new(|category| category == crate::trace::Category::RegionCache);
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(424_242, region(424_242, vec![], vec![]));
+
+        let key: Key = vec![42; 77].into();
+
+        // Miss triggers PD request/response and populates cache.
+        cache.get_region_by_key(&key).await?;
+        // Hit should be served from cache.
+        cache.get_region_by_key(&key).await?;
+
+        let events = seen.lock().unwrap().clone();
+        let names: Vec<String> = events.iter().map(|(_, name, _)| name.clone()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "region_cache.get_region_by_key.cache_miss",
+                "region_cache.read_through_region_by_key.pd_request",
+                "region_cache.read_through_region_by_key.pd_response",
+                "region_cache.get_region_by_key.cache_hit",
+            ]
+        );
+
+        assert_eq!(events[0].0, crate::trace::Category::RegionCache);
+        assert_eq!(trace_field_u64(&events[0].2, "keyLen"), Some(77));
+
+        assert_eq!(events[2].0, crate::trace::Category::RegionCache);
+        assert_eq!(trace_field_u64(&events[2].2, "regionID"), Some(424_242));
+
+        assert_eq!(events[3].0, crate::trace::Category::RegionCache);
+        assert_eq!(trace_field_u64(&events[3].2, "regionID"), Some(424_242));
 
         Ok(())
     }

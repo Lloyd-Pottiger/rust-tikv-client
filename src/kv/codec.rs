@@ -1,8 +1,8 @@
 use std::io::Write;
 use std::ptr;
 
-use crate::Error;
 use crate::internal_err;
+use crate::Error;
 use crate::Result;
 
 const ENC_GROUP_SIZE: usize = 8;
@@ -290,7 +290,9 @@ pub fn decode_comparable_uvarint(data: &[u8]) -> Result<(&[u8], u64)> {
         .ok_or_else(|| Error::StringError("insufficient bytes to decode value".to_owned()))?;
 
     if *first < NEGATIVE_TAG_END {
-        return Err(Error::StringError("invalid bytes to decode value".to_owned()));
+        return Err(Error::StringError(
+            "invalid bytes to decode value".to_owned(),
+        ));
     }
     if *first <= POSITIVE_TAG_START {
         return Ok((rest, u64::from(*first - NEGATIVE_TAG_END)));
@@ -298,7 +300,9 @@ pub fn decode_comparable_uvarint(data: &[u8]) -> Result<(&[u8], u64)> {
 
     let length = usize::from(*first - POSITIVE_TAG_START);
     if rest.len() < length {
-        return Err(Error::StringError("insufficient bytes to decode value".to_owned()));
+        return Err(Error::StringError(
+            "insufficient bytes to decode value".to_owned(),
+        ));
     }
     let mut v = 0u64;
     for &byte in &rest[..length] {
@@ -326,17 +330,23 @@ pub fn decode_comparable_varint(data: &[u8]) -> Result<(&[u8], i64)> {
     };
 
     if rest.len() < length {
-        return Err(Error::StringError("insufficient bytes to decode value".to_owned()));
+        return Err(Error::StringError(
+            "insufficient bytes to decode value".to_owned(),
+        ));
     }
     for &byte in &rest[..length] {
         v = (v << 8) | u64::from(byte);
     }
 
     if (*first > POSITIVE_TAG_START) && v > (i64::MAX as u64) {
-        return Err(Error::StringError("invalid bytes to decode value".to_owned()));
+        return Err(Error::StringError(
+            "invalid bytes to decode value".to_owned(),
+        ));
     }
     if (*first < NEGATIVE_TAG_END) && v <= (i64::MAX as u64) {
-        return Err(Error::StringError("invalid bytes to decode value".to_owned()));
+        return Err(Error::StringError(
+            "invalid bytes to decode value".to_owned(),
+        ));
     }
 
     Ok((&rest[length..], v as i64))
@@ -427,17 +437,7 @@ pub mod test {
 
     #[test]
     fn test_encode_decode_comparable_uvarint_roundtrip_and_order() {
-        let values = [
-            0u64,
-            1,
-            239,
-            240,
-            255,
-            256,
-            65_535,
-            65_536,
-            u64::MAX,
-        ];
+        let values = [0u64, 1, 239, 240, 255, 256, 65_535, 65_536, u64::MAX];
         for &value in &values {
             let mut buf = Vec::new();
             encode_comparable_uvarint(&mut buf, value);

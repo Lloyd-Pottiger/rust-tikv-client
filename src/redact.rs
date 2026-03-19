@@ -189,7 +189,9 @@ mod tests {
                 primary: b"cp".to_vec(),
                 ..Default::default()
             }),
-            already_exist: Some(kvrpcpb::AlreadyExist { key: b"ek".to_vec() }),
+            already_exist: Some(kvrpcpb::AlreadyExist {
+                key: b"ek".to_vec(),
+            }),
             deadlock: Some(kvrpcpb::Deadlock {
                 lock_key: b"lk".to_vec(),
                 deadlock_key: b"dk".to_vec(),
@@ -257,4 +259,3 @@ mod tests {
         assert_eq!(mismatch_lock.secondaries, vec![vec![b'?']]);
     }
 }
-

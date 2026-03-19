@@ -104,8 +104,8 @@ pub mod coprocessor;
 #[doc(hidden)]
 pub mod raw;
 pub mod redact;
-pub mod trace;
 pub mod request;
+pub mod trace;
 #[doc(hidden)]
 pub mod transaction;
 
@@ -164,6 +164,14 @@ pub use crate::backoff::Backoff;
 #[doc(hidden)]
 pub use crate::coprocessor::lowering as coprocessor_lowering;
 #[doc(inline)]
+pub use crate::kv::codec::decode_comparable_uvarint;
+#[doc(inline)]
+pub use crate::kv::codec::decode_comparable_varint;
+#[doc(inline)]
+pub use crate::kv::codec::encode_comparable_uvarint;
+#[doc(inline)]
+pub use crate::kv::codec::encode_comparable_varint;
+#[doc(inline)]
 pub use crate::kv::BoundRange;
 #[doc(inline)]
 pub use crate::kv::IntoOwnedRange;
@@ -173,14 +181,6 @@ pub use crate::kv::Key;
 pub use crate::kv::KvPair;
 #[doc(inline)]
 pub use crate::kv::Value;
-#[doc(inline)]
-pub use crate::kv::codec::decode_comparable_uvarint;
-#[doc(inline)]
-pub use crate::kv::codec::decode_comparable_varint;
-#[doc(inline)]
-pub use crate::kv::codec::encode_comparable_uvarint;
-#[doc(inline)]
-pub use crate::kv::codec::encode_comparable_varint;
 #[doc(inline)]
 pub use crate::raw::lowering as raw_lowering;
 #[doc(inline)]

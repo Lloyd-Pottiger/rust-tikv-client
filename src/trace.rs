@@ -6,6 +6,9 @@ use lazy_static::lazy_static;
 
 use crate::TraceControlFlags;
 
+#[cfg(test)]
+pub(crate) static TRACE_HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Category identifies a trace event family emitted by the client.
 ///
 /// This mirrors client-go `trace.Category`.
@@ -118,7 +121,10 @@ pub fn set_is_category_enabled_func(func: Option<IsCategoryEnabledFunc>) {
 
 /// Record a trace event (does not check `is_category_enabled`).
 pub fn trace(category: Category, name: &str, fields: &[TraceField]) {
-    let func = TRACE_EVENT_FUNC.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let func = TRACE_EVENT_FUNC
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     (func)(category, name, fields);
 }
 
@@ -191,21 +197,32 @@ mod tests {
 
     #[test]
     fn test_trace_hooks_and_is_enabled() {
+        let _lock = TRACE_HOOK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         assert!(!is_category_enabled(Category::KvRequest));
 
         let seen = Arc::new(Mutex::new(Vec::<(Category, String, usize)>::new()));
         let seen_event = seen.clone();
         let event: TraceEventFunc = Arc::new(move |category, name, fields| {
+            if category != Category::KvRequest {
+                return;
+            }
+            if name != "send" && name != "forced" && name != "drop" {
+                return;
+            }
             seen_event
                 .lock()
                 .unwrap()
                 .push((category, name.to_owned(), fields.len()));
         });
-        let enabled: IsCategoryEnabledFunc = Arc::new(|_| true);
+        let enabled: IsCategoryEnabledFunc = Arc::new(|category| category == Category::KvRequest);
 
         let _guard = set_hooks_scoped(event, enabled);
 
-        trace_if_enabled(Category::KvRequest, "send", || vec![TraceField::u64("id", 42)]);
+        trace_if_enabled(Category::KvRequest, "send", || {
+            vec![TraceField::u64("id", 42)]
+        });
         assert_eq!(seen.lock().unwrap().len(), 1);
 
         // `trace` does not consult the enabled hook.
@@ -225,4 +242,3 @@ mod tests {
         assert!(!immediate_logging_enabled(TraceControlFlags::default()));
     }
 }
-
