@@ -33,7 +33,7 @@ pub fn trace_id() -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-pub(crate) static TRACE_HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TRACE_HOOK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Category identifies a trace event family emitted by the client.
 ///
@@ -244,9 +244,7 @@ mod tests {
 
     #[test]
     fn test_trace_hooks_and_is_enabled() {
-        let _lock = TRACE_HOOK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = TRACE_HOOK_TEST_LOCK.blocking_lock();
         assert!(!is_category_enabled(Category::KvRequest));
 
         let seen = Arc::new(Mutex::new(Vec::<(Category, String, usize)>::new()));
@@ -278,7 +276,7 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), 2);
 
         // But `trace_if_enabled` should stop emitting once disabled.
-        trace_if_enabled(Category::KvRequest, "drop", || vec![]);
+        trace_if_enabled(Category::KvRequest, "drop", Vec::new);
         assert_eq!(seen.lock().unwrap().len(), 2);
     }
 

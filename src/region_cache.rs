@@ -969,9 +969,7 @@ mod test {
 
     #[tokio::test]
     async fn test_region_cache_trace_emits_hit_and_miss_events() -> Result<()> {
-        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
         let _reset = TraceHookReset;
 
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(

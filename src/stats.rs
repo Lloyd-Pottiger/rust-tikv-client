@@ -669,7 +669,7 @@ fn bool_label_value(v: bool) -> &'static str {
 }
 
 #[inline]
-fn u64_label_value<'a>(mut v: u64, buf: &'a mut [u8; 20]) -> &'a str {
+fn u64_label_value(mut v: u64, buf: &mut [u8; 20]) -> &str {
     if v == 0 {
         buf[0] = b'0';
         return "0";

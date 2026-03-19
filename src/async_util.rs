@@ -325,9 +325,9 @@ impl Pool for RunLoop {
             Some(pool) => pool.go(task),
             None => {
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn_blocking(move || task());
+                    handle.spawn_blocking(task);
                 } else {
-                    std::thread::spawn(move || task());
+                    std::thread::spawn(task);
                 }
             }
         }

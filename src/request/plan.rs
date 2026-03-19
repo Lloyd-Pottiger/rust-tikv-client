@@ -3322,9 +3322,7 @@ mod test {
 
     #[tokio::test]
     async fn test_trace_kv_request_send_and_result_emitted() {
-        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
         let _reset = TraceHookReset;
 
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
@@ -3391,9 +3389,7 @@ mod test {
 
     #[tokio::test]
     async fn test_trace_kv_request_includes_target_for_dispatch_with_interceptor() {
-        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
         let _reset = TraceHookReset;
 
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
@@ -3462,9 +3458,7 @@ mod test {
 
     #[tokio::test]
     async fn test_trace_2pc_prewrite_batch_events_emitted() {
-        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
         let _reset = TraceHookReset;
 
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
@@ -3552,9 +3546,7 @@ mod test {
 
     #[tokio::test]
     async fn test_trace_2pc_commit_batch_events_emitted() {
-        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
         let _reset = TraceHookReset;
 
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(

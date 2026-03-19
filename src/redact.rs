@@ -157,12 +157,12 @@ mod tests {
     #[test]
     fn test_key_and_key_bytes_match_client_go_hex_and_redaction() {
         let _guard = set_redact_mode_scoped(RedactMode::Disable);
-        assert_eq!(need_redact(), false);
+        assert!(!need_redact());
         assert_eq!(key(&[0x01, 0xAB]), "01AB");
         assert_eq!(key_bytes(&[0x01, 0xAB]), b"01AB".to_vec());
 
         set_redact_mode(RedactMode::Enable);
-        assert_eq!(need_redact(), true);
+        assert!(need_redact());
         assert_eq!(key(&[0x01, 0xAB]), "?");
         assert_eq!(key_bytes(&[0x01, 0xAB]), vec![b'?']);
     }
