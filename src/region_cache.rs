@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -24,6 +25,7 @@ use crate::region::RegionId;
 use crate::region::RegionVerId;
 use crate::region::RegionWithLeader;
 use crate::region::StoreId;
+use crate::stats;
 use crate::trace::{self, Category, TraceField};
 use crate::Key;
 use crate::Result;
@@ -284,6 +286,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     // Retrieve cache entry by RegionId. If there's no entry, query PD and update cache.
     pub async fn get_region_by_id(&self, id: RegionId) -> Result<RegionWithLeader> {
         let trace_enabled = trace::is_category_enabled(Category::RegionCache);
+        let started_at = Instant::now();
         for _ in 0..=MAX_RETRY_WAITING_CONCURRENT_REQUEST {
             let region_cache_guard = self.region_cache.read().await;
             let mut expired_ver_id: Option<RegionVerId> = None;
@@ -299,6 +302,8 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                                 &[TraceField::u64("regionID", id)],
                             );
                         }
+                        stats::region_cache_operation("get_region_by_id", true);
+                        stats::observe_load_region_cache("get_region_by_id", started_at.elapsed());
                         return Ok(region.clone());
                     }
 
@@ -317,6 +322,11 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                                     &[TraceField::u64("regionID", id)],
                                 );
                             }
+                            stats::region_cache_operation("get_region_by_id", true);
+                            stats::observe_load_region_cache(
+                                "get_region_by_id",
+                                started_at.elapsed(),
+                            );
                             return Ok(region.clone());
                         }
                     }
@@ -352,25 +362,36 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                         &[TraceField::u64("regionID", id)],
                     );
                 }
-                return self.read_through_region_by_id(id).await;
+                let result = self.read_through_region_by_id(id).await;
+                stats::region_cache_operation("get_region_by_id", result.is_ok());
+                stats::observe_load_region_cache("get_region_by_id", started_at.elapsed());
+                return result;
             }
         }
-        Err(Error::StringError(format!(
+        let err = Error::StringError(format!(
             "Concurrent PD requests failed for {MAX_RETRY_WAITING_CONCURRENT_REQUEST} times"
-        )))
+        ));
+        stats::region_cache_operation("get_region_by_id", false);
+        stats::observe_load_region_cache("get_region_by_id", started_at.elapsed());
+        Err(err)
     }
 
     pub async fn get_store_by_id(&self, id: StoreId) -> Result<Store> {
+        let started_at = Instant::now();
         let store = self.store_cache.read().await.get(&id).cloned();
-        match store {
+        let result = match store {
             Some(store) => Ok(store),
             None => self.read_through_store_by_id(id).await,
-        }
+        };
+        stats::region_cache_operation("get_store", result.is_ok());
+        stats::observe_load_region_cache("get_store", started_at.elapsed());
+        result
     }
 
     /// Force read through (query from PD) and update cache
     pub async fn read_through_region_by_key(&self, key: Key) -> Result<RegionWithLeader> {
         let trace_enabled = trace::is_category_enabled(Category::RegionCache);
+        let started_at = Instant::now();
         if trace_enabled {
             let key_bytes: &[u8] = (&key).into();
             let key_len = u64::try_from(key_bytes.len()).unwrap_or(u64::MAX);
@@ -380,7 +401,18 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 &[TraceField::u64("keyLen", key_len)],
             );
         }
-        let region = self.inner_client.clone().get_region(key.into()).await?;
+        let region = match self.inner_client.clone().get_region(key.into()).await {
+            Ok(region) => {
+                stats::region_cache_operation("get_region_when_miss", true);
+                stats::observe_load_region_cache("get_region_when_miss", started_at.elapsed());
+                region
+            }
+            Err(err) => {
+                stats::region_cache_operation("get_region_when_miss", false);
+                stats::observe_load_region_cache("get_region_when_miss", started_at.elapsed());
+                return Err(err);
+            }
+        };
         if trace_enabled {
             trace::trace(
                 Category::RegionCache,
@@ -416,11 +448,15 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         let mut total = 0usize;
 
         loop {
+            let scan_started_at = Instant::now();
             let regions = self
                 .inner_client
                 .clone()
                 .scan_regions(start_key.clone().into(), end_key_bytes.clone(), limit)
-                .await?;
+                .await;
+            stats::region_cache_operation("scan_regions", regions.is_ok());
+            stats::observe_load_region_cache("scan_regions", scan_started_at.elapsed());
+            let regions = regions?;
             if regions.is_empty() {
                 break;
             }
@@ -587,6 +623,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     }
 
     pub async fn invalidate_region_cache(&self, ver_id: crate::region::RegionVerId) {
+        stats::region_cache_operation("invalidate_region_from_cache", true);
         trace::trace_if_enabled(
             Category::RegionCache,
             "region_cache.invalidate_region_cache",
@@ -614,6 +651,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     }
 
     pub async fn invalidate_store_cache(&self, store_id: StoreId) {
+        stats::region_cache_operation("invalidate_store_regions", true);
         let mut cache = self.store_cache.write().await;
         cache.remove(&store_id);
     }

@@ -31,7 +31,7 @@ use crate::request::{KvRequest, StoreRequest};
 use crate::rpc_interceptor::RpcCallResult;
 use crate::rpc_interceptor::RpcInterceptors;
 use crate::rpc_interceptor::RpcRequest;
-use crate::stats::tikv_stats;
+use crate::stats::tikv_stats_for_kv_request;
 use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
 use crate::store::KvClient;
@@ -114,7 +114,7 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
 
     async fn execute(&self) -> Result<Self::Result> {
         let label = self.request.label();
-        let stats = tikv_stats(label);
+        let stats = tikv_stats_for_kv_request(label, &self.request as &dyn Any);
 
         let Some(kv_client) = self.kv_client.as_ref() else {
             return stats.done(Err(Error::InternalError {
@@ -244,7 +244,7 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
 
     async fn execute(&self) -> Result<Self::Result> {
         let label = self.request.label();
-        let stats = tikv_stats(label);
+        let stats = tikv_stats_for_kv_request(label, &self.request as &dyn Any);
         let kv_client = self.kv_client.as_ref().ok_or(Error::InternalError {
             message: "kv_client has not been initialised in DispatchWithInterceptor".to_owned(),
         })?;
