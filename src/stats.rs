@@ -32,6 +32,7 @@ pub struct RequestStats {
     failed_duration: Option<&'static HistogramVec>,
     failed_counter: Option<&'static IntCounterVec>,
     tikv_client_request_seconds: Option<&'static HistogramVec>,
+    tikv_client_rpc_net_latency_seconds: Option<&'static HistogramVec>,
     tikv_client_request_labels: Option<TikvClientRequestLabels>,
 }
 
@@ -69,6 +70,7 @@ impl RequestStats {
             failed_duration,
             failed_counter,
             tikv_client_request_seconds: None,
+            tikv_client_rpc_net_latency_seconds: None,
             tikv_client_request_labels: None,
         }
     }
@@ -78,6 +80,8 @@ impl RequestStats {
         labels: Option<TikvClientRequestLabels>,
     ) -> RequestStats {
         self.tikv_client_request_seconds = TIKV_CLIENT_RUST_REQUEST_SECONDS_HISTOGRAM_VEC.as_ref();
+        self.tikv_client_rpc_net_latency_seconds =
+            TIKV_CLIENT_RUST_RPC_NET_LATENCY_SECONDS_HISTOGRAM_VEC.as_ref();
         self.tikv_client_request_labels = labels;
         self
     }
@@ -115,6 +119,35 @@ impl RequestStats {
                         counter
                             .with_label_values(&[region_error_label(region_error), store])
                             .inc();
+                    }
+                }
+
+                if let (Some(histogram), Some(labels)) = (
+                    self.tikv_client_rpc_net_latency_seconds,
+                    self.tikv_client_request_labels,
+                ) {
+                    if let Some(details) = exec_details_v2_from_response(resp as &dyn Any) {
+                        let total_rpc_wall_time_ns = details
+                            .time_detail_v2
+                            .as_ref()
+                            .map(|detail| detail.total_rpc_wall_time_ns)
+                            .or_else(|| {
+                                details
+                                    .time_detail
+                                    .as_ref()
+                                    .map(|detail| detail.total_rpc_wall_time_ns)
+                            })
+                            .unwrap_or(0);
+                        if total_rpc_wall_time_ns > 0 {
+                            let net_latency = elapsed
+                                .saturating_sub(Duration::from_nanos(total_rpc_wall_time_ns));
+                            let internal = bool_label_value(labels.internal);
+                            let mut buf = [0u8; 20];
+                            let store = u64_label_value(labels.store_id, &mut buf);
+                            histogram
+                                .with_label_values(&[store, internal])
+                                .observe(duration_to_sec(net_latency));
+                        }
                     }
                 }
             }
@@ -491,6 +524,31 @@ fn region_error_from_response(response: &dyn Any) -> Option<&errorpb::Error> {
     None
 }
 
+fn exec_details_v2_from_response(response: &dyn Any) -> Option<&kvrpcpb::ExecDetailsV2> {
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::GetResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::BatchGetResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::BatchRollbackResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::CheckSecondaryLocksResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::CheckTxnStatusResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::ResolveLockResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::ScanLockResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
+    None
+}
+
 fn normalize_backoff_label(label: &str) -> &str {
     match label {
         // Match client-go `BackoffHistogramRPC` label usage.
@@ -639,6 +697,19 @@ lazy_static::lazy_static! {
             &["type", "store", "stale_read", "scope"],
             buckets,
         )
+    };
+
+    static ref TIKV_CLIENT_RUST_RPC_NET_LATENCY_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_rpc_net_latency_seconds";
+        let help = "Bucketed histogram of estimated network latency between the client and TiKV.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 24) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["store", "scope"], buckets)
     };
 
     static ref TIKV_CLIENT_RUST_RPC_ERROR_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
@@ -873,6 +944,43 @@ mod tests {
             found,
             "expected read request bytes histogram metric not found"
         );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_rpc_net_latency_histogram_records_labels() {
+        let mut ctx = kvrpcpb_alias::Context::default();
+        ctx.peer = Some(metapb::Peer {
+            store_id: 11_223_344_556,
+            ..Default::default()
+        });
+        ctx.request_source = "internal_unit_test".to_owned();
+
+        let stats = tikv_stats_with_context("unit_test_cmd_rpc_net_latency", Some(&ctx));
+
+        std::thread::sleep(Duration::from_millis(1));
+
+        let mut resp = kvrpcpb_alias::GetResponse::default();
+        resp.exec_details_v2 = Some(kvrpcpb_alias::ExecDetailsV2 {
+            time_detail_v2: Some(kvrpcpb_alias::TimeDetailV2 {
+                total_rpc_wall_time_ns: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let _ = stats.done(Ok(resp));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_rpc_net_latency_seconds")
+            .expect("rpc net latency histogram not registered");
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "store") == Some("11223344556")
+                && label_value(metric, "scope") == Some("true")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(found, "expected rpc net latency histogram metric not found");
     }
 
     #[test]
