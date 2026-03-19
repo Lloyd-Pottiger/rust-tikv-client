@@ -143,9 +143,13 @@ where
     let guard = LifecyclePostGuard {
         post: hooks.post.clone(),
     };
+    let parent_trace_id = crate::trace::trace_id();
     tokio::spawn(async move {
         let _guard = guard;
-        future.await
+        match parent_trace_id {
+            Some(trace_id) => crate::trace::with_trace_id(trace_id, future).await,
+            None => future.await,
+        }
     })
 }
 
@@ -671,7 +675,10 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.snapshot_runtime_stats.clone()
     }
 
-    fn apply_snapshot_read_context(ctx: &mut Option<kvrpcpb::Context>, opts: SnapshotReadContext) {
+    fn apply_snapshot_read_context(
+        ctx: &mut Option<kvrpcpb::Context>,
+        mut opts: SnapshotReadContext,
+    ) {
         let ctx = ctx.get_or_insert_with(kvrpcpb::Context::default);
         ctx.not_fill_cache = opts.not_fill_cache;
         ctx.task_id = opts.task_id;
@@ -682,7 +689,11 @@ impl<PdC: PdClient> Transaction<PdC> {
         ctx.record_time_stat = opts.record_time_stat;
         ctx.record_scan_stat = opts.record_scan_stat;
         ctx.resource_group_tag = opts.resource_group_tag.unwrap_or_default();
-        ctx.trace_id = opts.trace_id.unwrap_or_default();
+        ctx.trace_id = opts
+            .trace_id
+            .take()
+            .or_else(crate::trace::trace_id)
+            .unwrap_or_default();
         ctx.trace_control_flags = opts.trace_control_flags.bits();
         ctx.resource_control_context =
             opts.resource_group_name
@@ -6613,7 +6624,11 @@ impl TransactionOptions {
         if let Some(request_source) = &self.request_source {
             ctx.request_source = request_source.clone();
         }
-        ctx.trace_id = self.trace_id.clone().unwrap_or_default();
+        ctx.trace_id = self
+            .trace_id
+            .clone()
+            .or_else(crate::trace::trace_id)
+            .unwrap_or_default();
         ctx.trace_control_flags = self.trace_control_flags.bits();
     }
 
@@ -12458,6 +12473,51 @@ mod tests {
             seen_trace_control_flags.load(Ordering::SeqCst),
             flags.bits()
         );
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_trace_id_falls_back_to_task_local() {
+        let trace_id = b"trace-snapshot-task-local".to_vec();
+        let expected_trace_id = trace_id.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                assert_eq!(ctx.trace_id, expected_trace_id);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        crate::trace::with_trace_id(trace_id, async move {
+            let mut snapshot = Transaction::new(
+                Timestamp::default(),
+                pd_client,
+                TransactionOptions::new_optimistic().read_only(),
+                Keyspace::Disable,
+            );
+            let key: Key = vec![0].into();
+            let _ = snapshot.get(key).await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_context_trace_id_falls_back_to_task_local() {
+        let trace_id = b"trace-write-task-local".to_vec();
+        let expected_trace_id = trace_id.clone();
+
+        crate::trace::with_trace_id(trace_id, async move {
+            let options = TransactionOptions::new_optimistic();
+            let mut ctx = None;
+            options.apply_write_context(&mut ctx);
+            let ctx = ctx.expect("context");
+            assert_eq!(ctx.trace_id, expected_trace_id);
+        })
+        .await;
     }
 
     #[tokio::test]

@@ -1,10 +1,36 @@
 use std::borrow::Cow;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 use lazy_static::lazy_static;
 
 use crate::TraceControlFlags;
+
+tokio::task_local! {
+    static TASK_TRACE_ID: Vec<u8>;
+}
+
+/// Runs `future` with a task-local trace id.
+///
+/// This mirrors client-go `trace.ContextWithTraceID`, but uses Tokio task-local storage instead of
+/// Go's `context.Context`.
+pub fn with_trace_id<T, F>(trace_id: impl Into<Vec<u8>>, future: F) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    TASK_TRACE_ID.scope(trace_id.into(), future)
+}
+
+/// Returns the task-local trace id, if present.
+///
+/// Returns `None` when no trace id is set for the current Tokio task (or when called outside a
+/// Tokio task).
+///
+/// This mirrors client-go `trace.TraceIDFromContext`.
+pub fn trace_id() -> Option<Vec<u8>> {
+    TASK_TRACE_ID.try_with(|trace_id| trace_id.clone()).ok()
+}
 
 #[cfg(test)]
 pub(crate) static TRACE_HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -193,6 +219,27 @@ mod tests {
             prev_event,
             prev_enabled,
         }
+    }
+
+    #[tokio::test]
+    async fn test_task_local_trace_id_scope() {
+        assert_eq!(trace_id(), None);
+
+        let outer = b"trace-outer".to_vec();
+        with_trace_id(outer.clone(), async {
+            assert_eq!(trace_id(), Some(outer.clone()));
+
+            let inner = b"trace-inner".to_vec();
+            with_trace_id(inner.clone(), async {
+                assert_eq!(trace_id(), Some(inner.clone()));
+            })
+            .await;
+
+            assert_eq!(trace_id(), Some(outer.clone()));
+        })
+        .await;
+
+        assert_eq!(trace_id(), None);
     }
 
     #[test]
