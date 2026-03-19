@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::proto::kvrpcpb;
 use crate::proto::resource_manager;
+use crate::transaction::ResolveLockDetail;
 use crate::util::format_bytes;
 
 tokio::task_local! {
@@ -93,6 +94,273 @@ impl fmt::Display for TiKVExecDetails {
         }
 
         f.write_str(&parts.join(", "))
+    }
+}
+
+/// Diagnose information for a single TiKV request.
+///
+/// This mirrors client-go `util.ReqDetailInfo`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReqDetailInfo {
+    /// End-to-end wall time spent on the request.
+    pub req_total_time: Duration,
+    /// Region ID targeted by the request.
+    pub region: u64,
+    /// Store address that served the request.
+    pub store_addr: String,
+    /// Server-side execution details returned by TiKV.
+    pub exec_details: TiKVExecDetails,
+}
+
+/// Extra diagnostics for commit-ts lag introduced by `wait_until`.
+///
+/// This mirrors client-go `util.CommitTSLagDetails`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CommitTSLagDetails {
+    /// Total wait time spent waiting for PD TSO to catch up.
+    pub wait_time: Duration,
+    /// Number of backoff rounds taken while waiting.
+    pub backoff_count: u32,
+    /// The first lagging TSO observed from PD.
+    pub first_lag_ts: u64,
+    /// The minimum TSO the commit was waiting for.
+    pub wait_until_ts: u64,
+}
+
+impl CommitTSLagDetails {
+    /// Merge another lag-detail snapshot into `self`.
+    ///
+    /// Like client-go, snapshots with `first_lag_ts == 0` are treated as "no lag happened" and
+    /// do not affect the accumulated state.
+    pub fn merge(&mut self, other: &Self) {
+        if other.first_lag_ts == 0 {
+            return;
+        }
+
+        self.wait_time += other.wait_time;
+        self.backoff_count = self.backoff_count.saturating_add(other.backoff_count);
+        // Keep the last lag observation after merge, matching client-go.
+        self.first_lag_ts = other.first_lag_ts;
+        self.wait_until_ts = other.wait_until_ts;
+    }
+}
+
+/// Client-side commit execution details collected across retries.
+///
+/// This mirrors the public shape of client-go `util.CommitDetails`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CommitDetails {
+    /// Time spent fetching commit-ts from PD.
+    pub get_commit_ts_time: Duration,
+    /// Time spent fetching a fresh read timestamp from PD.
+    pub get_latest_ts_time: Duration,
+    /// Lag diagnostics for `wait_until` commit-ts constraints.
+    pub lag_details: CommitTSLagDetails,
+    /// Time spent in the prewrite phase.
+    pub prewrite_time: Duration,
+    /// Time spent waiting for prewrite binlog writes.
+    pub wait_prewrite_binlog_time: Duration,
+    /// Time spent in the commit phase.
+    pub commit_time: Duration,
+    /// Time spent waiting on local latches.
+    pub local_latch_time: Duration,
+    /// Total backoff time used across prewrite + commit phases.
+    pub commit_backoff_time: i64,
+    /// Backoff types seen while prewriting.
+    pub prewrite_backoff_types: Vec<String>,
+    /// Backoff types seen while committing.
+    pub commit_backoff_types: Vec<String>,
+    /// Slowest prewrite request observed so far.
+    pub slowest_prewrite: ReqDetailInfo,
+    /// Slowest primary-commit request observed so far.
+    pub commit_primary: ReqDetailInfo,
+    /// Number of written keys.
+    pub write_keys: usize,
+    /// Total written payload size in bytes.
+    pub write_size: usize,
+    /// Number of regions touched by prewrite.
+    pub prewrite_region_num: i32,
+    /// Transaction retry count accumulated across attempts.
+    pub txn_retry: usize,
+    /// Time spent resolving locks while committing.
+    pub resolve_lock: ResolveLockDetail,
+    /// Number of prewrite RPCs issued.
+    pub prewrite_req_num: usize,
+}
+
+impl CommitDetails {
+    /// Merge another commit-detail snapshot into `self`.
+    pub fn merge(&mut self, other: &Self) {
+        self.get_commit_ts_time += other.get_commit_ts_time;
+        self.get_latest_ts_time += other.get_latest_ts_time;
+        self.lag_details.merge(&other.lag_details);
+        self.prewrite_time += other.prewrite_time;
+        self.wait_prewrite_binlog_time += other.wait_prewrite_binlog_time;
+        self.commit_time += other.commit_time;
+        self.local_latch_time += other.local_latch_time;
+        self.commit_backoff_time = self
+            .commit_backoff_time
+            .saturating_add(other.commit_backoff_time);
+        self.write_keys = self.write_keys.saturating_add(other.write_keys);
+        self.write_size = self.write_size.saturating_add(other.write_size);
+        self.prewrite_region_num = self
+            .prewrite_region_num
+            .saturating_add(other.prewrite_region_num);
+        self.txn_retry = self.txn_retry.saturating_add(other.txn_retry);
+        self.prewrite_req_num = self.prewrite_req_num.saturating_add(other.prewrite_req_num);
+        self.resolve_lock.resolve_lock_time += other.resolve_lock.resolve_lock_time;
+
+        self.prewrite_backoff_types
+            .extend(other.prewrite_backoff_types.iter().cloned());
+        if self.slowest_prewrite.req_total_time < other.slowest_prewrite.req_total_time {
+            self.slowest_prewrite = other.slowest_prewrite.clone();
+        }
+
+        self.commit_backoff_types
+            .extend(other.commit_backoff_types.iter().cloned());
+        if self.commit_primary.req_total_time < other.commit_primary.req_total_time {
+            self.commit_primary = other.commit_primary.clone();
+        }
+    }
+
+    /// Merge prewrite request diagnostics into `self`, retaining only the slowest request.
+    pub fn merge_prewrite_req_details(
+        &mut self,
+        req_duration: Duration,
+        region_id: u64,
+        store_addr: impl Into<String>,
+        exec_details: Option<&kvrpcpb::ExecDetailsV2>,
+    ) {
+        if req_duration > self.slowest_prewrite.req_total_time {
+            self.slowest_prewrite = ReqDetailInfo {
+                req_total_time: req_duration,
+                region: region_id,
+                store_addr: store_addr.into(),
+                exec_details: TiKVExecDetails::from_proto(exec_details),
+            };
+        }
+    }
+
+    /// Merge primary-commit request diagnostics into `self`, retaining only the slowest request.
+    pub fn merge_commit_req_details(
+        &mut self,
+        req_duration: Duration,
+        region_id: u64,
+        store_addr: impl Into<String>,
+        exec_details: Option<&kvrpcpb::ExecDetailsV2>,
+    ) {
+        if req_duration > self.commit_primary.req_total_time {
+            self.commit_primary = ReqDetailInfo {
+                req_total_time: req_duration,
+                region: region_id,
+                store_addr: store_addr.into(),
+                exec_details: TiKVExecDetails::from_proto(exec_details),
+            };
+        }
+    }
+
+    /// Placeholder for flush-phase request details.
+    ///
+    /// client-go exposes the helper but leaves it empty today; keep the same behavior until the
+    /// Rust client collects flush-specific diagnostics.
+    pub fn merge_flush_req_details(
+        &mut self,
+        _req_duration: Duration,
+        _region_id: u64,
+        _store_addr: impl Into<String>,
+        _exec_details: Option<&kvrpcpb::ExecDetailsV2>,
+    ) {
+    }
+}
+
+/// Client-side pessimistic-lock execution details collected across retries.
+///
+/// This mirrors the public shape of client-go `util.LockKeysDetails`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LockKeysDetails {
+    /// Total time spent locking keys.
+    pub total_time: Duration,
+    /// Number of regions touched by the lock requests.
+    pub region_num: i32,
+    /// Number of keys requested to lock.
+    pub lock_keys: i32,
+    /// Number of newly locked keys in aggressive-locking mode.
+    pub aggressive_lock_new_count: usize,
+    /// Number of lock derivations reused in aggressive-locking mode.
+    pub aggressive_lock_derived_count: usize,
+    /// Number of keys that encountered conflicts while locking.
+    pub locked_with_conflict_count: usize,
+    /// Time spent resolving encountered locks.
+    pub resolve_lock: ResolveLockDetail,
+    /// Total backoff time used while locking.
+    pub backoff_time: i64,
+    /// Backoff types seen while locking.
+    pub backoff_types: Vec<String>,
+    /// Slowest lock request wall time.
+    pub slowest_req_total_time: Duration,
+    /// Region ID of the slowest lock request.
+    pub slowest_region: u64,
+    /// Store address of the slowest lock request.
+    pub slowest_store_addr: String,
+    /// TiKV execution details associated with the slowest lock request.
+    pub slowest_exec_details: TiKVExecDetails,
+    /// Total lock RPC time.
+    pub lock_rpc_time: i64,
+    /// Total number of lock RPCs.
+    pub lock_rpc_count: i64,
+    /// Number of retry rounds. Like client-go, each merge counts as one extra retry.
+    pub retry_count: usize,
+}
+
+impl LockKeysDetails {
+    /// Merge another lock-detail snapshot into `self`.
+    pub fn merge(&mut self, other: &Self) {
+        self.total_time += other.total_time;
+        self.region_num = self.region_num.saturating_add(other.region_num);
+        self.lock_keys = self.lock_keys.saturating_add(other.lock_keys);
+        self.aggressive_lock_new_count = self
+            .aggressive_lock_new_count
+            .saturating_add(other.aggressive_lock_new_count);
+        self.aggressive_lock_derived_count = self
+            .aggressive_lock_derived_count
+            .saturating_add(other.aggressive_lock_derived_count);
+        self.locked_with_conflict_count = self
+            .locked_with_conflict_count
+            .saturating_add(other.locked_with_conflict_count);
+        self.resolve_lock.resolve_lock_time += other.resolve_lock.resolve_lock_time;
+        self.backoff_time = self.backoff_time.saturating_add(other.backoff_time);
+        self.lock_rpc_time = self.lock_rpc_time.saturating_add(other.lock_rpc_time);
+        self.lock_rpc_count = self.lock_rpc_count.saturating_add(other.lock_rpc_count);
+        self.backoff_types
+            .extend(other.backoff_types.iter().cloned());
+        self.retry_count = self.retry_count.saturating_add(1);
+
+        if self.slowest_req_total_time < other.slowest_req_total_time {
+            self.slowest_req_total_time = other.slowest_req_total_time;
+            self.slowest_region = other.slowest_region;
+            self.slowest_store_addr = other.slowest_store_addr.clone();
+            self.slowest_exec_details = other.slowest_exec_details.clone();
+        }
+    }
+
+    /// Merge lock-request diagnostics into `self`, retaining only the slowest request.
+    pub fn merge_req_details(
+        &mut self,
+        req_duration: Duration,
+        region_id: u64,
+        store_addr: impl Into<String>,
+        exec_details: Option<&kvrpcpb::ExecDetailsV2>,
+    ) {
+        if req_duration > self.slowest_req_total_time {
+            self.slowest_req_total_time = req_duration;
+            self.slowest_region = region_id;
+            self.slowest_store_addr = store_addr.into();
+            self.slowest_exec_details = TiKVExecDetails::from_proto(exec_details);
+        }
     }
 }
 
@@ -1087,6 +1355,344 @@ fn saturating_fetch_add_i64(slot: &AtomicI64, value: i64) {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    fn sample_exec_details_v2(wait_ms: u64, process_ms: u64) -> kvrpcpb::ExecDetailsV2 {
+        kvrpcpb::ExecDetailsV2 {
+            time_detail_v2: Some(kvrpcpb::TimeDetailV2 {
+                wait_wall_time_ns: wait_ms * 1_000_000,
+                process_wall_time_ns: process_ms * 1_000_000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_commit_ts_lag_details_merge() {
+        let mut details = CommitTSLagDetails {
+            wait_time: Duration::from_millis(3),
+            backoff_count: 1,
+            first_lag_ts: 10,
+            wait_until_ts: 20,
+        };
+
+        details.merge(&CommitTSLagDetails::default());
+        assert_eq!(details.wait_time, Duration::from_millis(3));
+        assert_eq!(details.backoff_count, 1);
+        assert_eq!(details.first_lag_ts, 10);
+        assert_eq!(details.wait_until_ts, 20);
+
+        details.merge(&CommitTSLagDetails {
+            wait_time: Duration::from_millis(5),
+            backoff_count: 2,
+            first_lag_ts: 30,
+            wait_until_ts: 40,
+        });
+
+        assert_eq!(details.wait_time, Duration::from_millis(8));
+        assert_eq!(details.backoff_count, 3);
+        assert_eq!(details.first_lag_ts, 30);
+        assert_eq!(details.wait_until_ts, 40);
+    }
+
+    #[test]
+    fn test_commit_details_merge() {
+        let mut left = CommitDetails {
+            get_commit_ts_time: Duration::from_millis(10),
+            get_latest_ts_time: Duration::from_millis(5),
+            lag_details: CommitTSLagDetails {
+                wait_time: Duration::from_millis(1),
+                backoff_count: 1,
+                first_lag_ts: 11,
+                wait_until_ts: 12,
+            },
+            prewrite_time: Duration::from_millis(20),
+            wait_prewrite_binlog_time: Duration::from_millis(3),
+            commit_time: Duration::from_millis(15),
+            local_latch_time: Duration::from_millis(2),
+            commit_backoff_time: 100,
+            prewrite_backoff_types: vec!["txnLock".to_owned()],
+            commit_backoff_types: vec!["regionMiss".to_owned()],
+            slowest_prewrite: ReqDetailInfo {
+                req_total_time: Duration::from_millis(5),
+                region: 1,
+                store_addr: "s1".to_owned(),
+                ..Default::default()
+            },
+            commit_primary: ReqDetailInfo {
+                req_total_time: Duration::from_millis(3),
+                region: 2,
+                store_addr: "s2".to_owned(),
+                ..Default::default()
+            },
+            write_keys: 100,
+            write_size: 2_000,
+            prewrite_region_num: 4,
+            txn_retry: 1,
+            resolve_lock: ResolveLockDetail {
+                resolve_lock_time: Duration::from_nanos(50),
+            },
+            prewrite_req_num: 2,
+        };
+        let right = CommitDetails {
+            get_commit_ts_time: Duration::from_millis(12),
+            get_latest_ts_time: Duration::from_millis(6),
+            lag_details: CommitTSLagDetails {
+                wait_time: Duration::from_millis(2),
+                backoff_count: 3,
+                first_lag_ts: 21,
+                wait_until_ts: 22,
+            },
+            prewrite_time: Duration::from_millis(25),
+            wait_prewrite_binlog_time: Duration::from_millis(4),
+            commit_time: Duration::from_millis(18),
+            local_latch_time: Duration::from_millis(3),
+            commit_backoff_time: 200,
+            prewrite_backoff_types: vec!["tikvRPC".to_owned()],
+            commit_backoff_types: vec!["txnLock".to_owned()],
+            slowest_prewrite: ReqDetailInfo {
+                req_total_time: Duration::from_millis(8),
+                region: 10,
+                store_addr: "s10".to_owned(),
+                ..Default::default()
+            },
+            commit_primary: ReqDetailInfo {
+                req_total_time: Duration::from_millis(6),
+                region: 20,
+                store_addr: "s20".to_owned(),
+                ..Default::default()
+            },
+            write_keys: 150,
+            write_size: 3_000,
+            prewrite_region_num: 5,
+            txn_retry: 2,
+            resolve_lock: ResolveLockDetail {
+                resolve_lock_time: Duration::from_nanos(60),
+            },
+            prewrite_req_num: 3,
+        };
+
+        left.merge(&right);
+
+        assert_eq!(left.get_commit_ts_time, Duration::from_millis(22));
+        assert_eq!(left.get_latest_ts_time, Duration::from_millis(11));
+        assert_eq!(left.lag_details.wait_time, Duration::from_millis(3));
+        assert_eq!(left.lag_details.backoff_count, 4);
+        assert_eq!(left.lag_details.first_lag_ts, 21);
+        assert_eq!(left.lag_details.wait_until_ts, 22);
+        assert_eq!(left.prewrite_time, Duration::from_millis(45));
+        assert_eq!(left.wait_prewrite_binlog_time, Duration::from_millis(7));
+        assert_eq!(left.commit_time, Duration::from_millis(33));
+        assert_eq!(left.local_latch_time, Duration::from_millis(5));
+        assert_eq!(left.write_keys, 250);
+        assert_eq!(left.write_size, 5_000);
+        assert_eq!(left.prewrite_region_num, 9);
+        assert_eq!(left.txn_retry, 3);
+        assert_eq!(
+            left.resolve_lock.resolve_lock_time,
+            Duration::from_nanos(110)
+        );
+        assert_eq!(left.commit_backoff_time, 300);
+        assert_eq!(
+            left.prewrite_backoff_types,
+            vec!["txnLock".to_owned(), "tikvRPC".to_owned()]
+        );
+        assert_eq!(
+            left.commit_backoff_types,
+            vec!["regionMiss".to_owned(), "txnLock".to_owned()]
+        );
+        assert_eq!(
+            left.slowest_prewrite.req_total_time,
+            Duration::from_millis(8)
+        );
+        assert_eq!(left.slowest_prewrite.region, 10);
+        assert_eq!(left.slowest_prewrite.store_addr, "s10");
+        assert_eq!(left.commit_primary.req_total_time, Duration::from_millis(6));
+        assert_eq!(left.commit_primary.region, 20);
+        assert_eq!(left.commit_primary.store_addr, "s20");
+        assert_eq!(left.prewrite_req_num, 5);
+    }
+
+    #[test]
+    fn test_commit_details_merge_req_helpers_and_clone() {
+        let exec_details = sample_exec_details_v2(2, 3);
+        let mut details = CommitDetails::default();
+
+        details.merge_prewrite_req_details(
+            Duration::from_millis(5),
+            1,
+            "store-1",
+            Some(&exec_details),
+        );
+        details.merge_commit_req_details(
+            Duration::from_millis(4),
+            2,
+            "store-2",
+            Some(&exec_details),
+        );
+        details.merge_prewrite_req_details(Duration::from_millis(3), 9, "store-9", None);
+        details.merge_flush_req_details(Duration::from_secs(1), 99, "noop", Some(&exec_details));
+
+        let cloned = details.clone();
+
+        assert_eq!(
+            cloned.slowest_prewrite.req_total_time,
+            Duration::from_millis(5)
+        );
+        assert_eq!(cloned.slowest_prewrite.region, 1);
+        assert_eq!(cloned.slowest_prewrite.store_addr, "store-1");
+        assert_eq!(
+            cloned.slowest_prewrite.exec_details,
+            TiKVExecDetails::from_proto(Some(&exec_details))
+        );
+        assert_eq!(
+            cloned.commit_primary.req_total_time,
+            Duration::from_millis(4)
+        );
+        assert_eq!(cloned.commit_primary.region, 2);
+        assert_eq!(cloned.commit_primary.store_addr, "store-2");
+    }
+
+    #[test]
+    fn test_commit_details_merge_keeps_existing_slower_requests() {
+        let mut left = CommitDetails {
+            slowest_prewrite: ReqDetailInfo {
+                req_total_time: Duration::from_millis(10),
+                region: 1,
+                ..Default::default()
+            },
+            commit_primary: ReqDetailInfo {
+                req_total_time: Duration::from_millis(10),
+                region: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let right = CommitDetails {
+            slowest_prewrite: ReqDetailInfo {
+                req_total_time: Duration::from_millis(5),
+                region: 3,
+                ..Default::default()
+            },
+            commit_primary: ReqDetailInfo {
+                req_total_time: Duration::from_millis(5),
+                region: 4,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        left.merge(&right);
+
+        assert_eq!(left.slowest_prewrite.region, 1);
+        assert_eq!(left.commit_primary.region, 2);
+    }
+
+    #[test]
+    fn test_lock_keys_details_merge() {
+        let mut left = LockKeysDetails {
+            total_time: Duration::from_millis(10),
+            region_num: 2,
+            lock_keys: 5,
+            aggressive_lock_new_count: 1,
+            aggressive_lock_derived_count: 2,
+            locked_with_conflict_count: 3,
+            resolve_lock: ResolveLockDetail {
+                resolve_lock_time: Duration::from_nanos(100),
+            },
+            backoff_time: 200,
+            backoff_types: vec!["txnLock".to_owned()],
+            slowest_req_total_time: Duration::from_millis(5),
+            slowest_region: 10,
+            slowest_store_addr: "store1".to_owned(),
+            lock_rpc_time: 300,
+            lock_rpc_count: 4,
+            retry_count: 1,
+            ..Default::default()
+        };
+        let right = LockKeysDetails {
+            total_time: Duration::from_millis(20),
+            region_num: 3,
+            lock_keys: 7,
+            aggressive_lock_new_count: 4,
+            aggressive_lock_derived_count: 5,
+            locked_with_conflict_count: 6,
+            resolve_lock: ResolveLockDetail {
+                resolve_lock_time: Duration::from_nanos(150),
+            },
+            backoff_time: 250,
+            backoff_types: vec!["regionMiss".to_owned()],
+            slowest_req_total_time: Duration::from_millis(8),
+            slowest_region: 20,
+            slowest_store_addr: "store2".to_owned(),
+            lock_rpc_time: 350,
+            lock_rpc_count: 5,
+            retry_count: 2,
+            ..Default::default()
+        };
+
+        left.merge(&right);
+
+        assert_eq!(left.total_time, Duration::from_millis(30));
+        assert_eq!(left.region_num, 5);
+        assert_eq!(left.lock_keys, 12);
+        assert_eq!(left.aggressive_lock_new_count, 5);
+        assert_eq!(left.aggressive_lock_derived_count, 7);
+        assert_eq!(left.locked_with_conflict_count, 9);
+        assert_eq!(
+            left.resolve_lock.resolve_lock_time,
+            Duration::from_nanos(250)
+        );
+        assert_eq!(left.backoff_time, 450);
+        assert_eq!(left.lock_rpc_time, 650);
+        assert_eq!(left.lock_rpc_count, 9);
+        assert_eq!(left.retry_count, 2);
+        assert_eq!(
+            left.backoff_types,
+            vec!["txnLock".to_owned(), "regionMiss".to_owned()]
+        );
+        assert_eq!(left.slowest_req_total_time, Duration::from_millis(8));
+        assert_eq!(left.slowest_region, 20);
+        assert_eq!(left.slowest_store_addr, "store2");
+    }
+
+    #[test]
+    fn test_lock_keys_details_merge_keeps_existing_slowest_request() {
+        let mut left = LockKeysDetails {
+            slowest_req_total_time: Duration::from_millis(10),
+            slowest_region: 1,
+            ..Default::default()
+        };
+        let right = LockKeysDetails {
+            slowest_req_total_time: Duration::from_millis(5),
+            slowest_region: 2,
+            ..Default::default()
+        };
+
+        left.merge(&right);
+
+        assert_eq!(left.slowest_req_total_time, Duration::from_millis(10));
+        assert_eq!(left.slowest_region, 1);
+    }
+
+    #[test]
+    fn test_lock_keys_details_merge_req_details_and_clone() {
+        let exec_details = sample_exec_details_v2(4, 5);
+        let mut details = LockKeysDetails::default();
+
+        details.merge_req_details(Duration::from_millis(5), 10, "store-a", Some(&exec_details));
+        details.merge_req_details(Duration::from_millis(3), 20, "store-b", None);
+
+        let cloned = details.clone();
+
+        assert_eq!(cloned.slowest_req_total_time, Duration::from_millis(5));
+        assert_eq!(cloned.slowest_region, 10);
+        assert_eq!(cloned.slowest_store_addr, "store-a");
+        assert_eq!(
+            cloned.slowest_exec_details,
+            TiKVExecDetails::from_proto(Some(&exec_details))
+        );
+    }
 
     #[test]
     fn test_time_detail_prefers_v2_proto_fields() {
