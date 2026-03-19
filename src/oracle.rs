@@ -231,6 +231,27 @@ pub fn lower_limit_start_ts(
     ts_from_system_time(target)
 }
 
+/// Return whether `lock_ts + ttl_ms` is expired, compared to `current_ts`.
+///
+/// This mirrors client-go `Oracle.IsExpired`, but is implemented as a pure helper.
+pub fn is_expired(lock_ts: u64, ttl_ms: u64, current_ts: u64) -> bool {
+    let ttl_ms = i64::try_from(ttl_ms).unwrap_or(i64::MAX);
+    let expires_at = extract_physical(lock_ts).saturating_add(ttl_ms);
+    extract_physical(current_ts) >= expires_at
+}
+
+/// Return the remaining milliseconds until `lock_ts + ttl_ms` expires.
+///
+/// This mirrors client-go `Oracle.UntilExpired`, but is implemented as a pure helper.
+pub fn until_expired_ms(lock_ts: u64, ttl_ms: u64, current_ts: u64) -> i64 {
+    let ttl_ms = i64::try_from(ttl_ms).unwrap_or(i64::MAX);
+    let expires_at = extract_physical(lock_ts).saturating_add(ttl_ms);
+    let current = extract_physical(current_ts);
+
+    let remaining = i128::from(expires_at) - i128::from(current);
+    remaining.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
 /// An error indicating a read timestamp is in the future.
 ///
 /// This mirrors client-go `oracle.ErrFutureTSRead`.
@@ -281,6 +302,24 @@ mod tests {
             system_time_from_ts(ts).unwrap(),
             UNIX_EPOCH.checked_add(Duration::from_millis(10)).unwrap()
         );
+    }
+
+    #[test]
+    fn test_is_expired_and_until_expired_ms() {
+        let lock_ts = compose_ts(1000, 0);
+        let ttl_ms = 500;
+
+        let current_ts = compose_ts(1499, 0);
+        assert!(!is_expired(lock_ts, ttl_ms, current_ts));
+        assert_eq!(until_expired_ms(lock_ts, ttl_ms, current_ts), 1);
+
+        let current_ts = compose_ts(1500, 0);
+        assert!(is_expired(lock_ts, ttl_ms, current_ts));
+        assert_eq!(until_expired_ms(lock_ts, ttl_ms, current_ts), 0);
+
+        let current_ts = compose_ts(1501, 0);
+        assert!(is_expired(lock_ts, ttl_ms, current_ts));
+        assert_eq!(until_expired_ms(lock_ts, ttl_ms, current_ts), -1);
     }
 
     #[test]
