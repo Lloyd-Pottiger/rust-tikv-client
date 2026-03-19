@@ -8,6 +8,7 @@ pub mod bytes;
 pub mod gc_time;
 #[doc(hidden)]
 pub mod iter;
+mod misc;
 pub mod rate_limit;
 pub mod ts_set;
 
@@ -42,7 +43,12 @@ pub use bytes::format_bytes;
 pub use gc_time::compatible_parse_gc_time;
 pub use gc_time::GcTimeParseError;
 pub use gc_time::GC_TIME_FORMAT;
+pub use misc::session_id;
+pub use misc::with_recovery;
+pub use misc::with_session_id;
 pub use rate_limit::RateLimit;
 pub use rate_limit::RateLimitError;
 pub use rate_limit::RateLimitPermit;
 pub use ts_set::TsSet;
+
+pub(crate) use misc::scope_task_session_id;

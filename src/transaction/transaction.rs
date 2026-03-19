@@ -146,8 +146,10 @@ where
     let parent_trace_id = crate::trace::trace_id();
     let parent_request_source = crate::request_context::request_source();
     let parent_resource_group_name = crate::request_context::resource_group_name();
+    let parent_session_id = crate::util::session_id();
     tokio::spawn(async move {
         let _guard = guard;
+        let future = crate::util::scope_task_session_id(parent_session_id, future);
         let future = crate::request_context::scope_task_request_metadata(
             parent_request_source,
             parent_resource_group_name,
@@ -599,7 +601,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             rpc_interceptors: Default::default(),
             snapshot_runtime_stats: None,
             vars: Variables::default(),
-            session_id: 0,
+            session_id: crate::util::session_id().unwrap_or(0),
             resource_group_tagger: None,
             replica_read_adjuster: None,
             schema_ver: None,
@@ -1066,7 +1068,8 @@ impl<PdC: PdClient> Transaction<PdC> {
     ///
     /// This maps to client-go `KVTxn.SetSessionID`.
     ///
-    /// The session id is used for client-side logging and diagnostics.
+    /// The session id is used for client-side logging and diagnostics. It overrides any task-local
+    /// session id captured when the transaction was created.
     pub fn set_session_id(&mut self, session_id: u64) {
         self.session_id = session_id;
     }
@@ -13475,6 +13478,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_spawn_with_lifecycle_hooks_inherits_task_local_session_id() {
+        crate::util::with_session_id(88, async move {
+            let handle =
+                super::spawn_with_lifecycle_hooks(super::LifecycleHooks::default(), async {
+                    assert_eq!(crate::util::session_id(), Some(88));
+                });
+
+            handle.await.expect("spawned task should succeed");
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_background_task_lifecycle_hooks_fire_for_auto_heartbeat() {
         let pre_calls = Arc::new(AtomicUsize::new(0));
         let post_calls = Arc::new(AtomicUsize::new(0));
@@ -14603,6 +14619,21 @@ mod tests {
         assert_eq!(txn.session_id, 0);
         txn.set_session_id(42);
         assert_eq!(txn.session_id, 42);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_new_falls_back_to_task_local_session_id() {
+        crate::util::with_session_id(64, async move {
+            let txn = Transaction::new(
+                Timestamp::default(),
+                Arc::new(MockPdClient::default()),
+                TransactionOptions::new_optimistic().drop_check(CheckLevel::None),
+                Keyspace::Disable,
+            );
+
+            assert_eq!(txn.session_id, 64);
+        })
+        .await;
     }
 
     struct SkipKeyKvFilter {
