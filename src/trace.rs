@@ -1,0 +1,228 @@
+use std::borrow::Cow;
+use std::sync::Arc;
+use std::sync::RwLock;
+
+use lazy_static::lazy_static;
+
+use crate::TraceControlFlags;
+
+/// Category identifies a trace event family emitted by the client.
+///
+/// This mirrors client-go `trace.Category`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum Category {
+    /// Two-phase commit prewrite and commit phases.
+    Txn2Pc = 0,
+    /// Lock resolution and conflict handling.
+    TxnLockResolve = 1,
+    /// Individual KV request send and result events.
+    KvRequest = 2,
+    /// Region cache operations and PD lookups.
+    RegionCache = 3,
+}
+
+/// A structured trace field attached to a trace event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraceField {
+    pub key: &'static str,
+    pub value: TraceValue,
+}
+
+impl TraceField {
+    pub fn str(key: &'static str, value: impl Into<Cow<'static, str>>) -> Self {
+        TraceField {
+            key,
+            value: TraceValue::Str(value.into()),
+        }
+    }
+
+    pub fn u64(key: &'static str, value: u64) -> Self {
+        TraceField {
+            key,
+            value: TraceValue::U64(value),
+        }
+    }
+
+    pub fn i64(key: &'static str, value: i64) -> Self {
+        TraceField {
+            key,
+            value: TraceValue::I64(value),
+        }
+    }
+
+    pub fn bool(key: &'static str, value: bool) -> Self {
+        TraceField {
+            key,
+            value: TraceValue::Bool(value),
+        }
+    }
+
+    pub fn bytes(key: &'static str, value: impl Into<Vec<u8>>) -> Self {
+        TraceField {
+            key,
+            value: TraceValue::Bytes(value.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TraceValue {
+    Str(Cow<'static, str>),
+    U64(u64),
+    I64(i64),
+    Bool(bool),
+    Bytes(Vec<u8>),
+}
+
+/// The function signature for recording trace events.
+///
+/// This mirrors client-go `trace.TraceEventFunc`.
+pub type TraceEventFunc = Arc<dyn Fn(Category, &str, &[TraceField]) + Send + Sync>;
+
+/// The function signature for checking whether a category is enabled.
+///
+/// This mirrors client-go `trace.IsCategoryEnabledFunc`.
+pub type IsCategoryEnabledFunc = Arc<dyn Fn(Category) -> bool + Send + Sync>;
+
+fn noop_trace_event(_category: Category, _name: &str, _fields: &[TraceField]) {}
+fn noop_is_category_enabled(_category: Category) -> bool {
+    false
+}
+
+lazy_static! {
+    static ref TRACE_EVENT_FUNC: RwLock<TraceEventFunc> = RwLock::new(Arc::new(noop_trace_event));
+    static ref IS_CATEGORY_ENABLED_FUNC: RwLock<IsCategoryEnabledFunc> =
+        RwLock::new(Arc::new(noop_is_category_enabled));
+}
+
+/// Register the global trace event callback.
+///
+/// Passing `None` resets to a no-op implementation.
+pub fn set_trace_event_func(func: Option<TraceEventFunc>) {
+    let func = func.unwrap_or_else(|| Arc::new(noop_trace_event));
+    let mut guard = TRACE_EVENT_FUNC.write().unwrap_or_else(|e| e.into_inner());
+    *guard = func;
+}
+
+/// Register the global category enabled callback.
+///
+/// Passing `None` resets to a no-op implementation that returns `false`.
+pub fn set_is_category_enabled_func(func: Option<IsCategoryEnabledFunc>) {
+    let func = func.unwrap_or_else(|| Arc::new(noop_is_category_enabled));
+    let mut guard = IS_CATEGORY_ENABLED_FUNC
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = func;
+}
+
+/// Record a trace event (does not check `is_category_enabled`).
+pub fn trace(category: Category, name: &str, fields: &[TraceField]) {
+    let func = TRACE_EVENT_FUNC.read().unwrap_or_else(|e| e.into_inner()).clone();
+    (func)(category, name, fields);
+}
+
+/// Check whether a trace category is enabled.
+pub fn is_category_enabled(category: Category) -> bool {
+    let func = IS_CATEGORY_ENABLED_FUNC
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    (func)(category)
+}
+
+/// Convenience helper: checks `is_category_enabled` before recording the event.
+///
+/// Use this when building `fields` is non-trivial.
+pub fn trace_if_enabled<F>(category: Category, name: &str, fields: F)
+where
+    F: FnOnce() -> Vec<TraceField>,
+{
+    if !is_category_enabled(category) {
+        return;
+    }
+    let fields = fields();
+    trace(category, name, &fields);
+}
+
+/// Convenience helper for `TraceControlFlags::IMMEDIATE_LOG`.
+///
+/// This mirrors client-go `trace.ImmediateLoggingEnabled(ctx)` but takes flags directly.
+pub fn immediate_logging_enabled(flags: TraceControlFlags) -> bool {
+    flags.has(TraceControlFlags::IMMEDIATE_LOG)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    struct HookGuard {
+        prev_event: TraceEventFunc,
+        prev_enabled: IsCategoryEnabledFunc,
+    }
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            set_trace_event_func(Some(self.prev_event.clone()));
+            set_is_category_enabled_func(Some(self.prev_enabled.clone()));
+        }
+    }
+
+    fn set_hooks_scoped(event: TraceEventFunc, enabled: IsCategoryEnabledFunc) -> HookGuard {
+        let prev_event = TRACE_EVENT_FUNC
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let prev_enabled = IS_CATEGORY_ENABLED_FUNC
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
+        set_trace_event_func(Some(event));
+        set_is_category_enabled_func(Some(enabled));
+
+        HookGuard {
+            prev_event,
+            prev_enabled,
+        }
+    }
+
+    #[test]
+    fn test_trace_hooks_and_is_enabled() {
+        assert!(!is_category_enabled(Category::KvRequest));
+
+        let seen = Arc::new(Mutex::new(Vec::<(Category, String, usize)>::new()));
+        let seen_event = seen.clone();
+        let event: TraceEventFunc = Arc::new(move |category, name, fields| {
+            seen_event
+                .lock()
+                .unwrap()
+                .push((category, name.to_owned(), fields.len()));
+        });
+        let enabled: IsCategoryEnabledFunc = Arc::new(|_| true);
+
+        let _guard = set_hooks_scoped(event, enabled);
+
+        trace_if_enabled(Category::KvRequest, "send", || vec![TraceField::u64("id", 42)]);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+
+        // `trace` does not consult the enabled hook.
+        set_is_category_enabled_func(None);
+        trace(Category::KvRequest, "forced", &[]);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+
+        // But `trace_if_enabled` should stop emitting once disabled.
+        trace_if_enabled(Category::KvRequest, "drop", || vec![]);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_immediate_logging_enabled_helper() {
+        let flags = TraceControlFlags::default().with(TraceControlFlags::IMMEDIATE_LOG);
+        assert!(immediate_logging_enabled(flags));
+        assert!(!immediate_logging_enabled(TraceControlFlags::default()));
+    }
+}
+

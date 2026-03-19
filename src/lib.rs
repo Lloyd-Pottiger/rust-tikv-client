@@ -104,6 +104,7 @@ pub mod coprocessor;
 #[doc(hidden)]
 pub mod raw;
 pub mod redact;
+pub mod trace;
 pub mod request;
 #[doc(hidden)]
 pub mod transaction;
