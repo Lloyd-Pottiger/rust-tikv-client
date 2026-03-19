@@ -126,7 +126,7 @@ mod safe_ts;
 mod stats;
 mod store;
 mod timestamp;
-mod util;
+pub mod util;
 
 #[cfg(test)]
 mod mock;
