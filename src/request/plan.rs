@@ -205,11 +205,18 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
                 .as_ref()
                 .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
                 .unwrap_or(0);
-            let fields = vec![
+            let mut fields = vec![
                 TraceField::str("label", label),
                 TraceField::bool("success", result.is_ok()),
                 TraceField::u64("latency_ms", elapsed_ms),
             ];
+            if crate::util::trace_exec_details_enabled() {
+                if let Ok(resp) = result.as_ref() {
+                    if let Some(details) = exec_details_v2_from_response(resp as &dyn Any) {
+                        append_trace_exec_details_fields(&mut fields, details);
+                    }
+                }
+            }
             trace::trace(Category::KvRequest, "kv.request.result", &fields);
         }
 
@@ -318,7 +325,9 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                 }
             }
 
-            let started_at = if kv_trace_enabled || txn_2pc_trace_enabled {
+            let track_exec_details = crate::util::exec_details().is_some();
+            let request_bytes = track_exec_details.then(|| request_encoded_len(&self.request));
+            let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
                 Some(Instant::now())
             } else {
                 None
@@ -335,17 +344,37 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                     })
             });
 
+            if let Some(started_at) = started_at.as_ref() {
+                crate::util::record_task_local_wait_kv_response(started_at.elapsed());
+            }
+
+            if let Some(sent_bytes) = request_bytes {
+                let received_bytes = result
+                    .as_ref()
+                    .ok()
+                    .map(|resp| response_encoded_len(resp as &dyn Any))
+                    .unwrap_or(0);
+                crate::util::record_task_local_kv_traffic(sent_bytes, received_bytes);
+            }
+
             if kv_trace_enabled {
                 let elapsed_ms = started_at
                     .as_ref()
                     .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
                     .unwrap_or(0);
-                let fields = vec![
+                let mut fields = vec![
                     TraceField::str("label", label),
                     TraceField::str("target", target.to_owned()),
                     TraceField::bool("success", result.is_ok()),
                     TraceField::u64("latency_ms", elapsed_ms),
                 ];
+                if crate::util::trace_exec_details_enabled() {
+                    if let Ok(resp) = result.as_ref() {
+                        if let Some(details) = exec_details_v2_from_response(resp as &dyn Any) {
+                            append_trace_exec_details_fields(&mut fields, details);
+                        }
+                    }
+                }
                 trace::trace(Category::KvRequest, "kv.request.result", &fields);
             }
 
@@ -472,12 +501,19 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                 .as_ref()
                 .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
                 .unwrap_or(0);
-            let fields = vec![
+            let mut fields = vec![
                 TraceField::str("label", label),
                 TraceField::str("target", target.to_owned()),
                 TraceField::bool("success", result.is_ok()),
                 TraceField::u64("latency_ms", elapsed_ms),
             ];
+            if crate::util::trace_exec_details_enabled() {
+                if let Ok(resp) = result.as_ref() {
+                    if let Some(details) = exec_details_v2_from_response(resp as &dyn Any) {
+                        append_trace_exec_details_fields(&mut fields, details);
+                    }
+                }
+            }
             trace::trace(Category::KvRequest, "kv.request.result", &fields);
         }
 
@@ -502,6 +538,141 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         }
 
         stats.done(result)
+    }
+}
+
+fn append_trace_exec_details_fields(
+    fields: &mut Vec<TraceField>,
+    details: &kvrpcpb::ExecDetailsV2,
+) {
+    fn push_field(fields: &mut Vec<TraceField>, key: &'static str, value: u64) {
+        if value > 0 {
+            fields.push(TraceField::u64(key, value));
+        }
+    }
+
+    let (total_rpc_ns, wait_ns, process_ns, suspend_ns, kv_read_ns) =
+        if let Some(detail) = details.time_detail_v2.as_ref() {
+            (
+                detail.total_rpc_wall_time_ns,
+                detail.wait_wall_time_ns,
+                detail.process_wall_time_ns,
+                detail.process_suspend_wall_time_ns,
+                detail.kv_read_wall_time_ns,
+            )
+        } else if let Some(detail) = details.time_detail.as_ref() {
+            (
+                detail.total_rpc_wall_time_ns,
+                detail.wait_wall_time_ms.saturating_mul(1_000_000),
+                detail.process_wall_time_ms.saturating_mul(1_000_000),
+                0,
+                detail.kv_read_wall_time_ms.saturating_mul(1_000_000),
+            )
+        } else {
+            return;
+        };
+
+    push_field(fields, "tikv_exec_total_rpc_ns", total_rpc_ns);
+    push_field(fields, "tikv_exec_wait_ns", wait_ns);
+    push_field(fields, "tikv_exec_process_ns", process_ns);
+    push_field(fields, "tikv_exec_suspend_ns", suspend_ns);
+    push_field(fields, "tikv_exec_kv_read_ns", kv_read_ns);
+
+    if let Some(detail) = details.scan_detail_v2.as_ref() {
+        push_field(
+            fields,
+            "tikv_exec_get_snapshot_ns",
+            detail.get_snapshot_nanos,
+        );
+        push_field(
+            fields,
+            "tikv_exec_rocksdb_block_read_ns",
+            detail.rocksdb_block_read_nanos,
+        );
+        push_field(
+            fields,
+            "tikv_exec_rocksdb_block_read_bytes",
+            detail.rocksdb_block_read_byte,
+        );
+        push_field(
+            fields,
+            "tikv_exec_read_index_propose_wait_ns",
+            detail.read_index_propose_wait_nanos,
+        );
+        push_field(
+            fields,
+            "tikv_exec_read_index_confirm_wait_ns",
+            detail.read_index_confirm_wait_nanos,
+        );
+        push_field(
+            fields,
+            "tikv_exec_read_pool_schedule_wait_ns",
+            detail.read_pool_schedule_wait_nanos,
+        );
+    }
+
+    if let Some(detail) = details.write_detail.as_ref() {
+        push_field(
+            fields,
+            "tikv_exec_store_batch_wait_ns",
+            detail.store_batch_wait_nanos,
+        );
+        push_field(
+            fields,
+            "tikv_exec_propose_send_wait_ns",
+            detail.propose_send_wait_nanos,
+        );
+        push_field(fields, "tikv_exec_persist_log_ns", detail.persist_log_nanos);
+        push_field(
+            fields,
+            "tikv_exec_raft_db_write_leader_wait_ns",
+            detail.raft_db_write_leader_wait_nanos,
+        );
+        push_field(
+            fields,
+            "tikv_exec_raft_db_sync_log_ns",
+            detail.raft_db_sync_log_nanos,
+        );
+        push_field(
+            fields,
+            "tikv_exec_raft_db_write_memtable_ns",
+            detail.raft_db_write_memtable_nanos,
+        );
+        push_field(fields, "tikv_exec_commit_log_ns", detail.commit_log_nanos);
+        push_field(
+            fields,
+            "tikv_exec_apply_batch_wait_ns",
+            detail.apply_batch_wait_nanos,
+        );
+        push_field(fields, "tikv_exec_apply_log_ns", detail.apply_log_nanos);
+        push_field(
+            fields,
+            "tikv_exec_apply_mutex_lock_ns",
+            detail.apply_mutex_lock_nanos,
+        );
+        push_field(
+            fields,
+            "tikv_exec_apply_write_leader_wait_ns",
+            detail.apply_write_leader_wait_nanos,
+        );
+        push_field(
+            fields,
+            "tikv_exec_apply_write_wal_ns",
+            detail.apply_write_wal_nanos,
+        );
+        push_field(
+            fields,
+            "tikv_exec_apply_write_memtable_ns",
+            detail.apply_write_memtable_nanos,
+        );
+        push_field(fields, "tikv_exec_latch_wait_ns", detail.latch_wait_nanos);
+        push_field(fields, "tikv_exec_write_process_ns", detail.process_nanos);
+        push_field(fields, "tikv_exec_throttle_ns", detail.throttle_nanos);
+        push_field(
+            fields,
+            "tikv_exec_pessimistic_lock_wait_ns",
+            detail.pessimistic_lock_wait_nanos,
+        );
     }
 }
 
@@ -3413,6 +3584,43 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_dispatch_with_interceptor_fast_path_records_task_local_exec_details_wait_kv_duration(
+    ) {
+        let details = std::sync::Arc::new(crate::util::ExecDetails::default());
+        let response = crate::proto::kvrpcpb::GetResponse {
+            value: b"resp".to_vec(),
+            ..Default::default()
+        };
+        let expected_received =
+            i64::try_from(prost::Message::encoded_len(&response)).unwrap_or(i64::MAX);
+        let kv = MockKvClient::with_dispatch_hook(move |_| {
+            std::thread::sleep(Duration::from_millis(2));
+            Ok(Box::new(response.clone()))
+        });
+
+        let rpc_interceptors: crate::rpc_interceptor::RpcInterceptors =
+            std::sync::Arc::new(Vec::new());
+        let plan = DispatchWithInterceptor {
+            request: TraceTestRequest,
+            kv_client: Some(std::sync::Arc::new(kv)),
+            store_address: Some("test-store".to_owned()),
+            rpc_interceptors,
+        };
+
+        crate::util::with_exec_details(details.clone(), async {
+            let _ = plan.execute().await.unwrap();
+        })
+        .await;
+
+        assert!(details.wait_kv_resp_duration() >= Duration::from_millis(1));
+        assert_eq!(details.traffic_details().unpacked_bytes_sent_kv_total(), 11);
+        assert_eq!(
+            details.traffic_details().unpacked_bytes_received_kv_total(),
+            expected_received
+        );
+    }
+
+    #[tokio::test]
     async fn test_single_shard_handler_records_mpp_and_cross_zone_traffic() {
         let _lock = crate::config::GLOBAL_CONFIG_TEST_LOCK.lock().await;
         let _guard = set_global_config_scoped(crate::Config::default().with_zone_label("zone1"));
@@ -3687,6 +3895,103 @@ mod test {
         );
         assert_eq!(trace_field_bool(&events[1].2, "success"), Some(true));
         assert!(trace_field_u64(&events[1].2, "latency_ms").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_trace_kv_request_result_includes_exec_details_when_enabled() {
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
+        let _reset = TraceHookReset;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(
+            Vec::<Vec<crate::trace::TraceField>>::new(),
+        ));
+
+        let seen_event = seen.clone();
+        let event: crate::trace::TraceEventFunc =
+            std::sync::Arc::new(move |category, name, fields| {
+                if category != crate::trace::Category::KvRequest {
+                    return;
+                }
+                if name != "kv.request.result" {
+                    return;
+                }
+                seen_event.lock().unwrap().push(fields.to_vec());
+            });
+        crate::trace::set_trace_event_func(Some(event));
+
+        let enabled: crate::trace::IsCategoryEnabledFunc =
+            std::sync::Arc::new(|category| category == crate::trace::Category::KvRequest);
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+
+        let exec_details = crate::proto::kvrpcpb::ExecDetailsV2 {
+            time_detail: None,
+            scan_detail_v2: Some(crate::proto::kvrpcpb::ScanDetailV2 {
+                get_snapshot_nanos: 6,
+                rocksdb_block_read_nanos: 7,
+                rocksdb_block_read_byte: 8,
+                read_index_propose_wait_nanos: 9,
+                ..Default::default()
+            }),
+            write_detail: Some(crate::proto::kvrpcpb::WriteDetail {
+                store_batch_wait_nanos: 10,
+                ..Default::default()
+            }),
+            time_detail_v2: Some(crate::proto::kvrpcpb::TimeDetailV2 {
+                wait_wall_time_ns: 1,
+                process_wall_time_ns: 2,
+                process_suspend_wall_time_ns: 3,
+                kv_read_wall_time_ns: 4,
+                total_rpc_wall_time_ns: 5,
+            }),
+        };
+
+        let response = crate::proto::kvrpcpb::GetResponse {
+            exec_details_v2: Some(exec_details),
+            ..Default::default()
+        };
+        let kv = MockKvClient::with_dispatch_hook(move |_| Ok(Box::new(response.clone())));
+        let plan = Dispatch {
+            request: TraceTestRequest,
+            kv_client: Some(std::sync::Arc::new(kv)),
+        };
+
+        crate::util::with_trace_exec_details(async {
+            let _ = plan.execute().await.unwrap();
+        })
+        .await;
+
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 1);
+        let fields = &events[0];
+        assert_eq!(trace_field_str(fields, "label"), Some("trace_test_request"));
+        assert_eq!(trace_field_bool(fields, "success"), Some(true));
+        assert!(trace_field_u64(fields, "latency_ms").is_some());
+
+        assert_eq!(trace_field_u64(fields, "tikv_exec_total_rpc_ns"), Some(5));
+        assert_eq!(trace_field_u64(fields, "tikv_exec_wait_ns"), Some(1));
+        assert_eq!(trace_field_u64(fields, "tikv_exec_process_ns"), Some(2));
+        assert_eq!(trace_field_u64(fields, "tikv_exec_suspend_ns"), Some(3));
+        assert_eq!(trace_field_u64(fields, "tikv_exec_kv_read_ns"), Some(4));
+        assert_eq!(
+            trace_field_u64(fields, "tikv_exec_get_snapshot_ns"),
+            Some(6)
+        );
+        assert_eq!(
+            trace_field_u64(fields, "tikv_exec_rocksdb_block_read_ns"),
+            Some(7)
+        );
+        assert_eq!(
+            trace_field_u64(fields, "tikv_exec_rocksdb_block_read_bytes"),
+            Some(8)
+        );
+        assert_eq!(
+            trace_field_u64(fields, "tikv_exec_read_index_propose_wait_ns"),
+            Some(9)
+        );
+        assert_eq!(
+            trace_field_u64(fields, "tikv_exec_store_batch_wait_ns"),
+            Some(10)
+        );
     }
 
     #[tokio::test]
