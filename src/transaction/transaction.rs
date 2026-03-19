@@ -3678,6 +3678,31 @@ impl<PdC: PdClient> Transaction<PdC> {
             guard.unlock().await;
         }
 
+        if mode_info.one_pc_fallback() {
+            crate::stats::inc_one_pc_txn_counter("fallback");
+        }
+
+        let txn_counter_label = match &res {
+            Ok(Some(_)) => Some("ok"),
+            Ok(None) => None,
+            Err(Error::UndeterminedError(_))
+                if !mode_info.is_one_pc && !mode_info.is_async_commit =>
+            {
+                Some("ok")
+            }
+            Err(_) => Some("err"),
+        };
+
+        if let Some(label) = txn_counter_label {
+            if mode_info.is_one_pc {
+                crate::stats::inc_one_pc_txn_counter(label);
+            } else if mode_info.is_async_commit {
+                crate::stats::inc_async_commit_txn_counter(label);
+            } else {
+                crate::stats::inc_commit_txn_counter(label);
+            }
+        }
+
         if let Some(callback) = self.commit_callback.as_ref() {
             let commit_ts = match &res {
                 Ok(Some(ts)) => ts.version(),
@@ -7968,6 +7993,7 @@ mod tests {
 
     use async_trait::async_trait;
     use fail::FailScenario;
+    use serial_test::serial;
 
     use super::{
         AssertionLevel, PessimisticLockMode, PrewriteEncounterLockPolicy, PIPELINED_MIN_FLUSH_KEYS,
@@ -15455,9 +15481,28 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_transaction_set_enable_async_commit_one_pc_and_causal_consistency() {
         let start_version = 7;
         let one_pc_commit_version = 9;
+
+        let counter_value = |label: &str| {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_one_pc_txn_counter")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == label)
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        };
+        let before_ok = counter_value("ok");
 
         let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
             if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
@@ -15495,6 +15540,176 @@ mod tests {
         let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
         assert_eq!(commit_ts.version(), one_pc_commit_version);
         assert_eq!(pd_client.get_timestamp_call_count(), 0);
+
+        let after_ok = counter_value("ok");
+        assert!(
+            after_ok >= before_ok + 1.0,
+            "expected one_pc_txn_counter ok to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_commit_records_async_commit_ok_counter() {
+        let start_version = 7;
+        let async_commit_version = 9;
+        let commit_notify = Arc::new(tokio::sync::Notify::new());
+
+        let counter_value = |label: &str| {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_async_commit_txn_counter")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == label)
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        };
+        let before_ok = counter_value("ok");
+
+        let commit_notify_captured = commit_notify.clone();
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert_eq!(req.start_version, start_version);
+                assert!(req.use_async_commit);
+                assert!(!req.try_one_pc);
+                assert_eq!(req.min_commit_ts, start_version.saturating_add(1));
+                assert!(req.max_commit_ts > 0);
+
+                let resp = kvrpcpb::PrewriteResponse {
+                    min_commit_ts: async_commit_version,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                assert_eq!(req.keys, vec![vec![1]]);
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, async_commit_version);
+                commit_notify_captured.notify_one();
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_enable_async_commit(true);
+        txn.set_causal_consistency(true);
+
+        txn.put(vec![1u8], vec![42u8]).await.unwrap();
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), async_commit_version);
+        assert_eq!(pd_client.get_timestamp_call_count(), 0);
+
+        tokio::time::timeout(Duration::from_secs(1), commit_notify.notified())
+            .await
+            .expect("expected async-commit secondary commit request");
+
+        let after_ok = counter_value("ok");
+        assert!(
+            after_ok >= before_ok + 1.0,
+            "expected async_commit_txn_counter ok to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_commit_records_one_pc_fallback_and_two_pc_ok_counters() {
+        let start_version = 7;
+        let commit_version = 8;
+
+        let counter_value = |name: &str, label: &str| {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| family.get_name() == name)
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == label)
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        };
+
+        let one_pc_fallback_before =
+            counter_value("tikv_client_rust_one_pc_txn_counter", "fallback");
+        let two_pc_ok_before = counter_value("tikv_client_rust_commit_txn_counter", "ok");
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert_eq!(req.start_version, start_version);
+                assert!(!req.use_async_commit);
+                assert!(req.try_one_pc);
+                assert_eq!(req.min_commit_ts, start_version.saturating_add(1));
+                assert!(req.max_commit_ts > 0);
+
+                let resp = kvrpcpb::PrewriteResponse {
+                    one_pc_commit_ts: 0,
+                    min_commit_ts: 0,
+                    ..Default::default()
+                };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                assert_eq!(req.keys, vec![vec![1]]);
+                assert_eq!(req.start_version, start_version);
+                assert_eq!(req.commit_version, commit_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .try_one_pc()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_causal_consistency(true);
+
+        txn.put(vec![1u8], vec![42u8]).await.unwrap();
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+
+        let one_pc_fallback_after =
+            counter_value("tikv_client_rust_one_pc_txn_counter", "fallback");
+        let two_pc_ok_after = counter_value("tikv_client_rust_commit_txn_counter", "ok");
+
+        assert!(
+            one_pc_fallback_after >= one_pc_fallback_before + 1.0,
+            "expected one_pc_txn_counter fallback to increase"
+        );
+        assert!(
+            two_pc_ok_after >= two_pc_ok_before + 1.0,
+            "expected commit_txn_counter ok to increase"
+        );
     }
 
     #[tokio::test]

@@ -306,6 +306,24 @@ pub(crate) fn inc_batch_client_no_available_connection() {
     }
 }
 
+pub(crate) fn inc_commit_txn_counter(label: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_COMMIT_TXN_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[label]).inc();
+    }
+}
+
+pub(crate) fn inc_async_commit_txn_counter(label: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_ASYNC_COMMIT_TXN_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[label]).inc();
+    }
+}
+
+pub(crate) fn inc_one_pc_txn_counter(label: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_ONE_PC_TXN_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[label]).inc();
+    }
+}
+
 #[allow(dead_code)]
 pub fn observe_tso_batch(batch_size: usize) {
     if let Some(histogram) = PD_TSO_BATCH_SIZE_HISTOGRAM.as_ref() {
@@ -879,6 +897,24 @@ lazy_static::lazy_static! {
         "Counter of no available batch client.",
     );
 
+    static ref TIKV_CLIENT_RUST_COMMIT_TXN_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
+        "tikv_client_rust_commit_txn_counter",
+        "Counter of 2PC transactions.",
+        &["type"],
+    );
+
+    static ref TIKV_CLIENT_RUST_ASYNC_COMMIT_TXN_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
+        "tikv_client_rust_async_commit_txn_counter",
+        "Counter of async commit transactions.",
+        &["type"],
+    );
+
+    static ref TIKV_CLIENT_RUST_ONE_PC_TXN_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
+        "tikv_client_rust_one_pc_txn_counter",
+        "Counter of 1PC transactions.",
+        &["type"],
+    );
+
     static ref TIKV_CLIENT_RUST_READ_REQUEST_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_read_request_bytes";
         let help = "Bucketed histogram of total bytes sent/received for read requests.";
@@ -972,7 +1008,8 @@ mod tests {
     use serial_test::serial;
 
     use super::{
-        inc_batch_client_no_available_connection, observe_backoff_seconds,
+        inc_async_commit_txn_counter, inc_batch_client_no_available_connection,
+        inc_commit_txn_counter, inc_one_pc_txn_counter, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
         observe_request_retry_times, observe_stale_read_hit_miss, region_cache_operation,
@@ -1271,6 +1308,84 @@ mod tests {
         assert!(
             after >= before + 200.0,
             "expected no-available-connection counter to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_txn_commit_counters_record_labels() {
+        inc_commit_txn_counter("ok");
+        inc_commit_txn_counter("err");
+        inc_async_commit_txn_counter("ok");
+        inc_async_commit_txn_counter("err");
+        inc_one_pc_txn_counter("ok");
+        inc_one_pc_txn_counter("err");
+        inc_one_pc_txn_counter("fallback");
+
+        let families = prometheus::gather();
+
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_commit_txn_counter")
+            .expect("commit_txn_counter not registered");
+        assert!(
+            family
+                .get_metric()
+                .iter()
+                .any(|metric| label_value(metric, "type") == Some("ok")),
+            "expected commit_txn_counter ok label"
+        );
+        assert!(
+            family
+                .get_metric()
+                .iter()
+                .any(|metric| label_value(metric, "type") == Some("err")),
+            "expected commit_txn_counter err label"
+        );
+
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_async_commit_txn_counter")
+            .expect("async_commit_txn_counter not registered");
+        assert!(
+            family
+                .get_metric()
+                .iter()
+                .any(|metric| label_value(metric, "type") == Some("ok")),
+            "expected async_commit_txn_counter ok label"
+        );
+        assert!(
+            family
+                .get_metric()
+                .iter()
+                .any(|metric| label_value(metric, "type") == Some("err")),
+            "expected async_commit_txn_counter err label"
+        );
+
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_one_pc_txn_counter")
+            .expect("one_pc_txn_counter not registered");
+        assert!(
+            family
+                .get_metric()
+                .iter()
+                .any(|metric| label_value(metric, "type") == Some("ok")),
+            "expected one_pc_txn_counter ok label"
+        );
+        assert!(
+            family
+                .get_metric()
+                .iter()
+                .any(|metric| label_value(metric, "type") == Some("err")),
+            "expected one_pc_txn_counter err label"
+        );
+        assert!(
+            family
+                .get_metric()
+                .iter()
+                .any(|metric| label_value(metric, "type") == Some("fallback")),
+            "expected one_pc_txn_counter fallback label"
         );
     }
 
