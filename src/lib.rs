@@ -102,6 +102,7 @@ pub mod async_util;
 pub mod backoff;
 #[doc(hidden)]
 pub mod coprocessor;
+pub mod oracle;
 #[doc(hidden)]
 pub mod raw;
 pub mod redact;
