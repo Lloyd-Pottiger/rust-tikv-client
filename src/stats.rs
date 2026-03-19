@@ -159,10 +159,6 @@ pub(crate) fn tikv_stats_with_context(
     tikv_stats(cmd).with_tikv_client_request_labels(labels)
 }
 
-pub(crate) fn tikv_stats_for_kv_request(cmd: &'static str, request: &dyn Any) -> RequestStats {
-    tikv_stats_with_context(cmd, kv_context_from_request(request))
-}
-
 pub fn tikv_stats(cmd: &'static str) -> RequestStats {
     match (
         TIKV_REQUEST_DURATION_HISTOGRAM_VEC.as_ref(),
@@ -227,71 +223,102 @@ pub fn observe_tso_batch(batch_size: usize) {
     }
 }
 
-pub(crate) fn kv_context_from_request(request: &dyn Any) -> Option<&kvrpcpb::Context> {
-    macro_rules! downcast_kv_context {
-        ($($ty:ty),* $(,)?) => {
-            $(
-                if let Some(req) = request.downcast_ref::<$ty>() {
-                    return req.context.as_ref();
-                }
-            )*
+pub(crate) fn observe_kv_request_traffic_metrics(
+    label: &'static str,
+    context: Option<&kvrpcpb::Context>,
+    is_cross_zone: bool,
+    sent_bytes: i64,
+    received_bytes: i64,
+    response_ok: bool,
+) {
+    fn location_label_value(is_cross_zone: bool) -> &'static str {
+        if is_cross_zone {
+            "cross-zone"
+        } else {
+            "local"
+        }
+    }
+
+    fn direction_label_value(is_in: bool) -> &'static str {
+        if is_in {
+            "in"
+        } else {
+            "out"
+        }
+    }
+
+    fn replica_label_value(is_replica_read: bool) -> &'static str {
+        if is_replica_read {
+            "follower"
+        } else {
+            "leader"
+        }
+    }
+
+    fn bytes_to_u64(bytes: i64) -> u64 {
+        if bytes <= 0 {
+            0
+        } else {
+            u64::try_from(bytes).unwrap_or(u64::MAX)
+        }
+    }
+
+    fn is_read_request_label(label: &str) -> bool {
+        matches!(
+            label,
+            "kv_get"
+                | "kv_batch_get"
+                | "kv_buffer_batch_get"
+                | "kv_scan"
+                | "coprocessor"
+                | "batch_coprocessor"
+                | "coprocessor_stream"
+                | "raw_get"
+                | "raw_batch_get"
+                | "raw_get_key_ttl"
+                | "raw_scan"
+                | "raw_batch_scan"
+                | "raw_coprocessor"
+                | "raw_checksum"
+        )
+    }
+
+    let Some(context) = context else {
+        return;
+    };
+
+    let location = location_label_value(is_cross_zone);
+
+    if context.stale_read {
+        if let Some(counter) = TIKV_CLIENT_RUST_STALE_READ_REQ_COUNTER_VEC.as_ref() {
+            counter.with_label_values(&[location]).inc();
+        }
+        if let Some(counter) = TIKV_CLIENT_RUST_STALE_READ_BYTES_COUNTER_VEC.as_ref() {
+            counter
+                .with_label_values(&[location, direction_label_value(false)])
+                .inc_by(bytes_to_u64(sent_bytes));
+            if response_ok {
+                counter
+                    .with_label_values(&[location, direction_label_value(true)])
+                    .inc_by(bytes_to_u64(received_bytes));
+            }
+        }
+    }
+
+    if response_ok && is_read_request_label(label) {
+        let Some(histogram) = TIKV_CLIENT_RUST_READ_REQUEST_BYTES_HISTOGRAM_VEC.as_ref() else {
+            return;
         };
-    }
 
-    downcast_kv_context!(
-        kvrpcpb::RawGetRequest,
-        kvrpcpb::RawBatchGetRequest,
-        kvrpcpb::RawGetKeyTtlRequest,
-        kvrpcpb::RawPutRequest,
-        kvrpcpb::RawBatchPutRequest,
-        kvrpcpb::RawDeleteRequest,
-        kvrpcpb::RawBatchDeleteRequest,
-        kvrpcpb::RawScanRequest,
-        kvrpcpb::RawBatchScanRequest,
-        kvrpcpb::RawDeleteRangeRequest,
-        kvrpcpb::RawCasRequest,
-        kvrpcpb::RawCoprocessorRequest,
-        kvrpcpb::RawChecksumRequest,
-        kvrpcpb::GetRequest,
-        kvrpcpb::ScanRequest,
-        kvrpcpb::PrewriteRequest,
-        kvrpcpb::CommitRequest,
-        kvrpcpb::CleanupRequest,
-        kvrpcpb::BatchGetRequest,
-        kvrpcpb::BatchRollbackRequest,
-        kvrpcpb::FlushRequest,
-        kvrpcpb::PessimisticRollbackRequest,
-        kvrpcpb::ResolveLockRequest,
-        kvrpcpb::ScanLockRequest,
-        kvrpcpb::PessimisticLockRequest,
-        kvrpcpb::TxnHeartBeatRequest,
-        kvrpcpb::CheckTxnStatusRequest,
-        kvrpcpb::CheckSecondaryLocksRequest,
-        kvrpcpb::BufferBatchGetRequest,
-        kvrpcpb::GcRequest,
-        kvrpcpb::DeleteRangeRequest,
-        kvrpcpb::PrepareFlashbackToVersionRequest,
-        kvrpcpb::FlashbackToVersionRequest,
-        kvrpcpb::SplitRegionRequest,
-        kvrpcpb::UnsafeDestroyRangeRequest,
-        kvrpcpb::RegisterLockObserverRequest,
-        kvrpcpb::CheckLockObserverRequest,
-        kvrpcpb::RemoveLockObserverRequest,
-        kvrpcpb::PhysicalScanLockRequest,
-        kvrpcpb::GetLockWaitInfoRequest,
-        kvrpcpb::GetLockWaitHistoryRequest,
-        kvrpcpb::GetHealthFeedbackRequest,
-        kvrpcpb::BroadcastTxnStatusRequest,
-    );
+        let total = bytes_to_u64(sent_bytes).saturating_add(bytes_to_u64(received_bytes));
+        if total == 0 {
+            return;
+        }
 
-    if let Some(req) = request.downcast_ref::<coprocessor::Request>() {
-        return req.context.as_ref();
+        histogram
+            .with_label_values(&[replica_label_value(context.replica_read), location])
+            .observe(total as f64);
     }
-    if let Some(req) = request.downcast_ref::<coprocessor::BatchRequest>() {
-        return req.context.as_ref();
-    }
-
-    None
 }
 
 fn is_grpc_error(error: &Error) -> bool {
@@ -639,6 +666,31 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["type"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_READ_REQUEST_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_read_request_bytes";
+        let help = "Bucketed histogram of total bytes sent/received for read requests.";
+        let buckets = match prometheus::exponential_buckets(256.0, 2.0, 22) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["type", "result"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_STALE_READ_REQ_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
+        "tikv_client_rust_stale_read_req_counter",
+        "Total number of stale read requests.",
+        &["type"],
+    );
+
+    static ref TIKV_CLIENT_RUST_STALE_READ_BYTES_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
+        "tikv_client_rust_stale_read_bytes",
+        "Bytes sent/received for stale read requests.",
+        &["result", "direction"],
+    );
+
     static ref TIKV_CLIENT_RUST_REGION_CACHE_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_region_cache_operations_total",
         "Counter of region cache operations.",
@@ -701,8 +753,8 @@ mod tests {
     use serial_test::serial;
 
     use super::{
-        observe_backoff_seconds, observe_load_region_cache, region_cache_operation,
-        tikv_stats_with_context,
+        observe_backoff_seconds, observe_kv_request_traffic_metrics, observe_load_region_cache,
+        region_cache_operation, tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -746,6 +798,81 @@ mod tests {
                 && metric.get_histogram().get_sample_count() >= 1
         });
         assert!(found, "expected histogram metric with labels not found");
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_stale_read_metrics_record_traffic_counters() {
+        let mut ctx = kvrpcpb::Context::default();
+        ctx.peer = Some(metapb::Peer {
+            store_id: 1,
+            ..Default::default()
+        });
+        ctx.stale_read = true;
+
+        observe_kv_request_traffic_metrics("kv_get", Some(&ctx), true, 12, 34, true);
+
+        let families = prometheus::gather();
+
+        let req_counter_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_stale_read_req_counter")
+            .expect("stale read req counter not registered");
+        let req_counter_found = req_counter_family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("cross-zone")
+                && metric.get_counter().get_value() >= 1.0
+        });
+        assert!(
+            req_counter_found,
+            "expected stale read req counter metric with labels not found"
+        );
+
+        let bytes_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_stale_read_bytes")
+            .expect("stale read bytes counter not registered");
+        let bytes_out_found = bytes_family.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("cross-zone")
+                && label_value(metric, "direction") == Some("out")
+                && metric.get_counter().get_value() >= 12.0
+        });
+        let bytes_in_found = bytes_family.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("cross-zone")
+                && label_value(metric, "direction") == Some("in")
+                && metric.get_counter().get_value() >= 34.0
+        });
+        assert!(
+            bytes_out_found && bytes_in_found,
+            "expected stale read bytes metrics with labels not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_read_request_bytes_histogram_records_labels() {
+        let mut ctx = kvrpcpb::Context::default();
+        ctx.peer = Some(metapb::Peer {
+            store_id: 1,
+            ..Default::default()
+        });
+        ctx.replica_read = true;
+
+        observe_kv_request_traffic_metrics("kv_get", Some(&ctx), false, 12, 34, true);
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_read_request_bytes")
+            .expect("read request bytes histogram not registered");
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("follower")
+                && label_value(metric, "result") == Some("local")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            found,
+            "expected read request bytes histogram metric not found"
+        );
     }
 
     #[test]

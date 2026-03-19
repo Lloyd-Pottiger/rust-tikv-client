@@ -74,6 +74,7 @@ pub(crate) use exec_details::record_task_local_wait_kv_response;
 pub(crate) use exec_details::record_task_local_wait_pd_response;
 pub(crate) use exec_details::scope_task_exec_details;
 pub(crate) use exec_details::scope_task_traffic_kind;
+pub(crate) use exec_details::task_traffic_kind;
 pub(crate) use misc::scope_task_session_id;
 
 pub(crate) fn spawn_with_inherited_task_locals<F, T>(future: F) -> tokio::task::JoinHandle<T>

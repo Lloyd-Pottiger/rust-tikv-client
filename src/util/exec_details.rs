@@ -1296,6 +1296,12 @@ where
     )
 }
 
+pub(crate) fn task_traffic_kind() -> (bool, bool) {
+    TASK_TRAFFIC_KIND
+        .try_with(|kind| (kind.is_mpp, kind.is_cross_zone))
+        .unwrap_or((false, false))
+}
+
 pub(crate) fn record_task_local_backoff(duration: Duration) {
     if let Some(details) = exec_details() {
         details.add_backoff(duration);

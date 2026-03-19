@@ -33,7 +33,8 @@ use crate::rpc_interceptor::RpcCallResult;
 use crate::rpc_interceptor::RpcInterceptors;
 use crate::rpc_interceptor::RpcRequest;
 use crate::stats::observe_backoff_seconds;
-use crate::stats::tikv_stats_for_kv_request;
+use crate::stats::observe_kv_request_traffic_metrics;
+use crate::stats::tikv_stats_with_context;
 use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
 use crate::store::KvClient;
@@ -257,7 +258,7 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
 
     async fn execute(&self) -> Result<Self::Result> {
         let label = self.request.label();
-        let stats = tikv_stats_for_kv_request(label, &self.request as &dyn Any);
+        let stats = tikv_stats_with_context(label, self.request.context());
 
         let Some(kv_client) = self.kv_client.as_ref() else {
             return stats.done(Err(Error::InternalError {
@@ -321,7 +322,12 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
         }
 
         let track_exec_details = crate::util::exec_details().is_some();
-        let request_bytes = track_exec_details.then(|| request_encoded_len(&self.request));
+        let track_traffic_metrics = self
+            .request
+            .context()
+            .is_some_and(|context| context.stale_read);
+        let request_bytes = (track_exec_details || track_traffic_metrics)
+            .then(|| request_encoded_len(&self.request));
         let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
             Some(Instant::now())
         } else {
@@ -349,7 +355,18 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
                 .ok()
                 .map(|resp| response_encoded_len(resp as &dyn Any))
                 .unwrap_or(0);
-            crate::util::record_task_local_kv_traffic(sent_bytes, received_bytes);
+            if track_exec_details {
+                crate::util::record_task_local_kv_traffic(sent_bytes, received_bytes);
+            }
+            let (_, is_cross_zone) = crate::util::task_traffic_kind();
+            observe_kv_request_traffic_metrics(
+                label,
+                self.request.context(),
+                is_cross_zone,
+                sent_bytes,
+                received_bytes,
+                result.is_ok(),
+            );
         }
 
         if kv_trace_enabled {
@@ -431,7 +448,6 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
 
     async fn execute(&self) -> Result<Self::Result> {
         let label = self.request.label();
-        let stats = tikv_stats_for_kv_request(label, &self.request as &dyn Any);
         let kv_client = self.kv_client.as_ref().ok_or(Error::InternalError {
             message: "kv_client has not been initialised in DispatchWithInterceptor".to_owned(),
         })?;
@@ -465,6 +481,7 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         });
 
         if self.rpc_interceptors.is_empty() {
+            let stats = tikv_stats_with_context(label, self.request.context());
             if kv_trace_enabled {
                 let mut fields = kv_request_trace_fields(
                     label,
@@ -500,7 +517,12 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
             }
 
             let track_exec_details = crate::util::exec_details().is_some();
-            let request_bytes = track_exec_details.then(|| request_encoded_len(&self.request));
+            let track_traffic_metrics = self
+                .request
+                .context()
+                .is_some_and(|context| context.stale_read);
+            let request_bytes = (track_exec_details || track_traffic_metrics)
+                .then(|| request_encoded_len(&self.request));
             let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
                 Some(Instant::now())
             } else {
@@ -528,7 +550,18 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                     .ok()
                     .map(|resp| response_encoded_len(resp as &dyn Any))
                     .unwrap_or(0);
-                crate::util::record_task_local_kv_traffic(sent_bytes, received_bytes);
+                if track_exec_details {
+                    crate::util::record_task_local_kv_traffic(sent_bytes, received_bytes);
+                }
+                let (_, is_cross_zone) = crate::util::task_traffic_kind();
+                observe_kv_request_traffic_metrics(
+                    label,
+                    self.request.context(),
+                    is_cross_zone,
+                    sent_bytes,
+                    received_bytes,
+                    result.is_ok(),
+                );
             }
 
             if kv_trace_enabled {
@@ -592,6 +625,7 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         for interceptor in self.rpc_interceptors.iter() {
             interceptor.before(&mut rpc_request);
         }
+        let stats = tikv_stats_with_context(label, request.context());
 
         let prewrite_trace = (&request as &dyn Any)
             .downcast_ref::<kvrpcpb::PrewriteRequest>()
@@ -651,7 +685,9 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         }
 
         let track_exec_details = crate::util::exec_details().is_some();
-        let request_bytes = track_exec_details.then(|| request_encoded_len(&request));
+        let track_traffic_metrics = request.context().is_some_and(|context| context.stale_read);
+        let request_bytes =
+            (track_exec_details || track_traffic_metrics).then(|| request_encoded_len(&request));
         let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
             Some(Instant::now())
         } else {
@@ -679,7 +715,18 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                 .ok()
                 .map(|resp| response_encoded_len(resp as &dyn Any))
                 .unwrap_or(0);
-            crate::util::record_task_local_kv_traffic(sent_bytes, received_bytes);
+            if track_exec_details {
+                crate::util::record_task_local_kv_traffic(sent_bytes, received_bytes);
+            }
+            let (_, is_cross_zone) = crate::util::task_traffic_kind();
+            observe_kv_request_traffic_metrics(
+                label,
+                request.context(),
+                is_cross_zone,
+                sent_bytes,
+                received_bytes,
+                result.is_ok(),
+            );
         }
 
         let label = request.label();
