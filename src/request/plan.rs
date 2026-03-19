@@ -708,6 +708,7 @@ pub(crate) fn is_grpc_error(e: &Error) -> bool {
 
 const SLOW_STORE_TTL_ON_SERVER_IS_BUSY: Duration = Duration::from_secs(10);
 const SLOW_STORE_TTL_ON_GRPC_DEADLINE_EXCEEDED: Duration = Duration::from_secs(10);
+const ZONE_LABEL_KEY: &str = "zone";
 
 fn is_grpc_deadline_exceeded(e: &Error) -> bool {
     matches!(
@@ -796,6 +797,30 @@ fn store_labels_match(store: &metapb::Store, labels: &[StoreLabel]) -> bool {
             .iter()
             .any(|label| label.key == target.key && label.value == target.value)
     })
+}
+
+fn store_zone_label(store: &metapb::Store) -> Option<&str> {
+    store
+        .labels
+        .iter()
+        .find(|label| label.key == ZONE_LABEL_KEY)
+        .map(|label| label.value.as_str())
+}
+
+fn is_cross_zone(self_zone_label: Option<&str>, store: &metapb::Store) -> bool {
+    let Some(self_zone_label) = self_zone_label else {
+        return false;
+    };
+    if self_zone_label.is_empty() {
+        return false;
+    }
+    let Some(target_zone_label) = store_zone_label(store) else {
+        return false;
+    };
+    if target_zone_label.is_empty() {
+        return false;
+    }
+    self_zone_label != target_zone_label
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1420,6 +1445,7 @@ where
         match_store_labels: Arc<Vec<StoreLabel>>,
     ) -> Result<<Self as Plan>::Result> {
         debug!("single_shard_handler");
+        let self_zone_label = crate::config::get_global_config().zone_label;
         let mut replica_read = replica_read;
         let region_leader = region.leader.clone();
         let leader_store_id = region_leader.as_ref().map(|peer| peer.store_id);
@@ -1745,10 +1771,27 @@ where
         }
 
         // limit concurrent requests
+        let (is_mpp, is_cross_zone) = match region_store.region_with_leader.get_store_id() {
+            Ok(store_id) => match pd_client.store_meta_by_id(store_id).await {
+                Ok(store) => (
+                    crate::region_cache::is_tiflash_related_store(&store),
+                    is_cross_zone(self_zone_label.as_deref(), &store),
+                ),
+                Err(Error::Unimplemented) => (false, false),
+                Err(err) => {
+                    debug!(
+                        "single_shard_handler: traffic classification skipped: {:?}",
+                        err
+                    );
+                    (false, false)
+                }
+            },
+            Err(_) => (false, false),
+        };
         let permit = permits.acquire().await.map_err(|_| Error::InternalError {
             message: "request concurrency semaphore closed".to_owned(),
         })?;
-        let res = plan.execute().await;
+        let res = crate::util::scope_task_traffic_kind(is_mpp, is_cross_zone, plan.execute()).await;
         drop(permit);
 
         if patched_stale_read {
@@ -2237,16 +2280,21 @@ where
     type Result = Vec<Result<P::Result>>;
 
     async fn execute(&self) -> Result<Self::Result> {
+        let self_zone_label = crate::config::get_global_config().zone_label;
         let concurrency_permits = Arc::new(Semaphore::new(MULTI_STORES_CONCURRENCY));
         let stores = self.pd_client.clone().all_stores().await?;
         let mut handles = Vec::with_capacity(stores.len());
         for store in stores {
             let mut clone = self.inner.clone();
             clone.apply_store(&store);
+            let is_mpp = crate::region_cache::is_tiflash_related_store(&store.meta);
+            let cross_zone = is_cross_zone(self_zone_label.as_deref(), &store.meta);
             let handle = tokio::spawn(Self::single_store_handler(
                 clone,
                 self.backoff.clone(),
                 concurrency_permits.clone(),
+                is_mpp,
+                cross_zone,
             ));
             handles.push(handle);
         }
@@ -2267,12 +2315,15 @@ where
         plan: P,
         mut backoff: Backoff,
         permits: Arc<Semaphore>,
+        is_mpp: bool,
+        is_cross_zone: bool,
     ) -> Result<P::Result> {
         loop {
             let permit = permits.acquire().await.map_err(|_| Error::InternalError {
                 message: "store request concurrency semaphore closed".to_owned(),
             })?;
-            let res = plan.execute().await;
+            let res =
+                crate::util::scope_task_traffic_kind(is_mpp, is_cross_zone, plan.execute()).await;
             drop(permit);
 
             match res {
@@ -2328,15 +2379,20 @@ where
     type Result = Vec<Result<P::Result>>;
 
     async fn execute(&self) -> Result<Self::Result> {
+        let self_zone_label = crate::config::get_global_config().zone_label;
         let concurrency_permits = Arc::new(Semaphore::new(MULTI_STORES_CONCURRENCY));
         let mut handles = Vec::with_capacity(self.stores.len());
         for store in self.stores.iter() {
             let mut clone = self.inner.clone();
             clone.apply_store(store);
+            let is_mpp = crate::region_cache::is_tiflash_related_store(&store.meta);
+            let cross_zone = is_cross_zone(self_zone_label.as_deref(), &store.meta);
             let handle = tokio::spawn(Self::single_store_handler(
                 clone,
                 self.backoff.clone(),
                 concurrency_permits.clone(),
+                is_mpp,
+                cross_zone,
             ));
             handles.push(handle);
         }
@@ -2357,12 +2413,15 @@ where
         plan: P,
         mut backoff: Backoff,
         permits: Arc<Semaphore>,
+        is_mpp: bool,
+        is_cross_zone: bool,
     ) -> Result<P::Result> {
         loop {
             let permit = permits.acquire().await.map_err(|_| Error::InternalError {
                 message: "store request concurrency semaphore closed".to_owned(),
             })?;
-            let res = plan.execute().await;
+            let res =
+                crate::util::scope_task_traffic_kind(is_mpp, is_cross_zone, plan.execute()).await;
             drop(permit);
 
             match res {
@@ -3211,6 +3270,22 @@ mod test {
     use crate::mock::MockPdClient;
     use crate::proto::kvrpcpb::BatchGetResponse;
 
+    struct GlobalConfigGuard {
+        prev: crate::Config,
+    }
+
+    impl Drop for GlobalConfigGuard {
+        fn drop(&mut self) {
+            crate::config::set_global_config(self.prev.clone());
+        }
+    }
+
+    fn set_global_config_scoped(config: crate::Config) -> GlobalConfigGuard {
+        let prev = crate::config::get_global_config();
+        crate::config::set_global_config(config);
+        GlobalConfigGuard { prev }
+    }
+
     struct TraceHookReset;
 
     impl Drop for TraceHookReset {
@@ -3288,6 +3363,23 @@ mod test {
         type Response = crate::proto::kvrpcpb::GetResponse;
     }
 
+    impl Shardable for TraceTestRequest {
+        type Shard = ();
+
+        fn shards(
+            &self,
+            _: &Arc<impl crate::pd::PdClient>,
+        ) -> BoxStream<'static, crate::Result<(Self::Shard, RegionWithLeader)>> {
+            Box::pin(stream::empty()).boxed()
+        }
+
+        fn apply_shard(&mut self, _: Self::Shard) {}
+
+        fn apply_store(&mut self, store: &crate::store::RegionStore) -> Result<()> {
+            crate::store::Request::set_leader(self, &store.region_with_leader)
+        }
+    }
+
     #[tokio::test]
     async fn test_dispatch_records_task_local_exec_details_wait_kv_duration() {
         let details = std::sync::Arc::new(crate::util::ExecDetails::default());
@@ -3316,6 +3408,106 @@ mod test {
         assert_eq!(details.traffic_details().unpacked_bytes_sent_kv_total(), 11);
         assert_eq!(
             details.traffic_details().unpacked_bytes_received_kv_total(),
+            expected_received
+        );
+    }
+
+    #[tokio::test]
+    async fn test_single_shard_handler_records_mpp_and_cross_zone_traffic() {
+        let _lock = crate::config::GLOBAL_CONFIG_TEST_LOCK.lock().await;
+        let _guard = set_global_config_scoped(crate::Config::default().with_zone_label("zone1"));
+
+        let details = std::sync::Arc::new(crate::util::ExecDetails::default());
+        let response = crate::proto::kvrpcpb::GetResponse {
+            value: b"resp".to_vec(),
+            ..Default::default()
+        };
+        let expected_received =
+            i64::try_from(prost::Message::encoded_len(&response)).unwrap_or(i64::MAX);
+        let kv = MockKvClient::with_dispatch_hook(move |_| Ok(Box::new(response.clone())));
+
+        let pd_client = std::sync::Arc::new(MockPdClient::new(kv));
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: 1,
+                labels: vec![
+                    StoreLabel {
+                        key: "zone".to_owned(),
+                        value: "zone2".to_owned(),
+                    },
+                    StoreLabel {
+                        key: "engine".to_owned(),
+                        value: "tiflash".to_owned(),
+                    },
+                ],
+                ..Default::default()
+            })
+            .await;
+
+        let region = RegionWithLeader {
+            region: metapb::Region {
+                id: 42,
+                ..Default::default()
+            },
+            leader: Some(metapb::Peer {
+                store_id: 1,
+                ..Default::default()
+            }),
+        };
+
+        let plan = Dispatch {
+            request: TraceTestRequest,
+            kv_client: None,
+        };
+        let permits = std::sync::Arc::new(Semaphore::new(1));
+        let match_store_ids = std::sync::Arc::new(Vec::new());
+        let match_store_labels = std::sync::Arc::new(Vec::new());
+
+        crate::util::with_exec_details(details.clone(), async {
+            let results = RetryableMultiRegion::<Dispatch<TraceTestRequest>, MockPdClient>::single_shard_handler(
+                pd_client,
+                plan,
+                region,
+                Backoff::no_backoff(),
+                None,
+                permits,
+                false,
+                None,
+                match_store_ids,
+                match_store_labels,
+            )
+            .await
+            .unwrap();
+            assert_eq!(results.len(), 1);
+            assert!(results[0].is_ok());
+        })
+        .await;
+
+        assert_eq!(details.traffic_details().unpacked_bytes_sent_kv_total(), 0);
+        assert_eq!(
+            details.traffic_details().unpacked_bytes_received_kv_total(),
+            0
+        );
+        assert_eq!(
+            details.traffic_details().unpacked_bytes_sent_mpp_total(),
+            11
+        );
+        assert_eq!(
+            details
+                .traffic_details()
+                .unpacked_bytes_received_mpp_total(),
+            expected_received
+        );
+        assert_eq!(
+            details
+                .traffic_details()
+                .unpacked_bytes_sent_mpp_cross_zone(),
+            11
+        );
+        assert_eq!(
+            details
+                .traffic_details()
+                .unpacked_bytes_received_mpp_cross_zone(),
             expected_received
         );
     }

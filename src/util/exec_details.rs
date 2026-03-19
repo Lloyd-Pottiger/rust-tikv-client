@@ -19,6 +19,16 @@ tokio::task_local! {
     static TASK_TRACE_EXEC_DETAILS_ENABLED: bool;
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct TaskTrafficKind {
+    is_mpp: bool,
+    is_cross_zone: bool,
+}
+
+tokio::task_local! {
+    static TASK_TRAFFIC_KIND: TaskTrafficKind;
+}
+
 /// Server-side execution details returned by TiKV.
 ///
 /// This mirrors the public shape of client-go `util.TiKVExecDetails`, but keeps the sub-details as
@@ -1269,6 +1279,23 @@ where
     }
 }
 
+pub(crate) fn scope_task_traffic_kind<T, F>(
+    is_mpp: bool,
+    is_cross_zone: bool,
+    future: F,
+) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    TASK_TRAFFIC_KIND.scope(
+        TaskTrafficKind {
+            is_mpp,
+            is_cross_zone,
+        },
+        future,
+    )
+}
+
 pub(crate) fn record_task_local_backoff(duration: Duration) {
     if let Some(details) = exec_details() {
         details.add_backoff(duration);
@@ -1289,9 +1316,27 @@ pub(crate) fn record_task_local_wait_pd_response(duration: Duration) {
 
 pub(crate) fn record_task_local_kv_traffic(sent_bytes: i64, received_bytes: i64) {
     if let Some(details) = exec_details() {
-        details
-            .traffic_details()
-            .add_kv_bytes(sent_bytes, received_bytes, 0, 0);
+        let kind = TASK_TRAFFIC_KIND.try_with(|kind| *kind).unwrap_or_default();
+        let (sent_cross_zone, received_cross_zone) = if kind.is_cross_zone {
+            (sent_bytes, received_bytes)
+        } else {
+            (0, 0)
+        };
+        if kind.is_mpp {
+            details.traffic_details().add_mpp_bytes(
+                sent_bytes,
+                received_bytes,
+                sent_cross_zone,
+                received_cross_zone,
+            );
+        } else {
+            details.traffic_details().add_kv_bytes(
+                sent_bytes,
+                received_bytes,
+                sent_cross_zone,
+                received_cross_zone,
+            );
+        }
     }
 }
 
@@ -1933,6 +1978,72 @@ mod tests {
 
         assert_eq!(details.wait_kv_resp_duration(), Duration::from_millis(3));
         assert_eq!(details.wait_pd_resp_duration(), Duration::from_millis(5));
+    }
+
+    #[tokio::test]
+    async fn test_record_task_local_kv_traffic_respects_task_local_traffic_kind() {
+        let details = Arc::new(ExecDetails::default());
+
+        with_exec_details(details.clone(), async {
+            // Default scope records KV totals only.
+            record_task_local_kv_traffic(10, 20);
+
+            // Cross-zone KV.
+            scope_task_traffic_kind(false, true, async {
+                record_task_local_kv_traffic(1, 2);
+            })
+            .await;
+
+            // Local MPP.
+            scope_task_traffic_kind(true, false, async {
+                record_task_local_kv_traffic(3, 4);
+            })
+            .await;
+
+            // Cross-zone MPP.
+            scope_task_traffic_kind(true, true, async {
+                record_task_local_kv_traffic(5, 6);
+            })
+            .await;
+        })
+        .await;
+
+        assert_eq!(details.traffic_details().unpacked_bytes_sent_kv_total(), 11);
+        assert_eq!(
+            details.traffic_details().unpacked_bytes_received_kv_total(),
+            22
+        );
+        assert_eq!(
+            details
+                .traffic_details()
+                .unpacked_bytes_sent_kv_cross_zone(),
+            1
+        );
+        assert_eq!(
+            details
+                .traffic_details()
+                .unpacked_bytes_received_kv_cross_zone(),
+            2
+        );
+        assert_eq!(details.traffic_details().unpacked_bytes_sent_mpp_total(), 8);
+        assert_eq!(
+            details
+                .traffic_details()
+                .unpacked_bytes_received_mpp_total(),
+            10
+        );
+        assert_eq!(
+            details
+                .traffic_details()
+                .unpacked_bytes_sent_mpp_cross_zone(),
+            5
+        );
+        assert_eq!(
+            details
+                .traffic_details()
+                .unpacked_bytes_received_mpp_cross_zone(),
+            6
+        );
     }
 
     #[test]

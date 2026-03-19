@@ -148,6 +148,16 @@ pub struct Config {
     ///
     /// Defaults to disabled (`false`).
     pub enable_region_cache_preload: bool,
+    /// The local "zone" label used to classify cross-zone traffic.
+    ///
+    /// When set, the client compares it with the target store "zone" label (from PD store
+    /// metadata) and records cross-zone traffic counters in [`crate::util::TrafficDetails`].
+    ///
+    /// When unset (or empty), cross-zone classification is disabled and traffic is recorded only
+    /// in the total counters.
+    ///
+    /// This maps to client-go global config `ZoneLabel`.
+    pub zone_label: Option<String>,
     /// How often to refresh TiKV store health feedback (slow score).
     ///
     /// When non-zero, the client periodically issues `GetHealthFeedback` to all stores and uses
@@ -210,6 +220,7 @@ impl Default for Config {
             region_cache_ttl: DEFAULT_REGION_CACHE_TTL,
             region_cache_ttl_jitter: DEFAULT_REGION_CACHE_TTL_JITTER,
             enable_region_cache_preload: false,
+            zone_label: None,
             health_feedback_update_interval: Duration::ZERO,
             txn_local_latches_capacity: 0,
         }
@@ -523,6 +534,16 @@ impl Config {
         self
     }
 
+    /// Set the local "zone" label used to classify cross-zone traffic.
+    ///
+    /// This is a compatibility knob for client-go `config.GetGlobalConfig().ZoneLabel`.
+    #[must_use]
+    pub fn with_zone_label(mut self, zone_label: impl Into<String>) -> Self {
+        let zone_label = zone_label.into();
+        self.zone_label = (!zone_label.is_empty()).then_some(zone_label);
+        self
+    }
+
     /// Set how often to refresh TiKV store health feedback (slow score).
     ///
     /// Set to `Duration::ZERO` to disable the background refresher (default).
@@ -545,6 +566,10 @@ impl Config {
 lazy_static! {
     static ref GLOBAL_CONFIG: RwLock<Config> = RwLock::new(Config::default());
 }
+
+#[cfg(test)]
+pub(crate) static GLOBAL_CONFIG_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 /// Get the global client configuration.
 ///
@@ -574,9 +599,6 @@ pub fn update_global_config(update: impl FnOnce(&mut Config)) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static GLOBAL_CONFIG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct GlobalConfigGuard {
         prev: Config,
@@ -609,6 +631,7 @@ mod tests {
             DEFAULT_BATCH_RPC_MAX_BATCH_SIZE
         );
         assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
+        assert!(config.zone_label.is_none());
         assert_eq!(config.committer_concurrency, DEFAULT_COMMITTER_CONCURRENCY);
         assert_eq!(config.max_txn_ttl, DEFAULT_MAX_TXN_TTL);
         assert_eq!(
@@ -667,9 +690,7 @@ mod tests {
 
     #[test]
     fn test_global_config_set_get_update() {
-        let _lock = GLOBAL_CONFIG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::GLOBAL_CONFIG_TEST_LOCK.blocking_lock();
 
         let mut config = Config::default();
         config.enable_batch_rpc = true;
