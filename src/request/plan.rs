@@ -12,6 +12,7 @@ use futures::future::try_join_all;
 use futures::prelude::*;
 use log::debug;
 use log::info;
+use prost::Message;
 use tokio::sync::{RwLock, Semaphore};
 use tokio::time::sleep;
 
@@ -168,6 +169,7 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
         }
 
         let track_exec_details = crate::util::exec_details().is_some();
+        let request_bytes = track_exec_details.then(|| request_encoded_len(&self.request));
         let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
             Some(Instant::now())
         } else {
@@ -187,6 +189,15 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
 
         if let Some(started_at) = started_at.as_ref() {
             crate::util::record_task_local_wait_kv_response(started_at.elapsed());
+        }
+
+        if let Some(sent_bytes) = request_bytes {
+            let received_bytes = result
+                .as_ref()
+                .ok()
+                .map(|resp| response_encoded_len(resp as &dyn Any))
+                .unwrap_or(0);
+            crate::util::record_task_local_kv_traffic(sent_bytes, received_bytes);
         }
 
         if kv_trace_enabled {
@@ -415,6 +426,7 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         }
 
         let track_exec_details = crate::util::exec_details().is_some();
+        let request_bytes = track_exec_details.then(|| request_encoded_len(&request));
         let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
             Some(Instant::now())
         } else {
@@ -434,6 +446,15 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
 
         if let Some(started_at) = started_at.as_ref() {
             crate::util::record_task_local_wait_kv_response(started_at.elapsed());
+        }
+
+        if let Some(sent_bytes) = request_bytes {
+            let received_bytes = result
+                .as_ref()
+                .ok()
+                .map(|resp| response_encoded_len(resp as &dyn Any))
+                .unwrap_or(0);
+            crate::util::record_task_local_kv_traffic(sent_bytes, received_bytes);
         }
 
         let label = request.label();
@@ -507,6 +528,69 @@ fn exec_details_v2_from_response(resp: &dyn Any) -> Option<&kvrpcpb::ExecDetails
         return resp.exec_details_v2.as_ref();
     }
     None
+}
+
+fn response_encoded_len(resp: &dyn Any) -> i64 {
+    macro_rules! encoded_len_from_response {
+        ($resp:expr, $( $ty:path ),+ $(,)?) => {{
+            $(
+                if let Some(resp) = $resp.downcast_ref::<$ty>() {
+                    return i64::try_from(resp.encoded_len()).unwrap_or(i64::MAX);
+                }
+            )+
+            0
+        }};
+    }
+
+    encoded_len_from_response!(
+        resp,
+        kvrpcpb::RawGetResponse,
+        kvrpcpb::RawBatchGetResponse,
+        kvrpcpb::RawGetKeyTtlResponse,
+        kvrpcpb::RawPutResponse,
+        kvrpcpb::RawBatchPutResponse,
+        kvrpcpb::RawDeleteResponse,
+        kvrpcpb::RawBatchDeleteResponse,
+        kvrpcpb::RawDeleteRangeResponse,
+        kvrpcpb::RawScanResponse,
+        kvrpcpb::RawBatchScanResponse,
+        kvrpcpb::RawChecksumResponse,
+        kvrpcpb::RawCasResponse,
+        kvrpcpb::RawCoprocessorResponse,
+        kvrpcpb::GetResponse,
+        kvrpcpb::BatchGetResponse,
+        kvrpcpb::BufferBatchGetResponse,
+        kvrpcpb::ScanResponse,
+        kvrpcpb::ResolveLockResponse,
+        kvrpcpb::PrewriteResponse,
+        kvrpcpb::FlushResponse,
+        kvrpcpb::CommitResponse,
+        kvrpcpb::BatchRollbackResponse,
+        kvrpcpb::PessimisticRollbackResponse,
+        kvrpcpb::PessimisticLockResponse,
+        kvrpcpb::ScanLockResponse,
+        kvrpcpb::TxnHeartBeatResponse,
+        kvrpcpb::CheckTxnStatusResponse,
+        kvrpcpb::CheckSecondaryLocksResponse,
+        kvrpcpb::DeleteRangeResponse,
+        kvrpcpb::PrepareFlashbackToVersionResponse,
+        kvrpcpb::FlashbackToVersionResponse,
+        kvrpcpb::SplitRegionResponse,
+        kvrpcpb::UnsafeDestroyRangeResponse,
+        kvrpcpb::CompactResponse,
+        kvrpcpb::TiFlashSystemTableResponse,
+        kvrpcpb::RegisterLockObserverResponse,
+        kvrpcpb::CheckLockObserverResponse,
+        kvrpcpb::RemoveLockObserverResponse,
+        kvrpcpb::PhysicalScanLockResponse,
+        kvrpcpb::GetLockWaitInfoResponse,
+        kvrpcpb::GetLockWaitHistoryResponse,
+        kvrpcpb::StoreSafeTsResponse,
+    )
+}
+
+fn request_encoded_len(req: &dyn crate::store::Request) -> i64 {
+    i64::try_from(req.encoded_len()).unwrap_or(i64::MAX)
 }
 
 /// A dispatch plan that records snapshot runtime stats.
@@ -3194,6 +3278,10 @@ mod test {
         fn set_api_version(&mut self, _api_version: crate::proto::kvrpcpb::ApiVersion) {}
 
         fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+
+        fn encoded_len(&self) -> usize {
+            11
+        }
     }
 
     impl crate::request::KvRequest for TraceTestRequest {
@@ -3203,9 +3291,15 @@ mod test {
     #[tokio::test]
     async fn test_dispatch_records_task_local_exec_details_wait_kv_duration() {
         let details = std::sync::Arc::new(crate::util::ExecDetails::default());
-        let kv = std::sync::Arc::new(MockKvClient::with_dispatch_hook(|_| {
+        let response = crate::proto::kvrpcpb::GetResponse {
+            value: b"resp".to_vec(),
+            ..Default::default()
+        };
+        let expected_received =
+            i64::try_from(prost::Message::encoded_len(&response)).unwrap_or(i64::MAX);
+        let kv = std::sync::Arc::new(MockKvClient::with_dispatch_hook(move |_| {
             std::thread::sleep(Duration::from_millis(2));
-            Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()))
+            Ok(Box::new(response.clone()))
         }));
 
         let plan = Dispatch {
@@ -3219,6 +3313,11 @@ mod test {
         .await;
 
         assert!(details.wait_kv_resp_duration() >= Duration::from_millis(1));
+        assert_eq!(details.traffic_details().unpacked_bytes_sent_kv_total(), 11);
+        assert_eq!(
+            details.traffic_details().unpacked_bytes_received_kv_total(),
+            expected_received
+        );
     }
 
     #[tokio::test]

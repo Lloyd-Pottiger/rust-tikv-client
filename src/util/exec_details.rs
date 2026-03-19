@@ -1287,6 +1287,14 @@ pub(crate) fn record_task_local_wait_pd_response(duration: Duration) {
     }
 }
 
+pub(crate) fn record_task_local_kv_traffic(sent_bytes: i64, received_bytes: i64) {
+    if let Some(details) = exec_details() {
+        details
+            .traffic_details()
+            .add_kv_bytes(sent_bytes, received_bytes, 0, 0);
+    }
+}
+
 fn push_duration_part(parts: &mut Vec<String>, name: &str, duration: Duration) {
     if duration.is_zero() {
         return;

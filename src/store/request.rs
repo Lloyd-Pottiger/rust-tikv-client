@@ -6,6 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fail::fail_point;
 use futures::stream;
+use prost::Message;
 use tonic::transport::Channel;
 use tonic::IntoRequest;
 use tonic::IntoStreamingRequest;
@@ -33,6 +34,10 @@ pub trait Request: Any + Sync + Send + 'static {
 
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         None
+    }
+
+    fn encoded_len(&self) -> usize {
+        0
     }
 }
 
@@ -86,6 +91,10 @@ macro_rules! impl_request {
 
             fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
                 Some(self.context.get_or_insert(kvrpcpb::Context::default()))
+            }
+
+            fn encoded_len(&self) -> usize {
+                Message::encoded_len(self)
             }
         }
     };
@@ -174,6 +183,10 @@ impl Request for kvrpcpb::ResolveLockRequest {
 
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         Some(self.context.get_or_insert(kvrpcpb::Context::default()))
+    }
+
+    fn encoded_len(&self) -> usize {
+        Message::encoded_len(self)
     }
 }
 impl_request!(ScanLockRequest, kv_scan_lock, "kv_scan_lock");
@@ -296,6 +309,10 @@ impl Request for coprocessor::Request {
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         Some(self.context.get_or_insert(kvrpcpb::Context::default()))
     }
+
+    fn encoded_len(&self) -> usize {
+        Message::encoded_len(self)
+    }
 }
 
 #[async_trait]
@@ -340,6 +357,10 @@ impl Request for coprocessor::BatchRequest {
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         Some(self.context.get_or_insert(kvrpcpb::Context::default()))
     }
+
+    fn encoded_len(&self) -> usize {
+        Message::encoded_len(self)
+    }
 }
 
 #[async_trait]
@@ -376,6 +397,10 @@ impl Request for kvrpcpb::CompactRequest {
     }
 
     fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+
+    fn encoded_len(&self) -> usize {
+        Message::encoded_len(self)
+    }
 }
 
 #[async_trait]
@@ -410,6 +435,10 @@ impl Request for kvrpcpb::TiFlashSystemTableRequest {
     fn set_api_version(&mut self, _api_version: kvrpcpb::ApiVersion) {}
 
     fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+
+    fn encoded_len(&self) -> usize {
+        Message::encoded_len(self)
+    }
 }
 
 #[async_trait]
@@ -444,6 +473,10 @@ impl Request for kvrpcpb::StoreSafeTsRequest {
     fn set_api_version(&mut self, _api_version: kvrpcpb::ApiVersion) {}
 
     fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+
+    fn encoded_len(&self) -> usize {
+        Message::encoded_len(self)
+    }
 }
 
 #[async_trait]
@@ -546,6 +579,10 @@ impl Request for kvrpcpb::GetHealthFeedbackRequest {
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         Some(self.context.get_or_insert(kvrpcpb::Context::default()))
     }
+
+    fn encoded_len(&self) -> usize {
+        Message::encoded_len(self)
+    }
 }
 
 #[async_trait]
@@ -589,5 +626,9 @@ impl Request for kvrpcpb::BroadcastTxnStatusRequest {
 
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         Some(self.context.get_or_insert(kvrpcpb::Context::default()))
+    }
+
+    fn encoded_len(&self) -> usize {
+        Message::encoded_len(self)
     }
 }
