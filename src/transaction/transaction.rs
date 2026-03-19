@@ -2987,6 +2987,10 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// This is only supported for pipelined transactions enabled via
     /// [`TransactionOptions::pipelined`] / [`TransactionOptions::pipelined_txn`].
     ///
+    /// Note: This operation requires that there are no unreleased staging buffers (savepoints).
+    /// Use [`Transaction::release_staging`] / [`Transaction::cleanup_staging`] to close all
+    /// staging handles before flushing.
+    ///
     /// The returned boolean indicates whether a flush was triggered.
     pub async fn flush(&mut self, force: bool) -> Result<bool> {
         self.check_allow_operation().await?;
@@ -3014,6 +3018,11 @@ impl<PdC: PdClient> Transaction<PdC> {
             .should_flush(force, mutation_count, write_size);
         if !should_flush {
             return Ok(false);
+        }
+        if self.buffer.is_staging() {
+            return Err(Error::StringError(
+                "there are stages unreleased when flush is called".to_owned(),
+            ));
         }
         if self
             .pipelined
@@ -3927,7 +3936,8 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// later be passed to [`Transaction::release_staging`] (keep changes) or
     /// [`Transaction::cleanup_staging`] (rollback changes).
     ///
-    /// Note: staging is only supported for non-pipelined optimistic transactions.
+    /// Note: staging is only supported for optimistic transactions. For pipelined transactions,
+    /// staging handles must be released/cleaned up before a flush is triggered (including commit).
     pub fn staging(&mut self) -> Result<u64> {
         match self.get_status() {
             TransactionStatus::ReadOnly | TransactionStatus::Active => {}
@@ -3942,17 +3952,13 @@ impl<PdC: PdClient> Transaction<PdC> {
                 "staging is not supported for pessimistic transactions".to_owned(),
             ));
         }
-        if self.is_pipelined() {
-            return Err(Error::StringError(
-                "staging is not supported for pipelined transactions".to_owned(),
-            ));
-        }
         Ok(self.buffer.staging())
     }
 
     /// Release a staging buffer created by [`Transaction::staging`], keeping its changes.
     ///
-    /// Note: staging is only supported for non-pipelined optimistic transactions.
+    /// Note: staging is only supported for optimistic transactions. For pipelined transactions,
+    /// staging handles must be released/cleaned up before a flush is triggered (including commit).
     pub fn release_staging(&mut self, handle: u64) -> Result<()> {
         match self.get_status() {
             TransactionStatus::ReadOnly | TransactionStatus::Active => {}
@@ -3967,17 +3973,13 @@ impl<PdC: PdClient> Transaction<PdC> {
                 "staging is not supported for pessimistic transactions".to_owned(),
             ));
         }
-        if self.is_pipelined() {
-            return Err(Error::StringError(
-                "staging is not supported for pipelined transactions".to_owned(),
-            ));
-        }
         self.buffer.release_staging(handle)
     }
 
     /// Roll back changes in a staging buffer created by [`Transaction::staging`].
     ///
-    /// Note: staging is only supported for non-pipelined optimistic transactions.
+    /// Note: staging is only supported for optimistic transactions. For pipelined transactions,
+    /// staging handles must be released/cleaned up before a flush is triggered (including commit).
     pub fn cleanup_staging(&mut self, handle: u64) -> Result<()> {
         match self.get_status() {
             TransactionStatus::ReadOnly | TransactionStatus::Active => {}
@@ -3990,11 +3992,6 @@ impl<PdC: PdClient> Transaction<PdC> {
         if self.is_pessimistic() {
             return Err(Error::StringError(
                 "staging is not supported for pessimistic transactions".to_owned(),
-            ));
-        }
-        if self.is_pipelined() {
-            return Err(Error::StringError(
-                "staging is not supported for pipelined transactions".to_owned(),
             ));
         }
         self.buffer.cleanup_staging(handle)
@@ -8158,6 +8155,47 @@ mod tests {
             "pipelined_flush"
         );
         assert_eq!(flushed[0].assertion_level, AssertionLevel::Strict as i32);
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_flush_rejects_unreleased_staging_buffers() {
+        let flush_calls = Arc::new(AtomicUsize::new(0));
+        let flush_calls_cloned = flush_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    flush_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let handle = txn.staging().unwrap();
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+
+        let err = txn.flush(true).await.unwrap_err();
+        assert!(matches!(
+            err,
+            Error::StringError(msg) if msg == "there are stages unreleased when flush is called"
+        ));
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 0);
+
+        txn.release_staging(handle).unwrap();
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

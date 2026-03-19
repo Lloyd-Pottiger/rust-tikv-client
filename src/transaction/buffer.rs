@@ -67,6 +67,10 @@ impl Buffer {
         }
     }
 
+    pub(crate) fn is_staging(&self) -> bool {
+        !self.staging.is_empty()
+    }
+
     fn record_undo_entry(&mut self, key: &Key) {
         let Some(staging) = self.staging.last_mut() else {
             return;
