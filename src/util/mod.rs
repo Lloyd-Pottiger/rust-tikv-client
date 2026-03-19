@@ -5,6 +5,7 @@
 //! Some items in this module intentionally mirror client-go `util` APIs.
 
 pub mod bytes;
+pub mod exec_details;
 pub mod gc_time;
 #[doc(hidden)]
 pub mod iter;
@@ -40,6 +41,11 @@ pub use crate::request_context::INTERNAL_TXN_STATS;
 pub use crate::request_context::SOURCE_UNKNOWN;
 pub use bytes::bytes_to_string;
 pub use bytes::format_bytes;
+pub use exec_details::RUDetails;
+pub use exec_details::ScanDetail;
+pub use exec_details::TiKVExecDetails;
+pub use exec_details::TimeDetail;
+pub use exec_details::WriteDetail;
 pub use gc_time::compatible_parse_gc_time;
 pub use gc_time::GcTimeParseError;
 pub use gc_time::GC_TIME_FORMAT;
