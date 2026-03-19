@@ -103,6 +103,7 @@ pub mod backoff;
 pub mod coprocessor;
 #[doc(hidden)]
 pub mod raw;
+pub mod redact;
 pub mod request;
 #[doc(hidden)]
 pub mod transaction;
