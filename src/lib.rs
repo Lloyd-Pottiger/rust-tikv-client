@@ -173,6 +173,14 @@ pub use crate::kv::KvPair;
 #[doc(inline)]
 pub use crate::kv::Value;
 #[doc(inline)]
+pub use crate::kv::codec::decode_comparable_uvarint;
+#[doc(inline)]
+pub use crate::kv::codec::decode_comparable_varint;
+#[doc(inline)]
+pub use crate::kv::codec::encode_comparable_uvarint;
+#[doc(inline)]
+pub use crate::kv::codec::encode_comparable_varint;
+#[doc(inline)]
 pub use crate::raw::lowering as raw_lowering;
 #[doc(inline)]
 pub use crate::raw::Client as RawClient;

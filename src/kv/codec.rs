@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::ptr;
 
+use crate::Error;
 use crate::internal_err;
 use crate::Result;
 
@@ -133,6 +134,214 @@ pub fn decode_bytes_in_place(data: &mut Vec<u8>, desc: bool) -> Result<()> {
     }
 }
 
+const NEGATIVE_TAG_END: u8 = 8;
+const POSITIVE_TAG_START: u8 = 0xff - 8;
+
+/// Encode an `i64` into mem-comparable bytes (ascending order).
+///
+/// This mirrors client-go `util/codec.EncodeComparableVarint`.
+pub fn encode_comparable_varint(buf: &mut Vec<u8>, v: i64) {
+    if v < 0 {
+        if v >= -0xff {
+            buf.extend_from_slice(&[NEGATIVE_TAG_END - 1, v as u8]);
+        } else if v >= -0xffff {
+            buf.extend_from_slice(&[NEGATIVE_TAG_END - 2, (v >> 8) as u8, v as u8]);
+        } else if v >= -0xffffff {
+            buf.extend_from_slice(&[
+                NEGATIVE_TAG_END - 3,
+                (v >> 16) as u8,
+                (v >> 8) as u8,
+                v as u8,
+            ]);
+        } else if v >= -0xffffffff {
+            buf.extend_from_slice(&[
+                NEGATIVE_TAG_END - 4,
+                (v >> 24) as u8,
+                (v >> 16) as u8,
+                (v >> 8) as u8,
+                v as u8,
+            ]);
+        } else if v >= -0xffffffffff {
+            buf.extend_from_slice(&[
+                NEGATIVE_TAG_END - 5,
+                (v >> 32) as u8,
+                (v >> 24) as u8,
+                (v >> 16) as u8,
+                (v >> 8) as u8,
+                v as u8,
+            ]);
+        } else if v >= -0xffffffffffff {
+            buf.extend_from_slice(&[
+                NEGATIVE_TAG_END - 6,
+                (v >> 40) as u8,
+                (v >> 32) as u8,
+                (v >> 24) as u8,
+                (v >> 16) as u8,
+                (v >> 8) as u8,
+                v as u8,
+            ]);
+        } else if v >= -0xffffffffffffff {
+            buf.extend_from_slice(&[
+                NEGATIVE_TAG_END - 7,
+                (v >> 48) as u8,
+                (v >> 40) as u8,
+                (v >> 32) as u8,
+                (v >> 24) as u8,
+                (v >> 16) as u8,
+                (v >> 8) as u8,
+                v as u8,
+            ]);
+        } else {
+            buf.extend_from_slice(&[
+                NEGATIVE_TAG_END - 8,
+                (v >> 56) as u8,
+                (v >> 48) as u8,
+                (v >> 40) as u8,
+                (v >> 32) as u8,
+                (v >> 24) as u8,
+                (v >> 16) as u8,
+                (v >> 8) as u8,
+                v as u8,
+            ]);
+        }
+        return;
+    }
+
+    encode_comparable_uvarint(buf, v as u64);
+}
+
+/// Encode an `u64` into mem-comparable bytes (ascending order).
+///
+/// This mirrors client-go `util/codec.EncodeComparableUvarint`.
+pub fn encode_comparable_uvarint(buf: &mut Vec<u8>, v: u64) {
+    let single_byte_max = u64::from(POSITIVE_TAG_START - NEGATIVE_TAG_END);
+    if v <= single_byte_max {
+        buf.push((v as u8) + NEGATIVE_TAG_END);
+    } else if v <= 0xff {
+        buf.extend_from_slice(&[POSITIVE_TAG_START + 1, v as u8]);
+    } else if v <= 0xffff {
+        buf.extend_from_slice(&[POSITIVE_TAG_START + 2, (v >> 8) as u8, v as u8]);
+    } else if v <= 0xffffff {
+        buf.extend_from_slice(&[
+            POSITIVE_TAG_START + 3,
+            (v >> 16) as u8,
+            (v >> 8) as u8,
+            v as u8,
+        ]);
+    } else if v <= 0xffffffff {
+        buf.extend_from_slice(&[
+            POSITIVE_TAG_START + 4,
+            (v >> 24) as u8,
+            (v >> 16) as u8,
+            (v >> 8) as u8,
+            v as u8,
+        ]);
+    } else if v <= 0xffffffffff {
+        buf.extend_from_slice(&[
+            POSITIVE_TAG_START + 5,
+            (v >> 32) as u8,
+            (v >> 24) as u8,
+            (v >> 16) as u8,
+            (v >> 8) as u8,
+            v as u8,
+        ]);
+    } else if v <= 0xffffffffffff {
+        buf.extend_from_slice(&[
+            POSITIVE_TAG_START + 6,
+            (v >> 40) as u8,
+            (v >> 32) as u8,
+            (v >> 24) as u8,
+            (v >> 16) as u8,
+            (v >> 8) as u8,
+            v as u8,
+        ]);
+    } else if v <= 0xffffffffffffff {
+        buf.extend_from_slice(&[
+            POSITIVE_TAG_START + 7,
+            (v >> 48) as u8,
+            (v >> 40) as u8,
+            (v >> 32) as u8,
+            (v >> 24) as u8,
+            (v >> 16) as u8,
+            (v >> 8) as u8,
+            v as u8,
+        ]);
+    } else {
+        buf.extend_from_slice(&[
+            POSITIVE_TAG_START + 8,
+            (v >> 56) as u8,
+            (v >> 48) as u8,
+            (v >> 40) as u8,
+            (v >> 32) as u8,
+            (v >> 24) as u8,
+            (v >> 16) as u8,
+            (v >> 8) as u8,
+            v as u8,
+        ]);
+    }
+}
+
+/// Decode an `u64` from mem-comparable bytes.
+///
+/// This mirrors client-go `util/codec.DecodeComparableUvarint`.
+pub fn decode_comparable_uvarint(data: &[u8]) -> Result<(&[u8], u64)> {
+    let (first, rest) = data
+        .split_first()
+        .ok_or_else(|| Error::StringError("insufficient bytes to decode value".to_owned()))?;
+
+    if *first < NEGATIVE_TAG_END {
+        return Err(Error::StringError("invalid bytes to decode value".to_owned()));
+    }
+    if *first <= POSITIVE_TAG_START {
+        return Ok((rest, u64::from(*first - NEGATIVE_TAG_END)));
+    }
+
+    let length = usize::from(*first - POSITIVE_TAG_START);
+    if rest.len() < length {
+        return Err(Error::StringError("insufficient bytes to decode value".to_owned()));
+    }
+    let mut v = 0u64;
+    for &byte in &rest[..length] {
+        v = (v << 8) | u64::from(byte);
+    }
+    Ok((&rest[length..], v))
+}
+
+/// Decode an `i64` from mem-comparable bytes.
+///
+/// This mirrors client-go `util/codec.DecodeComparableVarint`.
+pub fn decode_comparable_varint(data: &[u8]) -> Result<(&[u8], i64)> {
+    let (first, rest) = data
+        .split_first()
+        .ok_or_else(|| Error::StringError("insufficient bytes to decode value".to_owned()))?;
+
+    if (*first >= NEGATIVE_TAG_END) && (*first <= POSITIVE_TAG_START) {
+        return Ok((rest, i64::from(*first - NEGATIVE_TAG_END)));
+    }
+
+    let (length, mut v) = if *first < NEGATIVE_TAG_END {
+        (usize::from(NEGATIVE_TAG_END - *first), u64::MAX)
+    } else {
+        (usize::from(*first - POSITIVE_TAG_START), 0u64)
+    };
+
+    if rest.len() < length {
+        return Err(Error::StringError("insufficient bytes to decode value".to_owned()));
+    }
+    for &byte in &rest[..length] {
+        v = (v << 8) | u64::from(byte);
+    }
+
+    if (*first > POSITIVE_TAG_START) && v > (i64::MAX as u64) {
+        return Err(Error::StringError("invalid bytes to decode value".to_owned()));
+    }
+    if (*first < NEGATIVE_TAG_END) && v <= (i64::MAX as u64) {
+        return Err(Error::StringError("invalid bytes to decode value".to_owned()));
+    }
+
+    Ok((&rest[length..], v as i64))
+}
+
 #[cfg(test)]
 pub mod test {
     use super::*;
@@ -214,5 +423,87 @@ pub mod test {
             decode_bytes_in_place(&mut desc, true).unwrap();
             assert_eq!(source, desc);
         }
+    }
+
+    #[test]
+    fn test_encode_decode_comparable_uvarint_roundtrip_and_order() {
+        let values = [
+            0u64,
+            1,
+            239,
+            240,
+            255,
+            256,
+            65_535,
+            65_536,
+            u64::MAX,
+        ];
+        for &value in &values {
+            let mut buf = Vec::new();
+            encode_comparable_uvarint(&mut buf, value);
+            let (rest, decoded) = decode_comparable_uvarint(&buf).unwrap();
+            assert!(rest.is_empty());
+            assert_eq!(decoded, value);
+        }
+
+        let mut encoded = values
+            .iter()
+            .map(|&v| {
+                let mut buf = Vec::new();
+                encode_comparable_uvarint(&mut buf, v);
+                (v, buf)
+            })
+            .collect::<Vec<_>>();
+        encoded.sort_by(|a, b| a.1.cmp(&b.1));
+        let sorted_values = encoded.into_iter().map(|(v, _)| v).collect::<Vec<_>>();
+        assert_eq!(sorted_values, values);
+    }
+
+    #[test]
+    fn test_encode_decode_comparable_varint_roundtrip_and_order() {
+        let values = [
+            i64::MIN,
+            -1_000_000,
+            -256,
+            -255,
+            -1,
+            0,
+            1,
+            239,
+            240,
+            1_000_000,
+            i64::MAX,
+        ];
+        for &value in &values {
+            let mut buf = Vec::new();
+            encode_comparable_varint(&mut buf, value);
+            let (rest, decoded) = decode_comparable_varint(&buf).unwrap();
+            assert!(rest.is_empty());
+            assert_eq!(decoded, value);
+        }
+
+        let mut encoded = values
+            .iter()
+            .map(|&v| {
+                let mut buf = Vec::new();
+                encode_comparable_varint(&mut buf, v);
+                (v, buf)
+            })
+            .collect::<Vec<_>>();
+        encoded.sort_by(|a, b| a.1.cmp(&b.1));
+        let sorted_values = encoded.into_iter().map(|(v, _)| v).collect::<Vec<_>>();
+        assert_eq!(sorted_values, values);
+    }
+
+    #[test]
+    fn test_decode_comparable_uvarint_rejects_invalid_and_insufficient() {
+        let err = decode_comparable_uvarint(&[]).unwrap_err();
+        assert!(matches!(err, crate::Error::StringError(_)));
+
+        let err = decode_comparable_uvarint(&[0]).unwrap_err();
+        assert!(matches!(err, crate::Error::StringError(_)));
+
+        let err = decode_comparable_uvarint(&[POSITIVE_TAG_START + 8, 1, 2]).unwrap_err();
+        assert!(matches!(err, crate::Error::StringError(_)));
     }
 }
