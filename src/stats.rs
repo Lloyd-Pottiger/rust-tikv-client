@@ -210,6 +210,16 @@ pub(crate) fn observe_load_region_cache(op: &'static str, elapsed: Duration) {
     }
 }
 
+pub(crate) fn observe_backoff_seconds(label: &str, duration: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_BACKOFF_SECONDS_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    let label = normalize_backoff_label(label);
+    histogram
+        .with_label_values(&[label])
+        .observe(duration_to_sec(duration));
+}
+
 #[allow(dead_code)]
 pub fn observe_tso_batch(batch_size: usize) {
     if let Some(histogram) = PD_TSO_BATCH_SIZE_HISTOGRAM.as_ref() {
@@ -454,6 +464,18 @@ fn region_error_from_response(response: &dyn Any) -> Option<&errorpb::Error> {
     None
 }
 
+fn normalize_backoff_label(label: &str) -> &str {
+    match label {
+        // Match client-go `BackoffHistogramRPC` label usage.
+        "grpc" => "tikvRPC",
+        // Region metadata changes / cache invalidations.
+        "region" => "regionMiss",
+        // Match client-go `BoTxnLockFast` label.
+        "txnLockFast" => "tikvLockFast",
+        other => other,
+    }
+}
+
 fn register_histogram_vec(
     name: &'static str,
     help: &'static str,
@@ -604,6 +626,19 @@ lazy_static::lazy_static! {
         &["type", "store"],
     );
 
+    static ref TIKV_CLIENT_RUST_BACKOFF_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_backoff_seconds";
+        let help = "Total backoff seconds for a single request backoff loop.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 29) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["type"], buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_REGION_CACHE_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_region_cache_operations_total",
         "Counter of region cache operations.",
@@ -665,7 +700,10 @@ mod tests {
 
     use serial_test::serial;
 
-    use super::{observe_load_region_cache, region_cache_operation, tikv_stats_with_context};
+    use super::{
+        observe_backoff_seconds, observe_load_region_cache, region_cache_operation,
+        tikv_stats_with_context,
+    };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
     use crate::proto::{errorpb, kvrpcpb as kvrpcpb_alias};
@@ -805,5 +843,22 @@ mod tests {
                 && metric.get_counter().get_value() >= 1.0
         });
         assert!(found, "expected region error counter metric not found");
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_backoff_seconds_histogram_records_mapped_label() {
+        observe_backoff_seconds("grpc", Duration::from_millis(1));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_backoff_seconds")
+            .expect("backoff histogram not registered");
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("tikvRPC")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(found, "expected backoff histogram metric not found");
     }
 }

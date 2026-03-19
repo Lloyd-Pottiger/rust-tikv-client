@@ -31,6 +31,7 @@ use crate::request::{KvRequest, StoreRequest};
 use crate::rpc_interceptor::RpcCallResult;
 use crate::rpc_interceptor::RpcInterceptors;
 use crate::rpc_interceptor::RpcRequest;
+use crate::stats::observe_backoff_seconds;
 use crate::stats::tikv_stats_for_kv_request;
 use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
@@ -1763,6 +1764,7 @@ where
                     // don't sleep if we have resolved the region error
                     if !region_error_resolved {
                         check_killed(&killed)?;
+                        observe_backoff_seconds("region", duration);
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("region", duration);
                         }
@@ -1858,8 +1860,9 @@ where
                     };
                 }
                 check_killed(&killed)?;
+                let label = if is_grpc_error { "grpc" } else { "region" };
+                observe_backoff_seconds(label, duration);
                 if let Some(stats) = plan.runtime_stats() {
-                    let label = if is_grpc_error { "grpc" } else { "region" };
                     stats.record_backoff(label, duration);
                 }
                 sleep(duration).await;
@@ -2189,6 +2192,7 @@ where
                 }
                 Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
                     Some(duration) => {
+                        observe_backoff_seconds("grpc", duration);
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("grpc", duration);
                         }
@@ -2277,6 +2281,7 @@ where
                 }
                 Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
                     Some(duration) => {
+                        observe_backoff_seconds("grpc", duration);
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("grpc", duration);
                         }
@@ -2477,6 +2482,7 @@ where
                         } else {
                             delay_duration
                         };
+                        observe_backoff_seconds("txnLockFast", delay_duration);
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("txnLockFast", delay_duration);
                         }
@@ -2577,6 +2583,7 @@ where
                             delay_duration
                         };
                         check_killed(&self.killed)?;
+                        observe_backoff_seconds("txnLockFast", delay_duration);
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("txnLockFast", delay_duration);
                         }
@@ -2765,6 +2772,7 @@ where
                     let delay_duration =
                         delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64));
                     check_killed(&self.killed)?;
+                    observe_backoff_seconds("txnLockFast", delay_duration);
                     if let Some(stats) = plan.runtime_stats() {
                         stats.record_backoff("txnLockFast", delay_duration);
                     }
