@@ -1395,7 +1395,7 @@ where
             let replica_read = replica_read.clone();
             let match_store_ids = match_store_ids.clone();
             let match_store_labels = match_store_labels.clone();
-            let handle = tokio::spawn(Self::single_shard_handler(
+            let handle = crate::util::spawn_with_inherited_task_locals(Self::single_shard_handler(
                 pd_client.clone(),
                 clone,
                 region,
@@ -2289,7 +2289,7 @@ where
             clone.apply_store(&store);
             let is_mpp = crate::region_cache::is_tiflash_related_store(&store.meta);
             let cross_zone = is_cross_zone(self_zone_label.as_deref(), &store.meta);
-            let handle = tokio::spawn(Self::single_store_handler(
+            let handle = crate::util::spawn_with_inherited_task_locals(Self::single_store_handler(
                 clone,
                 self.backoff.clone(),
                 concurrency_permits.clone(),
@@ -2387,7 +2387,7 @@ where
             clone.apply_store(store);
             let is_mpp = crate::region_cache::is_tiflash_related_store(&store.meta);
             let cross_zone = is_cross_zone(self_zone_label.as_deref(), &store.meta);
-            let handle = tokio::spawn(Self::single_store_handler(
+            let handle = crate::util::spawn_with_inherited_task_locals(Self::single_store_handler(
                 clone,
                 self.backoff.clone(),
                 concurrency_permits.clone(),
@@ -3509,6 +3509,116 @@ mod test {
                 .traffic_details()
                 .unpacked_bytes_received_mpp_cross_zone(),
             expected_received
+        );
+    }
+
+    #[derive(Clone)]
+    struct MultiShardTrafficRequest;
+
+    #[async_trait]
+    impl crate::store::Request for MultiShardTrafficRequest {
+        async fn dispatch(
+            &self,
+            _client: &crate::proto::tikvpb::tikv_client::TikvClient<tonic::transport::Channel>,
+            _timeout: std::time::Duration,
+        ) -> crate::Result<Box<dyn Any>> {
+            unreachable!("MultiShardTrafficRequest::dispatch should not be called")
+        }
+
+        fn label(&self) -> &'static str {
+            "multi_shard_traffic_request"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn set_leader(&mut self, _leader: &crate::region::RegionWithLeader) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn set_api_version(&mut self, _api_version: crate::proto::kvrpcpb::ApiVersion) {}
+
+        fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+
+        fn encoded_len(&self) -> usize {
+            11
+        }
+    }
+
+    impl crate::request::KvRequest for MultiShardTrafficRequest {
+        type Response = crate::proto::kvrpcpb::GetResponse;
+    }
+
+    impl Shardable for MultiShardTrafficRequest {
+        type Shard = ();
+
+        fn shards(
+            &self,
+            _: &Arc<impl crate::pd::PdClient>,
+        ) -> BoxStream<'static, crate::Result<(Self::Shard, RegionWithLeader)>> {
+            Box::pin(stream::iter([store_region(1), store_region(2)]).map(Ok)).boxed()
+        }
+
+        fn apply_shard(&mut self, _: Self::Shard) {}
+
+        fn apply_store(&mut self, store: &crate::store::RegionStore) -> Result<()> {
+            crate::store::Request::set_leader(self, &store.region_with_leader)
+        }
+    }
+
+    fn store_region(store_id: u64) -> ((), RegionWithLeader) {
+        let region = RegionWithLeader {
+            region: metapb::Region {
+                id: store_id,
+                ..Default::default()
+            },
+            leader: Some(metapb::Peer {
+                store_id,
+                ..Default::default()
+            }),
+        };
+        ((), region)
+    }
+
+    #[tokio::test]
+    async fn test_retryable_multi_region_spawns_inherit_exec_details_task_local() {
+        let details = std::sync::Arc::new(crate::util::ExecDetails::default());
+        let response = crate::proto::kvrpcpb::GetResponse {
+            value: b"resp".to_vec(),
+            ..Default::default()
+        };
+        let expected_received =
+            i64::try_from(prost::Message::encoded_len(&response)).unwrap_or(i64::MAX);
+        let kv = MockKvClient::with_dispatch_hook(move |_| Ok(Box::new(response.clone())));
+        let pd_client = Arc::new(MockPdClient::new(kv));
+
+        let plan = RetryableMultiRegion {
+            inner: Dispatch {
+                request: MultiShardTrafficRequest,
+                kv_client: None,
+            },
+            pd_client,
+            backoff: Backoff::no_backoff(),
+            killed: None,
+            concurrency: 2,
+            preserve_region_results: false,
+            replica_read: None,
+            match_store_ids: Arc::new(Vec::new()),
+            match_store_labels: Arc::new(Vec::new()),
+        };
+
+        crate::util::with_exec_details(details.clone(), async {
+            let results = plan.execute().await.unwrap();
+            assert_eq!(results.len(), 2);
+            assert!(results.iter().all(|r| r.is_ok()));
+        })
+        .await;
+
+        assert_eq!(details.traffic_details().unpacked_bytes_sent_kv_total(), 22);
+        assert_eq!(
+            details.traffic_details().unpacked_bytes_received_kv_total(),
+            expected_received * 2
         );
     }
 

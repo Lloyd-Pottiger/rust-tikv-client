@@ -75,3 +75,30 @@ pub(crate) use exec_details::record_task_local_wait_pd_response;
 pub(crate) use exec_details::scope_task_exec_details;
 pub(crate) use exec_details::scope_task_traffic_kind;
 pub(crate) use misc::scope_task_session_id;
+
+pub(crate) fn spawn_with_inherited_task_locals<F, T>(future: F) -> tokio::task::JoinHandle<T>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let parent_trace_id = crate::trace::trace_id();
+    let parent_exec_details = exec_details();
+    let parent_trace_exec_details = trace_exec_details_enabled();
+    let parent_request_source = crate::request_context::request_source();
+    let parent_resource_group_name = crate::request_context::resource_group_name();
+    let parent_session_id = session_id();
+    tokio::spawn(async move {
+        let future = scope_task_session_id(parent_session_id, future);
+        let future =
+            scope_task_exec_details(parent_exec_details, parent_trace_exec_details, future);
+        let future = crate::request_context::scope_task_request_metadata(
+            parent_request_source,
+            parent_resource_group_name,
+            future,
+        );
+        match parent_trace_id {
+            Some(trace_id) => crate::trace::with_trace_id(trace_id, future).await,
+            None => future.await,
+        }
+    })
+}
