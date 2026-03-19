@@ -1,8 +1,10 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::path::PathBuf;
+use std::sync::RwLock;
 use std::time::Duration;
 
+use lazy_static::lazy_static;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
 
@@ -479,9 +481,57 @@ impl Config {
     }
 }
 
+lazy_static! {
+    static ref GLOBAL_CONFIG: RwLock<Config> = RwLock::new(Config::default());
+}
+
+/// Get the global client configuration.
+///
+/// This is a compatibility layer for client-go `config.GetGlobalConfig`. Most Rust code should
+/// prefer passing a per-client [`Config`] explicitly.
+pub fn get_global_config() -> Config {
+    GLOBAL_CONFIG
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Set the global client configuration.
+///
+/// This is a compatibility layer for client-go `config.StoreGlobalConfig`. Most Rust code should
+/// prefer passing a per-client [`Config`] explicitly.
+pub fn set_global_config(config: Config) {
+    *GLOBAL_CONFIG.write().unwrap_or_else(|e| e.into_inner()) = config;
+}
+
+/// Update the global client configuration in-place.
+pub fn update_global_config(update: impl FnOnce(&mut Config)) {
+    let mut config = GLOBAL_CONFIG.write().unwrap_or_else(|e| e.into_inner());
+    update(&mut config);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static GLOBAL_CONFIG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct GlobalConfigGuard {
+        prev: Config,
+    }
+
+    impl Drop for GlobalConfigGuard {
+        fn drop(&mut self) {
+            set_global_config(self.prev.clone());
+        }
+    }
+
+    fn set_global_config_scoped(config: Config) -> GlobalConfigGuard {
+        let prev = get_global_config();
+        set_global_config(config);
+        GlobalConfigGuard { prev }
+    }
 
     #[test]
     fn test_config_default_grpc_keepalive_and_window_sizes() {
@@ -552,5 +602,20 @@ mod tests {
         config.batch_rpc_max_batch_size = 0;
         let err = config.validate().unwrap_err();
         assert!(matches!(err, crate::Error::StringError(_)));
+    }
+
+    #[test]
+    fn test_global_config_set_get_update() {
+        let _lock = GLOBAL_CONFIG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let mut config = Config::default();
+        config.enable_batch_rpc = true;
+        let _guard = set_global_config_scoped(config.clone());
+
+        assert_eq!(get_global_config(), config);
+        update_global_config(|cfg| cfg.enable_batch_rpc = false);
+        assert!(!get_global_config().enable_batch_rpc);
     }
 }
