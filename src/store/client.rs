@@ -163,7 +163,13 @@ impl KvRpcClient {
         health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
     ) -> KvRpcClient {
         let batch = if enable_batch_rpc {
-            match BatchCommandsClient::connect(rpc_client.clone(), batch_rpc_max_batch_size).await {
+            match BatchCommandsClient::connect(
+                rpc_client.clone(),
+                batch_rpc_max_batch_size,
+                store_address.clone(),
+            )
+            .await
+            {
                 Ok(client) => Some(client),
                 Err(Error::GrpcAPI(status)) if status.code() == tonic::Code::Unimplemented => None,
                 Err(err) => {

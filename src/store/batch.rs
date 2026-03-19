@@ -16,6 +16,7 @@ use tonic::Status;
 use crate::proto::kvrpcpb;
 use crate::proto::tikvpb;
 use crate::proto::tikvpb::tikv_client::TikvClient;
+use crate::stats::{observe_batch_pending_requests, observe_batch_requests};
 use crate::Error;
 use crate::Result;
 
@@ -49,16 +50,19 @@ impl Drop for BatchCommandsClientInner {
 struct OutboundRequestState {
     receiver: mpsc::Receiver<tikvpb::BatchCommandsRequest>,
     pending: Option<tikvpb::BatchCommandsRequest>,
+    target: String,
 }
 
 fn outbound_stream(
     receiver: mpsc::Receiver<tikvpb::BatchCommandsRequest>,
     max_requests: usize,
+    target: String,
 ) -> impl Stream<Item = tikvpb::BatchCommandsRequest> + Send {
     let max_requests = max_requests.max(1);
     let state = OutboundRequestState {
         receiver,
         pending: None,
+        target,
     };
     stream::unfold(state, move |mut state| async move {
         let mut head = if let Some(request) = state.pending.take() {
@@ -83,6 +87,21 @@ fn outbound_stream(
             }
         }
 
+        let batch_size = head.requests.len();
+        observe_batch_requests(&state.target, batch_size);
+        let pending_in_channel = state.receiver.len();
+        let pending_buffered = state
+            .pending
+            .as_ref()
+            .map(|req| req.requests.len())
+            .unwrap_or(0);
+        observe_batch_pending_requests(
+            &state.target,
+            batch_size
+                .saturating_add(pending_in_channel)
+                .saturating_add(pending_buffered),
+        );
+
         Some((head, state))
     })
 }
@@ -91,9 +110,10 @@ impl BatchCommandsClient {
     pub(crate) async fn connect(
         client: TikvClient<Channel>,
         max_outbound_requests: usize,
+        target: String,
     ) -> Result<Self> {
         let (outbound_tx, outbound_rx) = mpsc::channel(1024);
-        let outbound_stream = outbound_stream(outbound_rx, max_outbound_requests);
+        let outbound_stream = outbound_stream(outbound_rx, max_outbound_requests, target);
 
         let req = outbound_stream.into_streaming_request();
         let response = client
@@ -290,6 +310,15 @@ impl Drop for InflightGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+        metric
+            .get_label()
+            .iter()
+            .find(|pair| pair.get_name() == name)
+            .map(|pair| pair.get_value())
+    }
 
     fn client_with_channels(
         outbound: mpsc::Sender<tikvpb::BatchCommandsRequest>,
@@ -374,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_stream_batches_ready_requests() {
         let (out_tx, out_rx) = mpsc::channel(8);
-        let mut stream = Box::pin(outbound_stream(out_rx, 8));
+        let mut stream = Box::pin(outbound_stream(out_rx, 8, "unit_test_ready".to_owned()));
 
         let mk_req = |request_id| tikvpb::BatchCommandsRequest {
             requests: vec![tikvpb::batch_commands_request::Request {
@@ -403,7 +432,7 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_stream_respects_batch_limit() {
         let (out_tx, out_rx) = mpsc::channel(8);
-        let mut stream = Box::pin(outbound_stream(out_rx, 2));
+        let mut stream = Box::pin(outbound_stream(out_rx, 2, "unit_test_limit".to_owned()));
 
         let mk_req = |request_id| tikvpb::BatchCommandsRequest {
             requests: vec![tikvpb::batch_commands_request::Request {
@@ -423,6 +452,58 @@ mod tests {
 
         let second = stream.next().await.expect("second batch");
         assert_eq!(second.request_ids, vec![3]);
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_outbound_stream_records_batch_metrics() {
+        let target = "unit_test_target_batch_metrics_outbound_stream".to_owned();
+        let (out_tx, out_rx) = mpsc::channel(8);
+        let mut stream = Box::pin(outbound_stream(out_rx, 2, target.clone()));
+
+        let mk_req = |request_id| tikvpb::BatchCommandsRequest {
+            requests: vec![tikvpb::batch_commands_request::Request {
+                cmd: Some(tikvpb::batch_commands_request::request::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyRequest::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+        };
+
+        out_tx.send(mk_req(1)).await.expect("send req 1");
+        out_tx.send(mk_req(2)).await.expect("send req 2");
+        out_tx.send(mk_req(3)).await.expect("send req 3");
+
+        let _ = stream.next().await.expect("first batch");
+        let _ = stream.next().await.expect("second batch");
+
+        let families = prometheus::gather();
+
+        let requests_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_batch_requests")
+            .expect("batch_requests histogram not registered");
+        let requests_found = requests_family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some(target.as_str())
+                && metric.get_histogram().get_sample_count() >= 2
+        });
+        assert!(
+            requests_found,
+            "expected batch_requests metrics for target not found"
+        );
+
+        let pending_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_batch_pending_requests")
+            .expect("batch_pending_requests histogram not registered");
+        let pending_found = pending_family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some(target.as_str())
+                && metric.get_histogram().get_sample_count() >= 2
+        });
+        assert!(
+            pending_found,
+            "expected batch_pending_requests metrics for target not found"
+        );
     }
 
     #[tokio::test]

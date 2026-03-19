@@ -269,6 +269,30 @@ pub(crate) fn observe_stale_read_hit_miss(is_stale_read: bool, retry_times: u32)
     counter.with_label_values(&[result]).inc();
 }
 
+pub(crate) fn observe_batch_pending_requests(target: &str, pending_requests: usize) {
+    let Some(histogram) = TIKV_CLIENT_RUST_BATCH_PENDING_REQUESTS_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    if pending_requests == 0 {
+        return;
+    }
+    histogram
+        .with_label_values(&[target])
+        .observe(pending_requests as f64);
+}
+
+pub(crate) fn observe_batch_requests(target: &str, batch_size: usize) {
+    let Some(histogram) = TIKV_CLIENT_RUST_BATCH_REQUESTS_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    if batch_size == 0 {
+        return;
+    }
+    histogram
+        .with_label_values(&[target])
+        .observe(batch_size as f64);
+}
+
 #[allow(dead_code)]
 pub fn observe_tso_batch(batch_size: usize) {
     if let Some(histogram) = PD_TSO_BATCH_SIZE_HISTOGRAM.as_ref() {
@@ -783,6 +807,32 @@ lazy_static::lazy_static! {
         register_histogram_with_buckets(name, help, buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_BATCH_PENDING_REQUESTS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_batch_pending_requests";
+        let help = "Number of requests pending in the batch channel.";
+        let buckets = match prometheus::exponential_buckets(1.0, 2.0, 11) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["target"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_BATCH_REQUESTS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_batch_requests";
+        let help = "Number of requests in one batch.";
+        let buckets = match prometheus::exponential_buckets(1.0, 2.0, 11) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["target"], buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_READ_REQUEST_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_read_request_bytes";
         let help = "Bucketed histogram of total bytes sent/received for read requests.";
@@ -876,9 +926,9 @@ mod tests {
     use serial_test::serial;
 
     use super::{
-        observe_backoff_seconds, observe_kv_request_traffic_metrics, observe_load_region_cache,
-        observe_request_retry_times, observe_stale_read_hit_miss, region_cache_operation,
-        tikv_stats_with_context,
+        observe_backoff_seconds, observe_batch_pending_requests, observe_batch_requests,
+        observe_kv_request_traffic_metrics, observe_load_region_cache, observe_request_retry_times,
+        observe_stale_read_hit_miss, region_cache_operation, tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1052,6 +1102,42 @@ mod tests {
         assert!(
             after_miss >= before_miss + 70.0,
             "expected stale read miss counter to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_batch_metrics_helpers_record_metrics() {
+        let target = "unit_test_target_batch_metrics";
+        observe_batch_pending_requests(target, 10);
+        observe_batch_requests(target, 5);
+
+        let families = prometheus::gather();
+
+        let pending_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_batch_pending_requests")
+            .expect("batch_pending_requests histogram not registered");
+        let pending_found = pending_family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some(target)
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            pending_found,
+            "expected batch_pending_requests metric with labels not found"
+        );
+
+        let requests_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_batch_requests")
+            .expect("batch_requests histogram not registered");
+        let requests_found = requests_family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some(target)
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            requests_found,
+            "expected batch_requests metric with labels not found"
         );
     }
 
