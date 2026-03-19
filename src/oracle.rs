@@ -3,10 +3,13 @@
 //! This module provides small utilities that mirror client-go `oracle` timestamp helpers (compose
 //! and extract physical/logical parts, and convert between wall clock time and a TSO timestamp).
 
+use async_trait::async_trait;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::SystemTimeError;
 use std::time::UNIX_EPOCH;
+
+use crate::TimestampExt;
 
 /// The shift bit width used by PD timestamps (physical ms + logical part).
 ///
@@ -19,6 +22,118 @@ const LOGICAL_MASK: u64 = (1u64 << PHYSICAL_SHIFT_BITS) - 1;
 ///
 /// This mirrors client-go `oracle.GlobalTxnScope`.
 pub const GLOBAL_TXN_SCOPE: &str = "global";
+
+/// Options passed to the oracle APIs.
+///
+/// This mirrors client-go `oracle.Option`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OracleOption {
+    pub txn_scope: String,
+}
+
+impl OracleOption {
+    pub fn new() -> OracleOption {
+        OracleOption::default()
+    }
+}
+
+/// Timestamp oracle interface.
+///
+/// This is a Rust mapping of client-go `oracle.Oracle`. It is intentionally async and focuses on
+/// the parts that are surfaced as public APIs in this crate.
+#[async_trait]
+pub trait Oracle: Send + Sync {
+    /// Get a new monotonic timestamp.
+    async fn get_timestamp(&self, opt: &OracleOption) -> crate::Result<u64>;
+
+    /// Get a low-resolution timestamp.
+    async fn get_low_resolution_timestamp(&self, opt: &OracleOption) -> crate::Result<u64>;
+
+    /// Set the refresh interval for low-resolution timestamps.
+    fn set_low_resolution_timestamp_update_interval(
+        &self,
+        update_interval: Duration,
+    ) -> crate::Result<()>;
+
+    /// Get a stale timestamp for the given `txn_scope`.
+    async fn get_stale_timestamp(&self, txn_scope: &str, prev_seconds: u64) -> crate::Result<u64>;
+
+    /// Get the external timestamp from PD.
+    async fn get_external_timestamp(&self) -> crate::Result<u64>;
+
+    /// Set the external timestamp in PD.
+    async fn set_external_timestamp(&self, ts: u64) -> crate::Result<()>;
+
+    /// Get a minimum timestamp from all TSO keyspace groups.
+    async fn get_all_tso_keyspace_group_min_ts(&self) -> crate::Result<u64>;
+
+    /// Validate that `read_ts` is safe to use for reads.
+    async fn validate_read_ts(
+        &self,
+        read_ts: u64,
+        is_stale_read: bool,
+        opt: &OracleOption,
+    ) -> crate::Result<()>;
+}
+
+#[async_trait]
+impl Oracle for crate::TransactionClient {
+    async fn get_timestamp(&self, opt: &OracleOption) -> crate::Result<u64> {
+        Ok(self
+            .current_timestamp_with_txn_scope(&opt.txn_scope)
+            .await?
+            .version())
+    }
+
+    async fn get_low_resolution_timestamp(&self, opt: &OracleOption) -> crate::Result<u64> {
+        Ok(self
+            .low_resolution_timestamp_with_txn_scope(&opt.txn_scope)
+            .await?
+            .version())
+    }
+
+    fn set_low_resolution_timestamp_update_interval(
+        &self,
+        update_interval: Duration,
+    ) -> crate::Result<()> {
+        crate::TransactionClient::set_low_resolution_timestamp_update_interval(
+            self,
+            update_interval,
+        )
+    }
+
+    async fn get_stale_timestamp(&self, txn_scope: &str, prev_seconds: u64) -> crate::Result<u64> {
+        Ok(self
+            .stale_timestamp_with_txn_scope(txn_scope, prev_seconds)
+            .await?
+            .version())
+    }
+
+    async fn get_external_timestamp(&self) -> crate::Result<u64> {
+        self.external_timestamp().await
+    }
+
+    async fn set_external_timestamp(&self, ts: u64) -> crate::Result<()> {
+        crate::TransactionClient::set_external_timestamp(self, ts).await
+    }
+
+    async fn get_all_tso_keyspace_group_min_ts(&self) -> crate::Result<u64> {
+        Ok(self
+            .current_all_tso_keyspace_group_min_ts()
+            .await?
+            .version())
+    }
+
+    async fn validate_read_ts(
+        &self,
+        read_ts: u64,
+        is_stale_read: bool,
+        opt: &OracleOption,
+    ) -> crate::Result<()> {
+        self.validate_read_ts_with_txn_scope(&opt.txn_scope, read_ts, is_stale_read)
+            .await
+    }
+}
 
 /// Compose a TSO timestamp from physical and logical parts.
 ///
@@ -120,7 +235,7 @@ pub fn lower_limit_start_ts(
 ///
 /// This mirrors client-go `oracle.ErrFutureTSRead`.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("cannot set read timestamp to a future time, read_ts: {read_ts}, current_ts: {current_ts}")]
+#[error("cannot set read timestamp to a future time, readTS: {read_ts}, currentTS: {current_ts}")]
 pub struct ErrFutureTsRead {
     pub read_ts: u64,
     pub current_ts: u64,
@@ -130,7 +245,7 @@ pub struct ErrFutureTsRead {
 ///
 /// This mirrors client-go `oracle.ErrLatestStaleRead`.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("cannot set read ts to max u64 for stale read")]
+#[error("cannot set read ts to max uint64 for stale read")]
 pub struct ErrLatestStaleRead;
 
 #[cfg(test)]
@@ -166,5 +281,11 @@ mod tests {
             system_time_from_ts(ts).unwrap(),
             UNIX_EPOCH.checked_add(Duration::from_millis(10)).unwrap()
         );
+    }
+
+    #[test]
+    fn test_transaction_client_implements_oracle_trait() {
+        fn assert_oracle<T: Oracle>() {}
+        assert_oracle::<crate::TransactionClient>();
     }
 }
