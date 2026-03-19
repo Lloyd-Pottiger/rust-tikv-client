@@ -191,6 +191,40 @@ fn kv_request_trace_fields(
     fields
 }
 
+fn trace_cop_other_error_if_present(
+    ctx: Option<&kvrpcpb::Context>,
+    store_addr: &str,
+    resp: &dyn Any,
+) {
+    let Some(resp) = resp.downcast_ref::<crate::proto::coprocessor::Response>() else {
+        return;
+    };
+    if resp.other_error.is_empty() {
+        return;
+    }
+
+    let (region_id, region_ver, region_conf_ver, store_id) = match ctx {
+        Some(ctx) => {
+            let epoch = ctx.region_epoch.as_ref();
+            let conf_ver = epoch.map(|epoch| epoch.conf_ver).unwrap_or(0);
+            let ver = epoch.map(|epoch| epoch.version).unwrap_or(0);
+            let store_id = ctx.peer.as_ref().map(|peer| peer.store_id).unwrap_or(0);
+            (ctx.region_id, ver, conf_ver, store_id)
+        }
+        None => (0, 0, 0, 0),
+    };
+
+    let fields = vec![
+        TraceField::str("other_error", resp.other_error.clone()),
+        TraceField::u64("region_id", region_id),
+        TraceField::u64("region_ver", region_ver),
+        TraceField::u64("region_confVer", region_conf_ver),
+        TraceField::u64("store_id", store_id),
+        TraceField::str("store_addr", store_addr.to_owned()),
+    ];
+    trace::trace(Category::KvRequest, "cop.other_error", &fields);
+}
+
 /// A plan for how to execute a request. A user builds up a plan with various
 /// options, then exectutes it.
 #[async_trait]
@@ -340,6 +374,13 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
                 }
             }
             trace::trace(Category::KvRequest, "kv.request.result", &fields);
+            if let Ok(resp) = result.as_ref() {
+                trace_cop_other_error_if_present(
+                    self.request.context(),
+                    kv_trace_store_addr.unwrap_or(""),
+                    resp as &dyn Any,
+                );
+            }
         }
 
         if txn_2pc_trace_enabled {
@@ -513,6 +554,13 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                     }
                 }
                 trace::trace(Category::KvRequest, "kv.request.result", &fields);
+                if let Ok(resp) = result.as_ref() {
+                    trace_cop_other_error_if_present(
+                        self.request.context(),
+                        target,
+                        resp as &dyn Any,
+                    );
+                }
             }
 
             if txn_2pc_trace_enabled {
@@ -667,6 +715,9 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                 }
             }
             trace::trace(Category::KvRequest, "kv.request.result", &fields);
+            if let Ok(resp) = result.as_ref() {
+                trace_cop_other_error_if_present(request.context(), target, resp as &dyn Any);
+            }
         }
 
         if txn_2pc_trace_enabled {
@@ -4169,6 +4220,76 @@ mod test {
                 Some(expected_end.as_str())
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_trace_cop_other_error_emitted() {
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
+        let _reset = TraceHookReset;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(
+            Vec::<Vec<crate::trace::TraceField>>::new(),
+        ));
+
+        let seen_event = seen.clone();
+        let event: crate::trace::TraceEventFunc =
+            std::sync::Arc::new(move |category, name, fields| {
+                if category != crate::trace::Category::KvRequest {
+                    return;
+                }
+                if name != "cop.other_error" {
+                    return;
+                }
+                seen_event.lock().unwrap().push(fields.to_vec());
+            });
+        crate::trace::set_trace_event_func(Some(event));
+
+        let enabled: crate::trace::IsCategoryEnabledFunc =
+            std::sync::Arc::new(|category| category == crate::trace::Category::KvRequest);
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+
+        let mut region = crate::proto::metapb::Region::default();
+        region.id = 7;
+        region.region_epoch = Some(crate::proto::metapb::RegionEpoch {
+            conf_ver: 8,
+            version: 9,
+        });
+        let mut peer = crate::proto::metapb::Peer::default();
+        peer.store_id = 41;
+        let region = crate::region::RegionWithLeader {
+            region,
+            leader: Some(peer),
+        };
+
+        let mut request = crate::proto::coprocessor::Request::default();
+        crate::store::Request::set_leader(&mut request, &region)
+            .expect("set_leader should succeed");
+
+        let mut kv = MockKvClient::with_dispatch_hook(|req| {
+            req.downcast_ref::<crate::proto::coprocessor::Request>()
+                .expect("expected coprocessor request");
+            let mut resp = crate::proto::coprocessor::Response::default();
+            resp.other_error = "boom".to_owned();
+            Ok(Box::new(resp) as Box<dyn Any>)
+        });
+        kv.addr = "test-store".to_owned();
+
+        let plan = Dispatch {
+            request,
+            kv_client: Some(std::sync::Arc::new(kv)),
+        };
+
+        let _ = plan.execute().await.unwrap();
+
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 1);
+        let fields = &events[0];
+        assert_eq!(trace_field_str(fields, "other_error"), Some("boom"));
+        assert_eq!(trace_field_u64(fields, "region_id"), Some(7));
+        assert_eq!(trace_field_u64(fields, "region_ver"), Some(9));
+        assert_eq!(trace_field_u64(fields, "region_confVer"), Some(8));
+        assert_eq!(trace_field_u64(fields, "store_id"), Some(41));
+        assert_eq!(trace_field_str(fields, "store_addr"), Some("test-store"));
     }
 
     #[tokio::test]
