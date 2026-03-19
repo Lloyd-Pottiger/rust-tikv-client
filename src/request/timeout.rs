@@ -67,6 +67,14 @@ where
         self.inner.set_is_retry_request(is_retry_request);
     }
 
+    fn timeout_override(&self) -> Option<Duration> {
+        (!self.timeout.is_zero()).then_some(self.timeout)
+    }
+
+    fn context(&self) -> Option<&kvrpcpb::Context> {
+        self.inner.context()
+    }
+
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         self.inner.context_mut()
     }

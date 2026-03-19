@@ -1,10 +1,12 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 use lazy_static::lazy_static;
 
+use crate::region::RegionVerId;
 use crate::TraceControlFlags;
 
 tokio::task_local! {
@@ -123,6 +125,8 @@ lazy_static! {
     static ref TRACE_EVENT_FUNC: RwLock<TraceEventFunc> = RwLock::new(Arc::new(noop_trace_event));
     static ref IS_CATEGORY_ENABLED_FUNC: RwLock<IsCategoryEnabledFunc> =
         RwLock::new(Arc::new(noop_is_category_enabled));
+    static ref KV_REQUEST_REGION_RANGES: RwLock<HashMap<RegionVerId, (Vec<u8>, Vec<u8>)>> =
+        RwLock::new(HashMap::new());
 }
 
 /// Register the global trace event callback.
@@ -182,6 +186,42 @@ where
 /// This mirrors client-go `trace.ImmediateLoggingEnabled(ctx)` but takes flags directly.
 pub fn immediate_logging_enabled(flags: TraceControlFlags) -> bool {
     flags.has(TraceControlFlags::IMMEDIATE_LOG)
+}
+
+const MAX_KV_REQUEST_REGION_RANGES: usize = 4096;
+
+pub(crate) fn record_kv_request_region_range(region: &crate::region::RegionWithLeader) {
+    if !is_category_enabled(Category::KvRequest) {
+        return;
+    }
+    let mut guard = KV_REQUEST_REGION_RANGES
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    if guard.len() >= MAX_KV_REQUEST_REGION_RANGES {
+        guard.clear();
+    }
+    guard.insert(
+        region.ver_id(),
+        (
+            region.region.start_key.clone(),
+            region.region.end_key.clone(),
+        ),
+    );
+}
+
+pub(crate) fn kv_request_region_range(ver_id: &RegionVerId) -> Option<(Vec<u8>, Vec<u8>)> {
+    let guard = KV_REQUEST_REGION_RANGES
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.get(ver_id).cloned()
+}
+
+#[cfg(test)]
+pub(crate) fn clear_kv_request_region_ranges_for_test() {
+    let mut guard = KV_REQUEST_REGION_RANGES
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.clear();
 }
 
 #[cfg(test)]

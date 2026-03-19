@@ -616,6 +616,10 @@ impl Request for RawCoprocessorRequest {
         self.inner.set_is_retry_request(is_retry_request);
     }
 
+    fn context(&self) -> Option<&kvrpcpb::Context> {
+        self.inner.context()
+    }
+
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         self.inner.context_mut()
     }

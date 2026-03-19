@@ -32,6 +32,14 @@ pub trait Request: Any + Sync + Send + 'static {
     fn set_api_version(&mut self, api_version: kvrpcpb::ApiVersion);
     fn set_is_retry_request(&mut self, is_retry_request: bool);
 
+    fn timeout_override(&self) -> Option<Duration> {
+        None
+    }
+
+    fn context(&self) -> Option<&kvrpcpb::Context> {
+        None
+    }
+
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         None
     }
@@ -69,6 +77,7 @@ macro_rules! impl_request {
             }
 
             fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()> {
+                crate::trace::record_kv_request_region_range(leader);
                 let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
                 let leader_peer = leader.leader.as_ref().ok_or(Error::LeaderNotFound {
                     region: leader.ver_id(),
@@ -87,6 +96,10 @@ macro_rules! impl_request {
             fn set_is_retry_request(&mut self, is_retry_request: bool) {
                 let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
                 ctx.is_retry_request = is_retry_request;
+            }
+
+            fn context(&self) -> Option<&kvrpcpb::Context> {
+                self.context.as_ref()
             }
 
             fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
@@ -161,6 +174,7 @@ impl Request for kvrpcpb::ResolveLockRequest {
     }
 
     fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()> {
+        crate::trace::record_kv_request_region_range(leader);
         let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
         let leader_peer = leader.leader.as_ref().ok_or(Error::LeaderNotFound {
             region: leader.ver_id(),
@@ -179,6 +193,10 @@ impl Request for kvrpcpb::ResolveLockRequest {
     fn set_is_retry_request(&mut self, is_retry_request: bool) {
         let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
         ctx.is_retry_request = is_retry_request;
+    }
+
+    fn context(&self) -> Option<&kvrpcpb::Context> {
+        self.context.as_ref()
     }
 
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
@@ -286,6 +304,7 @@ impl Request for coprocessor::Request {
     }
 
     fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()> {
+        crate::trace::record_kv_request_region_range(leader);
         let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
         let leader_peer = leader.leader.as_ref().ok_or(Error::LeaderNotFound {
             region: leader.ver_id(),
@@ -304,6 +323,10 @@ impl Request for coprocessor::Request {
     fn set_is_retry_request(&mut self, is_retry_request: bool) {
         let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
         ctx.is_retry_request = is_retry_request;
+    }
+
+    fn context(&self) -> Option<&kvrpcpb::Context> {
+        self.context.as_ref()
     }
 
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
@@ -352,6 +375,10 @@ impl Request for coprocessor::BatchRequest {
     fn set_is_retry_request(&mut self, is_retry_request: bool) {
         let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
         ctx.is_retry_request = is_retry_request;
+    }
+
+    fn context(&self) -> Option<&kvrpcpb::Context> {
+        self.context.as_ref()
     }
 
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
@@ -576,6 +603,10 @@ impl Request for kvrpcpb::GetHealthFeedbackRequest {
         ctx.is_retry_request = is_retry_request;
     }
 
+    fn context(&self) -> Option<&kvrpcpb::Context> {
+        self.context.as_ref()
+    }
+
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         Some(self.context.get_or_insert(kvrpcpb::Context::default()))
     }
@@ -622,6 +653,10 @@ impl Request for kvrpcpb::BroadcastTxnStatusRequest {
     fn set_is_retry_request(&mut self, is_retry_request: bool) {
         let ctx = self.context.get_or_insert(kvrpcpb::Context::default());
         ctx.is_retry_request = is_retry_request;
+    }
+
+    fn context(&self) -> Option<&kvrpcpb::Context> {
+        self.context.as_ref()
     }
 
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {

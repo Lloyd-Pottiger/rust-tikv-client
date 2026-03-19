@@ -78,6 +78,7 @@ impl Request for CoprocessorStreamRequest {
     }
 
     fn set_leader(&mut self, leader: &RegionWithLeader) -> Result<()> {
+        crate::trace::record_kv_request_region_range(leader);
         let ctx = self
             .inner
             .context
@@ -105,6 +106,10 @@ impl Request for CoprocessorStreamRequest {
             .context
             .get_or_insert(kvrpcpb::Context::default());
         ctx.is_retry_request = is_retry_request;
+    }
+
+    fn context(&self) -> Option<&kvrpcpb::Context> {
+        self.inner.context.as_ref()
     }
 
     fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {

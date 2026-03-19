@@ -176,6 +176,10 @@ impl KvClient for MockKvClient {
             None => panic!("no dispatch hook set"),
         }
     }
+
+    fn store_address(&self) -> Option<&str> {
+        Some(&self.addr)
+    }
 }
 
 #[async_trait]

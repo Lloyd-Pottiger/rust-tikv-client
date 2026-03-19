@@ -120,6 +120,7 @@ impl KvConnect for TikvConnect {
         Ok(KvRpcClient::new(
             rpc_client,
             timeout,
+            address.to_owned(),
             enable_batch_rpc,
             batch_rpc_max_batch_size,
             health_feedback_observer,
@@ -131,6 +132,14 @@ impl KvConnect for TikvConnect {
 #[async_trait]
 pub trait KvClient {
     async fn dispatch(&self, req: &dyn Request) -> Result<Box<dyn Any>>;
+
+    fn timeout(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    fn store_address(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// This client handles requests for a single TiKV node. It converts the data
@@ -139,6 +148,7 @@ pub trait KvClient {
 pub struct KvRpcClient {
     rpc_client: TikvClient<Channel>,
     timeout: Duration,
+    store_address: String,
     batch: Option<BatchCommandsClient>,
     health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
 }
@@ -147,6 +157,7 @@ impl KvRpcClient {
     async fn new(
         rpc_client: TikvClient<Channel>,
         timeout: Duration,
+        store_address: String,
         enable_batch_rpc: bool,
         batch_rpc_max_batch_size: usize,
         health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
@@ -167,6 +178,7 @@ impl KvRpcClient {
         KvRpcClient {
             rpc_client,
             timeout,
+            store_address,
             batch,
             health_feedback_observer,
         }
@@ -897,6 +909,14 @@ impl KvClient for KvRpcClient {
         }
         request.dispatch(&self.rpc_client, self.timeout).await
     }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    fn store_address(&self) -> Option<&str> {
+        Some(&self.store_address)
+    }
 }
 
 #[cfg(test)]
@@ -1023,6 +1043,7 @@ mod tests {
         let client = KvRpcClient {
             rpc_client,
             timeout: Duration::from_secs(1),
+            store_address: "127.0.0.1:1".to_owned(),
             batch: Some(batch),
             health_feedback_observer: Arc::new(Mutex::new(None)),
         };

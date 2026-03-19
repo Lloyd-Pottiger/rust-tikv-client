@@ -84,6 +84,113 @@ fn collapse_key_errors(mut errors: Vec<Error>) -> Error {
     }
 }
 
+fn duration_to_ms_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn kv_cmd_from_label(label: &'static str) -> String {
+    let label =
+        if (label.starts_with("kv_") || label.starts_with("raw_") || label == "batch_coprocessor")
+            && label.ends_with("_request")
+        {
+            label.strip_suffix("_request").unwrap_or(label)
+        } else {
+            label
+        };
+
+    match label {
+        "coprocessor" => return "Cop".to_owned(),
+        "coprocessor_stream" => return "CopStream".to_owned(),
+        "batch_coprocessor" => return "BatchCop".to_owned(),
+        _ => {}
+    }
+
+    let (prefix, rest) = if let Some(rest) = label.strip_prefix("kv_") {
+        ("", rest)
+    } else if let Some(rest) = label.strip_prefix("raw_") {
+        ("Raw", rest)
+    } else {
+        ("", label)
+    };
+
+    let mut out = String::new();
+    out.push_str(prefix);
+    for part in rest.split('_').filter(|part| !part.is_empty()) {
+        match part {
+            "gc" => out.push_str("GC"),
+            "id" => out.push_str("ID"),
+            "mpp" => out.push_str("MPP"),
+            "rpc" => out.push_str("RPC"),
+            "ts" => out.push_str("TS"),
+            "tso" => out.push_str("TSO"),
+            "ttl" => out.push_str("TTL"),
+            _ => {
+                let mut chars = part.chars();
+                if let Some(first) = chars.next() {
+                    out.extend(first.to_uppercase());
+                    out.push_str(chars.as_str());
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        label.to_owned()
+    } else {
+        out
+    }
+}
+
+fn kv_request_trace_fields(
+    label: &'static str,
+    cmd: &str,
+    ctx: Option<&kvrpcpb::Context>,
+    store_addr: &str,
+    timeout: Duration,
+) -> Vec<TraceField> {
+    let (region_id, region_ver, region_conf_ver, store_id, ver_id) = match ctx {
+        Some(ctx) => {
+            let epoch = ctx.region_epoch.as_ref();
+            let conf_ver = epoch.map(|epoch| epoch.conf_ver).unwrap_or(0);
+            let ver = epoch.map(|epoch| epoch.version).unwrap_or(0);
+            let store_id = ctx.peer.as_ref().map(|peer| peer.store_id).unwrap_or(0);
+            let ver_id = RegionVerId {
+                id: ctx.region_id,
+                conf_ver,
+                ver,
+            };
+            (ctx.region_id, ver, conf_ver, store_id, Some(ver_id))
+        }
+        None => (0, 0, 0, 0, None),
+    };
+
+    let mut fields = vec![
+        TraceField::str("label", label),
+        TraceField::str("cmd", cmd.to_owned()),
+        TraceField::u64("region_id", region_id),
+        TraceField::u64("region_ver", region_ver),
+        TraceField::u64("region_confVer", region_conf_ver),
+        TraceField::u64("store_id", store_id),
+        TraceField::str("store_addr", store_addr.to_owned()),
+        TraceField::u64("timeout_ms", duration_to_ms_saturating(timeout)),
+    ];
+
+    if let Some(ver_id) = ver_id {
+        if let Some((start_key, end_key)) = trace::kv_request_region_range(&ver_id) {
+            fields.push(TraceField::str(
+                "region_start_key",
+                crate::redact::key(&start_key),
+            ));
+            fields.push(TraceField::str(
+                "region_end_key",
+                crate::redact::key(&end_key),
+            ));
+        }
+    }
+
+    fields
+}
+
 /// A plan for how to execute a request. A user builds up a plan with various
 /// options, then exectutes it.
 #[async_trait]
@@ -131,12 +238,23 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
         let txn_2pc_trace_enabled = (prewrite_req.is_some() || commit_req.is_some())
             && trace::is_category_enabled(Category::Txn2Pc);
 
+        let kv_trace_cmd = kv_trace_enabled.then(|| kv_cmd_from_label(label));
+        let kv_trace_timeout = kv_trace_enabled.then(|| {
+            self.request
+                .timeout_override()
+                .unwrap_or_else(|| kv_client.timeout())
+        });
+        let kv_trace_store_addr = kv_trace_enabled.then(|| kv_client.store_address().unwrap_or(""));
+
         if kv_trace_enabled {
-            trace::trace(
-                Category::KvRequest,
-                "kv.request.send",
-                &[TraceField::str("label", label)],
+            let fields = kv_request_trace_fields(
+                label,
+                kv_trace_cmd.as_deref().unwrap_or(label),
+                self.request.context(),
+                kv_trace_store_addr.unwrap_or(""),
+                kv_trace_timeout.unwrap_or_default(),
             );
+            trace::trace(Category::KvRequest, "kv.request.send", &fields);
         }
 
         if txn_2pc_trace_enabled {
@@ -205,11 +323,15 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
                 .as_ref()
                 .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
                 .unwrap_or(0);
-            let mut fields = vec![
-                TraceField::str("label", label),
-                TraceField::bool("success", result.is_ok()),
-                TraceField::u64("latency_ms", elapsed_ms),
-            ];
+            let mut fields = kv_request_trace_fields(
+                label,
+                kv_trace_cmd.as_deref().unwrap_or(label),
+                self.request.context(),
+                kv_trace_store_addr.unwrap_or(""),
+                kv_trace_timeout.unwrap_or_default(),
+            );
+            fields.push(TraceField::bool("success", result.is_ok()));
+            fields.push(TraceField::u64("latency_ms", elapsed_ms));
             if crate::util::trace_exec_details_enabled() {
                 if let Ok(resp) = result.as_ref() {
                     if let Some(details) = exec_details_v2_from_response(resp as &dyn Any) {
@@ -294,12 +416,23 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         let txn_2pc_trace_enabled = (prewrite_trace.is_some() || commit_trace.is_some())
             && trace::is_category_enabled(Category::Txn2Pc);
 
+        let kv_trace_cmd = kv_trace_enabled.then(|| kv_cmd_from_label(label));
+        let kv_trace_timeout = kv_trace_enabled.then(|| {
+            self.request
+                .timeout_override()
+                .unwrap_or_else(|| kv_client.timeout())
+        });
+
         if self.rpc_interceptors.is_empty() {
             if kv_trace_enabled {
-                let fields = vec![
-                    TraceField::str("label", label),
-                    TraceField::str("target", target.to_owned()),
-                ];
+                let mut fields = kv_request_trace_fields(
+                    label,
+                    kv_trace_cmd.as_deref().unwrap_or(label),
+                    self.request.context(),
+                    target,
+                    kv_trace_timeout.unwrap_or_default(),
+                );
+                fields.push(TraceField::str("target", target.to_owned()));
                 trace::trace(Category::KvRequest, "kv.request.send", &fields);
             }
 
@@ -362,12 +495,16 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                     .as_ref()
                     .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
                     .unwrap_or(0);
-                let mut fields = vec![
-                    TraceField::str("label", label),
-                    TraceField::str("target", target.to_owned()),
-                    TraceField::bool("success", result.is_ok()),
-                    TraceField::u64("latency_ms", elapsed_ms),
-                ];
+                let mut fields = kv_request_trace_fields(
+                    label,
+                    kv_trace_cmd.as_deref().unwrap_or(label),
+                    self.request.context(),
+                    target,
+                    kv_trace_timeout.unwrap_or_default(),
+                );
+                fields.push(TraceField::str("target", target.to_owned()));
+                fields.push(TraceField::bool("success", result.is_ok()));
+                fields.push(TraceField::u64("latency_ms", elapsed_ms));
                 if crate::util::trace_exec_details_enabled() {
                     if let Ok(resp) = result.as_ref() {
                         if let Some(details) = exec_details_v2_from_response(resp as &dyn Any) {
@@ -424,11 +561,22 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                 (req.start_version, req.commit_version, region_id, key_count)
             });
 
+        let kv_trace_cmd = kv_trace_enabled.then(|| kv_cmd_from_label(label));
+        let kv_trace_timeout = kv_trace_enabled.then(|| {
+            request
+                .timeout_override()
+                .unwrap_or_else(|| kv_client.timeout())
+        });
+
         if kv_trace_enabled {
-            let fields = vec![
-                TraceField::str("label", label),
-                TraceField::str("target", target.to_owned()),
-            ];
+            let mut fields = kv_request_trace_fields(
+                label,
+                kv_trace_cmd.as_deref().unwrap_or(label),
+                request.context(),
+                target,
+                kv_trace_timeout.unwrap_or_default(),
+            );
+            fields.push(TraceField::str("target", target.to_owned()));
             trace::trace(Category::KvRequest, "kv.request.send", &fields);
         }
 
@@ -501,12 +649,16 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                 .as_ref()
                 .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
                 .unwrap_or(0);
-            let mut fields = vec![
-                TraceField::str("label", label),
-                TraceField::str("target", target.to_owned()),
-                TraceField::bool("success", result.is_ok()),
-                TraceField::u64("latency_ms", elapsed_ms),
-            ];
+            let mut fields = kv_request_trace_fields(
+                label,
+                kv_trace_cmd.as_deref().unwrap_or(label),
+                request.context(),
+                target,
+                kv_trace_timeout.unwrap_or_default(),
+            );
+            fields.push(TraceField::str("target", target.to_owned()));
+            fields.push(TraceField::bool("success", result.is_ok()));
+            fields.push(TraceField::u64("latency_ms", elapsed_ms));
             if crate::util::trace_exec_details_enabled() {
                 if let Ok(resp) = result.as_ref() {
                     if let Some(details) = exec_details_v2_from_response(resp as &dyn Any) {
@@ -3886,6 +4038,18 @@ mod test {
             trace_field_str(&events[0].2, "label"),
             Some("trace_test_request")
         );
+        assert_eq!(
+            trace_field_str(&events[0].2, "cmd"),
+            Some("TraceTestRequest")
+        );
+        assert_eq!(trace_field_u64(&events[0].2, "region_id"), Some(0));
+        assert_eq!(trace_field_u64(&events[0].2, "region_ver"), Some(0));
+        assert_eq!(trace_field_u64(&events[0].2, "region_confVer"), Some(0));
+        assert_eq!(trace_field_u64(&events[0].2, "store_id"), Some(0));
+        assert_eq!(trace_field_str(&events[0].2, "store_addr"), Some(""));
+        assert_eq!(trace_field_u64(&events[0].2, "timeout_ms"), Some(0));
+        assert_eq!(trace_field_str(&events[0].2, "region_start_key"), None);
+        assert_eq!(trace_field_str(&events[0].2, "region_end_key"), None);
 
         assert_eq!(events[1].0, crate::trace::Category::KvRequest);
         assert_eq!(events[1].1, "kv.request.result");
@@ -3893,8 +4057,118 @@ mod test {
             trace_field_str(&events[1].2, "label"),
             Some("trace_test_request")
         );
+        assert_eq!(
+            trace_field_str(&events[1].2, "cmd"),
+            Some("TraceTestRequest")
+        );
+        assert_eq!(trace_field_u64(&events[1].2, "region_id"), Some(0));
+        assert_eq!(trace_field_u64(&events[1].2, "region_ver"), Some(0));
+        assert_eq!(trace_field_u64(&events[1].2, "region_confVer"), Some(0));
+        assert_eq!(trace_field_u64(&events[1].2, "store_id"), Some(0));
+        assert_eq!(trace_field_str(&events[1].2, "store_addr"), Some(""));
+        assert_eq!(trace_field_u64(&events[1].2, "timeout_ms"), Some(0));
+        assert_eq!(trace_field_str(&events[1].2, "region_start_key"), None);
+        assert_eq!(trace_field_str(&events[1].2, "region_end_key"), None);
         assert_eq!(trace_field_bool(&events[1].2, "success"), Some(true));
         assert!(trace_field_u64(&events[1].2, "latency_ms").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_trace_kv_request_includes_region_store_timeout_and_range() {
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
+        let _reset = TraceHookReset;
+
+        crate::trace::clear_kv_request_region_ranges_for_test();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
+            crate::trace::Category,
+            String,
+            Vec<crate::trace::TraceField>,
+        )>::new()));
+
+        let seen_event = seen.clone();
+        let event: crate::trace::TraceEventFunc =
+            std::sync::Arc::new(move |category, name, fields| {
+                if category != crate::trace::Category::KvRequest {
+                    return;
+                }
+                if name != "kv.request.send" && name != "kv.request.result" {
+                    return;
+                }
+                if trace_field_str(fields, "label") != Some("kv_get") {
+                    return;
+                }
+                seen_event
+                    .lock()
+                    .unwrap()
+                    .push((category, name.to_owned(), fields.to_vec()));
+            });
+        crate::trace::set_trace_event_func(Some(event));
+
+        let enabled: crate::trace::IsCategoryEnabledFunc =
+            std::sync::Arc::new(|category| category == crate::trace::Category::KvRequest);
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+
+        let mut region = crate::proto::metapb::Region::default();
+        region.id = 42;
+        region.start_key = vec![0x01, 0x02];
+        region.end_key = vec![0x02, 0x03];
+        region.region_epoch = Some(crate::proto::metapb::RegionEpoch {
+            conf_ver: 7,
+            version: 9,
+        });
+        let mut peer = crate::proto::metapb::Peer::default();
+        peer.store_id = 99;
+        let region = crate::region::RegionWithLeader {
+            region,
+            leader: Some(peer),
+        };
+        let expected_start = crate::redact::key(&region.region.start_key);
+        let expected_end = crate::redact::key(&region.region.end_key);
+
+        let mut get = crate::proto::kvrpcpb::GetRequest::default();
+        get.key = vec![1];
+        let mut request =
+            crate::request::RequestWithTimeout::new(get, std::time::Duration::from_secs(5));
+        crate::store::Request::set_leader(&mut request, &region)
+            .expect("set_leader should succeed");
+
+        let mut kv = MockKvClient::with_dispatch_hook(|req| {
+            req.downcast_ref::<crate::proto::kvrpcpb::GetRequest>()
+                .expect("expected get request");
+            Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+        });
+        kv.addr = "test-store".to_owned();
+
+        let plan = Dispatch {
+            request,
+            kv_client: Some(std::sync::Arc::new(kv)),
+        };
+
+        let _ = plan.execute().await.unwrap();
+
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+
+        for (_, name, fields) in events {
+            assert!(name == "kv.request.send" || name == "kv.request.result");
+            assert_eq!(trace_field_str(&fields, "label"), Some("kv_get"));
+            assert_eq!(trace_field_str(&fields, "cmd"), Some("Get"));
+            assert_eq!(trace_field_u64(&fields, "region_id"), Some(42));
+            assert_eq!(trace_field_u64(&fields, "region_ver"), Some(9));
+            assert_eq!(trace_field_u64(&fields, "region_confVer"), Some(7));
+            assert_eq!(trace_field_u64(&fields, "store_id"), Some(99));
+            assert_eq!(trace_field_str(&fields, "store_addr"), Some("test-store"));
+            assert_eq!(trace_field_u64(&fields, "timeout_ms"), Some(5000));
+            assert_eq!(
+                trace_field_str(&fields, "region_start_key"),
+                Some(expected_start.as_str())
+            );
+            assert_eq!(
+                trace_field_str(&fields, "region_end_key"),
+                Some(expected_end.as_str())
+            );
+        }
     }
 
     #[tokio::test]
@@ -4054,11 +4328,35 @@ mod test {
         assert_eq!(events[0].0, crate::trace::Category::KvRequest);
         assert_eq!(events[0].1, "kv.request.send");
         assert_eq!(trace_field_str(&events[0].2, "label"), Some("kv_get"));
+        assert_eq!(trace_field_str(&events[0].2, "cmd"), Some("Get"));
+        assert_eq!(trace_field_u64(&events[0].2, "region_id"), Some(0));
+        assert_eq!(trace_field_u64(&events[0].2, "region_ver"), Some(0));
+        assert_eq!(trace_field_u64(&events[0].2, "region_confVer"), Some(0));
+        assert_eq!(trace_field_u64(&events[0].2, "store_id"), Some(0));
+        assert_eq!(
+            trace_field_str(&events[0].2, "store_addr"),
+            Some("test-store")
+        );
+        assert_eq!(trace_field_u64(&events[0].2, "timeout_ms"), Some(0));
+        assert_eq!(trace_field_str(&events[0].2, "region_start_key"), None);
+        assert_eq!(trace_field_str(&events[0].2, "region_end_key"), None);
         assert_eq!(trace_field_str(&events[0].2, "target"), Some("test-store"));
 
         assert_eq!(events[1].0, crate::trace::Category::KvRequest);
         assert_eq!(events[1].1, "kv.request.result");
         assert_eq!(trace_field_str(&events[1].2, "label"), Some("kv_get"));
+        assert_eq!(trace_field_str(&events[1].2, "cmd"), Some("Get"));
+        assert_eq!(trace_field_u64(&events[1].2, "region_id"), Some(0));
+        assert_eq!(trace_field_u64(&events[1].2, "region_ver"), Some(0));
+        assert_eq!(trace_field_u64(&events[1].2, "region_confVer"), Some(0));
+        assert_eq!(trace_field_u64(&events[1].2, "store_id"), Some(0));
+        assert_eq!(
+            trace_field_str(&events[1].2, "store_addr"),
+            Some("test-store")
+        );
+        assert_eq!(trace_field_u64(&events[1].2, "timeout_ms"), Some(0));
+        assert_eq!(trace_field_str(&events[1].2, "region_start_key"), None);
+        assert_eq!(trace_field_str(&events[1].2, "region_end_key"), None);
         assert_eq!(trace_field_str(&events[1].2, "target"), Some("test-store"));
         assert_eq!(trace_field_bool(&events[1].2, "success"), Some(true));
     }
