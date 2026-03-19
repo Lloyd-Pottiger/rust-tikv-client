@@ -98,6 +98,7 @@
 
 #![allow(clippy::field_reassign_with_default)]
 
+pub mod async_util;
 pub mod backoff;
 #[doc(hidden)]
 pub mod coprocessor;
