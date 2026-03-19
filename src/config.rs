@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -77,6 +78,21 @@ pub struct Config {
     ///
     /// Set to `Duration::ZERO` to disable the connect timeout (use the system default).
     pub grpc_connect_timeout: Duration,
+    /// Optional custom DNS server used for resolving gRPC endpoints.
+    ///
+    /// This mirrors client-go `util.GetCustomDNSDialer` and is mainly useful for connecting TiKV
+    /// components in Kubernetes environments.
+    ///
+    /// When set, the client resolves gRPC endpoint hostnames via this DNS server (UDP/TCP) rather
+    /// than the system resolver.
+    pub grpc_custom_dns_server: Option<SocketAddr>,
+    /// Optional DNS domain suffix appended to all gRPC endpoints before resolving.
+    ///
+    /// For example, when set to `"cluster.local"`, the endpoint `"pd0.pd:2379"` becomes
+    /// `"pd0.pd.cluster.local:2379"` when dialing.
+    ///
+    /// This mirrors client-go `util.GetCustomDNSDialer`.
+    pub grpc_custom_dns_domain: Option<String>,
     /// After a duration of this time without RPC activity, the client pings the server to see if
     /// the transport is still alive (client-go `GrpcKeepAliveTime`).
     ///
@@ -182,6 +198,8 @@ impl Default for Config {
             enable_batch_rpc: false,
             batch_rpc_max_batch_size: DEFAULT_BATCH_RPC_MAX_BATCH_SIZE,
             grpc_connect_timeout: DEFAULT_GRPC_CONNECT_TIMEOUT,
+            grpc_custom_dns_server: None,
+            grpc_custom_dns_domain: None,
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
             grpc_initial_window_size: DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
@@ -218,6 +236,13 @@ impl Config {
             return Err(crate::Error::StringError(
                 "grpc-connection-count should be greater than 0".to_owned(),
             ));
+        }
+        if let Some(server) = self.grpc_custom_dns_server {
+            if server.port() == 0 {
+                return Err(crate::Error::StringError(
+                    "grpc-custom-dns-server port should be greater than 0".to_owned(),
+                ));
+            }
         }
         if self.batch_rpc_max_batch_size == 0 {
             return Err(crate::Error::StringError(
@@ -357,6 +382,42 @@ impl Config {
     pub fn with_grpc_connect_timeout(mut self, timeout: Duration) -> Self {
         self.grpc_connect_timeout = timeout;
         self
+    }
+
+    /// Set a custom DNS server used for resolving gRPC endpoints.
+    ///
+    /// When set, the client resolves gRPC endpoint hostnames via this DNS server rather than the
+    /// system resolver.
+    ///
+    /// This mirrors client-go `util.GetCustomDNSDialer`.
+    #[must_use]
+    pub fn with_grpc_custom_dns_server(mut self, dns_server: SocketAddr) -> Self {
+        self.grpc_custom_dns_server = Some(dns_server);
+        self
+    }
+
+    /// Set an optional DNS domain suffix appended to all gRPC endpoints before resolving.
+    ///
+    /// When set to `"cluster.local"`, the endpoint `"pd0.pd:2379"` becomes
+    /// `"pd0.pd.cluster.local:2379"` when dialing.
+    ///
+    /// This mirrors client-go `util.GetCustomDNSDialer`.
+    #[must_use]
+    pub fn with_grpc_custom_dns_domain(mut self, dns_domain: impl Into<String>) -> Self {
+        let dns_domain = dns_domain.into();
+        self.grpc_custom_dns_domain = (!dns_domain.is_empty()).then_some(dns_domain);
+        self
+    }
+
+    /// Convenience method: configure both custom DNS server and domain suffix.
+    #[must_use]
+    pub fn with_grpc_custom_dns(
+        mut self,
+        dns_server: SocketAddr,
+        dns_domain: impl Into<String>,
+    ) -> Self {
+        self.grpc_custom_dns_server = Some(dns_server);
+        self.with_grpc_custom_dns_domain(dns_domain)
     }
 
     /// Set the gRPC HTTP2 keepalive ping interval.

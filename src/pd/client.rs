@@ -1175,7 +1175,11 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
                 config.grpc_initial_window_size,
                 config.grpc_initial_conn_window_size,
             )
-            .with_grpc_connect_timeout(config.grpc_connect_timeout),
+            .with_grpc_connect_timeout(config.grpc_connect_timeout)
+            .with_grpc_custom_dns(
+                config.grpc_custom_dns_server,
+                config.grpc_custom_dns_domain.clone(),
+            ),
         );
 
         let pd = Arc::new(pd(security_mgr.clone()).await?);
