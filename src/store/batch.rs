@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::Instant;
 
 use futures::stream;
 use futures::Stream;
@@ -16,7 +17,10 @@ use tonic::Status;
 use crate::proto::kvrpcpb;
 use crate::proto::tikvpb;
 use crate::proto::tikvpb::tikv_client::TikvClient;
-use crate::stats::{observe_batch_pending_requests, observe_batch_requests};
+use crate::stats::{
+    observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
+    observe_batch_requests,
+};
 use crate::Error;
 use crate::Result;
 
@@ -116,11 +120,10 @@ impl BatchCommandsClient {
         let outbound_stream = outbound_stream(outbound_rx, max_outbound_requests, target);
 
         let req = outbound_stream.into_streaming_request();
-        let response = client
-            .clone()
-            .batch_commands(req)
-            .await
-            .map_err(Error::GrpcAPI)?;
+        let started_at = Instant::now();
+        let response = client.clone().batch_commands(req).await;
+        observe_batch_client_wait_connection_establish(started_at.elapsed());
+        let response = response.map_err(Error::GrpcAPI)?;
         Self::new_with_inbound(outbound_tx, response.into_inner())
     }
 

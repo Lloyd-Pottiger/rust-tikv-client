@@ -293,6 +293,12 @@ pub(crate) fn observe_batch_requests(target: &str, batch_size: usize) {
         .observe(batch_size as f64);
 }
 
+pub(crate) fn observe_batch_client_wait_connection_establish(elapsed: Duration) {
+    if let Some(histogram) = TIKV_CLIENT_RUST_BATCH_CLIENT_WAIT_ESTABLISH_HISTOGRAM.as_ref() {
+        histogram.observe(duration_to_sec(elapsed));
+    }
+}
+
 #[allow(dead_code)]
 pub fn observe_tso_batch(batch_size: usize) {
     if let Some(histogram) = PD_TSO_BATCH_SIZE_HISTOGRAM.as_ref() {
@@ -833,6 +839,19 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["target"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_BATCH_CLIENT_WAIT_ESTABLISH_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_batch_client_wait_connection_establish";
+        let help = "Batch client wait new connection establish.";
+        let buckets = match prometheus::exponential_buckets(0.001, 2.0, 28) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_READ_REQUEST_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_read_request_bytes";
         let help = "Bucketed histogram of total bytes sent/received for read requests.";
@@ -926,9 +945,10 @@ mod tests {
     use serial_test::serial;
 
     use super::{
-        observe_backoff_seconds, observe_batch_pending_requests, observe_batch_requests,
-        observe_kv_request_traffic_metrics, observe_load_region_cache, observe_request_retry_times,
-        observe_stale_read_hit_miss, region_cache_operation, tikv_stats_with_context,
+        observe_backoff_seconds, observe_batch_client_wait_connection_establish,
+        observe_batch_pending_requests, observe_batch_requests, observe_kv_request_traffic_metrics,
+        observe_load_region_cache, observe_request_retry_times, observe_stale_read_hit_miss,
+        region_cache_operation, tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1138,6 +1158,49 @@ mod tests {
         assert!(
             requests_found,
             "expected batch_requests metric with labels not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_batch_client_wait_establish_histogram_records_observations() {
+        let before_sum = {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| {
+                    family.get_name() == "tikv_client_rust_batch_client_wait_connection_establish"
+                })
+                .map(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .map(|metric| metric.get_histogram().get_sample_sum())
+                        .sum::<f64>()
+                })
+                .unwrap_or(0.0)
+        };
+
+        observe_batch_client_wait_connection_establish(Duration::from_secs(5));
+
+        let after_sum = {
+            let families = prometheus::gather();
+            let family = families
+                .iter()
+                .find(|family| {
+                    family.get_name() == "tikv_client_rust_batch_client_wait_connection_establish"
+                })
+                .expect("batch_client_wait_connection_establish histogram not registered");
+            family
+                .get_metric()
+                .iter()
+                .map(|metric| metric.get_histogram().get_sample_sum())
+                .sum::<f64>()
+        };
+
+        assert!(
+            after_sum >= before_sum + 5.0,
+            "expected batch client wait-establish histogram sample sum to increase"
         );
     }
 
