@@ -144,8 +144,15 @@ where
         post: hooks.post.clone(),
     };
     let parent_trace_id = crate::trace::trace_id();
+    let parent_request_source = crate::request_context::request_source();
+    let parent_resource_group_name = crate::request_context::resource_group_name();
     tokio::spawn(async move {
         let _guard = guard;
+        let future = crate::request_context::scope_task_request_metadata(
+            parent_request_source,
+            parent_resource_group_name,
+            future,
+        );
         match parent_trace_id {
             Some(trace_id) => crate::trace::with_trace_id(trace_id, future).await,
             None => future.await,
@@ -695,13 +702,19 @@ impl<PdC: PdClient> Transaction<PdC> {
             .or_else(crate::trace::trace_id)
             .unwrap_or_default();
         ctx.trace_control_flags = opts.trace_control_flags.bits();
-        ctx.resource_control_context =
-            opts.resource_group_name
-                .map(|resource_group_name| kvrpcpb::ResourceControlContext {
-                    resource_group_name,
-                    ..Default::default()
-                });
-        if let Some(request_source) = opts.request_source {
+        ctx.resource_control_context = opts
+            .resource_group_name
+            .take()
+            .or_else(crate::request_context::resource_group_name)
+            .map(|resource_group_name| kvrpcpb::ResourceControlContext {
+                resource_group_name,
+                ..Default::default()
+            });
+        if let Some(request_source) = opts
+            .request_source
+            .take()
+            .or_else(crate::request_context::request_source)
+        {
             ctx.request_source = request_source;
         }
         if opts.stale_read {
@@ -6614,15 +6627,22 @@ impl TransactionOptions {
         if let Some(tag) = &self.resource_group_tag {
             ctx.resource_group_tag = tag.clone();
         }
-        ctx.resource_control_context =
-            self.resource_group_name
-                .as_ref()
-                .map(|resource_group_name| kvrpcpb::ResourceControlContext {
-                    resource_group_name: resource_group_name.clone(),
-                    ..Default::default()
-                });
-        if let Some(request_source) = &self.request_source {
-            ctx.request_source = request_source.clone();
+        ctx.resource_control_context = self
+            .resource_group_name
+            .as_ref()
+            .cloned()
+            .or_else(crate::request_context::resource_group_name)
+            .map(|resource_group_name| kvrpcpb::ResourceControlContext {
+                resource_group_name,
+                ..Default::default()
+            });
+        if let Some(request_source) = self
+            .request_source
+            .as_ref()
+            .cloned()
+            .or_else(crate::request_context::request_source)
+        {
+            ctx.request_source = request_source;
         }
         ctx.trace_id = self
             .trace_id
@@ -12521,6 +12541,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_request_metadata_falls_back_to_task_local() {
+        let expected_request_source = "internal_gc_stats".to_owned();
+        let expected_resource_group_name = "rg-snapshot".to_owned();
+        let expected_resource_group_name_for_hook = expected_resource_group_name.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                assert_eq!(ctx.request_source, expected_request_source);
+                assert_eq!(
+                    ctx.resource_control_context
+                        .as_ref()
+                        .map(|ctx| ctx.resource_group_name.as_str()),
+                    Some(expected_resource_group_name_for_hook.as_str())
+                );
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        crate::request_context::with_internal_source_and_task_type("gc", "stats", async move {
+            crate::request_context::with_resource_group_name(
+                expected_resource_group_name,
+                async move {
+                    let mut snapshot = Transaction::new(
+                        Timestamp::default(),
+                        pd_client,
+                        TransactionOptions::new_optimistic()
+                            .read_only()
+                            .drop_check(CheckLevel::None),
+                        Keyspace::Disable,
+                    );
+
+                    let key: Key = vec![0].into();
+                    let _ = snapshot.get(key).await.unwrap();
+                },
+            )
+            .await
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_context_request_metadata_falls_back_to_task_local() {
+        crate::request_context::with_internal_source_and_task_type("gc", "stats", async move {
+            crate::request_context::with_resource_group_name("rg-write", async move {
+                let options = TransactionOptions::new_optimistic();
+                let mut ctx = None;
+                options.apply_write_context(&mut ctx);
+                let ctx = ctx.expect("context");
+                assert_eq!(ctx.request_source, "internal_gc_stats");
+                assert_eq!(
+                    ctx.resource_control_context
+                        .as_ref()
+                        .map(|ctx| ctx.resource_group_name.as_str()),
+                    Some("rg-write")
+                );
+            })
+            .await
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_txn_source_disk_full_opt_request_source_propagates_to_commit_requests() {
         let prewrite_txn_source = Arc::new(AtomicU64::new(0));
         let commit_txn_source = Arc::new(AtomicU64::new(0));
@@ -13360,6 +13447,31 @@ mod tests {
         })
         .await
         .expect("post hook should run when task is aborted");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_with_lifecycle_hooks_inherits_task_local_request_metadata() {
+        crate::request_context::with_internal_source_and_task_type("gc", "stats", async move {
+            crate::request_context::with_resource_group_name("rg-spawn", async move {
+                let handle = super::spawn_with_lifecycle_hooks(
+                    super::LifecycleHooks::default(),
+                    async move {
+                        assert_eq!(
+                            crate::request_context::request_source().as_deref(),
+                            Some("internal_gc_stats")
+                        );
+                        assert_eq!(
+                            crate::request_context::resource_group_name().as_deref(),
+                            Some("rg-spawn")
+                        );
+                    },
+                );
+
+                handle.await.expect("spawned task should succeed");
+            })
+            .await
+        })
+        .await;
     }
 
     #[tokio::test]

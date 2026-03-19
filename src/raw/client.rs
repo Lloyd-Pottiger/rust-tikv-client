@@ -234,7 +234,21 @@ impl Client<PdRpcClient> {
 }
 
 impl<PdC: PdClient> Client<PdC> {
-    fn apply_trace_context(&self, ctx: &mut crate::proto::kvrpcpb::Context) {
+    fn apply_request_context(&self, ctx: &mut crate::proto::kvrpcpb::Context) {
+        if ctx.request_source.is_empty() {
+            if let Some(request_source) = crate::request_context::request_source() {
+                ctx.request_source = request_source;
+            }
+        }
+        if ctx.resource_control_context.is_none() {
+            ctx.resource_control_context =
+                crate::request_context::resource_group_name().map(|resource_group_name| {
+                    crate::proto::kvrpcpb::ResourceControlContext {
+                        resource_group_name,
+                        ..Default::default()
+                    }
+                });
+        }
         ctx.trace_id = self
             .trace_id
             .clone()
@@ -243,9 +257,9 @@ impl<PdC: PdClient> Client<PdC> {
         ctx.trace_control_flags = self.trace_control_flags.bits();
     }
 
-    fn apply_trace_to_request<R: StoreRequest>(&self, request: &mut R) {
+    fn apply_request_context_to_request<R: StoreRequest>(&self, request: &mut R) {
         if let Some(ctx) = request.context_mut() {
-            self.apply_trace_context(ctx);
+            self.apply_request_context(ctx);
         }
     }
 
@@ -382,7 +396,7 @@ impl<PdC: PdClient> Client<PdC> {
         debug!("invoking raw get request");
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut request = new_raw_get_request(key, self.cf.clone());
-        self.apply_trace_to_request(&mut request);
+        self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
@@ -418,7 +432,7 @@ impl<PdC: PdClient> Client<PdC> {
             .into_iter()
             .map(|k| k.into().encode_keyspace(self.keyspace, KeyMode::Raw));
         let mut request = new_raw_batch_get_request(keys, self.cf.clone());
-        self.apply_trace_to_request(&mut request);
+        self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(Collect)
@@ -455,7 +469,7 @@ impl<PdC: PdClient> Client<PdC> {
             .map(|key| key.encode_keyspace(keyspace, KeyMode::Raw));
 
         let mut request = new_raw_batch_get_request(request_keys, self.cf.clone());
-        self.apply_trace_to_request(&mut request);
+        self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(Collect)
@@ -493,7 +507,7 @@ impl<PdC: PdClient> Client<PdC> {
         debug!("invoking raw get_key_ttl_secs request");
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut request = new_raw_get_key_ttl_request(key, self.cf.clone());
-        self.apply_trace_to_request(&mut request);
+        self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
@@ -532,7 +546,7 @@ impl<PdC: PdClient> Client<PdC> {
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut request =
             new_raw_put_request(key, value.into(), self.cf.clone(), ttl_secs, self.atomic);
-        self.apply_trace_to_request(&mut request);
+        self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
@@ -577,7 +591,7 @@ impl<PdC: PdClient> Client<PdC> {
             .map(|pair| pair.into().encode_keyspace(self.keyspace, KeyMode::Raw));
         let mut request =
             new_raw_batch_put_request(pairs, ttls.into_iter(), self.cf.clone(), self.atomic);
-        self.apply_trace_to_request(&mut request);
+        self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .extract_error()
@@ -607,7 +621,7 @@ impl<PdC: PdClient> Client<PdC> {
         debug!("invoking raw delete request");
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut request = new_raw_delete_request(key, self.cf.clone(), self.atomic);
-        self.apply_trace_to_request(&mut request);
+        self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
@@ -641,7 +655,7 @@ impl<PdC: PdClient> Client<PdC> {
             .into_iter()
             .map(|k| k.into().encode_keyspace(self.keyspace, KeyMode::Raw));
         let mut request = new_raw_batch_delete_request(keys, self.cf.clone());
-        self.apply_trace_to_request(&mut request);
+        self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .extract_error()
@@ -670,7 +684,7 @@ impl<PdC: PdClient> Client<PdC> {
         self.assert_non_atomic()?;
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut request = new_raw_delete_range_request(range, self.cf.clone());
-        self.apply_trace_to_request(&mut request);
+        self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .extract_error()
@@ -809,7 +823,7 @@ impl<PdC: PdClient> Client<PdC> {
         debug!("invoking raw checksum request");
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut request = new_raw_checksum_request(range);
-        self.apply_trace_to_request(&mut request);
+        self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .extract_error()
@@ -914,7 +928,7 @@ impl<PdC: PdClient> Client<PdC> {
             previous_value.into(),
             self.cf.clone(),
         );
-        self.apply_trace_to_request(&mut req);
+        self.apply_request_context_to_request(&mut req);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
@@ -951,7 +965,7 @@ impl<PdC: PdClient> Client<PdC> {
             ranges,
             request_builder,
         );
-        self.apply_trace_to_request(&mut req);
+        self.apply_request_context_to_request(&mut req);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, req)
             .preserve_shard()
             .retry_multi_region(self.backoff.clone())
@@ -1103,7 +1117,7 @@ impl<PdC: PdClient> Client<PdC> {
                 scan_args.reverse,
                 self.cf.clone(),
             );
-            self.apply_trace_to_request(&mut request);
+            self.apply_request_context_to_request(&mut request);
             let resp = self.do_store_scan(store.clone(), request).await;
             return match resp {
                 Ok(mut r) => {
@@ -2134,6 +2148,56 @@ mod tests {
         crate::trace::with_trace_id(trace_id, async move {
             let _ = client.get(vec![1]).await?;
             Ok::<(), Error>(())
+        })
+        .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_raw_client_request_metadata_falls_back_to_task_local() -> Result<()> {
+        let expected_request_source = "internal_gc_stats".to_owned();
+        let expected_resource_group_name = "rg-raw".to_owned();
+        let expected_resource_group_name_for_hook = expected_resource_group_name.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::RawGetRequest>()
+                    .expect("expected raw get request");
+                let ctx = req.context.as_ref().expect("context");
+                assert_eq!(ctx.request_source, expected_request_source);
+                assert_eq!(
+                    ctx.resource_control_context
+                        .as_ref()
+                        .map(|ctx| ctx.resource_group_name.as_str()),
+                    Some(expected_resource_group_name_for_hook.as_str())
+                );
+
+                Ok(Box::<kvrpcpb::RawGetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
+            keyspace: Keyspace::Disable,
+        };
+
+        crate::request_context::with_internal_source_and_task_type("gc", "stats", async move {
+            crate::request_context::with_resource_group_name(
+                expected_resource_group_name,
+                async move {
+                    let _ = client.get(vec![1]).await?;
+                    Ok::<(), Error>(())
+                },
+            )
+            .await
         })
         .await?;
 

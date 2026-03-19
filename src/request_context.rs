@@ -6,6 +6,16 @@
 //! isolation level). We expose a small, stable set of enums so applications
 //! don't need to depend on the generated protobuf types directly.
 
+use std::future::Future;
+
+tokio::task_local! {
+    static TASK_REQUEST_SOURCE: String;
+}
+
+tokio::task_local! {
+    static TASK_RESOURCE_GROUP_NAME: String;
+}
+
 /// The priority of commands executed by TiKV.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(i32)]
@@ -88,6 +98,53 @@ impl From<TraceControlFlags> for u64 {
     }
 }
 
+/// Internal request type used for low-resource internal tasks.
+pub const INTERNAL_TXN_OTHERS: &str = "others";
+/// Internal request type used by GC tasks.
+pub const INTERNAL_TXN_GC: &str = "gc";
+/// Internal request type used by miscellaneous meta tasks.
+pub const INTERNAL_TXN_META: &str = INTERNAL_TXN_OTHERS;
+/// Internal request type used by statistics tasks.
+pub const INTERNAL_TXN_STATS: &str = "stats";
+
+/// Empty explicit request-source type.
+pub const EXPLICIT_TYPE_EMPTY: &str = "";
+/// Deprecated explicit request-source type kept for compatibility.
+pub const EXPLICIT_TYPE_LIGHTNING: &str = "lightning";
+/// BR explicit request-source type.
+pub const EXPLICIT_TYPE_BR: &str = "br";
+/// Dumpling explicit request-source type.
+pub const EXPLICIT_TYPE_DUMPLING: &str = "dumpling";
+/// Background-task explicit request-source type.
+pub const EXPLICIT_TYPE_BACKGROUND: &str = "background";
+/// DDL explicit request-source type.
+pub const EXPLICIT_TYPE_DDL: &str = "ddl";
+/// Statistics explicit request-source type.
+pub const EXPLICIT_TYPE_STATS: &str = "stats";
+/// Import explicit request-source type.
+pub const EXPLICIT_TYPE_IMPORT: &str = "import";
+
+/// List of client-go-compatible explicit request-source types.
+pub const EXPLICIT_TYPE_LIST: &[&str] = &[
+    EXPLICIT_TYPE_EMPTY,
+    EXPLICIT_TYPE_LIGHTNING,
+    EXPLICIT_TYPE_BR,
+    EXPLICIT_TYPE_DUMPLING,
+    EXPLICIT_TYPE_BACKGROUND,
+    EXPLICIT_TYPE_DDL,
+    EXPLICIT_TYPE_STATS,
+    EXPLICIT_TYPE_IMPORT,
+];
+
+/// Internal request scope label.
+pub const INTERNAL_REQUEST: &str = "internal";
+/// Internal request prefix label.
+pub const INTERNAL_REQUEST_PREFIX: &str = "internal_";
+/// External request scope label.
+pub const EXTERNAL_REQUEST: &str = "external";
+/// Unknown request-source label.
+pub const SOURCE_UNKNOWN: &str = "unknown";
+
 /// A structured builder for the `kvrpcpb::Context.request_source` label.
 ///
 /// This matches the label format used by TiKV's Go client:
@@ -135,10 +192,6 @@ impl RequestSource {
 
 impl std::fmt::Display for RequestSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        const SOURCE_UNKNOWN: &str = "unknown";
-        const INTERNAL_REQUEST: &str = "internal";
-        const EXTERNAL_REQUEST: &str = "external";
-
         if self.is_empty() {
             return f.write_str(SOURCE_UNKNOWN);
         }
@@ -164,16 +217,130 @@ impl std::fmt::Display for RequestSource {
     }
 }
 
+/// Build a client-go-compatible request source label from its structured parts.
+#[must_use]
+pub fn build_request_source(
+    internal: bool,
+    source: impl Into<String>,
+    explicit_source: impl Into<String>,
+) -> String {
+    RequestSource::new()
+        .internal(internal)
+        .source_type(source)
+        .explicit_type(explicit_source)
+        .to_string()
+}
+
+/// Runs `future` with a task-local request source label.
+///
+/// This mirrors client-go request-source context propagation, but uses Tokio
+/// task-local storage instead of `context.Context`.
+pub fn with_request_source<T, F>(
+    request_source: impl Into<String>,
+    future: F,
+) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    TASK_REQUEST_SOURCE.scope(request_source.into(), future)
+}
+
+/// Runs `future` with a client-go-compatible internal request source label.
+pub fn with_internal_source_type<T, F>(
+    source: impl Into<String>,
+    future: F,
+) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    with_request_source(
+        build_request_source(true, source, EXPLICIT_TYPE_EMPTY),
+        future,
+    )
+}
+
+/// Runs `future` with a client-go-compatible internal request source label plus task type.
+pub fn with_internal_source_and_task_type<T, F>(
+    source: impl Into<String>,
+    task_name: impl Into<String>,
+    future: F,
+) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    with_request_source(build_request_source(true, source, task_name), future)
+}
+
+/// Returns the task-local request source label, if present.
+#[must_use]
+pub fn request_source() -> Option<String> {
+    TASK_REQUEST_SOURCE.try_with(Clone::clone).ok()
+}
+
+/// Runs `future` with a task-local resource group name.
+///
+/// This mirrors client-go `util.WithResourceGroupName`, but uses Tokio
+/// task-local storage instead of `context.Context`.
+pub fn with_resource_group_name<T, F>(
+    resource_group_name: impl Into<String>,
+    future: F,
+) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    TASK_RESOURCE_GROUP_NAME.scope(resource_group_name.into(), future)
+}
+
+/// Returns the task-local resource group name, if present.
+#[must_use]
+pub fn resource_group_name() -> Option<String> {
+    TASK_RESOURCE_GROUP_NAME.try_with(Clone::clone).ok()
+}
+
+pub(crate) async fn scope_task_request_metadata<T, F>(
+    request_source: Option<String>,
+    resource_group_name: Option<String>,
+    future: F,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    match (request_source, resource_group_name) {
+        (Some(request_source), Some(resource_group_name)) => {
+            with_request_source(
+                request_source,
+                with_resource_group_name(resource_group_name, future),
+            )
+            .await
+        }
+        (Some(request_source), None) => with_request_source(request_source, future).await,
+        (None, Some(resource_group_name)) => {
+            with_resource_group_name(resource_group_name, future).await
+        }
+        (None, None) => future.await,
+    }
+}
+
 /// Returns true if `request_source` represents an internal request.
 ///
 /// This matches client-go's `IsInternalRequest` behavior (checks for the `"internal"` prefix).
+#[must_use]
+pub fn is_internal_request(request_source: &str) -> bool {
+    request_source.starts_with(INTERNAL_REQUEST)
+}
+
 pub(crate) fn is_internal_request_source(request_source: &str) -> bool {
-    request_source.starts_with("internal")
+    is_internal_request(request_source)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_internal_request_source, RequestSource, TraceControlFlags};
+    use super::{
+        build_request_source, is_internal_request, is_internal_request_source, request_source,
+        resource_group_name, with_internal_source_and_task_type, with_internal_source_type,
+        with_request_source, with_resource_group_name, RequestSource, TraceControlFlags,
+        EXPLICIT_TYPE_EMPTY,
+    };
 
     #[test]
     fn test_request_source_formatting_matches_client_go() {
@@ -222,6 +389,25 @@ mod tests {
     }
 
     #[test]
+    fn test_build_request_source_matches_client_go() {
+        assert_eq!(
+            build_request_source(true, "gc", EXPLICIT_TYPE_EMPTY),
+            "internal_gc"
+        );
+        assert_eq!(
+            build_request_source(true, "gc", "stats"),
+            "internal_gc_stats"
+        );
+        assert_eq!(
+            build_request_source(false, "", "import"),
+            "external_unknown_import"
+        );
+        assert_eq!(build_request_source(true, "", ""), "unknown");
+        assert!(is_internal_request("internal_gc"));
+        assert!(!is_internal_request("external_gc"));
+    }
+
+    #[test]
     fn test_trace_control_flags_bits_match_client_go() {
         assert_eq!(TraceControlFlags::IMMEDIATE_LOG.bits(), 1 << 0);
         assert_eq!(TraceControlFlags::TIKV_CATEGORY_REQUEST.bits(), 1 << 1);
@@ -241,5 +427,41 @@ mod tests {
         assert!(flags.has(TraceControlFlags::IMMEDIATE_LOG));
         assert!(flags.has(TraceControlFlags::TIKV_CATEGORY_REQUEST));
         assert!(!flags.has(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS));
+    }
+
+    #[tokio::test]
+    async fn test_task_local_request_metadata_scopes_restore_outer_values() {
+        assert_eq!(request_source(), None);
+        assert_eq!(resource_group_name(), None);
+
+        with_request_source("external_br", async {
+            assert_eq!(request_source().as_deref(), Some("external_br"));
+            assert_eq!(resource_group_name(), None);
+
+            with_resource_group_name("rg-outer", async {
+                assert_eq!(request_source().as_deref(), Some("external_br"));
+                assert_eq!(resource_group_name().as_deref(), Some("rg-outer"));
+
+                with_internal_source_and_task_type("gc", "stats", async {
+                    assert_eq!(request_source().as_deref(), Some("internal_gc_stats"));
+                    assert_eq!(resource_group_name().as_deref(), Some("rg-outer"));
+                })
+                .await;
+
+                with_internal_source_type("gc", async {
+                    assert_eq!(request_source().as_deref(), Some("internal_gc"));
+                    assert_eq!(resource_group_name().as_deref(), Some("rg-outer"));
+                })
+                .await;
+            })
+            .await;
+
+            assert_eq!(request_source().as_deref(), Some("external_br"));
+            assert_eq!(resource_group_name(), None);
+        })
+        .await;
+
+        assert_eq!(request_source(), None);
+        assert_eq!(resource_group_name(), None);
     }
 }

@@ -45,8 +45,7 @@ fn parse_gc_time_prefix(value: &str) -> Result<SystemTime, ()> {
         return Err(());
     }
 
-    if bytes.get(8) != Some(&b'-') || bytes.get(11) != Some(&b':') || bytes.get(14) != Some(&b':')
-    {
+    if bytes.get(8) != Some(&b'-') || bytes.get(11) != Some(&b':') || bytes.get(14) != Some(&b':') {
         return Err(());
     }
 
@@ -114,15 +113,27 @@ fn parse_gc_time_prefix(value: &str) -> Result<SystemTime, ()> {
     }
     let offset_seconds = offset_hours
         .checked_mul(3600)
-        .and_then(|v| offset_minutes.checked_mul(60).and_then(|m| v.checked_add(m)))
+        .and_then(|v| {
+            offset_minutes
+                .checked_mul(60)
+                .and_then(|m| v.checked_add(m))
+        })
         .and_then(|v| sign.checked_mul(v))
         .ok_or(())?;
 
     let days = days_from_civil(year, month, day);
     let mut unix_seconds = days
         .checked_mul(86_400)
-        .and_then(|v| i64::from(hour).checked_mul(3600).and_then(|h| v.checked_add(h)))
-        .and_then(|v| i64::from(minute).checked_mul(60).and_then(|m| v.checked_add(m)))
+        .and_then(|v| {
+            i64::from(hour)
+                .checked_mul(3600)
+                .and_then(|h| v.checked_add(h))
+        })
+        .and_then(|v| {
+            i64::from(minute)
+                .checked_mul(60)
+                .and_then(|m| v.checked_add(m))
+        })
         .and_then(|v| v.checked_add(i64::from(second)))
         .ok_or(())?;
     unix_seconds = unix_seconds.checked_sub(offset_seconds).ok_or(())?;
@@ -222,10 +233,7 @@ mod tests {
         }
 
         for value in invalid_values {
-            assert!(
-                compatible_parse_gc_time(value).is_err(),
-                "value={value:?}"
-            );
+            assert!(compatible_parse_gc_time(value).is_err(), "value={value:?}");
         }
     }
 }
