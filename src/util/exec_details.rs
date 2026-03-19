@@ -1,11 +1,22 @@
 // Copyright 2026 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::fmt;
+use std::future::Future;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::proto::kvrpcpb;
 use crate::proto::resource_manager;
 use crate::util::format_bytes;
+
+tokio::task_local! {
+    static TASK_EXEC_DETAILS: Arc<ExecDetails>;
+}
+
+tokio::task_local! {
+    static TASK_TRACE_EXEC_DETAILS_ENABLED: bool;
+}
 
 /// Server-side execution details returned by TiKV.
 ///
@@ -622,6 +633,249 @@ impl fmt::Display for WriteDetail {
     }
 }
 
+/// Traffic-related counters collected alongside execution details.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct TrafficDetails {
+    unpacked_bytes_sent_kv_total: AtomicI64,
+    unpacked_bytes_received_kv_total: AtomicI64,
+    unpacked_bytes_sent_kv_cross_zone: AtomicI64,
+    unpacked_bytes_received_kv_cross_zone: AtomicI64,
+    unpacked_bytes_sent_mpp_total: AtomicI64,
+    unpacked_bytes_received_mpp_total: AtomicI64,
+    unpacked_bytes_sent_mpp_cross_zone: AtomicI64,
+    unpacked_bytes_received_mpp_cross_zone: AtomicI64,
+}
+
+impl Clone for TrafficDetails {
+    fn clone(&self) -> Self {
+        Self {
+            unpacked_bytes_sent_kv_total: AtomicI64::new(self.unpacked_bytes_sent_kv_total()),
+            unpacked_bytes_received_kv_total: AtomicI64::new(
+                self.unpacked_bytes_received_kv_total(),
+            ),
+            unpacked_bytes_sent_kv_cross_zone: AtomicI64::new(
+                self.unpacked_bytes_sent_kv_cross_zone(),
+            ),
+            unpacked_bytes_received_kv_cross_zone: AtomicI64::new(
+                self.unpacked_bytes_received_kv_cross_zone(),
+            ),
+            unpacked_bytes_sent_mpp_total: AtomicI64::new(self.unpacked_bytes_sent_mpp_total()),
+            unpacked_bytes_received_mpp_total: AtomicI64::new(
+                self.unpacked_bytes_received_mpp_total(),
+            ),
+            unpacked_bytes_sent_mpp_cross_zone: AtomicI64::new(
+                self.unpacked_bytes_sent_mpp_cross_zone(),
+            ),
+            unpacked_bytes_received_mpp_cross_zone: AtomicI64::new(
+                self.unpacked_bytes_received_mpp_cross_zone(),
+            ),
+        }
+    }
+}
+
+impl TrafficDetails {
+    /// Add KV traffic counters.
+    pub fn add_kv_bytes(
+        &self,
+        sent_total: i64,
+        received_total: i64,
+        sent_cross_zone: i64,
+        received_cross_zone: i64,
+    ) {
+        saturating_fetch_add_i64(&self.unpacked_bytes_sent_kv_total, sent_total);
+        saturating_fetch_add_i64(&self.unpacked_bytes_received_kv_total, received_total);
+        saturating_fetch_add_i64(&self.unpacked_bytes_sent_kv_cross_zone, sent_cross_zone);
+        saturating_fetch_add_i64(
+            &self.unpacked_bytes_received_kv_cross_zone,
+            received_cross_zone,
+        );
+    }
+
+    /// Add MPP traffic counters.
+    pub fn add_mpp_bytes(
+        &self,
+        sent_total: i64,
+        received_total: i64,
+        sent_cross_zone: i64,
+        received_cross_zone: i64,
+    ) {
+        saturating_fetch_add_i64(&self.unpacked_bytes_sent_mpp_total, sent_total);
+        saturating_fetch_add_i64(&self.unpacked_bytes_received_mpp_total, received_total);
+        saturating_fetch_add_i64(&self.unpacked_bytes_sent_mpp_cross_zone, sent_cross_zone);
+        saturating_fetch_add_i64(
+            &self.unpacked_bytes_received_mpp_cross_zone,
+            received_cross_zone,
+        );
+    }
+
+    /// Merge another traffic snapshot into `self`.
+    pub fn merge(&self, other: &Self) {
+        self.add_kv_bytes(
+            other.unpacked_bytes_sent_kv_total(),
+            other.unpacked_bytes_received_kv_total(),
+            other.unpacked_bytes_sent_kv_cross_zone(),
+            other.unpacked_bytes_received_kv_cross_zone(),
+        );
+        self.add_mpp_bytes(
+            other.unpacked_bytes_sent_mpp_total(),
+            other.unpacked_bytes_received_mpp_total(),
+            other.unpacked_bytes_sent_mpp_cross_zone(),
+            other.unpacked_bytes_received_mpp_cross_zone(),
+        );
+    }
+
+    /// Total unpacked KV bytes sent.
+    #[must_use]
+    pub fn unpacked_bytes_sent_kv_total(&self) -> i64 {
+        self.unpacked_bytes_sent_kv_total.load(Ordering::Relaxed)
+    }
+
+    /// Total unpacked KV bytes received.
+    #[must_use]
+    pub fn unpacked_bytes_received_kv_total(&self) -> i64 {
+        self.unpacked_bytes_received_kv_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Total unpacked cross-zone KV bytes sent.
+    #[must_use]
+    pub fn unpacked_bytes_sent_kv_cross_zone(&self) -> i64 {
+        self.unpacked_bytes_sent_kv_cross_zone
+            .load(Ordering::Relaxed)
+    }
+
+    /// Total unpacked cross-zone KV bytes received.
+    #[must_use]
+    pub fn unpacked_bytes_received_kv_cross_zone(&self) -> i64 {
+        self.unpacked_bytes_received_kv_cross_zone
+            .load(Ordering::Relaxed)
+    }
+
+    /// Total unpacked MPP bytes sent.
+    #[must_use]
+    pub fn unpacked_bytes_sent_mpp_total(&self) -> i64 {
+        self.unpacked_bytes_sent_mpp_total.load(Ordering::Relaxed)
+    }
+
+    /// Total unpacked MPP bytes received.
+    #[must_use]
+    pub fn unpacked_bytes_received_mpp_total(&self) -> i64 {
+        self.unpacked_bytes_received_mpp_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Total unpacked cross-zone MPP bytes sent.
+    #[must_use]
+    pub fn unpacked_bytes_sent_mpp_cross_zone(&self) -> i64 {
+        self.unpacked_bytes_sent_mpp_cross_zone
+            .load(Ordering::Relaxed)
+    }
+
+    /// Total unpacked cross-zone MPP bytes received.
+    #[must_use]
+    pub fn unpacked_bytes_received_mpp_cross_zone(&self) -> i64 {
+        self.unpacked_bytes_received_mpp_cross_zone
+            .load(Ordering::Relaxed)
+    }
+}
+
+/// Lightweight client-side execution counters collected across retries and RPC waits.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct ExecDetails {
+    backoff_count: AtomicU64,
+    backoff_duration_ns: AtomicU64,
+    wait_kv_resp_duration_ns: AtomicU64,
+    wait_pd_resp_duration_ns: AtomicU64,
+    traffic_details: TrafficDetails,
+}
+
+impl Clone for ExecDetails {
+    fn clone(&self) -> Self {
+        let clone = Self::default();
+        clone.add_backoff_count(self.backoff_count());
+        clone.add_backoff_duration(self.backoff_duration());
+        clone.add_wait_kv_response(self.wait_kv_resp_duration());
+        clone.add_wait_pd_response(self.wait_pd_resp_duration());
+        clone.traffic_details.merge(&self.traffic_details);
+        clone
+    }
+}
+
+impl ExecDetails {
+    /// Create an empty execution-detail accumulator.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add `count` to the backoff counter.
+    pub fn add_backoff_count(&self, count: u64) {
+        saturating_fetch_add_u64(&self.backoff_count, count);
+    }
+
+    /// Add a backoff sleep duration.
+    pub fn add_backoff_duration(&self, duration: Duration) {
+        saturating_fetch_add_u64(&self.backoff_duration_ns, duration_to_nanos(duration));
+    }
+
+    /// Add a backoff event (count + duration).
+    pub fn add_backoff(&self, duration: Duration) {
+        self.add_backoff_count(1);
+        self.add_backoff_duration(duration);
+    }
+
+    /// Add time spent waiting for a TiKV RPC response.
+    pub fn add_wait_kv_response(&self, duration: Duration) {
+        saturating_fetch_add_u64(&self.wait_kv_resp_duration_ns, duration_to_nanos(duration));
+    }
+
+    /// Add time spent waiting for a PD RPC response.
+    pub fn add_wait_pd_response(&self, duration: Duration) {
+        saturating_fetch_add_u64(&self.wait_pd_resp_duration_ns, duration_to_nanos(duration));
+    }
+
+    /// Merge another execution-detail accumulator into `self`.
+    pub fn merge(&self, other: &Self) {
+        self.add_backoff_count(other.backoff_count());
+        self.add_backoff_duration(other.backoff_duration());
+        self.add_wait_kv_response(other.wait_kv_resp_duration());
+        self.add_wait_pd_response(other.wait_pd_resp_duration());
+        self.traffic_details.merge(&other.traffic_details);
+    }
+
+    /// Total number of backoff sleeps.
+    #[must_use]
+    pub fn backoff_count(&self) -> u64 {
+        self.backoff_count.load(Ordering::Relaxed)
+    }
+
+    /// Total backoff sleep time.
+    #[must_use]
+    pub fn backoff_duration(&self) -> Duration {
+        Duration::from_nanos(self.backoff_duration_ns.load(Ordering::Relaxed))
+    }
+
+    /// Total time spent waiting for KV responses.
+    #[must_use]
+    pub fn wait_kv_resp_duration(&self) -> Duration {
+        Duration::from_nanos(self.wait_kv_resp_duration_ns.load(Ordering::Relaxed))
+    }
+
+    /// Total time spent waiting for PD responses.
+    #[must_use]
+    pub fn wait_pd_resp_duration(&self) -> Duration {
+        Duration::from_nanos(self.wait_pd_resp_duration_ns.load(Ordering::Relaxed))
+    }
+
+    /// Traffic counters associated with this execution accumulator.
+    #[must_use]
+    pub fn traffic_details(&self) -> &TrafficDetails {
+        &self.traffic_details
+    }
+}
+
 /// Resource unit (RU) consumption details.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
@@ -701,6 +955,70 @@ impl fmt::Display for RUDetails {
     }
 }
 
+/// Runs `future` with a task-local execution-detail accumulator.
+pub fn with_exec_details<T, F>(details: Arc<ExecDetails>, future: F) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    TASK_EXEC_DETAILS.scope(details, future)
+}
+
+/// Returns the task-local execution-detail accumulator, if present.
+#[must_use]
+pub fn exec_details() -> Option<Arc<ExecDetails>> {
+    TASK_EXEC_DETAILS.try_with(|details| details.clone()).ok()
+}
+
+/// Runs `future` with trace-exec-details enabled for the current Tokio task.
+pub fn with_trace_exec_details<T, F>(future: F) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    TASK_TRACE_EXEC_DETAILS_ENABLED.scope(true, future)
+}
+
+/// Returns whether trace-exec-details is enabled in the current Tokio task.
+#[must_use]
+pub fn trace_exec_details_enabled() -> bool {
+    TASK_TRACE_EXEC_DETAILS_ENABLED
+        .try_with(|enabled| *enabled)
+        .unwrap_or(false)
+}
+
+pub(crate) async fn scope_task_exec_details<T, F>(
+    details: Option<Arc<ExecDetails>>,
+    trace_enabled: bool,
+    future: F,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    match (details, trace_enabled) {
+        (Some(details), true) => with_exec_details(details, with_trace_exec_details(future)).await,
+        (Some(details), false) => with_exec_details(details, future).await,
+        (None, true) => with_trace_exec_details(future).await,
+        (None, false) => future.await,
+    }
+}
+
+pub(crate) fn record_task_local_backoff(duration: Duration) {
+    if let Some(details) = exec_details() {
+        details.add_backoff(duration);
+    }
+}
+
+pub(crate) fn record_task_local_wait_kv_response(duration: Duration) {
+    if let Some(details) = exec_details() {
+        details.add_wait_kv_response(duration);
+    }
+}
+
+pub(crate) fn record_task_local_wait_pd_response(duration: Duration) {
+    if let Some(details) = exec_details() {
+        details.add_wait_pd_response(duration);
+    }
+}
+
 fn push_duration_part(parts: &mut Vec<String>, name: &str, duration: Duration) {
     if duration.is_zero() {
         return;
@@ -708,7 +1026,9 @@ fn push_duration_part(parts: &mut Vec<String>, name: &str, duration: Duration) {
     parts.push(format!("{name}: {}", format_duration(duration)));
 }
 
-fn format_duration(duration: Duration) -> String {
+/// Format a duration using the same precision-pruning rules as client-go `util.FormatDuration`.
+#[must_use]
+pub fn format_duration(duration: Duration) -> String {
     let nanos = duration.as_nanos();
     if nanos == 0 {
         return "0s".to_owned();
@@ -747,9 +1067,26 @@ fn trim_float(value: f64, decimals: usize) -> String {
     text
 }
 
+fn duration_to_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn saturating_fetch_add_u64(slot: &AtomicU64, value: u64) {
+    let _ = slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(value))
+    });
+}
+
+fn saturating_fetch_add_i64(slot: &AtomicI64, value: i64) {
+    let _ = slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(value))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_time_detail_prefers_v2_proto_fields() {
@@ -929,6 +1266,88 @@ mod tests {
         assert_eq!(
             details.to_string(),
             "RRU:7.000000, WRU:10.000000, WaitDuration:15ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exec_details_task_local_scope_restores_outer_value_and_flag() {
+        assert!(exec_details().is_none());
+        assert!(!trace_exec_details_enabled());
+
+        let outer = Arc::new(ExecDetails::default());
+        let inner = Arc::new(ExecDetails::default());
+
+        with_exec_details(outer.clone(), async {
+            assert!(Arc::ptr_eq(&exec_details().unwrap(), &outer));
+            assert!(!trace_exec_details_enabled());
+
+            with_trace_exec_details(async {
+                assert!(trace_exec_details_enabled());
+                with_exec_details(inner.clone(), async {
+                    assert!(Arc::ptr_eq(&exec_details().unwrap(), &inner));
+                    record_task_local_backoff(Duration::from_millis(2));
+                })
+                .await;
+                assert!(trace_exec_details_enabled());
+                assert!(Arc::ptr_eq(&exec_details().unwrap(), &outer));
+            })
+            .await;
+
+            assert!(!trace_exec_details_enabled());
+            assert!(Arc::ptr_eq(&exec_details().unwrap(), &outer));
+        })
+        .await;
+
+        assert!(exec_details().is_none());
+        assert!(!trace_exec_details_enabled());
+        assert_eq!(inner.backoff_count(), 1);
+        assert_eq!(inner.backoff_duration(), Duration::from_millis(2));
+        assert_eq!(outer.backoff_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_scope_task_exec_details_inherits_both_values() {
+        let details = Arc::new(ExecDetails::default());
+
+        scope_task_exec_details(Some(details.clone()), true, async {
+            assert!(Arc::ptr_eq(&exec_details().unwrap(), &details));
+            assert!(trace_exec_details_enabled());
+            record_task_local_wait_kv_response(Duration::from_millis(3));
+            record_task_local_wait_pd_response(Duration::from_millis(5));
+        })
+        .await;
+
+        assert_eq!(details.wait_kv_resp_duration(), Duration::from_millis(3));
+        assert_eq!(details.wait_pd_resp_duration(), Duration::from_millis(5));
+    }
+
+    #[test]
+    fn test_exec_details_merge_and_traffic_details_merge() {
+        let left = ExecDetails::default();
+        left.add_backoff(Duration::from_millis(2));
+        left.add_wait_kv_response(Duration::from_millis(3));
+        left.traffic_details().add_kv_bytes(10, 20, 1, 2);
+
+        let right = ExecDetails::default();
+        right.add_backoff(Duration::from_millis(4));
+        right.add_wait_pd_response(Duration::from_millis(5));
+        right.traffic_details().add_mpp_bytes(30, 40, 3, 4);
+
+        left.merge(&right);
+
+        assert_eq!(left.backoff_count(), 2);
+        assert_eq!(left.backoff_duration(), Duration::from_millis(6));
+        assert_eq!(left.wait_kv_resp_duration(), Duration::from_millis(3));
+        assert_eq!(left.wait_pd_resp_duration(), Duration::from_millis(5));
+        assert_eq!(left.traffic_details().unpacked_bytes_sent_kv_total(), 10);
+        assert_eq!(
+            left.traffic_details().unpacked_bytes_received_kv_total(),
+            20
+        );
+        assert_eq!(left.traffic_details().unpacked_bytes_sent_mpp_total(), 30);
+        assert_eq!(
+            left.traffic_details().unpacked_bytes_received_mpp_total(),
+            40
         );
     }
 }

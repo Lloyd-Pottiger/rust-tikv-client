@@ -167,7 +167,8 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
             }
         }
 
-        let started_at = if kv_trace_enabled || txn_2pc_trace_enabled {
+        let track_exec_details = crate::util::exec_details().is_some();
+        let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
             Some(Instant::now())
         } else {
             None
@@ -183,6 +184,10 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
                     ),
                 })
         });
+
+        if let Some(started_at) = started_at.as_ref() {
+            crate::util::record_task_local_wait_kv_response(started_at.elapsed());
+        }
 
         if kv_trace_enabled {
             let elapsed_ms = started_at
@@ -409,7 +414,8 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
             }
         }
 
-        let started_at = if kv_trace_enabled || txn_2pc_trace_enabled {
+        let track_exec_details = crate::util::exec_details().is_some();
+        let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
             Some(Instant::now())
         } else {
             None
@@ -425,6 +431,10 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                     ),
                 })
         });
+
+        if let Some(started_at) = started_at.as_ref() {
+            crate::util::record_task_local_wait_kv_response(started_at.elapsed());
+        }
 
         let label = request.label();
         let rpc_request = RpcRequest::new(target, label, request.context_mut());
@@ -1765,6 +1775,7 @@ where
                     if !region_error_resolved {
                         check_killed(&killed)?;
                         observe_backoff_seconds("region", duration);
+                        crate::util::record_task_local_backoff(duration);
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("region", duration);
                         }
@@ -1862,6 +1873,7 @@ where
                 check_killed(&killed)?;
                 let label = if is_grpc_error { "grpc" } else { "region" };
                 observe_backoff_seconds(label, duration);
+                crate::util::record_task_local_backoff(duration);
                 if let Some(stats) = plan.runtime_stats() {
                     stats.record_backoff(label, duration);
                 }
@@ -2193,6 +2205,7 @@ where
                 Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
                     Some(duration) => {
                         observe_backoff_seconds("grpc", duration);
+                        crate::util::record_task_local_backoff(duration);
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("grpc", duration);
                         }
@@ -2282,6 +2295,7 @@ where
                 Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
                     Some(duration) => {
                         observe_backoff_seconds("grpc", duration);
+                        crate::util::record_task_local_backoff(duration);
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("grpc", duration);
                         }
@@ -2483,6 +2497,7 @@ where
                             delay_duration
                         };
                         observe_backoff_seconds("txnLockFast", delay_duration);
+                        crate::util::record_task_local_backoff(delay_duration);
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("txnLockFast", delay_duration);
                         }
@@ -2584,6 +2599,7 @@ where
                         };
                         check_killed(&self.killed)?;
                         observe_backoff_seconds("txnLockFast", delay_duration);
+                        crate::util::record_task_local_backoff(delay_duration);
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("txnLockFast", delay_duration);
                         }
@@ -2773,6 +2789,7 @@ where
                         delay_duration.min(Duration::from_millis(ms_before_txn_expired as u64));
                     check_killed(&self.killed)?;
                     observe_backoff_seconds("txnLockFast", delay_duration);
+                    crate::util::record_task_local_backoff(delay_duration);
                     if let Some(stats) = plan.runtime_stats() {
                         stats.record_backoff("txnLockFast", delay_duration);
                     }
@@ -3181,6 +3198,27 @@ mod test {
 
     impl crate::request::KvRequest for TraceTestRequest {
         type Response = crate::proto::kvrpcpb::GetResponse;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_records_task_local_exec_details_wait_kv_duration() {
+        let details = std::sync::Arc::new(crate::util::ExecDetails::default());
+        let kv = std::sync::Arc::new(MockKvClient::with_dispatch_hook(|_| {
+            std::thread::sleep(Duration::from_millis(2));
+            Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()))
+        }));
+
+        let plan = Dispatch {
+            request: TraceTestRequest,
+            kv_client: Some(kv),
+        };
+
+        crate::util::with_exec_details(details.clone(), async move {
+            let _ = plan.execute().await.expect("dispatch should succeed");
+        })
+        .await;
+
+        assert!(details.wait_kv_resp_duration() >= Duration::from_millis(1));
     }
 
     #[tokio::test]

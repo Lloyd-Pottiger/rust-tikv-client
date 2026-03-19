@@ -144,12 +144,19 @@ where
         post: hooks.post.clone(),
     };
     let parent_trace_id = crate::trace::trace_id();
+    let parent_exec_details = crate::util::exec_details();
+    let parent_trace_exec_details = crate::util::trace_exec_details_enabled();
     let parent_request_source = crate::request_context::request_source();
     let parent_resource_group_name = crate::request_context::resource_group_name();
     let parent_session_id = crate::util::session_id();
     tokio::spawn(async move {
         let _guard = guard;
         let future = crate::util::scope_task_session_id(parent_session_id, future);
+        let future = crate::util::scope_task_exec_details(
+            parent_exec_details,
+            parent_trace_exec_details,
+            future,
+        );
         let future = crate::request_context::scope_task_request_metadata(
             parent_request_source,
             parent_resource_group_name,
@@ -13488,6 +13495,34 @@ mod tests {
             handle.await.expect("spawned task should succeed");
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_spawn_with_lifecycle_hooks_inherits_exec_details_and_trace_flag() {
+        let details = Arc::new(crate::util::ExecDetails::default());
+        let details_for_spawn = details.clone();
+
+        crate::util::with_exec_details(details.clone(), async move {
+            crate::util::with_trace_exec_details(async move {
+                let handle = super::spawn_with_lifecycle_hooks(
+                    super::LifecycleHooks::default(),
+                    async move {
+                        assert!(crate::util::trace_exec_details_enabled());
+                        let current =
+                            crate::util::exec_details().expect("exec details should be inherited");
+                        assert!(Arc::ptr_eq(&current, &details_for_spawn));
+                        current.add_backoff(Duration::from_millis(2));
+                    },
+                );
+
+                handle.await.expect("spawned task should succeed");
+            })
+            .await;
+        })
+        .await;
+
+        assert_eq!(details.backoff_count(), 1);
+        assert_eq!(details.backoff_duration(), Duration::from_millis(2));
     }
 
     #[tokio::test]

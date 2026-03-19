@@ -970,6 +970,7 @@ async fn resolve_lock_with_retry(
                 match backoff.next_delay_duration() {
                     Some(duration) => {
                         check_killed(&killed)?;
+                        crate::util::record_task_local_backoff(duration);
                         if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                             stats.record_backoff("region", duration);
                         }
@@ -996,6 +997,7 @@ async fn resolve_lock_with_retry(
                                 handle_region_error(pd_client.clone(), *e, store.clone()).await?;
                             if !region_error_resolved {
                                 check_killed(&killed)?;
+                                crate::util::record_task_local_backoff(duration);
                                 if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                                     stats.record_backoff("region", duration);
                                 }
@@ -1028,6 +1030,7 @@ async fn resolve_lock_with_retry(
                         pd_client.invalidate_store_cache(store_id).await;
                     }
                     check_killed(&killed)?;
+                    crate::util::record_task_local_backoff(duration);
                     if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                         stats.record_backoff("grpc", duration);
                     }
@@ -1155,6 +1158,7 @@ async fn rollback_pessimistic_lock_with_retry(
                 match backoff.next_delay_duration() {
                     Some(duration) => {
                         check_killed(&killed)?;
+                        crate::util::record_task_local_backoff(duration);
                         if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                             stats.record_backoff("region", duration);
                         }
@@ -1176,6 +1180,7 @@ async fn rollback_pessimistic_lock_with_retry(
                             handle_region_error(pd_client.clone(), *e, store.clone()).await?;
                         if !region_error_resolved {
                             check_killed(&killed)?;
+                            crate::util::record_task_local_backoff(duration);
                             if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                                 stats.record_backoff("region", duration);
                             }
@@ -1206,6 +1211,7 @@ async fn rollback_pessimistic_lock_with_retry(
                         pd_client.invalidate_store_cache(store_id).await;
                     }
                     check_killed(&killed)?;
+                    crate::util::record_task_local_backoff(duration);
                     if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                         stats.record_backoff("grpc", duration);
                     }
@@ -2628,6 +2634,7 @@ impl LockResolver {
                     pd_client.invalidate_region_cache(region.clone()).await;
                     match backoff.next_delay_duration() {
                         Some(duration) => {
+                            crate::util::record_task_local_backoff(duration);
                             if let Some(stats) = self.rpc_context.runtime_stats.as_ref() {
                                 stats.record_backoff("region", duration);
                             }
@@ -2648,6 +2655,7 @@ impl LockResolver {
                             let region_error_resolved =
                                 handle_region_error(pd_client.clone(), *e, store.clone()).await?;
                             if !region_error_resolved {
+                                crate::util::record_task_local_backoff(duration);
                                 if let Some(stats) = self.rpc_context.runtime_stats.as_ref() {
                                     stats.record_backoff("region", duration);
                                 }
@@ -2666,6 +2674,7 @@ impl LockResolver {
                         if let Ok(store_id) = store.region_with_leader.get_store_id() {
                             pd_client.invalidate_store_cache(store_id).await;
                         }
+                        crate::util::record_task_local_backoff(duration);
                         if let Some(stats) = self.rpc_context.runtime_stats.as_ref() {
                             stats.record_backoff("grpc", duration);
                         }
@@ -2806,6 +2815,7 @@ impl LockResolver {
 
                     if let Some(duration) = backoff.next_delay_duration() {
                         check_killed(&killed)?;
+                        crate::util::record_task_local_backoff(duration);
                         sleep(duration).await;
                         continue;
                     }

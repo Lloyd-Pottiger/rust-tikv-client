@@ -185,33 +185,37 @@ macro_rules! retry_core {
     ($self: ident, $tag: literal, $call: expr) => {{
         let stats = pd_stats($tag);
         let mut last_err = Ok(());
-        for _ in 0..LEADER_CHANGE_RETRY {
-            let res = $call;
+        'retry: {
+            for _ in 0..LEADER_CHANGE_RETRY {
+                let res = $call;
 
-            match stats.done(res) {
-                Ok(r) => return Ok(r),
-                Err(Error::Unimplemented) => return Err(Error::Unimplemented),
-                Err(Error::GrpcAPI(status)) if status.code() == tonic::Code::Unimplemented => {
-                    return Err(Error::Unimplemented);
+                match stats.done(res) {
+                    Ok(r) => break 'retry Ok(r),
+                    Err(Error::Unimplemented) => break 'retry Err(Error::Unimplemented),
+                    Err(Error::GrpcAPI(status)) if status.code() == tonic::Code::Unimplemented => {
+                        break 'retry Err(Error::Unimplemented);
+                    }
+                    Err(e) => last_err = Err(e),
                 }
-                Err(e) => last_err = Err(e),
+
+                let mut reconnect_count = MAX_REQUEST_COUNT;
+                while let Err(e) = $self.reconnect(RECONNECT_INTERVAL_SEC).await {
+                    reconnect_count -= 1;
+                    if reconnect_count == 0 {
+                        break 'retry Err(e);
+                    }
+                    sleep(Duration::from_secs(RECONNECT_INTERVAL_SEC)).await;
+                }
             }
 
-            let mut reconnect_count = MAX_REQUEST_COUNT;
-            while let Err(e) = $self.reconnect(RECONNECT_INTERVAL_SEC).await {
-                reconnect_count -= 1;
-                if reconnect_count == 0 {
-                    return Err(e);
-                }
-                sleep(Duration::from_secs(RECONNECT_INTERVAL_SEC)).await;
+            match last_err {
+                Ok(()) => Err(internal_err!(concat!(
+                    "pd retry exhausted without error: ",
+                    $tag
+                ))),
+                Err(e) => Err(e),
             }
         }
-
-        last_err?;
-        return Err(internal_err!(concat!(
-            "pd retry exhausted without error: ",
-            $tag
-        )));
     }};
 }
 
@@ -265,42 +269,54 @@ impl RetryClientTrait for RetryClient<Cluster> {
     // These get_* functions will try multiple times to make a request, reconnecting as necessary.
     // It does not know about encoding. Caller should take care of it.
     async fn get_region(self: Arc<Self>, key: Vec<u8>) -> Result<RegionWithLeader> {
-        retry_mut!(self, "get_region", |cluster| {
-            let key = key.clone();
-            async {
-                cluster
-                    .get_region(key.clone(), self.timeout)
-                    .await
-                    .and_then(|resp| {
-                        region_from_response(resp, || Error::RegionForKeyNotFound { key })
-                    })
-            }
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_region", |cluster| {
+                let key = key.clone();
+                async {
+                    cluster
+                        .get_region(key.clone(), self.timeout)
+                        .await
+                        .and_then(|resp| {
+                            region_from_response(resp, || Error::RegionForKeyNotFound { key })
+                        })
+                }
+            }),
+        )
     }
 
     async fn get_prev_region(self: Arc<Self>, key: Vec<u8>) -> Result<RegionWithLeader> {
-        retry_mut!(self, "get_prev_region", |cluster| {
-            let key = key.clone();
-            async {
-                cluster
-                    .get_prev_region(key.clone(), self.timeout)
-                    .await
-                    .and_then(|resp| {
-                        region_from_response(resp, || Error::RegionForKeyNotFound { key })
-                    })
-            }
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_prev_region", |cluster| {
+                let key = key.clone();
+                async {
+                    cluster
+                        .get_prev_region(key.clone(), self.timeout)
+                        .await
+                        .and_then(|resp| {
+                            region_from_response(resp, || Error::RegionForKeyNotFound { key })
+                        })
+                }
+            }),
+        )
     }
 
     async fn get_region_by_id(self: Arc<Self>, region_id: RegionId) -> Result<RegionWithLeader> {
-        retry_mut!(self, "get_region_by_id", |cluster| async {
-            cluster
-                .get_region_by_id(region_id, self.timeout)
-                .await
-                .and_then(|resp| {
-                    region_from_response(resp, || Error::RegionNotFoundInResponse { region_id })
-                })
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_region_by_id", |cluster| async {
+                cluster
+                    .get_region_by_id(region_id, self.timeout)
+                    .await
+                    .and_then(|resp| {
+                        region_from_response(resp, || Error::RegionNotFoundInResponse { region_id })
+                    })
+            }),
+        )
     }
 
     async fn scan_regions(
@@ -309,67 +325,99 @@ impl RetryClientTrait for RetryClient<Cluster> {
         end_key: Vec<u8>,
         limit: i32,
     ) -> Result<Vec<RegionWithLeader>> {
-        retry_mut!(self, "scan_regions", |cluster| {
-            let start_key = start_key.clone();
-            let end_key = end_key.clone();
-            async {
-                cluster
-                    .scan_regions(start_key, end_key, limit, self.timeout)
-                    .await
-                    .and_then(scan_regions_from_response)
-            }
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "scan_regions", |cluster| {
+                let start_key = start_key.clone();
+                let end_key = end_key.clone();
+                async {
+                    cluster
+                        .scan_regions(start_key, end_key, limit, self.timeout)
+                        .await
+                        .and_then(scan_regions_from_response)
+                }
+            }),
+        )
     }
 
     async fn get_store(self: Arc<Self>, id: StoreId) -> Result<metapb::Store> {
-        retry_mut!(self, "get_store", |cluster| async {
-            cluster
-                .get_store(id, self.timeout)
-                .await
-                .and_then(|resp| store_from_response(resp, id))
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_store", |cluster| async {
+                cluster
+                    .get_store(id, self.timeout)
+                    .await
+                    .and_then(|resp| store_from_response(resp, id))
+            }),
+        )
     }
 
     async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
-        retry_mut!(self, "get_all_stores", |cluster| async {
-            cluster
-                .get_all_stores(self.timeout)
-                .await
-                .map(|resp| resp.stores.into_iter().map(Into::into).collect())
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_all_stores", |cluster| async {
+                cluster
+                    .get_all_stores(self.timeout)
+                    .await
+                    .map(|resp| resp.stores.into_iter().map(Into::into).collect())
+            }),
+        )
     }
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
-        retry!(self, "get_timestamp", |cluster| cluster.get_timestamp())
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry!(self, "get_timestamp", |cluster| cluster.get_timestamp()),
+        )
     }
 
     async fn get_timestamp_with_dc_location(
         self: Arc<Self>,
         dc_location: String,
     ) -> Result<Timestamp> {
-        retry!(self, "get_timestamp_with_dc_location", |cluster| {
-            cluster.get_timestamp_with_dc_location(dc_location.clone())
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry!(self, "get_timestamp_with_dc_location", |cluster| {
+                cluster.get_timestamp_with_dc_location(dc_location.clone())
+            }),
+        )
     }
 
     async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
-        retry_mut!(self, "get_min_ts", |cluster| async {
-            cluster.get_min_ts(self.timeout).await
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_min_ts", |cluster| async {
+                cluster.get_min_ts(self.timeout).await
+            }),
+        )
     }
 
     async fn get_external_timestamp(self: Arc<Self>) -> Result<u64> {
-        retry_mut!(self, "get_external_timestamp", |cluster| async {
-            cluster.get_external_timestamp(self.timeout).await
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_external_timestamp", |cluster| async {
+                cluster.get_external_timestamp(self.timeout).await
+            }),
+        )
     }
 
     async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
-        retry_mut!(self, "set_external_timestamp", |cluster| async {
-            cluster
-                .set_external_timestamp(timestamp, self.timeout)
-                .await
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "set_external_timestamp", |cluster| async {
+                cluster
+                    .set_external_timestamp(timestamp, self.timeout)
+                    .await
+            }),
+        )
     }
 
     async fn scatter_regions(
@@ -377,39 +425,55 @@ impl RetryClientTrait for RetryClient<Cluster> {
         region_ids: Vec<u64>,
         group: Option<String>,
     ) -> Result<pdpb::ScatterRegionResponse> {
-        retry_mut!(self, "scatter_regions", |cluster| {
-            let region_ids = region_ids.clone();
-            let group = group.clone();
-            async {
-                cluster
-                    .scatter_regions(region_ids, group, self.timeout)
-                    .await
-            }
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "scatter_regions", |cluster| {
+                let region_ids = region_ids.clone();
+                let group = group.clone();
+                async {
+                    cluster
+                        .scatter_regions(region_ids, group, self.timeout)
+                        .await
+                }
+            }),
+        )
     }
 
     async fn get_operator(self: Arc<Self>, region_id: u64) -> Result<pdpb::GetOperatorResponse> {
-        retry_mut!(self, "get_operator", |cluster| async {
-            cluster.get_operator(region_id, self.timeout).await
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_operator", |cluster| async {
+                cluster.get_operator(region_id, self.timeout).await
+            }),
+        )
     }
 
     async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
-        retry_mut!(self, "get_gc_safe_point", |cluster| async {
-            cluster
-                .get_gc_safe_point(self.timeout)
-                .await
-                .map(|resp| resp.safe_point)
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_gc_safe_point", |cluster| async {
+                cluster
+                    .get_gc_safe_point(self.timeout)
+                    .await
+                    .map(|resp| resp.safe_point)
+            }),
+        )
     }
 
     async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
-        retry_mut!(self, "get_gc_safe_point_v2", |cluster| async {
-            cluster
-                .get_gc_safe_point_v2(keyspace_id, self.timeout)
-                .await
-                .map(|resp| resp.safe_point)
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_gc_safe_point_v2", |cluster| async {
+                cluster
+                    .get_gc_safe_point_v2(keyspace_id, self.timeout)
+                    .await
+                    .map(|resp| resp.safe_point)
+            }),
+        )
     }
 
     async fn update_service_gc_safe_point(
@@ -418,15 +482,19 @@ impl RetryClientTrait for RetryClient<Cluster> {
         ttl: i64,
         safe_point: u64,
     ) -> Result<u64> {
-        retry_mut!(self, "update_service_gc_safe_point", |cluster| {
-            let service_id = service_id.clone();
-            async {
-                cluster
-                    .update_service_gc_safe_point(service_id, ttl, safe_point, self.timeout)
-                    .await
-                    .map(|resp| resp.min_safe_point)
-            }
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "update_service_gc_safe_point", |cluster| {
+                let service_id = service_id.clone();
+                async {
+                    cluster
+                        .update_service_gc_safe_point(service_id, ttl, safe_point, self.timeout)
+                        .await
+                        .map(|resp| resp.min_safe_point)
+                }
+            }),
+        )
     }
 
     async fn update_service_safe_point_v2(
@@ -436,21 +504,25 @@ impl RetryClientTrait for RetryClient<Cluster> {
         ttl: i64,
         safe_point: u64,
     ) -> Result<u64> {
-        retry_mut!(self, "update_service_safe_point_v2", |cluster| {
-            let service_id = service_id.clone();
-            async {
-                cluster
-                    .update_service_safe_point_v2(
-                        keyspace_id,
-                        service_id,
-                        ttl,
-                        safe_point,
-                        self.timeout,
-                    )
-                    .await
-                    .map(|resp| resp.min_safe_point)
-            }
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "update_service_safe_point_v2", |cluster| {
+                let service_id = service_id.clone();
+                async {
+                    cluster
+                        .update_service_safe_point_v2(
+                            keyspace_id,
+                            service_id,
+                            ttl,
+                            safe_point,
+                            self.timeout,
+                        )
+                        .await
+                        .map(|resp| resp.min_safe_point)
+                }
+            }),
+        )
     }
 
     async fn update_gc_safe_point_v2(
@@ -458,27 +530,39 @@ impl RetryClientTrait for RetryClient<Cluster> {
         keyspace_id: u32,
         safe_point: u64,
     ) -> Result<u64> {
-        retry_mut!(self, "update_gc_safe_point_v2", |cluster| async {
-            cluster
-                .update_gc_safe_point_v2(keyspace_id, safe_point, self.timeout)
-                .await
-                .map(|resp| resp.new_safe_point)
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "update_gc_safe_point_v2", |cluster| async {
+                cluster
+                    .update_gc_safe_point_v2(keyspace_id, safe_point, self.timeout)
+                    .await
+                    .map(|resp| resp.new_safe_point)
+            }),
+        )
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {
-        retry_mut!(self, "update_gc_safepoint", |cluster| async {
-            cluster
-                .update_safepoint(safepoint, self.timeout)
-                .await
-                .map(|resp| resp.new_safe_point)
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "update_gc_safepoint", |cluster| async {
+                cluster
+                    .update_safepoint(safepoint, self.timeout)
+                    .await
+                    .map(|resp| resp.new_safe_point)
+            }),
+        )
     }
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
-        retry_mut!(self, "load_keyspace", |cluster| async {
-            cluster.load_keyspace(keyspace, self.timeout).await
-        })
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "load_keyspace", |cluster| async {
+                cluster.load_keyspace(keyspace, self.timeout).await
+            }),
+        )
     }
 }
 
@@ -488,6 +572,11 @@ impl fmt::Debug for RetryClient {
             .field("timeout", &self.timeout)
             .finish()
     }
+}
+
+fn finish_pd_wait<T>(started_at: Instant, result: Result<T>) -> Result<T> {
+    crate::util::record_task_local_wait_pd_response(started_at.elapsed());
+    result
 }
 
 fn region_from_response(

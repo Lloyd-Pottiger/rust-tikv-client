@@ -5,7 +5,7 @@
 //! Some items in this module intentionally mirror client-go `util` APIs.
 
 pub mod bytes;
-pub mod exec_details;
+mod exec_details;
 pub mod gc_time;
 #[doc(hidden)]
 pub mod iter;
@@ -41,10 +41,17 @@ pub use crate::request_context::INTERNAL_TXN_STATS;
 pub use crate::request_context::SOURCE_UNKNOWN;
 pub use bytes::bytes_to_string;
 pub use bytes::format_bytes;
+pub use exec_details::exec_details;
+pub use exec_details::format_duration;
+pub use exec_details::trace_exec_details_enabled;
+pub use exec_details::with_exec_details;
+pub use exec_details::with_trace_exec_details;
+pub use exec_details::ExecDetails;
 pub use exec_details::RUDetails;
 pub use exec_details::ScanDetail;
 pub use exec_details::TiKVExecDetails;
 pub use exec_details::TimeDetail;
+pub use exec_details::TrafficDetails;
 pub use exec_details::WriteDetail;
 pub use gc_time::compatible_parse_gc_time;
 pub use gc_time::GcTimeParseError;
@@ -57,4 +64,8 @@ pub use rate_limit::RateLimitError;
 pub use rate_limit::RateLimitPermit;
 pub use ts_set::TsSet;
 
+pub(crate) use exec_details::record_task_local_backoff;
+pub(crate) use exec_details::record_task_local_wait_kv_response;
+pub(crate) use exec_details::record_task_local_wait_pd_response;
+pub(crate) use exec_details::scope_task_exec_details;
 pub(crate) use misc::scope_task_session_id;
