@@ -32,6 +32,7 @@ use crate::rpc_interceptor::RpcInterceptors;
 use crate::store::RegionStore;
 use crate::store::Request;
 use crate::timestamp::TimestampExt;
+use crate::trace::{self, Category, TraceField};
 use crate::transaction::requests;
 use crate::transaction::requests::new_check_secondary_locks_request;
 use crate::transaction::requests::new_check_txn_status_request;
@@ -479,228 +480,273 @@ pub(crate) async fn resolve_locks_with_options(
         ResolveLockTimeGuard::new(rpc_context.resolve_lock_detail.clone());
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
 
-    debug!("resolving locks");
-    let ts = ctx.low_resolution_timestamp(pd_client.clone()).await?;
-    let caller_start_ts = timestamp.version();
-    let current_ts = ts.version();
+    let trace_lock_count = locks.len();
+    let trace_lock_count_u64 = u64::try_from(trace_lock_count).unwrap_or(u64::MAX);
+    let trace_caller_start_ts = timestamp.version();
+    let trace_lite = trace_lock_count > 0
+        && locks
+            .iter()
+            .all(|lock| lock.txn_size < resolve_lock_lite_threshold);
+    let trace_enabled =
+        trace_lock_count > 0 && trace::is_category_enabled(Category::TxnLockResolve);
 
-    let mut live_locks = Vec::new();
-    let mut ms_before_txn_expired: Option<i64> = None;
-    let mut lock_resolver = LockResolver::new(ctx);
-    lock_resolver.rpc_context = rpc_context;
-    if let Some(callback) = lock_resolver.rpc_context.meet_lock_callback.as_ref() {
-        callback(&locks);
+    if trace_enabled {
+        let fields = vec![
+            TraceField::u64("callerStartTS", trace_caller_start_ts),
+            TraceField::u64("lockCount", trace_lock_count_u64),
+            TraceField::bool("forRead", false),
+            TraceField::bool("lite", trace_lite),
+        ];
+        trace::trace(Category::TxnLockResolve, "resolve_locks.start", &fields);
     }
 
-    // records the commit version of each primary lock (representing the status of the transaction)
-    let mut commit_versions: HashMap<u64, u64> = HashMap::new();
-    // Keep separate cleaned-region caches to match client-go behavior:
-    // pessimistic rollback region dedupe must not suppress normal resolve-lock dedupe.
-    let mut clean_regions: HashMap<u64, HashSet<RegionVerId>> = HashMap::new();
-    let mut pessimistic_clean_regions: HashMap<u64, HashSet<RegionVerId>> = HashMap::new();
-    let mut resolved_async_commit_txns: HashSet<u64> = HashSet::new();
-    // We must check txn status for *all* locks, not only TTL-expired ones.
-    //
-    // TTL only indicates whether a lock is *possibly* orphaned; it does not mean the transaction
-    // is still running. A transaction may already be committed/rolled back while its locks are
-    // still visible (e.g. cleanup/resolve hasn't finished, retries after region errors, etc.).
-    // If we only resolve TTL-expired locks, we can unnecessarily sleep/backoff until TTL even
-    // though `CheckTxnStatus` would already report `Committed`/`RolledBack`.
-    //
-    // This matches the client-go `LockResolver.ResolveLocksWithOpts` flow: query txn status for
-    // each encountered lock, then resolve immediately when the status is final.
-    for lock in locks {
-        if is_shared_lock(lock.lock_type) {
-            return Err(Error::StringError(
-                "misuse of resolve_locks: trying to resolve a shared lock directly".to_owned(),
-            ));
-        }
-        if resolved_async_commit_txns.contains(&lock.lock_version) {
-            continue;
-        }
-        let region_ver_id = pd_client
-            .region_for_key(&lock.key.clone().into())
-            .await?
-            .ver_id();
-        let is_pessimistic = is_pessimistic_lock(lock.lock_type);
+    let result = (async move {
+        debug!("resolving locks");
+        let ts = ctx.low_resolution_timestamp(pd_client.clone()).await?;
+        let caller_start_ts = timestamp.version();
+        let current_ts = ts.version();
 
-        let cleaned_regions = if is_pessimistic {
-            &pessimistic_clean_regions
-        } else {
-            &clean_regions
-        };
-        // Skip if the region has already been resolved for this lock type.
-        if cleaned_regions
-            .get(&lock.lock_version)
-            .map(|regions| regions.contains(&region_ver_id))
-            .unwrap_or(false)
-        {
-            continue;
+        let mut live_locks = Vec::new();
+        let mut ms_before_txn_expired: Option<i64> = None;
+        let mut lock_resolver = LockResolver::new(ctx);
+        lock_resolver.rpc_context = rpc_context;
+        if let Some(callback) = lock_resolver.rpc_context.meet_lock_callback.as_ref() {
+            callback(&locks);
         }
 
-        let commit_version = match commit_versions.get(&lock.lock_version) {
-            Some(&commit_version) => Some(commit_version),
-            None => {
-                let status = lock_resolver
-                    .get_txn_status_from_lock(
-                        lock_backoff.clone(),
-                        killed.clone(),
-                        &lock,
-                        caller_start_ts,
-                        current_ts,
-                        false,
-                        pd_client.clone(),
-                        keyspace,
-                    )
-                    .await?;
-                let mut resolved_async_commit: Option<(Vec<Vec<u8>>, u64)> = None;
-                let status = match status {
-                    TxnStatusFromLock::Status(status) => status,
-                    TxnStatusFromLock::AsyncCommitResolved {
-                        status,
-                        keys,
-                        commit_version,
-                    } => {
-                        resolved_async_commit = Some((keys, commit_version));
-                        status
-                    }
-                    TxnStatusFromLock::PessimisticRollbackRequired => {
-                        if pessimistic_region_resolve {
-                            if let Some(cleaned_region) = rollback_pessimistic_lock_with_retry(
-                                &lock,
-                                &lock_resolver.rpc_context,
-                                pd_client.clone(),
-                                keyspace,
-                                lock_backoff.clone(),
-                                killed.clone(),
-                            )
-                            .await?
-                            {
-                                pessimistic_clean_regions
-                                    .entry(lock.lock_version)
-                                    .or_default()
-                                    .insert(cleaned_region);
-                            }
-                        } else {
-                            rollback_pessimistic_lock(
-                                &lock,
-                                &lock_resolver.rpc_context,
-                                pd_client.clone(),
-                                keyspace,
-                            )
-                            .await?;
+        // records the commit version of each primary lock (representing the status of the transaction)
+        let mut commit_versions: HashMap<u64, u64> = HashMap::new();
+        // Keep separate cleaned-region caches to match client-go behavior:
+        // pessimistic rollback region dedupe must not suppress normal resolve-lock dedupe.
+        let mut clean_regions: HashMap<u64, HashSet<RegionVerId>> = HashMap::new();
+        let mut pessimistic_clean_regions: HashMap<u64, HashSet<RegionVerId>> = HashMap::new();
+        let mut resolved_async_commit_txns: HashSet<u64> = HashSet::new();
+        // We must check txn status for *all* locks, not only TTL-expired ones.
+        //
+        // TTL only indicates whether a lock is *possibly* orphaned; it does not mean the transaction
+        // is still running. A transaction may already be committed/rolled back while its locks are
+        // still visible (e.g. cleanup/resolve hasn't finished, retries after region errors, etc.).
+        // If we only resolve TTL-expired locks, we can unnecessarily sleep/backoff until TTL even
+        // though `CheckTxnStatus` would already report `Committed`/`RolledBack`.
+        //
+        // This matches the client-go `LockResolver.ResolveLocksWithOpts` flow: query txn status for
+        // each encountered lock, then resolve immediately when the status is final.
+        for lock in locks {
+            if is_shared_lock(lock.lock_type) {
+                return Err(Error::StringError(
+                    "misuse of resolve_locks: trying to resolve a shared lock directly".to_owned(),
+                ));
+            }
+            if resolved_async_commit_txns.contains(&lock.lock_version) {
+                continue;
+            }
+            let region_ver_id = pd_client
+                .region_for_key(&lock.key.clone().into())
+                .await?
+                .ver_id();
+            let is_pessimistic = is_pessimistic_lock(lock.lock_type);
+
+            let cleaned_regions = if is_pessimistic {
+                &pessimistic_clean_regions
+            } else {
+                &clean_regions
+            };
+            // Skip if the region has already been resolved for this lock type.
+            if cleaned_regions
+                .get(&lock.lock_version)
+                .map(|regions| regions.contains(&region_ver_id))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let commit_version = match commit_versions.get(&lock.lock_version) {
+                Some(&commit_version) => Some(commit_version),
+                None => {
+                    let status = lock_resolver
+                        .get_txn_status_from_lock(
+                            lock_backoff.clone(),
+                            killed.clone(),
+                            &lock,
+                            caller_start_ts,
+                            current_ts,
+                            false,
+                            pd_client.clone(),
+                            keyspace,
+                        )
+                        .await?;
+                    let mut resolved_async_commit: Option<(Vec<Vec<u8>>, u64)> = None;
+                    let status = match status {
+                        TxnStatusFromLock::Status(status) => status,
+                        TxnStatusFromLock::AsyncCommitResolved {
+                            status,
+                            keys,
+                            commit_version,
+                        } => {
+                            resolved_async_commit = Some((keys, commit_version));
+                            status
                         }
+                        TxnStatusFromLock::PessimisticRollbackRequired => {
+                            if pessimistic_region_resolve {
+                                if let Some(cleaned_region) = rollback_pessimistic_lock_with_retry(
+                                    &lock,
+                                    &lock_resolver.rpc_context,
+                                    pd_client.clone(),
+                                    keyspace,
+                                    lock_backoff.clone(),
+                                    killed.clone(),
+                                )
+                                .await?
+                                {
+                                    pessimistic_clean_regions
+                                        .entry(lock.lock_version)
+                                        .or_default()
+                                        .insert(cleaned_region);
+                                }
+                            } else {
+                                rollback_pessimistic_lock(
+                                    &lock,
+                                    &lock_resolver.rpc_context,
+                                    pd_client.clone(),
+                                    keyspace,
+                                )
+                                .await?;
+                            }
+                            continue;
+                        }
+                    };
+                    if let Some((keys, commit_version)) = resolved_async_commit {
+                        // Match client-go `resolveAsyncCommitLock`: resolve the full async-commit
+                        // transaction (primary + secondaries) once the commit ts is determined.
+                        resolve_lock_keys_with_retry(
+                            keys,
+                            lock.lock_version,
+                            commit_version,
+                            lock.is_txn_file,
+                            &lock_resolver.rpc_context,
+                            pd_client.clone(),
+                            keyspace,
+                            lock_backoff.clone(),
+                            killed.clone(),
+                        )
+                        .await?;
+                        commit_versions.insert(lock.lock_version, commit_version);
+                        resolved_async_commit_txns.insert(lock.lock_version);
                         continue;
                     }
-                };
-                if let Some((keys, commit_version)) = resolved_async_commit {
-                    // Match client-go `resolveAsyncCommitLock`: resolve the full async-commit
-                    // transaction (primary + secondaries) once the commit ts is determined.
-                    resolve_lock_keys_with_retry(
-                        keys,
-                        lock.lock_version,
-                        commit_version,
-                        lock.is_txn_file,
-                        &lock_resolver.rpc_context,
-                        pd_client.clone(),
-                        keyspace,
-                        lock_backoff.clone(),
-                        killed.clone(),
-                    )
-                    .await?;
-                    commit_versions.insert(lock.lock_version, commit_version);
-                    resolved_async_commit_txns.insert(lock.lock_version);
+                    match &status.kind {
+                        TransactionStatusKind::Committed(ts) => {
+                            let commit_version = ts.version();
+                            commit_versions.insert(lock.lock_version, commit_version);
+                            Some(commit_version)
+                        }
+                        TransactionStatusKind::RolledBack => {
+                            commit_versions.insert(lock.lock_version, 0);
+                            Some(0)
+                        }
+                        TransactionStatusKind::Locked(ttl, lock_info) => {
+                            live_locks.push(lock_info.clone());
+                            let mut ms_before_lock_expired =
+                                lock_until_expired_ms(lock_info.lock_version, *ttl, ts.clone());
+                            if ms_before_lock_expired <= 0 {
+                                ms_before_lock_expired = 0;
+                            }
+                            ms_before_txn_expired = Some(match ms_before_txn_expired {
+                                None => ms_before_lock_expired,
+                                Some(prev) => prev.min(ms_before_lock_expired),
+                            });
+                            None
+                        }
+                    }
+                }
+            };
+
+            if let Some(commit_version) = commit_version {
+                // Match client-go `resolve`: pessimistic locks should be handled by
+                // `PessimisticRollback`, not `ResolveLock`.
+                if is_pessimistic {
+                    if pessimistic_region_resolve {
+                        if let Some(cleaned_region) = rollback_pessimistic_lock_with_retry(
+                            &lock,
+                            &lock_resolver.rpc_context,
+                            pd_client.clone(),
+                            keyspace,
+                            lock_backoff.clone(),
+                            killed.clone(),
+                        )
+                        .await?
+                        {
+                            pessimistic_clean_regions
+                                .entry(lock.lock_version)
+                                .or_default()
+                                .insert(cleaned_region);
+                        }
+                    } else {
+                        rollback_pessimistic_lock(
+                            &lock,
+                            &lock_resolver.rpc_context,
+                            pd_client.clone(),
+                            keyspace,
+                        )
+                        .await?;
+                    }
                     continue;
                 }
-                match &status.kind {
-                    TransactionStatusKind::Committed(ts) => {
-                        let commit_version = ts.version();
-                        commit_versions.insert(lock.lock_version, commit_version);
-                        Some(commit_version)
-                    }
-                    TransactionStatusKind::RolledBack => {
-                        commit_versions.insert(lock.lock_version, 0);
-                        Some(0)
-                    }
-                    TransactionStatusKind::Locked(ttl, lock_info) => {
-                        live_locks.push(lock_info.clone());
-                        let mut ms_before_lock_expired =
-                            lock_until_expired_ms(lock_info.lock_version, *ttl, ts.clone());
-                        if ms_before_lock_expired <= 0 {
-                            ms_before_lock_expired = 0;
-                        }
-                        ms_before_txn_expired = Some(match ms_before_txn_expired {
-                            None => ms_before_lock_expired,
-                            Some(prev) => prev.min(ms_before_lock_expired),
-                        });
-                        None
-                    }
-                }
-            }
-        };
 
-        if let Some(commit_version) = commit_version {
-            // Match client-go `resolve`: pessimistic locks should be handled by
-            // `PessimisticRollback`, not `ResolveLock`.
-            if is_pessimistic {
-                if pessimistic_region_resolve {
-                    if let Some(cleaned_region) = rollback_pessimistic_lock_with_retry(
-                        &lock,
-                        &lock_resolver.rpc_context,
-                        pd_client.clone(),
-                        keyspace,
-                        lock_backoff.clone(),
-                        killed.clone(),
-                    )
-                    .await?
-                    {
-                        pessimistic_clean_regions
-                            .entry(lock.lock_version)
-                            .or_default()
-                            .insert(cleaned_region);
-                    }
-                } else {
-                    rollback_pessimistic_lock(
-                        &lock,
-                        &lock_resolver.rpc_context,
-                        pd_client.clone(),
-                        keyspace,
-                    )
-                    .await?;
+                let resolve_lite = lock.txn_size < resolve_lock_lite_threshold;
+                // The primary lock has been resolved by CheckTxnStatus already.
+                if resolve_lite && lock.key == lock.primary_lock {
+                    continue;
                 }
-                continue;
-            }
-
-            let resolve_lite = lock.txn_size < resolve_lock_lite_threshold;
-            // The primary lock has been resolved by CheckTxnStatus already.
-            if resolve_lite && lock.key == lock.primary_lock {
-                continue;
-            }
-            let cleaned_region = resolve_lock_with_retry(
-                &lock.key,
-                lock.lock_version,
-                commit_version,
-                lock.is_txn_file,
-                resolve_lite,
-                &lock_resolver.rpc_context,
-                pd_client.clone(),
-                keyspace,
-                lock_backoff.clone(),
-                killed.clone(),
-            )
-            .await?;
-            if !resolve_lite {
-                clean_regions
-                    .entry(lock.lock_version)
-                    .or_default()
-                    .insert(cleaned_region);
+                let cleaned_region = resolve_lock_with_retry(
+                    &lock.key,
+                    lock.lock_version,
+                    commit_version,
+                    lock.is_txn_file,
+                    resolve_lite,
+                    &lock_resolver.rpc_context,
+                    pd_client.clone(),
+                    keyspace,
+                    lock_backoff.clone(),
+                    killed.clone(),
+                )
+                .await?;
+                if !resolve_lite {
+                    clean_regions
+                        .entry(lock.lock_version)
+                        .or_default()
+                        .insert(cleaned_region);
+                }
             }
         }
-    }
-    Ok(ResolveLocksResult {
-        live_locks,
-        ms_before_txn_expired: ms_before_txn_expired.unwrap_or(0),
+        Ok(ResolveLocksResult {
+            live_locks,
+            ms_before_txn_expired: ms_before_txn_expired.unwrap_or(0),
+        })
     })
+    .await;
+
+    if trace_enabled {
+        let mut fields = vec![
+            TraceField::u64("callerStartTS", trace_caller_start_ts),
+            TraceField::u64("lockCount", trace_lock_count_u64),
+            TraceField::bool("forRead", false),
+            TraceField::bool("lite", trace_lite),
+        ];
+        match &result {
+            Ok(result) => {
+                fields.push(TraceField::i64("ttl", result.ms_before_txn_expired));
+                fields.push(TraceField::u64(
+                    "liveLocks",
+                    u64::try_from(result.live_locks.len()).unwrap_or(u64::MAX),
+                ));
+            }
+            Err(err) => fields.push(TraceField::str("error", err.to_string())),
+        }
+        trace::trace(Category::TxnLockResolve, "resolve_locks.finish", &fields);
+    }
+
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -720,55 +766,142 @@ pub(crate) async fn resolve_locks_for_read(
         ResolveLockTimeGuard::new(rpc_context.resolve_lock_detail.clone());
     let resolve_lock_lite_threshold = pd_client.resolve_lock_lite_threshold();
 
-    debug!("resolving locks for read");
-    let ts = ctx.low_resolution_timestamp(pd_client.clone()).await?;
-    let caller_start_ts = timestamp.version();
-    let current_ts = ts.version();
+    let trace_lock_count = locks.len();
+    let trace_lock_count_u64 = u64::try_from(trace_lock_count).unwrap_or(u64::MAX);
+    let trace_caller_start_ts = timestamp.version();
+    let trace_lite = trace_lock_count > 0
+        && (force_resolve_lock_lite
+            || locks
+                .iter()
+                .all(|lock| lock.txn_size < resolve_lock_lite_threshold));
+    let trace_enabled =
+        trace_lock_count > 0 && trace::is_category_enabled(Category::TxnLockResolve);
 
-    let mut ms_before_txn_expired: Option<i64> = None;
-    let mut live_locks = Vec::new();
-    let mut resolved_locks = Vec::new();
-    let mut committed_locks = Vec::new();
-    let mut lock_resolver = LockResolver::new(ctx);
-    lock_resolver.rpc_context = rpc_context;
-    if let Some(callback) = lock_resolver.rpc_context.meet_lock_callback.as_ref() {
-        callback(&locks);
+    if trace_enabled {
+        let fields = vec![
+            TraceField::u64("callerStartTS", trace_caller_start_ts),
+            TraceField::u64("lockCount", trace_lock_count_u64),
+            TraceField::bool("forRead", true),
+            TraceField::bool("lite", trace_lite),
+        ];
+        trace::trace(Category::TxnLockResolve, "resolve_locks.start", &fields);
     }
-    let mut resolved_async_commit_txns: HashSet<u64> = HashSet::new();
 
-    for lock in locks {
-        if is_shared_lock(lock.lock_type) {
-            return Err(Error::StringError(
-                "misuse of resolve_locks_for_read: trying to resolve a shared lock directly"
-                    .to_owned(),
-            ));
+    let result = (async move {
+        debug!("resolving locks for read");
+        let ts = ctx.low_resolution_timestamp(pd_client.clone()).await?;
+        let caller_start_ts = timestamp.version();
+        let current_ts = ts.version();
+
+        let mut ms_before_txn_expired: Option<i64> = None;
+        let mut live_locks = Vec::new();
+        let mut resolved_locks = Vec::new();
+        let mut committed_locks = Vec::new();
+        let mut lock_resolver = LockResolver::new(ctx);
+        lock_resolver.rpc_context = rpc_context;
+        if let Some(callback) = lock_resolver.rpc_context.meet_lock_callback.as_ref() {
+            callback(&locks);
         }
+        let mut resolved_async_commit_txns: HashSet<u64> = HashSet::new();
 
-        let status = lock_resolver
-            .get_txn_status_from_lock(
-                lock_backoff.clone(),
-                killed.clone(),
-                &lock,
-                caller_start_ts,
-                current_ts,
-                false,
-                pd_client.clone(),
-                keyspace,
-            )
-            .await?;
-
-        let mut resolved_async_commit: Option<(Vec<Vec<u8>>, u64)> = None;
-        let status = match status {
-            TxnStatusFromLock::Status(status) => status,
-            TxnStatusFromLock::AsyncCommitResolved {
-                status,
-                keys,
-                commit_version,
-            } => {
-                resolved_async_commit = Some((keys, commit_version));
-                status
+        for lock in locks {
+            if is_shared_lock(lock.lock_type) {
+                return Err(Error::StringError(
+                    "misuse of resolve_locks_for_read: trying to resolve a shared lock directly"
+                        .to_owned(),
+                ));
             }
-            TxnStatusFromLock::PessimisticRollbackRequired => {
+
+            let status = lock_resolver
+                .get_txn_status_from_lock(
+                    lock_backoff.clone(),
+                    killed.clone(),
+                    &lock,
+                    caller_start_ts,
+                    current_ts,
+                    false,
+                    pd_client.clone(),
+                    keyspace,
+                )
+                .await?;
+
+            let mut resolved_async_commit: Option<(Vec<Vec<u8>>, u64)> = None;
+            let status = match status {
+                TxnStatusFromLock::Status(status) => status,
+                TxnStatusFromLock::AsyncCommitResolved {
+                    status,
+                    keys,
+                    commit_version,
+                } => {
+                    resolved_async_commit = Some((keys, commit_version));
+                    status
+                }
+                TxnStatusFromLock::PessimisticRollbackRequired => {
+                    rollback_pessimistic_lock(
+                        &lock,
+                        &lock_resolver.rpc_context,
+                        pd_client.clone(),
+                        keyspace,
+                    )
+                    .await?;
+                    resolved_locks.push(lock.lock_version);
+                    continue;
+                }
+            };
+
+            // Match client-go `resolveLocks` for read: `MinCommitTSPushed` means the lock can
+            // be ignored for this snapshot read.
+            if status.action == kvrpcpb::Action::MinCommitTsPushed {
+                resolved_locks.push(lock.lock_version);
+                continue;
+            }
+
+            let is_rolled_back = matches!(
+                status.action,
+                kvrpcpb::Action::NoAction
+                    | kvrpcpb::Action::LockNotExistRollback
+                    | kvrpcpb::Action::TtlExpireRollback
+            ) && matches!(status.kind, TransactionStatusKind::RolledBack);
+
+            let commit_version = match &status.kind {
+                TransactionStatusKind::Committed(commit_ts) => commit_ts.version(),
+                TransactionStatusKind::RolledBack if is_rolled_back => 0,
+                TransactionStatusKind::Locked(ttl, _) => {
+                    let mut ms_before_lock_expired =
+                        lock_until_expired_ms(lock.lock_version, *ttl, ts.clone());
+                    if ms_before_lock_expired <= 0 {
+                        ms_before_lock_expired = 0;
+                    }
+                    ms_before_txn_expired = Some(match ms_before_txn_expired {
+                        None => ms_before_lock_expired,
+                        Some(prev) => prev.min(ms_before_lock_expired),
+                    });
+                    live_locks.push(lock);
+                    continue;
+                }
+                _ => {
+                    // `CheckTxnStatus` returned an undetermined "rolled back" response shape.
+                    // Keep parity with client-go by not marking the lock as resolved for read;
+                    // the caller should retry until the status is determined or lock expires.
+                    live_locks.push(lock);
+                    ms_before_txn_expired = Some(match ms_before_txn_expired {
+                        None => 0,
+                        Some(prev) => prev.min(0),
+                    });
+                    continue;
+                }
+            };
+
+            if commit_version > 0 && commit_version <= caller_start_ts {
+                committed_locks.push(lock.lock_version);
+            } else {
+                resolved_locks.push(lock.lock_version);
+            }
+
+            // For read requests, resolve locks asynchronously and ignore best-effort cleanup errors.
+            // The `committed_locks` / `resolved_locks` context allows read retry to proceed without
+            // waiting for the cleanup to finish.
+            if is_pessimistic_lock(lock.lock_type) {
                 rollback_pessimistic_lock(
                     &lock,
                     &lock_resolver.rpc_context,
@@ -776,96 +909,70 @@ pub(crate) async fn resolve_locks_for_read(
                     keyspace,
                 )
                 .await?;
-                resolved_locks.push(lock.lock_version);
                 continue;
             }
-        };
 
-        // Match client-go `resolveLocks` for read: `MinCommitTSPushed` means the lock can
-        // be ignored for this snapshot read.
-        if status.action == kvrpcpb::Action::MinCommitTsPushed {
-            resolved_locks.push(lock.lock_version);
-            continue;
-        }
+            if resolved_async_commit_txns.contains(&lock.lock_version) {
+                continue;
+            }
 
-        let is_rolled_back = matches!(
-            status.action,
-            kvrpcpb::Action::NoAction
-                | kvrpcpb::Action::LockNotExistRollback
-                | kvrpcpb::Action::TtlExpireRollback
-        ) && matches!(status.kind, TransactionStatusKind::RolledBack);
+            if let Some((keys, commit_version)) = resolved_async_commit {
+                // Match client-go `resolveAsyncCommitLock`: resolve the full async-commit transaction
+                // in a background cleanup task for snapshot reads.
+                resolved_async_commit_txns.insert(lock.lock_version);
 
-        let commit_version = match &status.kind {
-            TransactionStatusKind::Committed(commit_ts) => commit_ts.version(),
-            TransactionStatusKind::RolledBack if is_rolled_back => 0,
-            TransactionStatusKind::Locked(ttl, _) => {
-                let mut ms_before_lock_expired =
-                    lock_until_expired_ms(lock.lock_version, *ttl, ts.clone());
-                if ms_before_lock_expired <= 0 {
-                    ms_before_lock_expired = 0;
+                let start_version = lock.lock_version;
+                let is_txn_file = lock.is_txn_file;
+                let rpc_context = lock_resolver.rpc_context.clone();
+                let pd_client = pd_client.clone();
+                let lock_backoff = lock_backoff.clone();
+                let killed = killed.clone();
+
+                let task = tokio::spawn(async move {
+                    if let Err(err) = resolve_lock_keys_with_retry(
+                        keys,
+                        start_version,
+                        commit_version,
+                        is_txn_file,
+                        &rpc_context,
+                        pd_client,
+                        keyspace,
+                        lock_backoff,
+                        killed,
+                    )
+                    .await
+                    {
+                        warn!("async resolve_lock_for_read (async commit) failed: {err}");
+                    }
+                });
+                if let Some(lock_tracker) = lock_tracker.as_ref() {
+                    lock_tracker.track_cleanup_task(task).await;
                 }
-                ms_before_txn_expired = Some(match ms_before_txn_expired {
-                    None => ms_before_lock_expired,
-                    Some(prev) => prev.min(ms_before_lock_expired),
-                });
-                live_locks.push(lock);
                 continue;
             }
-            _ => {
-                // `CheckTxnStatus` returned an undetermined "rolled back" response shape.
-                // Keep parity with client-go by not marking the lock as resolved for read;
-                // the caller should retry until the status is determined or lock expires.
-                live_locks.push(lock);
-                ms_before_txn_expired = Some(match ms_before_txn_expired {
-                    None => 0,
-                    Some(prev) => prev.min(0),
-                });
+
+            // Match client-go point-read behavior: callers can force ResolveLock lite regardless of
+            // `txn_size`/threshold to reduce cleanup overhead.
+            let resolve_lite =
+                force_resolve_lock_lite || lock.txn_size < resolve_lock_lite_threshold;
+            if resolve_lite && lock.key == lock.primary_lock {
                 continue;
             }
-        };
 
-        if commit_version > 0 && commit_version <= caller_start_ts {
-            committed_locks.push(lock.lock_version);
-        } else {
-            resolved_locks.push(lock.lock_version);
-        }
-
-        // For read requests, resolve locks asynchronously and ignore best-effort cleanup errors.
-        // The `committed_locks` / `resolved_locks` context allows read retry to proceed without
-        // waiting for the cleanup to finish.
-        if is_pessimistic_lock(lock.lock_type) {
-            rollback_pessimistic_lock(
-                &lock,
-                &lock_resolver.rpc_context,
-                pd_client.clone(),
-                keyspace,
-            )
-            .await?;
-            continue;
-        }
-
-        if resolved_async_commit_txns.contains(&lock.lock_version) {
-            continue;
-        }
-
-        if let Some((keys, commit_version)) = resolved_async_commit {
-            // Match client-go `resolveAsyncCommitLock`: resolve the full async-commit transaction
-            // in a background cleanup task for snapshot reads.
-            resolved_async_commit_txns.insert(lock.lock_version);
-
+            let key = lock.key.clone();
             let start_version = lock.lock_version;
             let is_txn_file = lock.is_txn_file;
             let rpc_context = lock_resolver.rpc_context.clone();
             let pd_client = pd_client.clone();
             let lock_backoff = lock_backoff.clone();
             let killed = killed.clone();
-
             let task = tokio::spawn(async move {
-                if let Err(err) = resolve_lock_keys_with_retry(
-                    keys,
+                if let Err(err) = resolve_lock_with_retry(
+                    &key,
                     start_version,
                     commit_version,
                     is_txn_file,
+                    resolve_lite,
                     &rpc_context,
                     pd_client,
                     keyspace,
@@ -874,58 +981,52 @@ pub(crate) async fn resolve_locks_for_read(
                 )
                 .await
                 {
-                    warn!("async resolve_lock_for_read (async commit) failed: {err}");
+                    warn!("async resolve_lock_for_read failed: {err}");
                 }
             });
             if let Some(lock_tracker) = lock_tracker.as_ref() {
                 lock_tracker.track_cleanup_task(task).await;
             }
-            continue;
         }
 
-        // Match client-go point-read behavior: callers can force ResolveLock lite regardless of
-        // `txn_size`/threshold to reduce cleanup overhead.
-        let resolve_lite = force_resolve_lock_lite || lock.txn_size < resolve_lock_lite_threshold;
-        if resolve_lite && lock.key == lock.primary_lock {
-            continue;
-        }
+        Ok(ResolveLocksForReadResult {
+            ms_before_txn_expired: ms_before_txn_expired.unwrap_or(0),
+            live_locks,
+            resolved_locks,
+            committed_locks,
+        })
+    })
+    .await;
 
-        let key = lock.key.clone();
-        let start_version = lock.lock_version;
-        let is_txn_file = lock.is_txn_file;
-        let rpc_context = lock_resolver.rpc_context.clone();
-        let pd_client = pd_client.clone();
-        let lock_backoff = lock_backoff.clone();
-        let killed = killed.clone();
-        let task = tokio::spawn(async move {
-            if let Err(err) = resolve_lock_with_retry(
-                &key,
-                start_version,
-                commit_version,
-                is_txn_file,
-                resolve_lite,
-                &rpc_context,
-                pd_client,
-                keyspace,
-                lock_backoff,
-                killed,
-            )
-            .await
-            {
-                warn!("async resolve_lock_for_read failed: {err}");
+    if trace_enabled {
+        let mut fields = vec![
+            TraceField::u64("callerStartTS", trace_caller_start_ts),
+            TraceField::u64("lockCount", trace_lock_count_u64),
+            TraceField::bool("forRead", true),
+            TraceField::bool("lite", trace_lite),
+        ];
+        match &result {
+            Ok(result) => {
+                fields.push(TraceField::i64("ttl", result.ms_before_txn_expired));
+                fields.push(TraceField::u64(
+                    "ignoredLocks",
+                    u64::try_from(result.resolved_locks.len()).unwrap_or(u64::MAX),
+                ));
+                fields.push(TraceField::u64(
+                    "accessibleLocks",
+                    u64::try_from(result.committed_locks.len()).unwrap_or(u64::MAX),
+                ));
+                fields.push(TraceField::u64(
+                    "liveLocks",
+                    u64::try_from(result.live_locks.len()).unwrap_or(u64::MAX),
+                ));
             }
-        });
-        if let Some(lock_tracker) = lock_tracker.as_ref() {
-            lock_tracker.track_cleanup_task(task).await;
+            Err(err) => fields.push(TraceField::str("error", err.to_string())),
         }
+        trace::trace(Category::TxnLockResolve, "resolve_locks.finish", &fields);
     }
 
-    Ok(ResolveLocksForReadResult {
-        ms_before_txn_expired: ms_before_txn_expired.unwrap_or(0),
-        live_locks,
-        resolved_locks,
-        committed_locks,
-    })
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2865,6 +2966,194 @@ mod tests {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::errorpb;
+
+    struct TraceHookReset;
+
+    impl Drop for TraceHookReset {
+        fn drop(&mut self) {
+            crate::trace::set_trace_event_func(None);
+            crate::trace::set_is_category_enabled_func(None);
+        }
+    }
+
+    fn trace_field_u64(fields: &[crate::trace::TraceField], key: &str) -> Option<u64> {
+        fields
+            .iter()
+            .find(|field| field.key == key)
+            .and_then(|field| match &field.value {
+                crate::trace::TraceValue::U64(value) => Some(*value),
+                _ => None,
+            })
+    }
+
+    fn trace_field_bool(fields: &[crate::trace::TraceField], key: &str) -> Option<bool> {
+        fields
+            .iter()
+            .find(|field| field.key == key)
+            .and_then(|field| match &field.value {
+                crate::trace::TraceValue::Bool(value) => Some(*value),
+                _ => None,
+            })
+    }
+
+    fn trace_field_str<'a>(fields: &'a [crate::trace::TraceField], key: &str) -> Option<&'a str> {
+        fields
+            .iter()
+            .find(|field| field.key == key)
+            .and_then(|field| match &field.value {
+                crate::trace::TraceValue::Str(value) => Some(value.as_ref()),
+                _ => None,
+            })
+    }
+
+    #[tokio::test]
+    async fn test_trace_txn_lock_resolve_with_options_emits_finish_on_error() {
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
+        let _reset = TraceHookReset;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
+            crate::trace::Category,
+            String,
+            Vec<crate::trace::TraceField>,
+        )>::new()));
+
+        let seen_event = seen.clone();
+        let event: crate::trace::TraceEventFunc =
+            std::sync::Arc::new(move |category, name, fields| {
+                if category != crate::trace::Category::TxnLockResolve {
+                    return;
+                }
+                if name != "resolve_locks.start" && name != "resolve_locks.finish" {
+                    return;
+                }
+                seen_event
+                    .lock()
+                    .unwrap()
+                    .push((category, name.to_owned(), fields.to_vec()));
+            });
+        crate::trace::set_trace_event_func(Some(event));
+
+        let enabled: crate::trace::IsCategoryEnabledFunc =
+            std::sync::Arc::new(|category| category == crate::trace::Category::TxnLockResolve);
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+
+        let pd_client = std::sync::Arc::new(
+            MockPdClient::new(MockKvClient::default()).with_get_timestamp_error(),
+        );
+        let lock = kvrpcpb::LockInfo {
+            lock_version: 42,
+            key: vec![1],
+            primary_lock: vec![1],
+            ..Default::default()
+        };
+        let timestamp = Timestamp::from_version(123);
+
+        let _ = resolve_locks_with_options(
+            ResolveLocksContext::default(),
+            vec![lock],
+            timestamp,
+            pd_client,
+            Keyspace::Disable,
+            false,
+            OPTIMISTIC_BACKOFF,
+            None,
+            LockResolverRpcContext::default(),
+        )
+        .await
+        .unwrap_err();
+
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].1, "resolve_locks.start");
+        assert_eq!(events[1].1, "resolve_locks.finish");
+
+        assert_eq!(trace_field_u64(&events[0].2, "callerStartTS"), Some(123));
+        assert_eq!(trace_field_u64(&events[0].2, "lockCount"), Some(1));
+        assert_eq!(trace_field_bool(&events[0].2, "forRead"), Some(false));
+        assert_eq!(trace_field_bool(&events[0].2, "lite"), Some(true));
+
+        assert_eq!(trace_field_u64(&events[1].2, "callerStartTS"), Some(123));
+        assert_eq!(trace_field_u64(&events[1].2, "lockCount"), Some(1));
+        assert_eq!(
+            trace_field_str(&events[1].2, "error"),
+            Some("injected get_timestamp error")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trace_txn_lock_resolve_for_read_emits_finish_on_error() {
+        let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
+        let _reset = TraceHookReset;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
+            crate::trace::Category,
+            String,
+            Vec<crate::trace::TraceField>,
+        )>::new()));
+
+        let seen_event = seen.clone();
+        let event: crate::trace::TraceEventFunc =
+            std::sync::Arc::new(move |category, name, fields| {
+                if category != crate::trace::Category::TxnLockResolve {
+                    return;
+                }
+                if name != "resolve_locks.start" && name != "resolve_locks.finish" {
+                    return;
+                }
+                seen_event
+                    .lock()
+                    .unwrap()
+                    .push((category, name.to_owned(), fields.to_vec()));
+            });
+        crate::trace::set_trace_event_func(Some(event));
+
+        let enabled: crate::trace::IsCategoryEnabledFunc =
+            std::sync::Arc::new(|category| category == crate::trace::Category::TxnLockResolve);
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+
+        let pd_client = std::sync::Arc::new(
+            MockPdClient::new(MockKvClient::default()).with_get_timestamp_error(),
+        );
+        let lock = kvrpcpb::LockInfo {
+            lock_version: 42,
+            key: vec![1],
+            primary_lock: vec![1],
+            ..Default::default()
+        };
+        let timestamp = Timestamp::from_version(123);
+
+        let _ = resolve_locks_for_read(
+            ResolveLocksContext::default(),
+            vec![lock],
+            timestamp,
+            pd_client,
+            Keyspace::Disable,
+            OPTIMISTIC_BACKOFF,
+            None,
+            false,
+            None,
+            LockResolverRpcContext::default(),
+        )
+        .await
+        .unwrap_err();
+
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].1, "resolve_locks.start");
+        assert_eq!(events[1].1, "resolve_locks.finish");
+
+        assert_eq!(trace_field_u64(&events[0].2, "callerStartTS"), Some(123));
+        assert_eq!(trace_field_u64(&events[0].2, "lockCount"), Some(1));
+        assert_eq!(trace_field_bool(&events[0].2, "forRead"), Some(true));
+        assert_eq!(trace_field_bool(&events[0].2, "lite"), Some(true));
+
+        assert_eq!(trace_field_u64(&events[1].2, "callerStartTS"), Some(123));
+        assert_eq!(trace_field_u64(&events[1].2, "lockCount"), Some(1));
+        assert_eq!(
+            trace_field_str(&events[1].2, "error"),
+            Some("injected get_timestamp error")
+        );
+    }
 
     #[test]
     fn test_lock_wrapper_accessors_and_predicates() {
