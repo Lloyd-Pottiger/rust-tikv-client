@@ -4,6 +4,7 @@ use core::ops::Range;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use log::debug;
 use tokio::time::sleep;
@@ -394,6 +395,7 @@ impl<PdC: PdClient> Client<PdC> {
     /// ```
     pub async fn get(&self, key: impl Into<Key>) -> Result<Option<Value>> {
         debug!("invoking raw get request");
+        let start = Instant::now();
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut request = new_raw_get_request(key, self.cf.clone());
         self.apply_request_context_to_request(&mut request);
@@ -402,7 +404,9 @@ impl<PdC: PdClient> Client<PdC> {
             .merge(CollectSingle)
             .post_process_default()
             .plan();
-        plan.execute().await
+        let result = plan.execute().await;
+        crate::stats::observe_rawkv_cmd_seconds("get", start.elapsed());
+        result
     }
 
     /// Create a new 'batch get' request.
@@ -428,6 +432,7 @@ impl<PdC: PdClient> Client<PdC> {
         keys: impl IntoIterator<Item = impl Into<Key>>,
     ) -> Result<Vec<KvPair>> {
         debug!("invoking raw batch_get request");
+        let start = Instant::now();
         let keys = keys
             .into_iter()
             .map(|k| k.into().encode_keyspace(self.keyspace, KeyMode::Raw));
@@ -437,11 +442,13 @@ impl<PdC: PdClient> Client<PdC> {
             .retry_multi_region(self.backoff.clone())
             .merge(Collect)
             .plan();
-        plan.execute().await.map(|r| {
+        let result = plan.execute().await.map(|r| {
             r.into_iter()
                 .map(|pair| pair.truncate_keyspace(self.keyspace))
                 .collect()
-        })
+        });
+        crate::stats::observe_rawkv_cmd_seconds("batch_get", start.elapsed());
+        result
     }
 
     /// Create a new 'batch get values' request.
@@ -461,6 +468,7 @@ impl<PdC: PdClient> Client<PdC> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
+        let start = Instant::now();
 
         let keyspace = self.keyspace;
         let request_keys = keys
@@ -476,7 +484,9 @@ impl<PdC: PdClient> Client<PdC> {
             .plan();
 
         let mut values_by_key = HashMap::with_capacity(keys.len());
-        for pair in plan.execute().await? {
+        let pairs = plan.execute().await;
+        crate::stats::observe_rawkv_cmd_seconds("batch_get", start.elapsed());
+        for pair in pairs? {
             let KvPair(key, value) = pair.truncate_keyspace(keyspace);
             values_by_key.insert(key, value);
         }
@@ -505,7 +515,9 @@ impl<PdC: PdClient> Client<PdC> {
     /// # });
     pub async fn get_key_ttl_secs(&self, key: impl Into<Key>) -> Result<Option<u64>> {
         debug!("invoking raw get_key_ttl_secs request");
-        let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
+        let key: Key = key.into();
+        crate::stats::observe_rawkv_kv_size_bytes("key", key.0.len());
+        let key = key.encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut request = new_raw_get_key_ttl_request(key, self.cf.clone());
         self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
@@ -543,16 +555,22 @@ impl<PdC: PdClient> Client<PdC> {
         ttl_secs: u64,
     ) -> Result<()> {
         debug!("invoking raw put request");
-        let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let mut request =
-            new_raw_put_request(key, value.into(), self.cf.clone(), ttl_secs, self.atomic);
+        let start = Instant::now();
+        let key: Key = key.into();
+        let value: Value = value.into();
+        crate::stats::observe_rawkv_kv_size_bytes("key", key.0.len());
+        crate::stats::observe_rawkv_kv_size_bytes("value", value.len());
+        let key = key.encode_keyspace(self.keyspace, KeyMode::Raw);
+        let mut request = new_raw_put_request(key, value, self.cf.clone(), ttl_secs, self.atomic);
         self.apply_request_context_to_request(&mut request);
         let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .retry_multi_region(self.backoff.clone())
             .merge(CollectSingle)
             .extract_error()
             .plan();
-        plan.execute().await?;
+        let result = plan.execute().await;
+        crate::stats::observe_rawkv_cmd_seconds("batch_put", start.elapsed());
+        result?;
         Ok(())
     }
 
@@ -586,6 +604,7 @@ impl<PdC: PdClient> Client<PdC> {
         ttls: impl IntoIterator<Item = u64>,
     ) -> Result<()> {
         debug!("invoking raw batch_put request");
+        let start = Instant::now();
         let pairs = pairs
             .into_iter()
             .map(|pair| pair.into().encode_keyspace(self.keyspace, KeyMode::Raw));
@@ -596,7 +615,9 @@ impl<PdC: PdClient> Client<PdC> {
             .retry_multi_region(self.backoff.clone())
             .extract_error()
             .plan();
-        plan.execute().await?;
+        let result = plan.execute().await;
+        crate::stats::observe_rawkv_cmd_seconds("batch_put", start.elapsed());
+        result?;
         Ok(())
     }
 
@@ -619,6 +640,7 @@ impl<PdC: PdClient> Client<PdC> {
     /// ```
     pub async fn delete(&self, key: impl Into<Key>) -> Result<()> {
         debug!("invoking raw delete request");
+        let start = Instant::now();
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut request = new_raw_delete_request(key, self.cf.clone(), self.atomic);
         self.apply_request_context_to_request(&mut request);
@@ -627,7 +649,9 @@ impl<PdC: PdClient> Client<PdC> {
             .merge(CollectSingle)
             .extract_error()
             .plan();
-        plan.execute().await?;
+        let result = plan.execute().await;
+        crate::stats::observe_rawkv_cmd_seconds("delete", start.elapsed());
+        result?;
         Ok(())
     }
 
@@ -650,18 +674,24 @@ impl<PdC: PdClient> Client<PdC> {
     /// ```
     pub async fn batch_delete(&self, keys: impl IntoIterator<Item = impl Into<Key>>) -> Result<()> {
         debug!("invoking raw batch_delete request");
-        self.assert_non_atomic()?;
-        let keys = keys
-            .into_iter()
-            .map(|k| k.into().encode_keyspace(self.keyspace, KeyMode::Raw));
-        let mut request = new_raw_batch_delete_request(keys, self.cf.clone());
-        self.apply_request_context_to_request(&mut request);
-        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .retry_multi_region(self.backoff.clone())
-            .extract_error()
-            .plan();
-        plan.execute().await?;
-        Ok(())
+        let start = Instant::now();
+        let result: Result<()> = async {
+            self.assert_non_atomic()?;
+            let keys = keys
+                .into_iter()
+                .map(|k| k.into().encode_keyspace(self.keyspace, KeyMode::Raw));
+            let mut request = new_raw_batch_delete_request(keys, self.cf.clone());
+            self.apply_request_context_to_request(&mut request);
+            let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+                .retry_multi_region(self.backoff.clone())
+                .extract_error()
+                .plan();
+            plan.execute().await?;
+            Ok(())
+        }
+        .await;
+        crate::stats::observe_rawkv_cmd_seconds("batch_delete", start.elapsed());
+        result
     }
 
     /// Create a new 'delete range' request.
@@ -681,16 +711,28 @@ impl<PdC: PdClient> Client<PdC> {
     /// ```
     pub async fn delete_range(&self, range: impl Into<BoundRange>) -> Result<()> {
         debug!("invoking raw delete_range request");
-        self.assert_non_atomic()?;
-        let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let mut request = new_raw_delete_range_request(range, self.cf.clone());
-        self.apply_request_context_to_request(&mut request);
-        let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
-            .retry_multi_region(self.backoff.clone())
-            .extract_error()
-            .plan();
-        plan.execute().await?;
-        Ok(())
+        let start = Instant::now();
+        let result: Result<()> = async {
+            self.assert_non_atomic()?;
+            let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
+            let mut request = new_raw_delete_range_request(range, self.cf.clone());
+            self.apply_request_context_to_request(&mut request);
+            let plan = crate::request::PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+                .retry_multi_region(self.backoff.clone())
+                .extract_error()
+                .plan();
+            plan.execute().await?;
+            Ok(())
+        }
+        .await;
+
+        let label = if result.is_ok() {
+            "delete_range"
+        } else {
+            "delete_range_error"
+        };
+        crate::stats::observe_rawkv_cmd_seconds(label, start.elapsed());
+        result
     }
 
     /// Create a new 'scan' request.
@@ -821,6 +863,7 @@ impl<PdC: PdClient> Client<PdC> {
     /// `checksum(push(startKey, '\0'), push(endKey, '\0'))`.
     pub async fn checksum(&self, range: impl Into<BoundRange>) -> Result<super::RawChecksum> {
         debug!("invoking raw checksum request");
+        let start = Instant::now();
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
         let mut request = new_raw_checksum_request(range);
         self.apply_request_context_to_request(&mut request);
@@ -829,7 +872,9 @@ impl<PdC: PdClient> Client<PdC> {
             .extract_error()
             .merge(Collect)
             .plan();
-        plan.execute().await
+        let result = plan.execute().await;
+        crate::stats::observe_rawkv_cmd_seconds("raw_checksum", start.elapsed());
+        result
     }
 
     /// Create a new 'batch scan' request.
@@ -986,112 +1031,123 @@ impl<PdC: PdClient> Client<PdC> {
         key_only: bool,
         reverse: bool,
     ) -> Result<Vec<KvPair>> {
-        if limit > MAX_RAW_KV_SCAN_LIMIT {
-            return Err(Error::MaxScanLimitExceeded {
-                limit,
-                max_limit: MAX_RAW_KV_SCAN_LIMIT,
-            });
-        }
-        let backoff = DEFAULT_STORE_BACKOFF;
-        let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
-        let (range_start, range_end) = range.into_keys();
-
-        // An empty end key means "unbounded" in TiKV APIs, so normalize it to `None` to avoid
-        // prematurely terminating multi-region scans.
-        let range_end = range_end.filter(|key| !key.is_empty());
-
-        if let Some(range_end) = range_end.as_ref() {
-            if &range_start >= range_end {
-                return Ok(Vec::new());
-            }
-        }
-
-        let mut result = Vec::new();
-        let mut remaining = limit;
-
-        if reverse {
-            // Reverse scan requires an explicit upper bound because locating the last region is
-            // not implemented.
-            let Some(mut current_upper) = range_end.clone() else {
-                return Err(Error::Unimplemented);
-            };
-            if current_upper.is_empty() {
-                return Err(Error::Unimplemented);
-            }
-
-            while remaining > 0 && current_upper > range_start {
-                let scan_args = ScanInnerArgs {
-                    from_key: range_start.clone(),
-                    to_key: Some(current_upper.clone()),
-                    limit: remaining,
-                    key_only,
-                    reverse,
-                    backoff: backoff.clone(),
-                };
-                let (res, next_upper) = self.retryable_scan(scan_args).await?;
-
-                let mut kvs = res
-                    .map(|r| r.kvs.into_iter().map(Into::into).collect::<Vec<KvPair>>())
-                    .unwrap_or_default();
-                if !kvs.is_empty() {
-                    remaining -= kvs.len() as u32;
-                    result.append(&mut kvs);
-                }
-
-                if next_upper.is_empty() || next_upper <= range_start {
-                    break;
-                }
-                if next_upper >= current_upper {
-                    return Err(Error::StringError(
-                        "raw reverse scan returned a non-advancing range".to_owned(),
-                    ));
-                }
-                current_upper = next_upper;
-            }
+        let label = if reverse {
+            "raw_reverse_scan"
         } else {
-            let mut current_start = range_start;
-            while remaining > 0 {
-                let scan_args = ScanInnerArgs {
-                    from_key: current_start.clone(),
-                    to_key: range_end.clone(),
-                    limit: remaining,
-                    key_only,
-                    reverse,
-                    backoff: backoff.clone(),
-                };
-                let (res, next_start) = self.retryable_scan(scan_args).await?;
-
-                let mut kvs = res
-                    .map(|r| r.kvs.into_iter().map(Into::into).collect::<Vec<KvPair>>())
-                    .unwrap_or_default();
-                if !kvs.is_empty() {
-                    remaining -= kvs.len() as u32;
-                    result.append(&mut kvs);
-                }
-
-                if next_start.is_empty()
-                    || range_end
-                        .as_ref()
-                        .is_some_and(|range_end| range_end <= &next_start)
-                {
-                    break;
-                }
-                if next_start <= current_start {
-                    return Err(Error::StringError(
-                        "raw scan returned a non-advancing range".to_owned(),
-                    ));
-                }
-                current_start = next_start;
+            "raw_scan"
+        };
+        let start = Instant::now();
+        let result: Result<Vec<KvPair>> = async {
+            if limit > MAX_RAW_KV_SCAN_LIMIT {
+                return Err(Error::MaxScanLimitExceeded {
+                    limit,
+                    max_limit: MAX_RAW_KV_SCAN_LIMIT,
+                });
             }
+            let backoff = DEFAULT_STORE_BACKOFF;
+            let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
+            let (range_start, range_end) = range.into_keys();
+
+            // An empty end key means "unbounded" in TiKV APIs, so normalize it to `None` to avoid
+            // prematurely terminating multi-region scans.
+            let range_end = range_end.filter(|key| !key.is_empty());
+
+            if let Some(range_end) = range_end.as_ref() {
+                if &range_start >= range_end {
+                    return Ok(Vec::new());
+                }
+            }
+
+            let mut result = Vec::new();
+            let mut remaining = limit;
+
+            if reverse {
+                // Reverse scan requires an explicit upper bound because locating the last region is
+                // not implemented.
+                let Some(mut current_upper) = range_end.clone() else {
+                    return Err(Error::Unimplemented);
+                };
+                if current_upper.is_empty() {
+                    return Err(Error::Unimplemented);
+                }
+
+                while remaining > 0 && current_upper > range_start {
+                    let scan_args = ScanInnerArgs {
+                        from_key: range_start.clone(),
+                        to_key: Some(current_upper.clone()),
+                        limit: remaining,
+                        key_only,
+                        reverse,
+                        backoff: backoff.clone(),
+                    };
+                    let (res, next_upper) = self.retryable_scan(scan_args).await?;
+
+                    let mut kvs = res
+                        .map(|r| r.kvs.into_iter().map(Into::into).collect::<Vec<KvPair>>())
+                        .unwrap_or_default();
+                    if !kvs.is_empty() {
+                        remaining -= kvs.len() as u32;
+                        result.append(&mut kvs);
+                    }
+
+                    if next_upper.is_empty() || next_upper <= range_start {
+                        break;
+                    }
+                    if next_upper >= current_upper {
+                        return Err(Error::StringError(
+                            "raw reverse scan returned a non-advancing range".to_owned(),
+                        ));
+                    }
+                    current_upper = next_upper;
+                }
+            } else {
+                let mut current_start = range_start;
+                while remaining > 0 {
+                    let scan_args = ScanInnerArgs {
+                        from_key: current_start.clone(),
+                        to_key: range_end.clone(),
+                        limit: remaining,
+                        key_only,
+                        reverse,
+                        backoff: backoff.clone(),
+                    };
+                    let (res, next_start) = self.retryable_scan(scan_args).await?;
+
+                    let mut kvs = res
+                        .map(|r| r.kvs.into_iter().map(Into::into).collect::<Vec<KvPair>>())
+                        .unwrap_or_default();
+                    if !kvs.is_empty() {
+                        remaining -= kvs.len() as u32;
+                        result.append(&mut kvs);
+                    }
+
+                    if next_start.is_empty()
+                        || range_end
+                            .as_ref()
+                            .is_some_and(|range_end| range_end <= &next_start)
+                    {
+                        break;
+                    }
+                    if next_start <= current_start {
+                        return Err(Error::StringError(
+                            "raw scan returned a non-advancing range".to_owned(),
+                        ));
+                    }
+                    current_start = next_start;
+                }
+            }
+
+            // limit is a soft limit, so we need check the number of results
+            result.truncate(limit as usize);
+
+            // truncate the prefix of keys
+            let result = result.truncate_keyspace(self.keyspace);
+
+            Ok(result)
         }
-
-        // limit is a soft limit, so we need check the number of results
-        result.truncate(limit as usize);
-
-        // truncate the prefix of keys
-        let result = result.truncate_keyspace(self.keyspace);
-
-        Ok(result)
+        .await;
+        crate::stats::observe_rawkv_cmd_seconds(label, start.elapsed());
+        result
     }
 
     async fn retryable_scan(

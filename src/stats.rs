@@ -324,6 +324,22 @@ pub(crate) fn inc_one_pc_txn_counter(label: &'static str) {
     }
 }
 
+pub(crate) fn observe_rawkv_cmd_seconds(label: &'static str, elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_RAWKV_CMD_SECONDS_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    histogram
+        .with_label_values(&[label])
+        .observe(duration_to_sec(elapsed));
+}
+
+pub(crate) fn observe_rawkv_kv_size_bytes(label: &'static str, bytes: usize) {
+    let Some(histogram) = TIKV_CLIENT_RUST_RAWKV_KV_SIZE_BYTES_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    histogram.with_label_values(&[label]).observe(bytes as f64);
+}
+
 #[allow(dead_code)]
 pub fn observe_tso_batch(batch_size: usize) {
     if let Some(histogram) = PD_TSO_BATCH_SIZE_HISTOGRAM.as_ref() {
@@ -915,6 +931,32 @@ lazy_static::lazy_static! {
         &["type"],
     );
 
+    static ref TIKV_CLIENT_RUST_RAWKV_CMD_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_rawkv_cmd_seconds";
+        let help = "Bucketed histogram of processing time of rawkv cmds.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 29) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["type"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_RAWKV_KV_SIZE_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_rawkv_kv_size_bytes";
+        let help = "Size of key/value to put, in bytes.";
+        let buckets = match prometheus::exponential_buckets(1.0, 2.0, 30) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["type"], buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_READ_REQUEST_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_read_request_bytes";
         let help = "Bucketed histogram of total bytes sent/received for read requests.";
@@ -1012,8 +1054,8 @@ mod tests {
         inc_commit_txn_counter, inc_one_pc_txn_counter, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
-        observe_request_retry_times, observe_stale_read_hit_miss, region_cache_operation,
-        tikv_stats_with_context,
+        observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
+        observe_stale_read_hit_miss, region_cache_operation, tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1386,6 +1428,68 @@ mod tests {
                 .iter()
                 .any(|metric| label_value(metric, "type") == Some("fallback")),
             "expected one_pc_txn_counter fallback label"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_rawkv_cmd_seconds_histogram_records_labels() {
+        observe_rawkv_cmd_seconds("get", Duration::from_millis(1));
+        observe_rawkv_cmd_seconds("delete_range_error", Duration::from_millis(2));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_rawkv_cmd_seconds")
+            .expect("rawkv_cmd_seconds histogram not registered");
+
+        let get_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("get")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            get_found,
+            "expected rawkv_cmd_seconds get label metric not found"
+        );
+
+        let err_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("delete_range_error")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            err_found,
+            "expected rawkv_cmd_seconds delete_range_error label metric not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_rawkv_kv_size_bytes_histogram_records_labels() {
+        observe_rawkv_kv_size_bytes("key", 123);
+        observe_rawkv_kv_size_bytes("value", 456);
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_rawkv_kv_size_bytes")
+            .expect("rawkv_kv_size_bytes histogram not registered");
+
+        let key_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("key")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            key_found,
+            "expected rawkv_kv_size_bytes key label metric not found"
+        );
+
+        let value_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("value")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            value_found,
+            "expected rawkv_kv_size_bytes value label metric not found"
         );
     }
 
