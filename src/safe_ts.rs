@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use log::debug;
 use tokio::sync::{watch, Mutex, RwLock};
@@ -13,12 +13,14 @@ use crate::region::StoreId;
 use crate::request::Keyspace;
 use crate::request::Plan;
 use crate::request::PlanBuilder;
+use crate::stats::{inc_safe_ts_update_counter, set_min_safe_ts_gap_seconds};
 use crate::Error;
 use crate::Result;
 
 const GLOBAL_TXN_SCOPE: &str = "global";
 const ZONE_LABEL_KEY: &str = "zone";
 const SAFE_TS_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
+const SAFE_TS_PHYSICAL_SHIFT_BITS: u32 = 18;
 
 pub(crate) struct SafeTsCache<PdC: PdClient> {
     inner: Arc<SafeTsCacheInner<PdC>>,
@@ -183,24 +185,63 @@ impl<PdC: PdClient> SafeTsCacheInner<PdC> {
         }
 
         let store_ids: Vec<StoreId> = stores.iter().map(|store| store.meta.id).collect();
-        let pd_store_safe_ts = match self.pd.min_resolved_ts_by_stores(&store_ids).await {
-            Ok((_min_resolved_ts, store_safe_ts)) if !store_safe_ts.is_empty() => {
-                Some(store_safe_ts)
-            }
-            _ => None,
-        };
+        let (pd_min_resolved_ts, pd_store_safe_ts) =
+            match self.pd.min_resolved_ts_by_stores(&store_ids).await {
+                Ok((min_resolved_ts, store_safe_ts)) if !store_safe_ts.is_empty() => {
+                    (Some(min_resolved_ts), Some(store_safe_ts))
+                }
+                _ => (None, None),
+            };
 
-        let store_safe_ts_updates: Vec<(StoreId, u64)> = match pd_store_safe_ts {
-            Some(pd_store_safe_ts) => stores
-                .iter()
-                .filter_map(|store| {
+        let store_safe_ts_updates: Vec<(StoreId, Option<u64>)> = match pd_store_safe_ts {
+            Some(pd_store_safe_ts) => {
+                let mut updates = Vec::with_capacity(stores.len());
+                let mut fallback_stores = Vec::new();
+
+                for store in &stores {
                     let store_id = store.meta.id;
-                    pd_store_safe_ts
+                    if let Some(safe_ts) = pd_store_safe_ts
                         .get(&store_id)
                         .copied()
-                        .map(|safe_ts| (store_id, safe_ts))
-                })
-                .collect(),
+                        .filter(|safe_ts| is_valid_pd_safe_ts(*safe_ts))
+                    {
+                        updates.push((store_id, Some(safe_ts)));
+                    } else {
+                        fallback_stores.push(store.clone());
+                        updates.push((store_id, None));
+                    }
+                }
+
+                if !fallback_stores.is_empty() {
+                    let request = kvrpcpb::StoreSafeTsRequest {
+                        key_range: Some(kvrpcpb::KeyRange::default()),
+                    };
+                    let plan = PlanBuilder::new(self.pd.clone(), self.keyspace, request)
+                        .stores(fallback_stores.clone(), DEFAULT_STORE_BACKOFF)
+                        .plan();
+                    let results = plan.execute().await?;
+
+                    let mut fallback_results = HashMap::with_capacity(fallback_stores.len());
+                    for (store, result) in fallback_stores.iter().zip(results) {
+                        let store_id = store.meta.id;
+                        let safe_ts = match result {
+                            Ok(resp) => Some(resp.safe_ts),
+                            Err(_) => None,
+                        };
+                        fallback_results.insert(store_id, safe_ts);
+                    }
+
+                    for (store_id, safe_ts) in &mut updates {
+                        if safe_ts.is_none() {
+                            if let Some(fallback_safe_ts) = fallback_results.get(store_id) {
+                                *safe_ts = *fallback_safe_ts;
+                            }
+                        }
+                    }
+                }
+
+                updates
+            }
             None => {
                 let request = kvrpcpb::StoreSafeTsRequest {
                     key_range: Some(kvrpcpb::KeyRange::default()),
@@ -213,29 +254,71 @@ impl<PdC: PdClient> SafeTsCacheInner<PdC> {
                 stores
                     .iter()
                     .zip(results)
-                    .filter_map(|(store, result)| {
-                        let resp = match result {
-                            Ok(resp) => resp,
-                            Err(_) => return None,
+                    .map(|(store, result)| {
+                        let safe_ts = match result {
+                            Ok(resp) => Some(resp.safe_ts),
+                            Err(_) => None,
                         };
-                        Some((store.meta.id, resp.safe_ts))
+                        (store.meta.id, safe_ts)
                     })
                     .collect()
             }
         };
 
+        let now_ms = epoch_millis();
         let mut state = self.state.write().await;
+        if let Some(pd_min_resolved_ts) =
+            pd_min_resolved_ts.filter(|safe_ts| is_valid_pd_safe_ts(*safe_ts))
+        {
+            let prev_min_safe_ts = state
+                .min_safe_ts
+                .get(GLOBAL_TXN_SCOPE)
+                .copied()
+                .unwrap_or(0);
+            if prev_min_safe_ts > pd_min_resolved_ts {
+                inc_safe_ts_update_counter("skip", "cluster");
+                set_min_safe_ts_gap_seconds(
+                    "cluster",
+                    safe_ts_gap_seconds(now_ms, prev_min_safe_ts),
+                );
+            } else {
+                inc_safe_ts_update_counter("success", "cluster");
+                set_min_safe_ts_gap_seconds(
+                    "cluster",
+                    safe_ts_gap_seconds(now_ms, pd_min_resolved_ts),
+                );
+            }
+        }
+
         for (store_id, new_safe_ts) in store_safe_ts_updates {
+            let store_id_label = store_id.to_string();
+            let Some(new_safe_ts) = new_safe_ts else {
+                inc_safe_ts_update_counter("fail", store_id_label.as_str());
+                continue;
+            };
+
             if new_safe_ts == u64::MAX {
                 debug!("skip setting safe-ts to max value (store_id={})", store_id);
+                inc_safe_ts_update_counter("fail", store_id_label.as_str());
                 continue;
             }
 
             let prev_safe_ts = state.store_safe_ts.get(&store_id).copied().unwrap_or(0);
             if prev_safe_ts > new_safe_ts {
+                inc_safe_ts_update_counter("skip", store_id_label.as_str());
+                set_min_safe_ts_gap_seconds(
+                    store_id_label.as_str(),
+                    safe_ts_gap_seconds(now_ms, prev_safe_ts),
+                );
                 continue;
             }
+
             state.store_safe_ts.insert(store_id, new_safe_ts);
+            inc_safe_ts_update_counter("success", store_id_label.as_str());
+            set_min_safe_ts_gap_seconds(
+                store_id_label.as_str(),
+                safe_ts_gap_seconds(now_ms, new_safe_ts),
+            );
         }
 
         let mut zone_to_store_ids: HashMap<String, Vec<StoreId>> = HashMap::new();
@@ -265,6 +348,22 @@ impl<PdC: PdClient> SafeTsCacheInner<PdC> {
 
         Ok(())
     }
+}
+
+fn is_valid_pd_safe_ts(safe_ts: u64) -> bool {
+    safe_ts != 0 && safe_ts != u64::MAX
+}
+
+fn epoch_millis() -> i128 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as i128,
+        Err(_) => 0,
+    }
+}
+
+fn safe_ts_gap_seconds(now_ms: i128, safe_ts: u64) -> f64 {
+    let safe_ms = (safe_ts >> SAFE_TS_PHYSICAL_SHIFT_BITS) as i128;
+    (now_ms - safe_ms) as f64 / 1000.0
 }
 
 fn compute_min_safe_ts(store_safe_ts: &HashMap<StoreId, u64>, store_ids: &[StoreId]) -> u64 {
@@ -298,6 +397,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use serial_test::serial;
     use tokio::sync::Notify;
 
     use super::SafeTsCache;
@@ -310,6 +410,14 @@ mod tests {
     use crate::request::Keyspace;
     use crate::store::{RegionStore, Store};
     use crate::{Error, Result, Timestamp};
+
+    fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+        metric
+            .get_label()
+            .iter()
+            .find(|pair| pair.get_name() == name)
+            .map(|pair| pair.get_value())
+    }
 
     #[derive(Clone)]
     struct SafeTsPdClient {
@@ -534,6 +642,56 @@ mod tests {
         )
     }
 
+    fn store_for_safe_ts_scripted(
+        store_id: StoreId,
+        labels: Vec<metapb::StoreLabel>,
+        safe_ts: Vec<u64>,
+    ) -> Store {
+        let safe_ts = Arc::new(safe_ts);
+        let cursor = Arc::new(AtomicUsize::new(0));
+
+        let kv_client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::StoreSafeTsRequest>().is_some() {
+                let idx = cursor.fetch_add(1, Ordering::SeqCst);
+                let safe_ts = safe_ts
+                    .get(idx)
+                    .copied()
+                    .or_else(|| safe_ts.last().copied())
+                    .unwrap_or(0);
+                let resp = kvrpcpb::StoreSafeTsResponse { safe_ts };
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            Err(Error::Unimplemented)
+        });
+
+        Store::new(
+            metapb::Store {
+                id: store_id,
+                labels,
+                ..Default::default()
+            },
+            Arc::new(kv_client),
+        )
+    }
+
+    fn store_for_safe_ts_error(store_id: StoreId, labels: Vec<metapb::StoreLabel>) -> Store {
+        let kv_client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::StoreSafeTsRequest>().is_some() {
+                return Err(Error::StringError("injected safe-ts error".to_owned()));
+            }
+            Err(Error::Unimplemented)
+        });
+
+        Store::new(
+            metapb::Store {
+                id: store_id,
+                labels,
+                ..Default::default()
+            },
+            Arc::new(kv_client),
+        )
+    }
+
     #[tokio::test]
     async fn test_min_safe_ts_with_txn_scope_includes_tiflash_store() -> Result<()> {
         let tikv_dc1 = store_for_safe_ts(
@@ -736,6 +894,154 @@ mod tests {
             1,
             "concurrent refresh errors should be singleflighted"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_safe_ts_refresh_records_metrics_success() -> Result<()> {
+        let store_safe_ts_calls = Arc::new(AtomicUsize::new(0));
+        let tikv_dc1 = store_for_safe_ts_with_counter(
+            111,
+            vec![metapb::StoreLabel {
+                key: "zone".to_owned(),
+                value: "dc1".to_owned(),
+            }],
+            999,
+            store_safe_ts_calls.clone(),
+        );
+        let tikv_dc2 = store_for_safe_ts_with_counter(
+            222,
+            vec![metapb::StoreLabel {
+                key: "zone".to_owned(),
+                value: "dc2".to_owned(),
+            }],
+            999,
+            store_safe_ts_calls.clone(),
+        );
+
+        let mut store_safe_ts = HashMap::new();
+        store_safe_ts.insert(111, 100);
+        store_safe_ts.insert(222, 10);
+
+        let pd_client = Arc::new(SafeTsFastPathPdClient {
+            stores: vec![tikv_dc1, tikv_dc2],
+            store_safe_ts,
+        });
+        let safe_ts = SafeTsCache::new(pd_client, Keyspace::Disable);
+        safe_ts.refresh().await?;
+
+        assert_eq!(
+            store_safe_ts_calls.load(Ordering::SeqCst),
+            0,
+            "pd fast path should skip StoreSafeTS RPCs"
+        );
+
+        let families = prometheus::gather();
+        let counter = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_safets_update_counter")
+            .expect("safets_update_counter not registered");
+
+        let store_111_ok = counter.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("success")
+                && label_value(metric, "store") == Some("111")
+                && metric.get_counter().get_value() >= 1.0
+        });
+        assert!(store_111_ok, "expected safets success metric for store 111");
+
+        let store_222_ok = counter.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("success")
+                && label_value(metric, "store") == Some("222")
+                && metric.get_counter().get_value() >= 1.0
+        });
+        assert!(store_222_ok, "expected safets success metric for store 222");
+
+        let gap = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_min_safets_gap_seconds")
+            .expect("min_safets_gap_seconds gauge not registered");
+        let store_111_gap = gap.get_metric().iter().any(|metric| {
+            label_value(metric, "store") == Some("111")
+                && metric.get_gauge().get_value().is_finite()
+        });
+        assert!(store_111_gap, "expected safets gap metric for store 111");
+
+        let store_222_gap = gap.get_metric().iter().any(|metric| {
+            label_value(metric, "store") == Some("222")
+                && metric.get_gauge().get_value().is_finite()
+        });
+        assert!(store_222_gap, "expected safets gap metric for store 222");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_safe_ts_refresh_records_metrics_skip() -> Result<()> {
+        let tikv_dc1 = store_for_safe_ts_scripted(
+            333,
+            vec![metapb::StoreLabel {
+                key: "zone".to_owned(),
+                value: "dc1".to_owned(),
+            }],
+            vec![100, 10],
+        );
+
+        let pd_client = Arc::new(SafeTsPdClient {
+            stores: vec![tikv_dc1],
+        });
+        let safe_ts = SafeTsCache::new(pd_client, Keyspace::Disable);
+
+        safe_ts.refresh().await?;
+        safe_ts.refresh().await?;
+
+        let families = prometheus::gather();
+        let counter = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_safets_update_counter")
+            .expect("safets_update_counter not registered");
+
+        let store_333_skip = counter.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("skip")
+                && label_value(metric, "store") == Some("333")
+                && metric.get_counter().get_value() >= 1.0
+        });
+        assert!(store_333_skip, "expected safets skip metric for store 333");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_safe_ts_refresh_records_metrics_fail() -> Result<()> {
+        let tikv_dc1 = store_for_safe_ts_error(
+            444,
+            vec![metapb::StoreLabel {
+                key: "zone".to_owned(),
+                value: "dc1".to_owned(),
+            }],
+        );
+
+        let pd_client = Arc::new(SafeTsPdClient {
+            stores: vec![tikv_dc1],
+        });
+        let safe_ts = SafeTsCache::new(pd_client, Keyspace::Disable);
+        safe_ts.refresh().await?;
+
+        let families = prometheus::gather();
+        let counter = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_safets_update_counter")
+            .expect("safets_update_counter not registered");
+
+        let store_444_fail = counter.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("fail")
+                && label_value(metric, "store") == Some("444")
+                && metric.get_counter().get_value() >= 1.0
+        });
+        assert!(store_444_fail, "expected safets fail metric for store 444");
 
         Ok(())
     }

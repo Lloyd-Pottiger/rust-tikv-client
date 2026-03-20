@@ -5,6 +5,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use log::warn;
+use prometheus::GaugeVec;
 use prometheus::Histogram;
 use prometheus::HistogramOpts;
 use prometheus::HistogramVec;
@@ -384,6 +385,18 @@ pub(crate) fn observe_rawkv_kv_size_bytes(label: &'static str, bytes: usize) {
     histogram.with_label_values(&[label]).observe(bytes as f64);
 }
 
+pub(crate) fn inc_safe_ts_update_counter(result: &'static str, store: &str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_SAFE_TS_UPDATE_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[result, store]).inc();
+    }
+}
+
+pub(crate) fn set_min_safe_ts_gap_seconds(store: &str, gap_seconds: f64) {
+    if let Some(gauge) = TIKV_CLIENT_RUST_MIN_SAFE_TS_GAP_SECONDS_GAUGE_VEC.as_ref() {
+        gauge.with_label_values(&[store]).set(gap_seconds);
+    }
+}
+
 #[allow(dead_code)]
 pub fn observe_tso_batch(batch_size: usize) {
     if let Some(histogram) = PD_TSO_BATCH_SIZE_HISTOGRAM.as_ref() {
@@ -755,6 +768,25 @@ fn register_int_counter_vec(
     Some(metric)
 }
 
+fn register_gauge_vec(
+    name: &'static str,
+    help: &'static str,
+    label_names: &'static [&'static str],
+) -> Option<GaugeVec> {
+    let metric = match GaugeVec::new(Opts::new(name, help), label_names) {
+        Ok(metric) => metric,
+        Err(err) => {
+            warn!("failed to build prometheus gauge vec {name}: {err}");
+            return None;
+        }
+    };
+    if let Err(err) = prometheus::register(Box::new(metric.clone())) {
+        warn!("failed to register prometheus gauge vec {name}: {err}");
+        return None;
+    }
+    Some(metric)
+}
+
 fn register_int_counter(name: &'static str, help: &'static str) -> Option<IntCounter> {
     let metric = match IntCounter::with_opts(Opts::new(name, help)) {
         Ok(metric) => metric,
@@ -1027,6 +1059,20 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["type"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_SAFE_TS_UPDATE_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_safets_update_counter",
+            "Counter of tikv safe_ts being updated.",
+            &["result", "store"],
+        );
+
+    static ref TIKV_CLIENT_RUST_MIN_SAFE_TS_GAP_SECONDS_GAUGE_VEC: Option<GaugeVec> =
+        register_gauge_vec(
+            "tikv_client_rust_min_safets_gap_seconds",
+            "The minimal (non-zero) SafeTS gap for each store.",
+            &["store"],
+        );
+
     static ref TIKV_CLIENT_RUST_READ_REQUEST_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_read_request_bytes";
         let help = "Bucketed histogram of total bytes sent/received for read requests.";
@@ -1121,12 +1167,13 @@ mod tests {
 
     use super::{
         inc_async_commit_txn_counter, inc_batch_client_no_available_connection,
-        inc_commit_txn_counter, inc_one_pc_txn_counter, observe_backoff_seconds,
-        observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
-        observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
-        observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
-        observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
-        observe_txn_heart_beat_seconds, region_cache_operation, tikv_stats_with_context,
+        inc_commit_txn_counter, inc_one_pc_txn_counter, inc_safe_ts_update_counter,
+        observe_backoff_seconds, observe_batch_client_wait_connection_establish,
+        observe_batch_pending_requests, observe_batch_requests, observe_kv_request_traffic_metrics,
+        observe_load_region_cache, observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes,
+        observe_request_retry_times, observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
+        observe_txn_heart_beat_seconds, region_cache_operation, set_min_safe_ts_gap_seconds,
+        tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1611,6 +1658,68 @@ mod tests {
         assert!(
             err_found,
             "expected txn_heart_beat err label metric not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_safets_update_counter_records_labels() {
+        inc_safe_ts_update_counter("success", "unit_test_store_ok");
+        inc_safe_ts_update_counter("skip", "unit_test_store_skip");
+        inc_safe_ts_update_counter("fail", "unit_test_store_fail");
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_safets_update_counter")
+            .expect("safets_update_counter not registered");
+
+        let ok_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("success")
+                && label_value(metric, "store") == Some("unit_test_store_ok")
+                && metric.get_counter().get_value() >= 1.0
+        });
+        assert!(ok_found, "expected safets_update_counter ok label metric");
+
+        let skip_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("skip")
+                && label_value(metric, "store") == Some("unit_test_store_skip")
+                && metric.get_counter().get_value() >= 1.0
+        });
+        assert!(
+            skip_found,
+            "expected safets_update_counter skip label metric"
+        );
+
+        let fail_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("fail")
+                && label_value(metric, "store") == Some("unit_test_store_fail")
+                && metric.get_counter().get_value() >= 1.0
+        });
+        assert!(
+            fail_found,
+            "expected safets_update_counter fail label metric"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_min_safets_gap_seconds_gauge_records_labels() {
+        set_min_safe_ts_gap_seconds("unit_test_store_gap", 123.0);
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_min_safets_gap_seconds")
+            .expect("min_safets_gap_seconds gauge not registered");
+
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "store") == Some("unit_test_store_gap")
+                && (metric.get_gauge().get_value() - 123.0).abs() < 1e-6
+        });
+        assert!(
+            found,
+            "expected min_safets_gap_seconds gauge with label not found"
         );
     }
 
