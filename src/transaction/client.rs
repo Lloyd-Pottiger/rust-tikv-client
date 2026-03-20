@@ -2991,6 +2991,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_store_level_apis_return_error_on_response_error_string() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                if req
+                    .downcast_ref::<kvrpcpb::RegisterLockObserverRequest>()
+                    .is_some()
+                {
+                    return Ok(Box::new(kvrpcpb::RegisterLockObserverResponse {
+                        error: "injected store error".to_owned(),
+                    }) as Box<dyn Any>);
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::CheckLockObserverRequest>()
+                    .is_some()
+                {
+                    return Ok(Box::new(kvrpcpb::CheckLockObserverResponse {
+                        error: "injected store error".to_owned(),
+                        is_clean: false,
+                        locks: Vec::new(),
+                    }) as Box<dyn Any>);
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::RemoveLockObserverRequest>()
+                    .is_some()
+                {
+                    return Ok(Box::new(kvrpcpb::RemoveLockObserverResponse {
+                        error: "injected store error".to_owned(),
+                    }) as Box<dyn Any>);
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::PhysicalScanLockRequest>()
+                    .is_some()
+                {
+                    return Ok(Box::new(kvrpcpb::PhysicalScanLockResponse {
+                        error: "injected store error".to_owned(),
+                        locks: Vec::new(),
+                    }) as Box<dyn Any>);
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::GetLockWaitInfoRequest>()
+                    .is_some()
+                {
+                    return Ok(Box::new(kvrpcpb::GetLockWaitInfoResponse {
+                        region_error: None,
+                        error: "injected store error".to_owned(),
+                        entries: Vec::new(),
+                    }) as Box<dyn Any>);
+                }
+
+                if req
+                    .downcast_ref::<kvrpcpb::GetLockWaitHistoryRequest>()
+                    .is_some()
+                {
+                    return Ok(Box::new(kvrpcpb::GetLockWaitHistoryResponse {
+                        region_error: None,
+                        error: "injected store error".to_owned(),
+                        entries: Vec::new(),
+                    }) as Box<dyn Any>);
+                }
+
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        for err in [
+            client.register_lock_observer(1).await.unwrap_err(),
+            client.check_lock_observer(1).await.unwrap_err(),
+            client.remove_lock_observer(1).await.unwrap_err(),
+            client
+                .physical_scan_lock(1, crate::Key::EMPTY, 1)
+                .await
+                .unwrap_err(),
+            client.lock_wait_info().await.unwrap_err(),
+            client.lock_wait_history().await.unwrap_err(),
+        ] {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("injected store error"),
+                "expected error string to be propagated, got: {msg}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_low_resolution_timestamp_uses_cached_last_tso_without_fetching_pd_timestamp() {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {

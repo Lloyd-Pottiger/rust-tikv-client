@@ -1746,8 +1746,12 @@ impl Merge<kvrpcpb::RegisterLockObserverResponse> for Collect {
         &self,
         input: Vec<Result<kvrpcpb::RegisterLockObserverResponse>>,
     ) -> Result<Self::Out> {
-        let _: Vec<kvrpcpb::RegisterLockObserverResponse> =
-            input.into_iter().collect::<Result<Vec<_>>>()?;
+        for resp in input {
+            let resp = resp?;
+            if !resp.error.is_empty() {
+                return Err(crate::Error::StringError(resp.error));
+            }
+        }
         Ok(())
     }
 }
@@ -1783,6 +1787,9 @@ impl Merge<kvrpcpb::CheckLockObserverResponse> for Collect {
         let mut locks = Vec::new();
         for resp in input {
             let mut resp = resp?;
+            if !resp.error.is_empty() {
+                return Err(crate::Error::StringError(resp.error));
+            }
             is_clean &= resp.is_clean;
             locks.extend(resp.take_locks().into_iter().map(Into::into));
         }
@@ -1810,8 +1817,12 @@ impl Merge<kvrpcpb::RemoveLockObserverResponse> for Collect {
     type Out = ();
 
     fn merge(&self, input: Vec<Result<kvrpcpb::RemoveLockObserverResponse>>) -> Result<Self::Out> {
-        let _: Vec<kvrpcpb::RemoveLockObserverResponse> =
-            input.into_iter().collect::<Result<Vec<_>>>()?;
+        for resp in input {
+            let resp = resp?;
+            if !resp.error.is_empty() {
+                return Err(crate::Error::StringError(resp.error));
+            }
+        }
         Ok(())
     }
 }
@@ -1849,10 +1860,15 @@ impl Merge<kvrpcpb::PhysicalScanLockResponse> for Collect {
     type Out = Vec<kvrpcpb::LockInfo>;
 
     fn merge(&self, input: Vec<Result<kvrpcpb::PhysicalScanLockResponse>>) -> Result<Self::Out> {
-        input
-            .into_iter()
-            .flat_map_ok(|mut resp| resp.take_locks().into_iter().map(Into::into))
-            .collect()
+        let mut locks = Vec::new();
+        for resp in input {
+            let mut resp = resp?;
+            if !resp.error.is_empty() {
+                return Err(crate::Error::StringError(resp.error));
+            }
+            locks.extend(resp.take_locks().into_iter().map(Into::into));
+        }
+        Ok(locks)
     }
 }
 
@@ -1874,10 +1890,15 @@ impl Merge<kvrpcpb::GetLockWaitInfoResponse> for Collect {
     type Out = Vec<crate::proto::deadlock::WaitForEntry>;
 
     fn merge(&self, input: Vec<Result<kvrpcpb::GetLockWaitInfoResponse>>) -> Result<Self::Out> {
-        input
-            .into_iter()
-            .flat_map_ok(|resp| resp.entries.into_iter())
-            .collect()
+        let mut entries = Vec::new();
+        for resp in input {
+            let resp = resp?;
+            if !resp.error.is_empty() {
+                return Err(crate::Error::StringError(resp.error));
+            }
+            entries.extend(resp.entries);
+        }
+        Ok(entries)
     }
 }
 
@@ -1899,10 +1920,15 @@ impl Merge<kvrpcpb::GetLockWaitHistoryResponse> for Collect {
     type Out = Vec<crate::proto::deadlock::WaitForEntry>;
 
     fn merge(&self, input: Vec<Result<kvrpcpb::GetLockWaitHistoryResponse>>) -> Result<Self::Out> {
-        input
-            .into_iter()
-            .flat_map_ok(|resp| resp.entries.into_iter())
-            .collect()
+        let mut entries = Vec::new();
+        for resp in input {
+            let resp = resp?;
+            if !resp.error.is_empty() {
+                return Err(crate::Error::StringError(resp.error));
+            }
+            entries.extend(resp.entries);
+        }
+        Ok(entries)
     }
 }
 
