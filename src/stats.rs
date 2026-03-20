@@ -487,6 +487,20 @@ pub(crate) fn observe_txn_cmd_duration_seconds(
         .observe(duration_to_sec(elapsed));
 }
 
+pub(crate) fn observe_txn_commit_backoff_seconds(elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TXN_COMMIT_BACKOFF_SECONDS_HISTOGRAM.as_ref() else {
+        return;
+    };
+    histogram.observe(duration_to_sec(elapsed));
+}
+
+pub(crate) fn observe_txn_commit_backoff_count(count: u64) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TXN_COMMIT_BACKOFF_COUNT_HISTOGRAM.as_ref() else {
+        return;
+    };
+    histogram.observe(count as f64);
+}
+
 pub(crate) fn observe_txn_heart_beat_seconds(label: &'static str, elapsed: Duration) {
     let Some(histogram) = TIKV_CLIENT_RUST_TXN_HEART_BEAT_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1426,6 +1440,32 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["type", "scope"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_TXN_COMMIT_BACKOFF_SECONDS_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_txn_commit_backoff_seconds";
+        let help = "Bucketed histogram of the total backoff duration in committing a transaction.";
+        let buckets = match prometheus::exponential_buckets(0.001, 2.0, 22) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_TXN_COMMIT_BACKOFF_COUNT_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_txn_commit_backoff_count";
+        let help = "Bucketed histogram of the backoff count in committing a transaction.";
+        let buckets = match prometheus::exponential_buckets(1.0, 2.0, 12) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_TXN_WRITE_KV_NUM_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_txn_write_kv_num";
         let help = "Count of kv pairs to write in a transaction.";
@@ -1733,7 +1773,8 @@ mod tests {
         observe_pipelined_flush_throttle_seconds, observe_range_task_push_duration,
         observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
         observe_stale_read_hit_miss, observe_ts_future_wait_seconds,
-        observe_txn_cmd_duration_seconds, observe_txn_heart_beat_seconds,
+        observe_txn_cmd_duration_seconds, observe_txn_commit_backoff_count,
+        observe_txn_commit_backoff_seconds, observe_txn_heart_beat_seconds,
         observe_txn_lag_commit_ts_attempt_count, observe_txn_lag_commit_ts_wait_seconds,
         observe_txn_ttl_manager, observe_txn_write_kv_num, observe_txn_write_size_bytes,
         region_cache_operation, set_feedback_slow_score,
@@ -2259,6 +2300,52 @@ mod tests {
                 && metric.get_histogram().get_sample_count() >= 1
         });
         assert!(found, "expected histogram metric with labels not found");
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_txn_commit_backoff_histograms_record_observations() {
+        fn histogram_sample(name: &str) -> (u64, f64) {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == name)
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| {
+                    let histogram = metric.get_histogram();
+                    (histogram.get_sample_count(), histogram.get_sample_sum())
+                })
+                .unwrap_or((0, 0.0))
+        }
+
+        let (seconds_count_before, seconds_sum_before) =
+            histogram_sample("tikv_client_rust_txn_commit_backoff_seconds");
+        let (count_count_before, count_sum_before) =
+            histogram_sample("tikv_client_rust_txn_commit_backoff_count");
+
+        observe_txn_commit_backoff_seconds(Duration::from_millis(3));
+        observe_txn_commit_backoff_count(4);
+
+        let (seconds_count_after, seconds_sum_after) =
+            histogram_sample("tikv_client_rust_txn_commit_backoff_seconds");
+        let (count_count_after, count_sum_after) =
+            histogram_sample("tikv_client_rust_txn_commit_backoff_count");
+
+        assert!(
+            seconds_count_after >= seconds_count_before + 1,
+            "expected txn_commit_backoff_seconds histogram to record observations"
+        );
+        assert!(
+            seconds_sum_after > seconds_sum_before,
+            "expected txn_commit_backoff_seconds histogram sum to increase"
+        );
+        assert!(
+            count_count_after >= count_count_before + 1,
+            "expected txn_commit_backoff_count histogram to record observations"
+        );
+        assert!(
+            count_sum_after >= count_sum_before + 4.0,
+            "expected txn_commit_backoff_count histogram sum to increase"
+        );
     }
 
     #[test]

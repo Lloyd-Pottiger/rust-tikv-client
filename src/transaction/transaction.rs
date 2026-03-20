@@ -3703,7 +3703,34 @@ impl<PdC: PdClient> Transaction<PdC> {
         committer.commit_wait_until_tso = self.commit_wait_until_tso;
         committer.commit_wait_until_tso_timeout = self.commit_wait_until_tso_timeout;
         committer.commit_ts_upper_bound_check = self.commit_ts_upper_bound_check.clone();
-        let (res, mode_info) = committer.commit_with_mode_info().await;
+        let (res, mode_info, commit_backoff_duration, commit_backoff_count) =
+            if let Some(details) = crate::util::exec_details() {
+                let backoff_count_before = details.backoff_count();
+                let backoff_duration_before = details.backoff_duration();
+                let (res, mode_info) = committer.commit_with_mode_info().await;
+                let backoff_count_after = details.backoff_count();
+                let backoff_duration_after = details.backoff_duration();
+                (
+                    res,
+                    mode_info,
+                    backoff_duration_after.saturating_sub(backoff_duration_before),
+                    backoff_count_after.saturating_sub(backoff_count_before),
+                )
+            } else {
+                let details = Arc::new(crate::util::ExecDetails::default());
+                let (res, mode_info) = crate::util::with_exec_details(details.clone(), async {
+                    committer.commit_with_mode_info().await
+                })
+                .await;
+                (
+                    res,
+                    mode_info,
+                    details.backoff_duration(),
+                    details.backoff_count(),
+                )
+            };
+        crate::stats::observe_txn_commit_backoff_seconds(commit_backoff_duration);
+        crate::stats::observe_txn_commit_backoff_count(commit_backoff_count);
 
         if let Some(guard) = latch_guard {
             if let Ok(Some(commit_ts)) = &res {
@@ -16050,6 +16077,79 @@ mod tests {
         assert!(
             two_pc_ok_after >= two_pc_ok_before + 1.0,
             "expected commit_txn_counter ok to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_commit_records_txn_commit_backoff_histograms() {
+        fn histogram_sample(name: &str) -> (u64, f64) {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == name)
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| {
+                    let histogram = metric.get_histogram();
+                    (histogram.get_sample_count(), histogram.get_sample_sum())
+                })
+                .unwrap_or((0, 0.0))
+        }
+
+        let (seconds_count_before, seconds_sum_before) =
+            histogram_sample("tikv_client_rust_txn_commit_backoff_seconds");
+        let (count_count_before, count_sum_before) =
+            histogram_sample("tikv_client_rust_txn_commit_backoff_count");
+
+        let start_version = 7;
+        let commit_version = 8;
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            crate::util::record_task_local_backoff(Duration::from_millis(5));
+
+            if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+            if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_causal_consistency(true);
+
+        txn.put(vec![1u8], vec![42u8]).await.unwrap();
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+
+        let (seconds_count_after, seconds_sum_after) =
+            histogram_sample("tikv_client_rust_txn_commit_backoff_seconds");
+        let (count_count_after, count_sum_after) =
+            histogram_sample("tikv_client_rust_txn_commit_backoff_count");
+
+        assert!(
+            seconds_count_after >= seconds_count_before + 1,
+            "expected txn_commit_backoff_seconds histogram to record observations"
+        );
+        assert!(
+            seconds_sum_after > seconds_sum_before,
+            "expected txn_commit_backoff_seconds histogram sum to increase"
+        );
+        assert!(
+            count_count_after >= count_count_before + 1,
+            "expected txn_commit_backoff_count histogram to record observations"
+        );
+        assert!(
+            count_sum_after >= count_sum_before + 2.0,
+            "expected txn_commit_backoff_count histogram sum to increase"
         );
     }
 
