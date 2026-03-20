@@ -690,6 +690,13 @@ pub fn observe_tso_batch(batch_size: usize) {
     }
 }
 
+pub(crate) fn observe_ts_future_wait_seconds(elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TS_FUTURE_WAIT_SECONDS_HISTOGRAM.as_ref() else {
+        return;
+    };
+    histogram.observe(duration_to_sec(elapsed));
+}
+
 pub(crate) fn observe_kv_request_traffic_metrics(
     label: &'static str,
     context: Option<&kvrpcpb::Context>,
@@ -1352,6 +1359,19 @@ lazy_static::lazy_static! {
             "The actual working update interval for the low resolution TSO. As there are adaptive mechanism internally, this value may differ from the config.",
         );
 
+    static ref TIKV_CLIENT_RUST_TS_FUTURE_WAIT_SECONDS_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_ts_future_wait_seconds";
+        let help = "Bucketed histogram of seconds cost for waiting timestamp future.";
+        let buckets = match prometheus::exponential_buckets(0.000005, 2.0, 30) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_TXN_WRITE_CONFLICT_COUNTER: Option<IntCounter> = register_int_counter(
         "tikv_client_rust_txn_write_conflict_counter",
         "Counter of txn write conflict",
@@ -1694,10 +1714,11 @@ mod tests {
         observe_pipelined_flush_len, observe_pipelined_flush_size,
         observe_pipelined_flush_throttle_seconds, observe_range_task_push_duration,
         observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
-        observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
-        observe_txn_heart_beat_seconds, observe_txn_lag_commit_ts_attempt_count,
-        observe_txn_lag_commit_ts_wait_seconds, observe_txn_ttl_manager, observe_txn_write_kv_num,
-        observe_txn_write_size_bytes, region_cache_operation, set_feedback_slow_score,
+        observe_stale_read_hit_miss, observe_ts_future_wait_seconds,
+        observe_txn_cmd_duration_seconds, observe_txn_heart_beat_seconds,
+        observe_txn_lag_commit_ts_attempt_count, observe_txn_lag_commit_ts_wait_seconds,
+        observe_txn_ttl_manager, observe_txn_write_kv_num, observe_txn_write_size_bytes,
+        region_cache_operation, set_feedback_slow_score,
         set_low_resolution_tso_update_interval_seconds, set_min_safe_ts_gap_seconds,
         set_range_task_stats, tikv_stats_with_context,
     };
@@ -2523,6 +2544,27 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected validate_read_ts_from_pd_count to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_ts_future_wait_seconds_histogram_records_observations() {
+        fn sample_count() -> u64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_ts_future_wait_seconds")
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        }
+
+        let before = sample_count();
+        observe_ts_future_wait_seconds(Duration::from_micros(10));
+        let after = sample_count();
+        assert!(
+            after >= before + 1,
+            "expected ts_future_wait_seconds histogram to record observations"
         );
     }
 

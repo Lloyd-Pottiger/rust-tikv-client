@@ -16,6 +16,7 @@ use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::pin_mut;
 use futures::prelude::*;
@@ -85,6 +86,7 @@ impl TimestampOracle {
         self,
         dc_location: String,
     ) -> Result<Timestamp> {
+        let start = Instant::now();
         debug!("getting current timestamp, dc_location={}", dc_location);
         let (response_tx, response_rx) = oneshot::channel();
         let request = TimestampRequest {
@@ -95,7 +97,9 @@ impl TimestampOracle {
             .send(request)
             .await
             .map_err(|_| internal_err!("TimestampRequest channel is closed"))?;
-        Ok(response_rx.await?)
+        let response = response_rx.await;
+        crate::stats::observe_ts_future_wait_seconds(start.elapsed());
+        Ok(response?)
     }
 }
 
@@ -319,6 +323,7 @@ fn allocate_timestamps(
 #[cfg(test)]
 mod tests {
     use futures::stream::StreamExt;
+    use serial_test::serial;
 
     use super::*;
 
@@ -450,5 +455,43 @@ mod tests {
         assert_eq!(t1.suffix_bits, 2);
         assert_eq!(t2.suffix_bits, 2);
         assert_eq!(t3.suffix_bits, 2);
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_get_timestamp_records_ts_future_wait_seconds_histogram() {
+        fn sample_count() -> u64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_ts_future_wait_seconds")
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        }
+
+        let before = sample_count();
+
+        let (request_tx, mut request_rx) = mpsc::channel(MAX_BATCH_SIZE);
+        let oracle = TimestampOracle { request_tx };
+        let handler = tokio::spawn(async move {
+            let req = request_rx.recv().await.expect("timestamp request");
+            let _ = req.response.send(Timestamp {
+                physical: 10,
+                logical: 11,
+                suffix_bits: 0,
+            });
+        });
+
+        oracle
+            .get_timestamp_with_dc_location("dc1".to_owned())
+            .await
+            .expect("timestamp");
+        handler.await.expect("handler task");
+
+        let after = sample_count();
+        assert!(
+            after >= before + 1,
+            "expected ts_future_wait_seconds histogram to record observations"
+        );
     }
 }
