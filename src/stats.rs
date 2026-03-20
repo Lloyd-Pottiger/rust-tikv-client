@@ -406,6 +406,16 @@ pub(crate) fn observe_txn_write_size_bytes(internal: bool, write_size: u64) {
         .observe(write_size as f64);
 }
 
+pub(crate) fn observe_local_latch_wait_seconds(elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_LOCAL_LATCH_WAIT_SECONDS_HISTOGRAM.as_ref() else {
+        return;
+    };
+    if elapsed.is_zero() {
+        return;
+    }
+    histogram.observe(duration_to_sec(elapsed));
+}
+
 pub(crate) struct TxnCmdTimer {
     label: &'static str,
     internal: bool,
@@ -1154,6 +1164,19 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["scope"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_LOCAL_LATCH_WAIT_SECONDS_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_local_latch_wait_seconds";
+        let help = "Wait time of a get local latch.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 20) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_TXN_HEART_BEAT_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_txn_heart_beat";
         let help = "Bucketed histogram of the txn_heartbeat request duration.";
@@ -1331,8 +1354,8 @@ mod tests {
         inc_safe_ts_update_counter, inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
-        observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
-        observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
+        observe_local_latch_wait_seconds, observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes,
+        observe_request_retry_times, observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
         observe_txn_heart_beat_seconds, observe_txn_lag_commit_ts_attempt_count,
         observe_txn_lag_commit_ts_wait_seconds, observe_txn_write_kv_num,
         observe_txn_write_size_bytes, region_cache_operation, set_min_safe_ts_gap_seconds,
@@ -1934,6 +1957,25 @@ mod tests {
             general_found,
             "expected txn_write_size_bytes general label metric not found"
         );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_local_latch_wait_histogram_records_samples() {
+        observe_local_latch_wait_seconds(Duration::from_millis(5));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_local_latch_wait_seconds")
+            .expect("local_latch_wait_seconds histogram not registered");
+
+        let observed = family
+            .get_metric()
+            .first()
+            .map(|metric| metric.get_histogram().get_sample_count())
+            .unwrap_or(0);
+        assert!(observed >= 1, "expected local_latch_wait_seconds sample");
     }
 
     #[test]

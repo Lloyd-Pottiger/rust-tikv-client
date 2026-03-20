@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::{Mutex, Notify};
 
@@ -62,16 +63,22 @@ impl TxnLocalLatches {
         start_ts: u64,
         mut keys: Vec<Vec<u8>>,
     ) -> TxnLatchGuard {
+        let started_at = Instant::now();
         keys.sort();
         keys.dedup();
 
         let required_slots = keys.iter().map(|key| self.slot_id(key)).collect();
         let lock = Arc::new(TxnLatchLock::new(start_ts, keys, required_slots));
 
-        if self.acquire(&lock).await == AcquireResult::Locked {
+        let acquire_result = self.acquire(&lock).await;
+        if acquire_result == AcquireResult::Locked {
             lock.notify.notified().await;
         }
         debug_assert!(!lock.is_locked());
+        let elapsed = started_at.elapsed();
+        if !elapsed.is_zero() {
+            crate::stats::observe_local_latch_wait_seconds(elapsed);
+        }
 
         TxnLatchGuard {
             latches: self.clone(),
@@ -332,6 +339,7 @@ mod tests {
     use crate::transaction::{ResolveLocksContext, Transaction, TransactionOptions};
     use crate::Error;
     use crate::Timestamp;
+    use serial_test::serial;
     use tokio::time::{timeout, Duration};
 
     #[tokio::test]
@@ -467,5 +475,45 @@ mod tests {
             .expect("subsequent latch acquisition should not block");
         assert!(!guard_c.is_stale());
         guard_c.unlock().await;
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_lock_records_local_latch_wait_metrics() {
+        let metric = "tikv_client_rust_local_latch_wait_seconds";
+        let sample_count = || {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| family.get_name() == metric)
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        };
+
+        let before = sample_count();
+
+        let latches = Arc::new(TxnLocalLatches::new(256));
+        let guard_a = latches.lock(1, vec![b"a".to_vec()]).await;
+
+        let latches_b = latches.clone();
+        let handle_b = tokio::spawn(async move { latches_b.lock(2, vec![b"a".to_vec()]).await });
+
+        tokio::task::yield_now().await;
+        assert!(!handle_b.is_finished());
+
+        guard_a.unlock().await;
+
+        let guard_b = timeout(Duration::from_secs(1), handle_b)
+            .await
+            .expect("lock b should be woken")
+            .expect("lock b task should succeed");
+        guard_b.unlock().await;
+
+        let after = sample_count();
+        assert!(
+            after >= before + 1,
+            "expected local_latch_wait_seconds to observe samples"
+        );
     }
 }
