@@ -254,6 +254,12 @@ pub(crate) fn inc_gc_unsafe_destroy_range_failures(label: &'static str) {
     }
 }
 
+pub(crate) fn inc_lock_resolver_actions(label: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_LOCK_RESOLVER_ACTIONS_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[label]).inc();
+    }
+}
+
 pub(crate) fn observe_backoff_seconds(label: &str, duration: Duration) {
     let Some(histogram) = TIKV_CLIENT_RUST_BACKOFF_SECONDS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1145,6 +1151,12 @@ lazy_static::lazy_static! {
         &["type", "store"],
     );
 
+    static ref TIKV_CLIENT_RUST_LOCK_RESOLVER_ACTIONS_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
+        "tikv_client_rust_lock_resolver_actions_total",
+        "Counter of lock resolver actions.",
+        &["type"],
+    );
+
     static ref TIKV_CLIENT_RUST_REGION_ERROR_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_region_err_total",
         "Counter of region errors.",
@@ -1566,8 +1578,8 @@ mod tests {
     use super::{
         add_range_task_stats, inc_async_commit_txn_counter,
         inc_batch_client_no_available_connection, inc_commit_txn_counter,
-        inc_gc_unsafe_destroy_range_failures, inc_load_safepoint_total, inc_one_pc_txn_counter,
-        inc_safe_ts_update_counter, inc_stale_region_from_pd_counter,
+        inc_gc_unsafe_destroy_range_failures, inc_load_safepoint_total, inc_lock_resolver_actions,
+        inc_one_pc_txn_counter, inc_safe_ts_update_counter, inc_stale_region_from_pd_counter,
         inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
@@ -2421,6 +2433,40 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected gc_unsafe_destroy_range_failures(send) to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_lock_resolver_actions_total_counter_increments() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_lock_resolver_actions_total")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(label)
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("resolve");
+        inc_lock_resolver_actions("resolve");
+        let after = counter_value("resolve");
+        assert!(
+            after >= before + 1.0,
+            "expected lock_resolver_actions_total(resolve) to increase"
+        );
+
+        let before = counter_value("query_txn_status");
+        inc_lock_resolver_actions("query_txn_status");
+        let after = counter_value("query_txn_status");
+        assert!(
+            after >= before + 1.0,
+            "expected lock_resolver_actions_total(query_txn_status) to increase"
         );
     }
 
