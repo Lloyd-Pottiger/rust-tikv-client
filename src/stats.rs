@@ -438,6 +438,17 @@ pub(crate) fn inc_one_pc_txn_counter(label: &'static str) {
     }
 }
 
+pub(crate) fn add_aggressive_locking_count(label: &'static str, count: usize) {
+    let Some(counter) = TIKV_CLIENT_RUST_AGGRESSIVE_LOCKING_COUNT_COUNTER_VEC.as_ref() else {
+        return;
+    };
+    let count = u64::try_from(count).unwrap_or(u64::MAX);
+    if count == 0 {
+        return;
+    }
+    counter.with_label_values(&[label]).inc_by(count);
+}
+
 pub(crate) fn inc_load_safepoint_total(label: &'static str) {
     if let Some(counter) = TIKV_CLIENT_RUST_LOAD_SAFEPOINT_COUNTER_VEC.as_ref() {
         counter.with_label_values(&[label]).inc();
@@ -1377,6 +1388,13 @@ lazy_static::lazy_static! {
         "Counter of txn write conflict",
     );
 
+    static ref TIKV_CLIENT_RUST_AGGRESSIVE_LOCKING_COUNT_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_aggressive_locking_count",
+            "Counter of keys locked in aggressive locking mode",
+            &["type"],
+        );
+
     static ref TIKV_CLIENT_RUST_COMMIT_TXN_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_commit_txn_counter",
         "Counter of 2PC transactions.",
@@ -1701,7 +1719,7 @@ mod tests {
     use serial_test::serial;
 
     use super::{
-        add_range_task_stats, inc_async_commit_txn_counter,
+        add_aggressive_locking_count, add_range_task_stats, inc_async_commit_txn_counter,
         inc_batch_client_no_available_connection, inc_commit_txn_counter,
         inc_gc_unsafe_destroy_range_failures, inc_health_feedback_ops_counter,
         inc_load_safepoint_total, inc_lock_resolver_actions, inc_one_pc_txn_counter,
@@ -2133,6 +2151,32 @@ mod tests {
                 .iter()
                 .any(|metric| label_value(metric, "type") == Some("fallback")),
             "expected one_pc_txn_counter fallback label"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_aggressive_locking_count_counter_increments() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_aggressive_locking_count")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(label)
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("new");
+        add_aggressive_locking_count("new", 3);
+        let after = counter_value("new");
+        assert!(
+            after >= before + 3.0,
+            "expected aggressive_locking_count(new) to increase"
         );
     }
 

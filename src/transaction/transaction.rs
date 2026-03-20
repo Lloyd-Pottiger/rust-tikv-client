@@ -4486,6 +4486,14 @@ impl<PdC: PdClient> Transaction<PdC> {
         } else {
             locks.clone()
         };
+
+        if track_aggressive_locking && self.aggressive_locking.is_some() && !need_value {
+            crate::stats::add_aggressive_locking_count(
+                "derived",
+                locks.len().saturating_sub(locks_for_request.len()),
+            );
+            crate::stats::add_aggressive_locking_count("new", locks_for_request.len());
+        }
         if locks_for_request.is_empty() {
             self.buffer.primary_key_or(&primary_lock);
             self.start_auto_heartbeat().await?;
@@ -4518,6 +4526,13 @@ impl<PdC: PdClient> Transaction<PdC> {
             && self.aggressive_locking.is_some()
             && mode == PessimisticLockMode::Exclusive
             && locks_for_request.len() == 1;
+        if track_aggressive_locking
+            && !need_value
+            && self.aggressive_locking.is_some()
+            && !use_force_lock_wake_up_mode
+        {
+            crate::stats::add_aggressive_locking_count("non_force_lock", locks_for_request.len());
+        }
         let apply_pessimistic_lock_wake_up_mode =
             |request: &mut kvrpcpb::PessimisticLockRequest| {
                 if use_force_lock_wake_up_mode {
@@ -4901,6 +4916,7 @@ impl<PdC: PdClient> Transaction<PdC> {
 
             let mut locked_keys_actual_for_update_ts = Vec::new();
             let mut max_locked_with_conflict_ts = 0u64;
+            let mut locked_with_conflict_count = 0usize;
             if request.wake_up_mode
                 == kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock as i32
             {
@@ -4929,6 +4945,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                                 == kvrpcpb::PessimisticLockKeyResultType::LockResultLockedWithConflict
                                     as i32 =>
                             {
+                                locked_with_conflict_count =
+                                    locked_with_conflict_count.saturating_add(1);
                                 false
                             }
                             x if x
@@ -4975,6 +4993,12 @@ impl<PdC: PdClient> Transaction<PdC> {
             );
 
             if errors.is_empty() {
+                if track_aggressive_locking && locked_with_conflict_count > 0 {
+                    crate::stats::add_aggressive_locking_count(
+                        "locked_with_conflict",
+                        locked_with_conflict_count,
+                    );
+                }
                 let pairs = CollectPessimisticLock::new(need_value)
                     .merge(success.into_iter().map(Ok).collect())?;
                 return Ok(PessimisticLockRequestResult {
@@ -18633,6 +18657,85 @@ mod tests {
         assert_eq!(
             lock_requests[0].wake_up_mode,
             kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock as i32
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_aggressive_locking_records_metrics() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_aggressive_locking_count")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == label)
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let new_before = counter_value("new");
+        let derived_before = counter_value("derived");
+        let locked_with_conflict_before = counter_value("locked_with_conflict");
+        let non_force_lock_before = counter_value("non_force_lock");
+
+        let client = MockKvClient::with_dispatch_hook(|req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PessimisticLockRequest>() {
+                let mut resp = ok_pessimistic_lock_response_for_request(req);
+                if req.wake_up_mode
+                    == kvrpcpb::PessimisticLockWakeUpMode::WakeUpModeForceLock as i32
+                {
+                    if let Some(result) = resp.results.first_mut() {
+                        result.r#type =
+                            kvrpcpb::PessimisticLockKeyResultType::LockResultLockedWithConflict
+                                as i32;
+                        result.locked_with_conflict_ts = req.for_update_ts.saturating_add(100);
+                    }
+                }
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            Err(Error::StringError("unexpected request".to_owned()))
+        });
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(100));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_pessimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.start_aggressive_locking().unwrap();
+
+        txn.lock_keys(vec![b"k1".to_vec()]).await.unwrap();
+        assert!(
+            counter_value("new") >= new_before + 1.0,
+            "expected aggressive_locking_count(new) to increase"
+        );
+        assert!(
+            counter_value("locked_with_conflict") >= locked_with_conflict_before + 1.0,
+            "expected aggressive_locking_count(locked_with_conflict) to increase"
+        );
+
+        txn.lock_keys(vec![b"k1".to_vec()]).await.unwrap();
+        assert!(
+            counter_value("derived") >= derived_before + 1.0,
+            "expected aggressive_locking_count(derived) to increase"
+        );
+
+        txn.lock_keys(vec![b"k2".to_vec(), b"k3".to_vec()])
+            .await
+            .unwrap();
+        assert!(
+            counter_value("non_force_lock") >= non_force_lock_before + 2.0,
+            "expected aggressive_locking_count(non_force_lock) to increase"
         );
     }
 
