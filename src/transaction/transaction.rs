@@ -7380,6 +7380,9 @@ impl<PdC: PdClient> Committer<PdC> {
         let primary_lock_key = primary_lock.clone();
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = self.calc_txn_lock_ttl();
+        if self.options.assertion_level != AssertionLevel::Off {
+            crate::stats::inc_prewrite_assertion_count_for_mutations(&self.mutations);
+        }
         let mut request = match &self.options.kind {
             TransactionKind::Optimistic => new_prewrite_request(
                 self.mutations.clone(),
@@ -19126,6 +19129,184 @@ mod tests {
                     expected_for_update_ts: 101,
                 }
             ]
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_prewrite_assertion_count_records_prewrite_mutations() {
+        fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+            metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.get_name() == name)
+                .map(|pair| pair.get_value())
+        }
+
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_prewrite_assertion_count")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(label)
+                            && metric.has_counter()
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before_none = counter_value("none");
+        let before_exist = counter_value("exist");
+        let before_not_exist = counter_value("not-exist");
+        let before_unknown = counter_value("unknown");
+
+        let client = MockKvClient::with_dispatch_hook(|req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+        let pd_client = Arc::new(MockPdClient::new(client));
+
+        let mutations = vec![
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: vec![1],
+                value: vec![1],
+                assertion: kvrpcpb::Assertion::None as i32,
+            },
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: vec![2],
+                value: vec![2],
+                assertion: kvrpcpb::Assertion::Exist as i32,
+            },
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: vec![3],
+                value: vec![3],
+                assertion: kvrpcpb::Assertion::NotExist as i32,
+            },
+            kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: vec![4],
+                value: vec![4],
+                assertion: 42,
+            },
+        ];
+
+        let mut options = TransactionOptions::new_optimistic();
+        options.assertion_level = AssertionLevel::Strict;
+
+        let mut committer = super::Committer::new(
+            Some(Key::from(vec![1])),
+            mutations,
+            Timestamp::from_version(7),
+            pd_client,
+            options,
+            Keyspace::Disable,
+            0,
+            Instant::now(),
+        );
+
+        let _ = committer.prewrite().await.unwrap();
+
+        assert!(
+            counter_value("none") >= before_none + 1.0,
+            "expected prewrite_assertion_count(none) to increase"
+        );
+        assert!(
+            counter_value("exist") >= before_exist + 1.0,
+            "expected prewrite_assertion_count(exist) to increase"
+        );
+        assert!(
+            counter_value("not-exist") >= before_not_exist + 1.0,
+            "expected prewrite_assertion_count(not-exist) to increase"
+        );
+        assert!(
+            counter_value("unknown") >= before_unknown + 1.0,
+            "expected prewrite_assertion_count(unknown) to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_prewrite_assertion_count_records_flush_mutations() {
+        fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+            metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.get_name() == name)
+                .map(|pair| pair.get_value())
+        }
+
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_prewrite_assertion_count")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(label)
+                            && metric.has_counter()
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before_none = counter_value("none");
+        let before_exist = counter_value("exist");
+        let before_not_exist = counter_value("not-exist");
+        let before_unknown = counter_value("unknown");
+
+        let mutations = vec![
+            kvrpcpb::Mutation {
+                assertion: kvrpcpb::Assertion::None as i32,
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                assertion: kvrpcpb::Assertion::Exist as i32,
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                assertion: kvrpcpb::Assertion::NotExist as i32,
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                assertion: 42,
+                ..Default::default()
+            },
+        ];
+
+        let _ = crate::transaction::lowering::new_flush_request(
+            mutations,
+            Key::from(vec![1]),
+            Timestamp::from_version(7),
+            0,
+            0,
+            0,
+            kvrpcpb::AssertionLevel::Strict,
+        );
+
+        assert!(
+            counter_value("none") >= before_none + 1.0,
+            "expected prewrite_assertion_count(none) to increase"
+        );
+        assert!(
+            counter_value("exist") >= before_exist + 1.0,
+            "expected prewrite_assertion_count(exist) to increase"
+        );
+        assert!(
+            counter_value("not-exist") >= before_not_exist + 1.0,
+            "expected prewrite_assertion_count(not-exist) to increase"
+        );
+        assert!(
+            counter_value("unknown") >= before_unknown + 1.0,
+            "expected prewrite_assertion_count(unknown) to increase"
         );
     }
 }

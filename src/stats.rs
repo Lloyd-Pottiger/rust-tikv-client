@@ -260,6 +260,43 @@ pub(crate) fn inc_lock_resolver_actions(label: &'static str) {
     }
 }
 
+pub(crate) fn inc_prewrite_assertion_count_for_mutations(mutations: &[kvrpcpb::Mutation]) {
+    let Some(counter) = TIKV_CLIENT_RUST_PREWRITE_ASSERTION_COUNT_COUNTER_VEC.as_ref() else {
+        return;
+    };
+
+    if mutations.is_empty() {
+        return;
+    }
+
+    let mut none = 0_u64;
+    let mut exist = 0_u64;
+    let mut not_exist = 0_u64;
+    let mut unknown = 0_u64;
+
+    for mutation in mutations {
+        match kvrpcpb::Assertion::try_from(mutation.assertion) {
+            Ok(kvrpcpb::Assertion::None) => none += 1,
+            Ok(kvrpcpb::Assertion::Exist) => exist += 1,
+            Ok(kvrpcpb::Assertion::NotExist) => not_exist += 1,
+            Err(_) => unknown += 1,
+        }
+    }
+
+    if none > 0 {
+        counter.with_label_values(&["none"]).inc_by(none);
+    }
+    if exist > 0 {
+        counter.with_label_values(&["exist"]).inc_by(exist);
+    }
+    if not_exist > 0 {
+        counter.with_label_values(&["not-exist"]).inc_by(not_exist);
+    }
+    if unknown > 0 {
+        counter.with_label_values(&["unknown"]).inc_by(unknown);
+    }
+}
+
 pub(crate) fn observe_backoff_seconds(label: &str, duration: Duration) {
     let Some(histogram) = TIKV_CLIENT_RUST_BACKOFF_SECONDS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1157,6 +1194,12 @@ lazy_static::lazy_static! {
         &["type"],
     );
 
+    static ref TIKV_CLIENT_RUST_PREWRITE_ASSERTION_COUNT_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
+        "tikv_client_rust_prewrite_assertion_count",
+        "Counter of assertions used in prewrite requests.",
+        &["type"],
+    );
+
     static ref TIKV_CLIENT_RUST_REGION_ERROR_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_region_err_total",
         "Counter of region errors.",
@@ -1579,7 +1622,8 @@ mod tests {
         add_range_task_stats, inc_async_commit_txn_counter,
         inc_batch_client_no_available_connection, inc_commit_txn_counter,
         inc_gc_unsafe_destroy_range_failures, inc_load_safepoint_total, inc_lock_resolver_actions,
-        inc_one_pc_txn_counter, inc_safe_ts_update_counter, inc_stale_region_from_pd_counter,
+        inc_one_pc_txn_counter, inc_prewrite_assertion_count_for_mutations,
+        inc_safe_ts_update_counter, inc_stale_region_from_pd_counter,
         inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
@@ -2467,6 +2511,73 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected lock_resolver_actions_total(query_txn_status) to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_prewrite_assertion_count_counter_records_mutation_assertions() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_prewrite_assertion_count")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(label)
+                            && metric.has_counter()
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let mutations = vec![
+            kvrpcpb::Mutation {
+                assertion: kvrpcpb::Assertion::None as i32,
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                assertion: kvrpcpb::Assertion::Exist as i32,
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                assertion: kvrpcpb::Assertion::NotExist as i32,
+                ..Default::default()
+            },
+            kvrpcpb::Mutation {
+                assertion: 42,
+                ..Default::default()
+            },
+        ];
+
+        let before_none = counter_value("none");
+        let before_exist = counter_value("exist");
+        let before_not_exist = counter_value("not-exist");
+        let before_unknown = counter_value("unknown");
+
+        inc_prewrite_assertion_count_for_mutations(&mutations);
+
+        let after_none = counter_value("none");
+        let after_exist = counter_value("exist");
+        let after_not_exist = counter_value("not-exist");
+        let after_unknown = counter_value("unknown");
+
+        assert!(
+            after_none >= before_none + 1.0,
+            "expected prewrite_assertion_count(none) to increase"
+        );
+        assert!(
+            after_exist >= before_exist + 1.0,
+            "expected prewrite_assertion_count(exist) to increase"
+        );
+        assert!(
+            after_not_exist >= before_not_exist + 1.0,
+            "expected prewrite_assertion_count(not-exist) to increase"
+        );
+        assert!(
+            after_unknown >= before_unknown + 1.0,
+            "expected prewrite_assertion_count(unknown) to increase"
         );
     }
 

@@ -7,6 +7,7 @@ use crate::proto::pdpb::Timestamp;
 /// This module provides constructor functions for requests which take arguments as high-level
 /// types (i.e., the types from the client crate) and converts these to the types used in the
 /// generated protobuf code, then calls the low-level ctor functions in the requests module.
+use crate::stats;
 use crate::timestamp::TimestampExt;
 /// This module provides constructor functions for requests which take arguments as high-level
 /// types (i.e., the types from the client crate) and converts these to the types used in the
@@ -203,6 +204,9 @@ pub fn new_flush_request(
     lock_ttl: u64,
     assertion_level: kvrpcpb::AssertionLevel,
 ) -> kvrpcpb::FlushRequest {
+    if assertion_level != kvrpcpb::AssertionLevel::Off {
+        stats::inc_prewrite_assertion_count_for_mutations(&mutations);
+    }
     requests::new_flush_request(
         mutations,
         primary_key.into(),
