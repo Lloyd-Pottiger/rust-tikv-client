@@ -4177,7 +4177,11 @@ impl<PdC: PdClient> Transaction<PdC> {
         .merge(CollectSingle)
         .post_process_default()
         .plan();
-        plan.execute().await
+        let start = Instant::now();
+        let res = plan.execute().await;
+        let label = if res.is_ok() { "ok" } else { "err" };
+        crate::stats::observe_txn_heart_beat_seconds(label, start.elapsed());
+        res
     }
 
     async fn scan_inner(
@@ -5443,7 +5447,13 @@ impl<PdC: PdClient> Transaction<PdC> {
                 .post_process_default()
                 .plan();
 
-                if let Err(err) = plan.execute().await {
+                let start_time = Instant::now();
+                let heartbeat_res = plan.execute().await;
+                crate::stats::observe_txn_heart_beat_seconds(
+                    if heartbeat_res.is_ok() { "ok" } else { "err" },
+                    start_time.elapsed(),
+                );
+                if let Err(err) = heartbeat_res {
                     if broadcast_pipelined_txn_status {
                         let mut should_close = false;
                         match &err {
@@ -16019,6 +16029,148 @@ mod tests {
         assert!(
             sample_count("shared_lock_keys", "true") >= before_shared_lock_keys + 1,
             "expected txn_cmd_duration_seconds shared_lock_keys to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_send_heart_beat_records_txn_heart_beat_histogram_ok_and_err_labels() {
+        let start_version = 7;
+
+        let sample_count = |label: &str| {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_txn_heart_beat")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == label)
+                    })
+                })
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        };
+
+        let ok_before = sample_count("ok");
+        let err_before = sample_count("err");
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::TxnHeartBeatRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::TxnHeartBeatResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::Unimplemented)
+            },
+        )));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.put(vec![1u8], b"v".to_vec()).await.unwrap();
+        let _ = txn.send_heart_beat().await.unwrap();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::TxnHeartBeatRequest>().is_some() {
+                    return Err(Error::StringError("heartbeat failed".to_owned()));
+                }
+                Err(Error::Unimplemented)
+            },
+        )));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version.saturating_add(1)),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.put(vec![1u8], b"v".to_vec()).await.unwrap();
+        let _ = txn
+            .send_heart_beat()
+            .await
+            .expect_err("expected heartbeat failure");
+
+        let ok_after = sample_count("ok");
+        let err_after = sample_count("err");
+        assert!(
+            ok_after >= ok_before + 1,
+            "expected txn_heart_beat ok to increase"
+        );
+        assert!(
+            err_after >= err_before + 1,
+            "expected txn_heart_beat err to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_auto_heartbeat_records_txn_heart_beat_histogram() {
+        let start_version = 7;
+        let heartbeat_calls = Arc::new(AtomicUsize::new(0));
+        let heartbeat_calls_captured = heartbeat_calls.clone();
+
+        let sample_count = |label: &str| {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_txn_heart_beat")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == label)
+                    })
+                })
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        };
+
+        let ok_before = sample_count("ok");
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::TxnHeartBeatRequest>().is_some() {
+                    heartbeat_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::<kvrpcpb::TxnHeartBeatResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::Unimplemented)
+            },
+        )));
+        pd_client.set_ttl_refreshed_txn_size(0);
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::FixedTime(Duration::from_millis(10)))
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.put("k".to_owned(), "v").await.unwrap();
+        txn.start_auto_heartbeat().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while heartbeat_calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("heartbeat should fire");
+        txn.stop_auto_heartbeat();
+
+        let ok_after = sample_count("ok");
+        assert!(
+            ok_after >= ok_before + 1,
+            "expected txn_heart_beat ok to increase"
         );
     }
 

@@ -337,6 +337,15 @@ pub(crate) fn observe_txn_cmd_duration_seconds(
         .observe(duration_to_sec(elapsed));
 }
 
+pub(crate) fn observe_txn_heart_beat_seconds(label: &'static str, elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TXN_HEART_BEAT_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    histogram
+        .with_label_values(&[label])
+        .observe(duration_to_sec(elapsed));
+}
+
 pub(crate) struct TxnCmdTimer {
     label: &'static str,
     internal: bool,
@@ -979,6 +988,19 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["type", "scope"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_TXN_HEART_BEAT_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_txn_heart_beat";
+        let help = "Bucketed histogram of the txn_heartbeat request duration.";
+        let buckets = match prometheus::exponential_buckets(0.001, 2.0, 20) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["type"], buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_RAWKV_CMD_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_rawkv_cmd_seconds";
         let help = "Bucketed histogram of processing time of rawkv cmds.";
@@ -1103,8 +1125,8 @@ mod tests {
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
         observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
-        observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds, region_cache_operation,
-        tikv_stats_with_context,
+        observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
+        observe_txn_heart_beat_seconds, region_cache_operation, tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1559,6 +1581,37 @@ mod tests {
                 && metric.get_histogram().get_sample_count() >= 1
         });
         assert!(found, "expected histogram metric with labels not found");
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_txn_heart_beat_histogram_records_labels() {
+        observe_txn_heart_beat_seconds("ok", Duration::from_millis(5));
+        observe_txn_heart_beat_seconds("err", Duration::from_millis(7));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_txn_heart_beat")
+            .expect("txn_heart_beat histogram not registered");
+
+        let ok_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("ok")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            ok_found,
+            "expected txn_heart_beat ok label metric not found"
+        );
+
+        let err_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("err")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            err_found,
+            "expected txn_heart_beat err label metric not found"
+        );
     }
 
     #[test]
