@@ -73,15 +73,26 @@ async fn refresh_health_feedback_once<PdC: PdClient>(
                 let saw_supported = saw_supported_for_tasks.clone();
                 let saw_unimplemented = saw_unimplemented_for_tasks.clone();
                 async move {
+                    crate::stats::inc_health_feedback_ops_counter(store_id, "tick");
+                    crate::stats::inc_health_feedback_ops_counter(store_id, "active_update");
                     match pd.get_health_feedback(store_id).await {
-                        Ok(_feedback) => {
+                        Ok(feedback) => {
                             saw_supported.store(true, Ordering::Relaxed);
+                            crate::stats::set_feedback_slow_score(store_id, feedback.slow_score);
                         }
                         Err(err) if is_unimplemented_error(&err) => {
                             saw_unimplemented.store(true, Ordering::Relaxed);
+                            crate::stats::inc_health_feedback_ops_counter(
+                                store_id,
+                                "active_update_err",
+                            );
                         }
                         Err(err) => {
                             saw_supported.store(true, Ordering::Relaxed);
+                            crate::stats::inc_health_feedback_ops_counter(
+                                store_id,
+                                "active_update_err",
+                            );
                             debug!(
                                 "health feedback request to store {} failed: {:?}",
                                 store_id, err
@@ -111,11 +122,48 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    use serial_test::serial;
+
     use super::*;
     use crate::mock::{MockKvClient, MockPdClient};
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
     use tonic::Status;
+
+    fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+        metric
+            .get_label()
+            .iter()
+            .find(|pair| pair.get_name() == name)
+            .map(|pair| pair.get_value())
+    }
+
+    fn feedback_slow_score(store: &str) -> Option<f64> {
+        prometheus::gather()
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_feedback_slow_score")
+            .and_then(|family| {
+                family.get_metric().iter().find(|metric| {
+                    label_value(metric, "store") == Some(store) && metric.has_gauge()
+                })
+            })
+            .map(|metric| metric.get_gauge().get_value())
+    }
+
+    fn health_feedback_counter(scope: &str, ty: &str) -> f64 {
+        prometheus::gather()
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_health_feedback_ops_counter")
+            .and_then(|family| {
+                family.get_metric().iter().find(|metric| {
+                    label_value(metric, "scope") == Some(scope)
+                        && label_value(metric, "type") == Some(ty)
+                        && metric.has_counter()
+                })
+            })
+            .map(|metric| metric.get_counter().get_value())
+            .unwrap_or(0.0)
+    }
 
     #[test]
     fn test_is_unimplemented_error_matches_unimplemented_variants() {
@@ -129,7 +177,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_refresh_health_feedback_once_queries_all_stores() {
+        crate::stats::set_feedback_slow_score(1, 999);
+        crate::stats::set_feedback_slow_score(2, 999);
+
+        let tick_1_before = health_feedback_counter("1", "tick");
+        let tick_2_before = health_feedback_counter("2", "tick");
+        let active_update_1_before = health_feedback_counter("1", "active_update");
+        let active_update_2_before = health_feedback_counter("2", "active_update");
+        let active_update_err_1_before = health_feedback_counter("1", "active_update_err");
+        let active_update_err_2_before = health_feedback_counter("2", "active_update_err");
+
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_captured = calls.clone();
 
@@ -165,10 +224,58 @@ mod tests {
         let outcome = refresh_health_feedback_once(client.clone()).await.unwrap();
         assert_eq!(outcome, HealthFeedbackRefreshOutcome::Completed);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        assert!(
+            health_feedback_counter("1", "tick") >= tick_1_before + 1.0,
+            "expected health_feedback_ops_counter(1, tick) to increase"
+        );
+        assert!(
+            health_feedback_counter("2", "tick") >= tick_2_before + 1.0,
+            "expected health_feedback_ops_counter(2, tick) to increase"
+        );
+        assert!(
+            health_feedback_counter("1", "active_update") >= active_update_1_before + 1.0,
+            "expected health_feedback_ops_counter(1, active_update) to increase"
+        );
+        assert!(
+            health_feedback_counter("2", "active_update") >= active_update_2_before + 1.0,
+            "expected health_feedback_ops_counter(2, active_update) to increase"
+        );
+        assert_eq!(
+            health_feedback_counter("1", "active_update_err"),
+            active_update_err_1_before,
+            "expected health_feedback_ops_counter(1, active_update_err) not to change"
+        );
+        assert_eq!(
+            health_feedback_counter("2", "active_update_err"),
+            active_update_err_2_before,
+            "expected health_feedback_ops_counter(2, active_update_err) not to change"
+        );
+        assert_eq!(
+            feedback_slow_score("1"),
+            Some(1.0),
+            "expected feedback_slow_score gauge for store 1"
+        );
+        assert_eq!(
+            feedback_slow_score("2"),
+            Some(1.0),
+            "expected feedback_slow_score gauge for store 2"
+        );
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_refresh_health_feedback_once_stops_when_unimplemented_everywhere() {
+        crate::stats::set_feedback_slow_score(1, 999);
+        crate::stats::set_feedback_slow_score(2, 999);
+
+        let tick_1_before = health_feedback_counter("1", "tick");
+        let tick_2_before = health_feedback_counter("2", "tick");
+        let active_update_1_before = health_feedback_counter("1", "active_update");
+        let active_update_2_before = health_feedback_counter("2", "active_update");
+        let active_update_err_1_before = health_feedback_counter("1", "active_update_err");
+        let active_update_err_2_before = health_feedback_counter("2", "active_update_err");
+
         let client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             |req: &dyn Any| {
                 req.downcast_ref::<kvrpcpb::GetHealthFeedbackRequest>()
@@ -192,5 +299,40 @@ mod tests {
 
         let outcome = refresh_health_feedback_once(client.clone()).await.unwrap();
         assert_eq!(outcome, HealthFeedbackRefreshOutcome::Unsupported);
+
+        assert!(
+            health_feedback_counter("1", "tick") >= tick_1_before + 1.0,
+            "expected health_feedback_ops_counter(1, tick) to increase"
+        );
+        assert!(
+            health_feedback_counter("2", "tick") >= tick_2_before + 1.0,
+            "expected health_feedback_ops_counter(2, tick) to increase"
+        );
+        assert!(
+            health_feedback_counter("1", "active_update") >= active_update_1_before + 1.0,
+            "expected health_feedback_ops_counter(1, active_update) to increase"
+        );
+        assert!(
+            health_feedback_counter("2", "active_update") >= active_update_2_before + 1.0,
+            "expected health_feedback_ops_counter(2, active_update) to increase"
+        );
+        assert!(
+            health_feedback_counter("1", "active_update_err") >= active_update_err_1_before + 1.0,
+            "expected health_feedback_ops_counter(1, active_update_err) to increase"
+        );
+        assert!(
+            health_feedback_counter("2", "active_update_err") >= active_update_err_2_before + 1.0,
+            "expected health_feedback_ops_counter(2, active_update_err) to increase"
+        );
+        assert_eq!(
+            feedback_slow_score("1"),
+            Some(999.0),
+            "expected feedback_slow_score gauge for store 1 not to change"
+        );
+        assert_eq!(
+            feedback_slow_score("2"),
+            Some(999.0),
+            "expected feedback_slow_score gauge for store 2 not to change"
+        );
     }
 }

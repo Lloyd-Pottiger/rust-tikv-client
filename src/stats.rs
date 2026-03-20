@@ -297,6 +297,24 @@ pub(crate) fn inc_prewrite_assertion_count_for_mutations(mutations: &[kvrpcpb::M
     }
 }
 
+pub(crate) fn set_feedback_slow_score(store_id: u64, slow_score: i32) {
+    let Some(gauge) = TIKV_CLIENT_RUST_FEEDBACK_SLOW_SCORE_GAUGE_VEC.as_ref() else {
+        return;
+    };
+    let mut buf = [0u8; 20];
+    let store = u64_label_value(store_id, &mut buf);
+    gauge.with_label_values(&[store]).set(f64::from(slow_score));
+}
+
+pub(crate) fn inc_health_feedback_ops_counter(scope: u64, label: &'static str) {
+    let Some(counter) = TIKV_CLIENT_RUST_HEALTH_FEEDBACK_OPS_COUNTER_VEC.as_ref() else {
+        return;
+    };
+    let mut buf = [0u8; 20];
+    let scope = u64_label_value(scope, &mut buf);
+    counter.with_label_values(&[scope, label]).inc();
+}
+
 pub(crate) fn observe_backoff_seconds(label: &str, duration: Duration) {
     let Some(histogram) = TIKV_CLIENT_RUST_BACKOFF_SECONDS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1200,6 +1218,18 @@ lazy_static::lazy_static! {
         &["type"],
     );
 
+    static ref TIKV_CLIENT_RUST_FEEDBACK_SLOW_SCORE_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
+        "tikv_client_rust_feedback_slow_score",
+        "Slow scores of each tikv node that is calculated by TiKV and sent to the client by health feedback.",
+        &["store"],
+    );
+
+    static ref TIKV_CLIENT_RUST_HEALTH_FEEDBACK_OPS_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
+        "tikv_client_rust_health_feedback_ops_counter",
+        "Counter of operations about TiKV health feedback.",
+        &["scope", "type"],
+    );
+
     static ref TIKV_CLIENT_RUST_REGION_ERROR_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_region_err_total",
         "Counter of region errors.",
@@ -1621,20 +1651,20 @@ mod tests {
     use super::{
         add_range_task_stats, inc_async_commit_txn_counter,
         inc_batch_client_no_available_connection, inc_commit_txn_counter,
-        inc_gc_unsafe_destroy_range_failures, inc_load_safepoint_total, inc_lock_resolver_actions,
-        inc_one_pc_txn_counter, inc_prewrite_assertion_count_for_mutations,
-        inc_safe_ts_update_counter, inc_stale_region_from_pd_counter,
-        inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
-        observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
-        observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
-        observe_local_latch_wait_seconds, observe_pipelined_flush_duration,
-        observe_pipelined_flush_len, observe_pipelined_flush_size,
-        observe_pipelined_flush_throttle_seconds, observe_range_task_push_duration,
-        observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
-        observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
+        inc_gc_unsafe_destroy_range_failures, inc_health_feedback_ops_counter,
+        inc_load_safepoint_total, inc_lock_resolver_actions, inc_one_pc_txn_counter,
+        inc_prewrite_assertion_count_for_mutations, inc_safe_ts_update_counter,
+        inc_stale_region_from_pd_counter, inc_validate_read_ts_from_pd_count,
+        observe_backoff_seconds, observe_batch_client_wait_connection_establish,
+        observe_batch_pending_requests, observe_batch_requests, observe_kv_request_traffic_metrics,
+        observe_load_region_cache, observe_local_latch_wait_seconds,
+        observe_pipelined_flush_duration, observe_pipelined_flush_len,
+        observe_pipelined_flush_size, observe_pipelined_flush_throttle_seconds,
+        observe_range_task_push_duration, observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes,
+        observe_request_retry_times, observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
         observe_txn_heart_beat_seconds, observe_txn_lag_commit_ts_attempt_count,
         observe_txn_lag_commit_ts_wait_seconds, observe_txn_write_kv_num,
-        observe_txn_write_size_bytes, region_cache_operation,
+        observe_txn_write_size_bytes, region_cache_operation, set_feedback_slow_score,
         set_low_resolution_tso_update_interval_seconds, set_min_safe_ts_gap_seconds,
         set_range_task_stats, tikv_stats_with_context,
     };
@@ -2578,6 +2608,49 @@ mod tests {
         assert!(
             after_unknown >= before_unknown + 1.0,
             "expected prewrite_assertion_count(unknown) to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_feedback_slow_score_gauge_sets_value_for_store() {
+        set_feedback_slow_score(42, 81);
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_feedback_slow_score")
+            .expect("feedback_slow_score gauge not registered");
+
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "store") == Some("42") && metric.get_gauge().get_value() == 81.0
+        });
+        assert!(found, "expected feedback_slow_score gauge for store 42");
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_health_feedback_ops_counter_increments_for_scope_and_type() {
+        fn counter_value(scope: &str, ty: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_health_feedback_ops_counter")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "scope") == Some(scope)
+                            && label_value(metric, "type") == Some(ty)
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("7", "tick");
+        inc_health_feedback_ops_counter(7, "tick");
+        let after = counter_value("7", "tick");
+        assert!(
+            after >= before + 1.0,
+            "expected health_feedback_ops_counter(7, tick) to increase"
         );
     }
 

@@ -741,6 +741,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC, Cluster> {
 
 impl<KvC: KvConnect + Send + Sync + 'static> HealthFeedbackObserver for PdRpcClient<KvC, Cluster> {
     fn observe_health_feedback(&self, feedback: &kvrpcpb::HealthFeedback) {
+        crate::stats::set_feedback_slow_score(feedback.store_id, feedback.slow_score);
         if feedback.slow_score >= HEALTH_FEEDBACK_SLOW_SCORE_THRESHOLD {
             PdClient::mark_store_slow(self, feedback.store_id, HEALTH_FEEDBACK_SLOW_STORE_TTL);
         }
