@@ -242,6 +242,12 @@ pub(crate) fn observe_load_region_cache(op: &'static str, elapsed: Duration) {
     }
 }
 
+pub(crate) fn inc_stale_region_from_pd_counter() {
+    if let Some(counter) = TIKV_CLIENT_RUST_STALE_REGION_FROM_PD_COUNTER.as_ref() {
+        counter.inc();
+    }
+}
+
 pub(crate) fn observe_backoff_seconds(label: &str, duration: Duration) {
     let Some(histogram) = TIKV_CLIENT_RUST_BACKOFF_SECONDS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1420,6 +1426,11 @@ lazy_static::lazy_static! {
         &["result"],
     );
 
+    static ref TIKV_CLIENT_RUST_STALE_REGION_FROM_PD_COUNTER: Option<IntCounter> = register_int_counter(
+        "tikv_client_rust_stale_region_from_pd",
+        "Counter of stale region from PD",
+    );
+
     static ref TIKV_CLIENT_RUST_REGION_CACHE_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_region_cache_operations_total",
         "Counter of region cache operations.",
@@ -1484,7 +1495,8 @@ mod tests {
     use super::{
         inc_async_commit_txn_counter, inc_batch_client_no_available_connection,
         inc_commit_txn_counter, inc_load_safepoint_total, inc_one_pc_txn_counter,
-        inc_safe_ts_update_counter, inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
+        inc_safe_ts_update_counter, inc_stale_region_from_pd_counter,
+        inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
         observe_local_latch_wait_seconds, observe_pipelined_flush_duration,
@@ -2273,6 +2285,32 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected validate_read_ts_from_pd_count to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_stale_region_from_pd_counter_increments() {
+        fn counter_value() -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_stale_region_from_pd")
+                .and_then(|family| {
+                    family
+                        .get_metric()
+                        .get(0)
+                        .map(|metric| metric.get_counter().get_value())
+                })
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value();
+        inc_stale_region_from_pd_counter();
+        let after = counter_value();
+
+        assert!(
+            after >= before + 1.0,
+            "expected stale_region_from_pd counter to increase"
         );
     }
 

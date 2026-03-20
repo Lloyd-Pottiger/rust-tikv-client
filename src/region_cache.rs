@@ -536,6 +536,17 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         // This takes a write lock because we update multiple indices consistently. This runs on
         // region-cache update paths (e.g. cache miss), not the hot-path request routing.
         let mut cache = self.region_cache.write().await;
+        let new_ver_id = region.ver_id();
+        if let Some(old_ver_id) = cache.id_to_ver_id.get(&new_ver_id.id) {
+            // Like client-go, ignore stale region info that arrives out-of-order or from a PD
+            // follower that lags behind. These stale entries can otherwise overwrite newer cached
+            // regions.
+            if old_ver_id.ver > new_ver_id.ver || old_ver_id.conf_ver > new_ver_id.conf_ver {
+                stats::inc_stale_region_from_pd_counter();
+                return;
+            }
+        }
+
         let now_ms = now_epoch_millis();
         let ttl_deadline_ms = next_ttl_deadline_millis(
             now_ms,
@@ -546,8 +557,8 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         let end_key = region.end_key();
         let mut to_be_removed: HashSet<RegionVerId> = HashSet::new();
 
-        if let Some(ver_id) = cache.id_to_ver_id.get(&region.id()) {
-            if ver_id != &region.ver_id() {
+        if let Some(ver_id) = cache.id_to_ver_id.get(&new_ver_id.id) {
+            if ver_id != &new_ver_id {
                 to_be_removed.insert(ver_id.clone());
             }
         }
@@ -563,6 +574,10 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             match cache.ver_id_to_region.get(ver_id_in_cache) {
                 Some(region_in_cache) => {
                     if region_in_cache.region.end_key > region.region.start_key {
+                        if region_in_cache.ver_id().ver > new_ver_id.ver {
+                            stats::inc_stale_region_from_pd_counter();
+                            return;
+                        }
                         to_be_removed.insert(ver_id_in_cache.clone());
                     } else {
                         break;
@@ -597,7 +612,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 .id_to_ver_id
                 .retain(|_, ver_id| !stale_ver_ids.contains(ver_id));
         }
-        let ver_id = region.ver_id();
+        let ver_id = new_ver_id;
         cache
             .key_to_ver_id
             .insert(region.start_key(), ver_id.clone());
@@ -734,6 +749,7 @@ mod test {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use serial_test::serial;
     use tokio::sync::Mutex;
 
     use super::RegionCache;
@@ -770,6 +786,19 @@ mod test {
                 crate::trace::TraceValue::U64(value) => Some(*value),
                 _ => None,
             })
+    }
+
+    fn stale_region_from_pd_counter_value() -> f64 {
+        prometheus::gather()
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_stale_region_from_pd")
+            .and_then(|family| {
+                family
+                    .get_metric()
+                    .get(0)
+                    .map(|metric| metric.get_counter().get_value())
+            })
+            .unwrap_or(0.0)
     }
 
     #[derive(Default)]
@@ -1231,6 +1260,57 @@ mod test {
         expected_cache.insert(vec![30].into(), region3);
 
         assert(&cache, &expected_cache).await
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_add_region_ignores_stale_region_from_pd_and_records_metrics() {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let mut region_newer = region(1, vec![], vec![10]);
+        region_newer.region.region_epoch = Some(RegionEpoch {
+            conf_ver: 0,
+            version: 2,
+        });
+        cache.add_region(region_newer).await;
+
+        let before = stale_region_from_pd_counter_value();
+
+        let mut stale_same_id = region(1, vec![], vec![10]);
+        stale_same_id.region.region_epoch = Some(RegionEpoch {
+            conf_ver: 0,
+            version: 1,
+        });
+        cache.add_region(stale_same_id).await;
+
+        let mut cached_intersecting = region(2, vec![10], vec![20]);
+        cached_intersecting.region.region_epoch = Some(RegionEpoch {
+            conf_ver: 0,
+            version: 5,
+        });
+        cache.add_region(cached_intersecting).await;
+
+        let mut stale_intersecting = region(3, vec![], vec![15]);
+        stale_intersecting.region.region_epoch = Some(RegionEpoch {
+            conf_ver: 0,
+            version: 3,
+        });
+        cache.add_region(stale_intersecting).await;
+
+        let after = stale_region_from_pd_counter_value();
+        assert!(
+            after >= before + 2.0,
+            "expected stale_region_from_pd counter to increase"
+        );
+
+        let guard = cache.region_cache.read().await;
+        let region1_ver = guard.id_to_ver_id.get(&1).expect("region 1 missing");
+        assert_eq!(region1_ver.ver, 2);
+        assert!(
+            !guard.id_to_ver_id.contains_key(&3),
+            "expected stale region not to be inserted"
+        );
     }
 
     #[tokio::test]
