@@ -1641,9 +1641,29 @@ impl Merge<kvrpcpb::UnsafeDestroyRangeResponse> for Collect {
     type Out = ();
 
     fn merge(&self, input: Vec<Result<kvrpcpb::UnsafeDestroyRangeResponse>>) -> Result<Self::Out> {
-        let _: Vec<kvrpcpb::UnsafeDestroyRangeResponse> =
-            input.into_iter().collect::<Result<Vec<_>>>()?;
-        Ok(())
+        let mut errors = Vec::new();
+        for resp in input {
+            match resp {
+                Ok(resp) => {
+                    if !resp.error.is_empty() {
+                        crate::stats::inc_gc_unsafe_destroy_range_failures("send");
+                        errors.push(resp.error);
+                    }
+                }
+                Err(err) => {
+                    crate::stats::inc_gc_unsafe_destroy_range_failures("send");
+                    errors.push(err.to_string());
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::Error::StringError(format!(
+                "[unsafe destroy range] destroy range finished with errors: {errors:?}"
+            )))
+        }
     }
 }
 

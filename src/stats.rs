@@ -248,6 +248,12 @@ pub(crate) fn inc_stale_region_from_pd_counter() {
     }
 }
 
+pub(crate) fn inc_gc_unsafe_destroy_range_failures(label: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_GC_UNSAFE_DESTROY_RANGE_FAILURES_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[label]).inc();
+    }
+}
+
 pub(crate) fn observe_backoff_seconds(label: &str, duration: Duration) {
     let Some(histogram) = TIKV_CLIENT_RUST_BACKOFF_SECONDS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1431,6 +1437,13 @@ lazy_static::lazy_static! {
         "Counter of stale region from PD",
     );
 
+    static ref TIKV_CLIENT_RUST_GC_UNSAFE_DESTROY_RANGE_FAILURES_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_gc_unsafe_destroy_range_failures",
+            "Counter of unsafe destroy range failures.",
+            &["type"],
+        );
+
     static ref TIKV_CLIENT_RUST_REGION_CACHE_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_region_cache_operations_total",
         "Counter of region cache operations.",
@@ -1494,8 +1507,8 @@ mod tests {
 
     use super::{
         inc_async_commit_txn_counter, inc_batch_client_no_available_connection,
-        inc_commit_txn_counter, inc_load_safepoint_total, inc_one_pc_txn_counter,
-        inc_safe_ts_update_counter, inc_stale_region_from_pd_counter,
+        inc_commit_txn_counter, inc_gc_unsafe_destroy_range_failures, inc_load_safepoint_total,
+        inc_one_pc_txn_counter, inc_safe_ts_update_counter, inc_stale_region_from_pd_counter,
         inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
@@ -2311,6 +2324,43 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected stale_region_from_pd counter to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_gc_unsafe_destroy_range_failures_counter_increments() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| {
+                    family.get_name() == "tikv_client_rust_gc_unsafe_destroy_range_failures"
+                })
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(label)
+                            && metric.has_counter()
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("get_stores");
+        inc_gc_unsafe_destroy_range_failures("get_stores");
+        let after = counter_value("get_stores");
+        assert!(
+            after >= before + 1.0,
+            "expected gc_unsafe_destroy_range_failures(get_stores) to increase"
+        );
+
+        let before = counter_value("send");
+        inc_gc_unsafe_destroy_range_failures("send");
+        let after = counter_value("send");
+        assert!(
+            after >= before + 1.0,
+            "expected gc_unsafe_destroy_range_failures(send) to increase"
         );
     }
 

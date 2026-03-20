@@ -23,6 +23,7 @@ use crate::request::KeyMode;
 use crate::request::Keyspace;
 use crate::request::Plan;
 use crate::safe_ts::SafeTsCache;
+use crate::stats::inc_gc_unsafe_destroy_range_failures;
 use crate::stats::inc_validate_read_ts_from_pd_count;
 use crate::stats::set_low_resolution_tso_update_interval_seconds;
 use crate::timestamp::TimestampExt;
@@ -1190,8 +1191,15 @@ impl<PdC: PdClient> Client<PdC> {
     pub async fn unsafe_destroy_range(&self, range: impl Into<BoundRange>) -> Result<()> {
         let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
         let req = new_unsafe_destroy_range_request(range);
+        let stores = match self.pd.all_stores().await {
+            Ok(stores) => stores,
+            Err(err) => {
+                inc_gc_unsafe_destroy_range_failures("get_stores");
+                return Err(err);
+            }
+        };
         let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
-            .all_stores(DEFAULT_STORE_BACKOFF)
+            .stores(stores, DEFAULT_STORE_BACKOFF)
             .merge(crate::request::Collect)
             .plan();
         plan.execute().await
@@ -1451,6 +1459,29 @@ mod tests {
                     .get(0)
                     .map(|metric| metric.get_gauge().get_value())
             })
+    }
+
+    fn gc_unsafe_destroy_range_failures_counter_value(label: &str) -> f64 {
+        fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+            metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.get_name() == name)
+                .map(|pair| pair.get_value())
+        }
+
+        prometheus::gather()
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_gc_unsafe_destroy_range_failures")
+            .and_then(|family| {
+                family.get_metric().iter().find(|metric| {
+                    label_value(metric, "type") == Some(label)
+                        && metric.has_counter()
+                        && metric.get_counter().get_value() > 0.0
+                })
+            })
+            .map(|metric| metric.get_counter().get_value())
+            .unwrap_or(0.0)
     }
 
     #[test]
@@ -2891,6 +2922,71 @@ mod tests {
         assert!(
             (value - 1.5).abs() < 1e-6,
             "expected low_resolution_tso_update_interval_seconds gauge to be set"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_unsafe_destroy_range_counts_get_stores_failures() {
+        let pd_client = Arc::new(MockPdClient::default());
+        pd_client.set_all_stores_should_fail(true);
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let before = gc_unsafe_destroy_range_failures_counter_value("get_stores");
+        let _ = client.unsafe_destroy_range(..).await.unwrap_err();
+        let after = gc_unsafe_destroy_range_failures_counter_value("get_stores");
+
+        assert!(
+            after >= before + 1.0,
+            "expected gc_unsafe_destroy_range_failures(get_stores) to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_unsafe_destroy_range_counts_send_failures_on_store_error_string() {
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                req.downcast_ref::<kvrpcpb::UnsafeDestroyRangeRequest>()
+                    .expect("UnsafeDestroyRangeRequest");
+
+                Ok(Box::new(kvrpcpb::UnsafeDestroyRangeResponse {
+                    region_error: None,
+                    error: "injected unsafe destroy range error".to_owned(),
+                }) as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let before = gc_unsafe_destroy_range_failures_counter_value("send");
+        let _ = client.unsafe_destroy_range(..).await.unwrap_err();
+        let after = gc_unsafe_destroy_range_failures_counter_value("send");
+
+        assert!(
+            after >= before + 1.0,
+            "expected gc_unsafe_destroy_range_failures(send) to increase"
         );
     }
 

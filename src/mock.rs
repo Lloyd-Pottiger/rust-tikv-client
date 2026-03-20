@@ -7,7 +7,7 @@
 
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -136,6 +136,8 @@ pub struct MockPdClient {
     get_timestamp_delay: Duration,
     #[new(value = "false")]
     get_timestamp_should_fail: bool,
+    #[new(value = "AtomicBool::new(false)")]
+    all_stores_should_fail: AtomicBool,
     #[new(value = "Mutex::new(Vec::new())")]
     scatter_regions_calls: Mutex<Vec<(Vec<RegionId>, Option<String>)>>,
     #[new(value = "Mutex::new(Vec::new())")]
@@ -211,6 +213,11 @@ impl MockPdClient {
     pub fn set_max_txn_ttl(&self, ttl: Duration) {
         let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
         self.max_txn_ttl_ms.store(ttl_ms, Ordering::SeqCst);
+    }
+
+    pub fn set_all_stores_should_fail(&self, should_fail: bool) {
+        self.all_stores_should_fail
+            .store(should_fail, Ordering::SeqCst);
     }
 
     pub async fn insert_store_meta(&self, store: metapb::Store) {
@@ -698,6 +705,9 @@ impl PdClient for MockPdClient {
     }
 
     async fn all_stores(&self) -> Result<Vec<Store>> {
+        if self.all_stores_should_fail.load(Ordering::SeqCst) {
+            return Err(Error::StringError("injected all_stores error".to_owned()));
+        }
         let metas = self.store_metas.read().await;
         let client = Arc::new(self.client.clone());
         if metas.is_empty() {
