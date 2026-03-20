@@ -359,6 +359,29 @@ pub(crate) fn observe_txn_heart_beat_seconds(label: &'static str, elapsed: Durat
         .observe(duration_to_sec(elapsed));
 }
 
+pub(crate) fn observe_txn_lag_commit_ts_wait_seconds(result: &'static str, elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TXN_LAG_COMMIT_TS_WAIT_SECONDS_HISTOGRAM_VEC.as_ref()
+    else {
+        return;
+    };
+    histogram
+        .with_label_values(&[result])
+        .observe(duration_to_sec(elapsed));
+}
+
+pub(crate) fn observe_txn_lag_commit_ts_attempt_count(result: &'static str, attempts: usize) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TXN_LAG_COMMIT_TS_ATTEMPT_COUNT_HISTOGRAM_VEC.as_ref()
+    else {
+        return;
+    };
+    if attempts == 0 {
+        return;
+    }
+    histogram
+        .with_label_values(&[result])
+        .observe(attempts as f64);
+}
+
 pub(crate) struct TxnCmdTimer {
     label: &'static str,
     internal: bool,
@@ -378,6 +401,42 @@ impl TxnCmdTimer {
 impl Drop for TxnCmdTimer {
     fn drop(&mut self) {
         observe_txn_cmd_duration_seconds(self.label, self.internal, self.start.elapsed());
+    }
+}
+
+pub(crate) struct TxnLagCommitTsTimer {
+    start: Instant,
+    attempts: usize,
+    ok: bool,
+}
+
+impl TxnLagCommitTsTimer {
+    pub(crate) fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            attempts: 1,
+            ok: false,
+        }
+    }
+
+    pub(crate) fn inc_attempts(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+    }
+
+    pub(crate) fn attempts(&self) -> usize {
+        self.attempts
+    }
+
+    pub(crate) fn mark_ok(&mut self) {
+        self.ok = true;
+    }
+}
+
+impl Drop for TxnLagCommitTsTimer {
+    fn drop(&mut self) {
+        let result = if self.ok { "ok" } else { "err" };
+        observe_txn_lag_commit_ts_attempt_count(result, self.attempts);
+        observe_txn_lag_commit_ts_wait_seconds(result, self.start.elapsed());
     }
 }
 
@@ -1058,6 +1117,32 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["type"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_TXN_LAG_COMMIT_TS_WAIT_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_txn_lag_commit_ts_wait_seconds";
+        let help = "Bucketed histogram of seconds waiting commit TSO lag.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 16) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["result"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_TXN_LAG_COMMIT_TS_ATTEMPT_COUNT_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_txn_lag_commit_ts_attempt_count";
+        let help = "Bucketed histogram of attempts to get the lagging TSO in one commit.";
+        let buckets = match prometheus::exponential_buckets(1.0, 2.0, 6) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["result"], buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_RAWKV_CMD_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_rawkv_cmd_seconds";
         let help = "Bucketed histogram of processing time of rawkv cmds.";
@@ -1198,8 +1283,9 @@ mod tests {
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
         observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
         observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
-        observe_txn_heart_beat_seconds, region_cache_operation, set_min_safe_ts_gap_seconds,
-        tikv_stats_with_context,
+        observe_txn_heart_beat_seconds, observe_txn_lag_commit_ts_attempt_count,
+        observe_txn_lag_commit_ts_wait_seconds, region_cache_operation,
+        set_min_safe_ts_gap_seconds, tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1684,6 +1770,62 @@ mod tests {
         assert!(
             err_found,
             "expected txn_heart_beat err label metric not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_txn_lag_commit_ts_histograms_record_labels() {
+        observe_txn_lag_commit_ts_wait_seconds("ok", Duration::from_millis(5));
+        observe_txn_lag_commit_ts_wait_seconds("err", Duration::from_millis(7));
+        observe_txn_lag_commit_ts_attempt_count("ok", 1);
+        observe_txn_lag_commit_ts_attempt_count("err", 3);
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_txn_lag_commit_ts_wait_seconds")
+            .expect("txn_lag_commit_ts_wait_seconds histogram not registered");
+
+        let ok_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("ok")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            ok_found,
+            "expected txn_lag_commit_ts_wait_seconds ok label metric not found"
+        );
+
+        let err_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("err")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            err_found,
+            "expected txn_lag_commit_ts_wait_seconds err label metric not found"
+        );
+
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_txn_lag_commit_ts_attempt_count")
+            .expect("txn_lag_commit_ts_attempt_count histogram not registered");
+
+        let ok_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("ok")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            ok_found,
+            "expected txn_lag_commit_ts_attempt_count ok label metric not found"
+        );
+
+        let err_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "result") == Some("err")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            err_found,
+            "expected txn_lag_commit_ts_attempt_count err label metric not found"
         );
     }
 

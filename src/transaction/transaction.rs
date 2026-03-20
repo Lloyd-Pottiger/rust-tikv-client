@@ -1374,6 +1374,8 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Ok(first_attempt_version);
         }
 
+        let mut lag_timer = crate::stats::TxnLagCommitTsTimer::new();
+
         let max_sleep = self.commit_wait_until_tso_timeout;
         if max_sleep.is_zero() {
             return Err(Error::StringError(format!(
@@ -1404,7 +1406,6 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         let deadline = Instant::now() + max_sleep;
         let mut backoff = Backoff::no_jitter_backoff(2, 500, 32);
-        let mut attempts = 1_usize;
         let mut last_attempt = first_attempt;
 
         while last_attempt.version() <= self.commit_wait_until_tso {
@@ -1422,7 +1423,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
             tokio::time::sleep(delay).await;
 
-            attempts += 1;
+            lag_timer.inc_attempts();
             last_attempt =
                 get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
                     .await?;
@@ -1434,12 +1435,13 @@ impl<PdC: PdClient> Transaction<PdC> {
                 first_attempt_version,
                 self.commit_wait_until_tso,
                 max_sleep,
-                attempts,
+                lag_timer.attempts(),
                 last_attempt.version()
             )));
         }
 
         self.check_commit_ts_upper_bound(last_attempt.version())?;
+        lag_timer.mark_ok();
         Ok(last_attempt.version())
     }
 
@@ -7598,6 +7600,8 @@ impl<PdC: PdClient> Committer<PdC> {
             return Ok(first_attempt);
         }
 
+        let mut lag_timer = crate::stats::TxnLagCommitTsTimer::new();
+
         let max_sleep = self.commit_wait_until_tso_timeout;
         if max_sleep.is_zero() {
             return Err(Error::StringError(format!(
@@ -7628,7 +7632,6 @@ impl<PdC: PdClient> Committer<PdC> {
 
         let deadline = Instant::now() + max_sleep;
         let mut backoff = Backoff::no_jitter_backoff(2, 500, 32);
-        let mut attempts = 1_usize;
         let mut last_attempt = first_attempt;
 
         while last_attempt.version() <= self.commit_wait_until_tso {
@@ -7646,7 +7649,7 @@ impl<PdC: PdClient> Committer<PdC> {
             }
             tokio::time::sleep(delay).await;
 
-            attempts += 1;
+            lag_timer.inc_attempts();
             last_attempt =
                 get_timestamp_for_txn_scope(self.rpc.clone(), self.options.txn_scope.as_deref())
                     .await?;
@@ -7658,12 +7661,13 @@ impl<PdC: PdClient> Committer<PdC> {
                 first_attempt_version,
                 self.commit_wait_until_tso,
                 max_sleep,
-                attempts,
+                lag_timer.attempts(),
                 last_attempt.version()
             )));
         }
 
         self.check_commit_ts_upper_bound(last_attempt.version())?;
+        lag_timer.mark_ok();
         Ok(last_attempt)
     }
 
@@ -14581,6 +14585,100 @@ mod tests {
         let commit_ts = txn.get_timestamp_for_commit().await.unwrap();
         assert_eq!(commit_ts, expected_commit_version);
         assert_eq!(pd_client.get_timestamp_call_count(), 4);
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_get_timestamp_for_commit_records_lag_commit_ts_metrics() {
+        let metric_wait = "tikv_client_rust_txn_lag_commit_ts_wait_seconds";
+        let metric_attempt = "tikv_client_rust_txn_lag_commit_ts_attempt_count";
+
+        let histogram_samples = |name: &str, result: &str| -> u64 {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| family.get_name() == name)
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "result" && pair.get_value() == result)
+                    })
+                })
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        };
+
+        let start_version = 7;
+        let first_commit_version = 8;
+        let commit_wait_until = 10;
+        let expected_commit_version = 11;
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::default()).with_tso_sequence(first_commit_version),
+        );
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_commit_wait_until_tso(commit_wait_until);
+        txn.set_commit_wait_until_tso_timeout(Duration::from_millis(50));
+
+        let before_ok_wait = histogram_samples(metric_wait, "ok");
+        let before_ok_attempt = histogram_samples(metric_attempt, "ok");
+
+        let commit_ts = txn.get_timestamp_for_commit().await.unwrap();
+        assert_eq!(commit_ts, expected_commit_version);
+
+        let after_ok_wait = histogram_samples(metric_wait, "ok");
+        let after_ok_attempt = histogram_samples(metric_attempt, "ok");
+
+        assert!(
+            after_ok_wait >= before_ok_wait + 1,
+            "expected lag commit ts wait histogram to record ok label"
+        );
+        assert!(
+            after_ok_attempt >= before_ok_attempt + 1,
+            "expected lag commit ts attempt histogram to record ok label"
+        );
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::default()).with_tso_sequence(first_commit_version),
+        );
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_commit_wait_until_tso(commit_wait_until);
+        txn.set_commit_wait_until_tso_timeout(Duration::ZERO);
+
+        let before_err_wait = histogram_samples(metric_wait, "err");
+        let before_err_attempt = histogram_samples(metric_attempt, "err");
+
+        assert!(txn.get_timestamp_for_commit().await.is_err());
+
+        let after_err_wait = histogram_samples(metric_wait, "err");
+        let after_err_attempt = histogram_samples(metric_attempt, "err");
+
+        assert!(
+            after_err_wait >= before_err_wait + 1,
+            "expected lag commit ts wait histogram to record err label"
+        );
+        assert!(
+            after_err_attempt >= before_err_attempt + 1,
+            "expected lag commit ts attempt histogram to record err label"
+        );
     }
 
     #[tokio::test]
