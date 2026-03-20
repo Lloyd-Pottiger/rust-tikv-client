@@ -416,6 +416,47 @@ pub(crate) fn observe_local_latch_wait_seconds(elapsed: Duration) {
     histogram.observe(duration_to_sec(elapsed));
 }
 
+pub(crate) fn observe_pipelined_flush_len(mutation_count: usize) {
+    let Some(histogram) = TIKV_CLIENT_RUST_PIPELINED_FLUSH_LEN_HISTOGRAM.as_ref() else {
+        return;
+    };
+    if mutation_count == 0 {
+        return;
+    }
+    histogram.observe(mutation_count as f64);
+}
+
+pub(crate) fn observe_pipelined_flush_size(write_size: u64) {
+    let Some(histogram) = TIKV_CLIENT_RUST_PIPELINED_FLUSH_SIZE_HISTOGRAM.as_ref() else {
+        return;
+    };
+    if write_size == 0 {
+        return;
+    }
+    histogram.observe(write_size as f64);
+}
+
+pub(crate) fn observe_pipelined_flush_duration(elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_PIPELINED_FLUSH_DURATION_HISTOGRAM.as_ref() else {
+        return;
+    };
+    if elapsed.is_zero() {
+        return;
+    }
+    histogram.observe(duration_to_sec(elapsed));
+}
+
+pub(crate) fn observe_pipelined_flush_throttle_seconds(elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_PIPELINED_FLUSH_THROTTLE_SECONDS_HISTOGRAM.as_ref()
+    else {
+        return;
+    };
+    if elapsed.is_zero() {
+        return;
+    }
+    histogram.observe(duration_to_sec(elapsed));
+}
+
 pub(crate) struct TxnCmdTimer {
     label: &'static str,
     internal: bool,
@@ -1177,6 +1218,58 @@ lazy_static::lazy_static! {
         register_histogram_with_buckets(name, help, buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_PIPELINED_FLUSH_LEN_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_pipelined_flush_len";
+        let help = "Bucketed histogram of length of pipelined flushed memdb";
+        let buckets = match prometheus::exponential_buckets(1000.0, 2.0, 16) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_PIPELINED_FLUSH_SIZE_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_pipelined_flush_size";
+        let help = "Bucketed histogram of size of pipelined flushed memdb";
+        let buckets = match prometheus::exponential_buckets(16.0 * 1024.0 * 1024.0, 1.2, 13) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_PIPELINED_FLUSH_DURATION_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_pipelined_flush_duration";
+        let help = "Flush time of pipelined memdb.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 28) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_PIPELINED_FLUSH_THROTTLE_SECONDS_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_pipelined_flush_throttle_seconds";
+        let help = "Throttle durations of pipelined flushes.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 28) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_TXN_HEART_BEAT_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_txn_heart_beat";
         let help = "Bucketed histogram of the txn_heartbeat request duration.";
@@ -1354,12 +1447,14 @@ mod tests {
         inc_safe_ts_update_counter, inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
-        observe_local_latch_wait_seconds, observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes,
-        observe_request_retry_times, observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
-        observe_txn_heart_beat_seconds, observe_txn_lag_commit_ts_attempt_count,
-        observe_txn_lag_commit_ts_wait_seconds, observe_txn_write_kv_num,
-        observe_txn_write_size_bytes, region_cache_operation, set_min_safe_ts_gap_seconds,
-        tikv_stats_with_context,
+        observe_local_latch_wait_seconds, observe_pipelined_flush_duration,
+        observe_pipelined_flush_len, observe_pipelined_flush_size,
+        observe_pipelined_flush_throttle_seconds, observe_rawkv_cmd_seconds,
+        observe_rawkv_kv_size_bytes, observe_request_retry_times, observe_stale_read_hit_miss,
+        observe_txn_cmd_duration_seconds, observe_txn_heart_beat_seconds,
+        observe_txn_lag_commit_ts_attempt_count, observe_txn_lag_commit_ts_wait_seconds,
+        observe_txn_write_kv_num, observe_txn_write_size_bytes, region_cache_operation,
+        set_min_safe_ts_gap_seconds, tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1976,6 +2071,34 @@ mod tests {
             .map(|metric| metric.get_histogram().get_sample_count())
             .unwrap_or(0);
         assert!(observed >= 1, "expected local_latch_wait_seconds sample");
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_pipelined_flush_histograms_record_samples() {
+        observe_pipelined_flush_len(1234);
+        observe_pipelined_flush_size(16 * 1024 * 1024);
+        observe_pipelined_flush_duration(Duration::from_millis(5));
+        observe_pipelined_flush_throttle_seconds(Duration::from_millis(7));
+
+        let sample_count = |families: &[prometheus::proto::MetricFamily], name: &str| -> u64 {
+            families
+                .iter()
+                .find(|family| family.get_name() == name)
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        };
+
+        let families = prometheus::gather();
+        for name in [
+            "tikv_client_rust_pipelined_flush_len",
+            "tikv_client_rust_pipelined_flush_size",
+            "tikv_client_rust_pipelined_flush_duration",
+            "tikv_client_rust_pipelined_flush_throttle_seconds",
+        ] {
+            assert!(sample_count(&families, name) >= 1, "expected {name} sample");
+        }
     }
 
     #[test]

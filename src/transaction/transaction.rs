@@ -3081,6 +3081,8 @@ impl<PdC: PdClient> Transaction<PdC> {
         debug!(
             "triggering transactional flush (force={force}, mutation_count={mutation_count}, write_size={write_size})"
         );
+        crate::stats::observe_pipelined_flush_len(mutation_count);
+        crate::stats::observe_pipelined_flush_size(write_size);
 
         // If the mutable buffer is too large, block until the previous flush finishes.
         let is_flushing = self
@@ -3197,7 +3199,9 @@ impl<PdC: PdClient> Transaction<PdC> {
                 .plan();
                 let result = plan.execute().await.map(|_| ());
 
-                let sample_ms = start.elapsed().as_millis() as f64;
+                let elapsed = start.elapsed();
+                crate::stats::observe_pipelined_flush_duration(elapsed);
+                let sample_ms = elapsed.as_millis() as f64;
                 let mut flush_ewma = match flush_ewma.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
@@ -5913,7 +5917,9 @@ async fn throttle_pipelined_flush(ewma: Arc<Mutex<FlushDurationEwma>>, write_thr
         return;
     }
 
-    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+    let sleep = Duration::from_millis(sleep_ms);
+    crate::stats::observe_pipelined_flush_throttle_seconds(sleep);
+    tokio::time::sleep(sleep).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8273,6 +8279,68 @@ mod tests {
             "pipelined_flush"
         );
         assert_eq!(flushed[0].assertion_level, AssertionLevel::Strict as i32);
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_pipelined_flush_records_metrics() {
+        let metric_len = "tikv_client_rust_pipelined_flush_len";
+        let metric_size = "tikv_client_rust_pipelined_flush_size";
+        let metric_duration = "tikv_client_rust_pipelined_flush_duration";
+
+        let sample_count = |name: &str| -> u64 {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| family.get_name() == name)
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        };
+
+        let before_len = sample_count(metric_len);
+        let before_size = sample_count(metric_size);
+        let before_duration = sample_count(metric_duration);
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if req.downcast_ref::<kvrpcpb::FlushRequest>().is_some() {
+                    return Ok(Box::<kvrpcpb::FlushResponse>::default() as Box<dyn Any>);
+                }
+                Err(Error::StringError("unexpected request".to_owned()))
+            },
+        )));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .pipelined()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![1u8], b"v1".to_vec()).await.unwrap();
+        assert!(txn.flush(true).await.unwrap());
+        txn.flush_wait().await.unwrap();
+
+        let after_len = sample_count(metric_len);
+        let after_size = sample_count(metric_size);
+        let after_duration = sample_count(metric_duration);
+
+        assert!(
+            after_len >= before_len + 1,
+            "expected pipelined_flush_len histogram to record a sample"
+        );
+        assert!(
+            after_size >= before_size + 1,
+            "expected pipelined_flush_size histogram to record a sample"
+        );
+        assert!(
+            after_duration >= before_duration + 1,
+            "expected pipelined_flush_duration histogram to record a sample"
+        );
     }
 
     #[tokio::test]
