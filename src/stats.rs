@@ -320,6 +320,45 @@ pub(crate) fn inc_batch_client_no_available_connection() {
     }
 }
 
+pub(crate) fn set_range_task_stats(task: &str, completed_regions: usize, failed_regions: usize) {
+    let Some(gauge) = TIKV_CLIENT_RUST_RANGE_TASK_STATS_GAUGE_VEC.as_ref() else {
+        return;
+    };
+
+    gauge
+        .with_label_values(&[task, "completed-regions"])
+        .set(completed_regions as f64);
+    gauge
+        .with_label_values(&[task, "failed-regions"])
+        .set(failed_regions as f64);
+}
+
+pub(crate) fn add_range_task_stats(task: &str, completed_regions: usize, failed_regions: usize) {
+    let Some(gauge) = TIKV_CLIENT_RUST_RANGE_TASK_STATS_GAUGE_VEC.as_ref() else {
+        return;
+    };
+
+    if completed_regions != 0 {
+        gauge
+            .with_label_values(&[task, "completed-regions"])
+            .add(completed_regions as f64);
+    }
+    if failed_regions != 0 {
+        gauge
+            .with_label_values(&[task, "failed-regions"])
+            .add(failed_regions as f64);
+    }
+}
+
+pub(crate) fn observe_range_task_push_duration(task: &str, elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_RANGE_TASK_PUSH_DURATION_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    histogram
+        .with_label_values(&[task])
+        .observe(duration_to_sec(elapsed));
+}
+
 pub(crate) fn inc_commit_txn_counter(label: &'static str) {
     if let Some(counter) = TIKV_CLIENT_RUST_COMMIT_TXN_COUNTER_VEC.as_ref() {
         counter.with_label_values(&[label]).inc();
@@ -1176,6 +1215,25 @@ lazy_static::lazy_static! {
         "Counter of no available batch client.",
     );
 
+    static ref TIKV_CLIENT_RUST_RANGE_TASK_STATS_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
+        "tikv_client_rust_range_task_stats",
+        "Stat of range tasks.",
+        &["type", "result"],
+    );
+
+    static ref TIKV_CLIENT_RUST_RANGE_TASK_PUSH_DURATION_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_range_task_push_duration";
+        let help = "Duration to push sub tasks to range task workers.";
+        let buckets = match prometheus::exponential_buckets(0.001, 2.0, 20) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["type"], buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_LOAD_SAFEPOINT_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
             "tikv_client_rust_load_safepoint_total",
@@ -1506,21 +1564,23 @@ mod tests {
     use serial_test::serial;
 
     use super::{
-        inc_async_commit_txn_counter, inc_batch_client_no_available_connection,
-        inc_commit_txn_counter, inc_gc_unsafe_destroy_range_failures, inc_load_safepoint_total,
-        inc_one_pc_txn_counter, inc_safe_ts_update_counter, inc_stale_region_from_pd_counter,
+        add_range_task_stats, inc_async_commit_txn_counter,
+        inc_batch_client_no_available_connection, inc_commit_txn_counter,
+        inc_gc_unsafe_destroy_range_failures, inc_load_safepoint_total, inc_one_pc_txn_counter,
+        inc_safe_ts_update_counter, inc_stale_region_from_pd_counter,
         inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
         observe_local_latch_wait_seconds, observe_pipelined_flush_duration,
         observe_pipelined_flush_len, observe_pipelined_flush_size,
-        observe_pipelined_flush_throttle_seconds, observe_rawkv_cmd_seconds,
-        observe_rawkv_kv_size_bytes, observe_request_retry_times, observe_stale_read_hit_miss,
-        observe_txn_cmd_duration_seconds, observe_txn_heart_beat_seconds,
-        observe_txn_lag_commit_ts_attempt_count, observe_txn_lag_commit_ts_wait_seconds,
-        observe_txn_write_kv_num, observe_txn_write_size_bytes, region_cache_operation,
+        observe_pipelined_flush_throttle_seconds, observe_range_task_push_duration,
+        observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
+        observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
+        observe_txn_heart_beat_seconds, observe_txn_lag_commit_ts_attempt_count,
+        observe_txn_lag_commit_ts_wait_seconds, observe_txn_write_kv_num,
+        observe_txn_write_size_bytes, region_cache_operation,
         set_low_resolution_tso_update_interval_seconds, set_min_safe_ts_gap_seconds,
-        tikv_stats_with_context,
+        set_range_task_stats, tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -2361,6 +2421,56 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected gc_unsafe_destroy_range_failures(send) to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_range_task_stats_gauge_records_labels_and_values() {
+        set_range_task_stats("delete-range", 0, 0);
+        add_range_task_stats("delete-range", 12, 3);
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_range_task_stats")
+            .expect("range_task_stats gauge not registered");
+
+        let completed_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("delete-range")
+                && label_value(metric, "result") == Some("completed-regions")
+                && metric.get_gauge().get_value() >= 12.0
+        });
+        let failed_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("delete-range")
+                && label_value(metric, "result") == Some("failed-regions")
+                && metric.get_gauge().get_value() >= 3.0
+        });
+
+        assert!(
+            completed_found && failed_found,
+            "expected range_task_stats gauge labels not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_range_task_push_duration_histogram_records_observations() {
+        observe_range_task_push_duration("delete-range", Duration::from_millis(12));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_range_task_push_duration")
+            .expect("range_task_push_duration histogram not registered");
+
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("delete-range")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            found,
+            "expected range_task_push_duration histogram metric with labels not found"
         );
     }
 

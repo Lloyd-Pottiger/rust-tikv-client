@@ -4,9 +4,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use tokio::sync::mpsc;
 
 use crate::compat::stream_fn;
 use crate::pd::PdClient;
+use crate::stats::{add_range_task_stats, observe_range_task_push_duration, set_range_task_stats};
 use crate::store::region_stream_for_range;
 use crate::{BoundRange, Error, Result};
 
@@ -124,6 +126,10 @@ impl<PdC: PdClient> RangeTaskRunner<PdC> {
         self.completed_regions.store(0, Ordering::Relaxed);
         self.failed_regions.store(0, Ordering::Relaxed);
 
+        let identifier = self.identifier.as_str();
+        set_range_task_stats(identifier, 0, 0);
+        let _reset = RangeTaskStatsReset { identifier };
+
         let range = range.into();
         let (start_key, end_key) = range.into_keys();
         let start_key = Vec::<u8>::from(start_key);
@@ -186,28 +192,66 @@ impl<PdC: PdClient> RangeTaskRunner<PdC> {
             },
         );
 
-        let identifier = self.identifier.as_str();
+        let (tx, rx) = mpsc::channel::<BoundRange>(self.concurrency);
+
+        let producer = async move {
+            futures::pin_mut!(task_ranges);
+            let tx = tx;
+
+            while let Some(range) = task_ranges.try_next().await? {
+                let started_at = std::time::Instant::now();
+                if tx.send(range).await.is_err() {
+                    // Consumer is no longer interested (likely aborted due to error).
+                    break;
+                }
+                observe_range_task_push_duration(identifier, started_at.elapsed());
+            }
+
+            Ok(())
+        };
+
         let handler = self.handler.clone();
         let completed_regions = &self.completed_regions;
         let failed_regions = &self.failed_regions;
 
-        task_ranges
-            .try_for_each_concurrent(self.concurrency, move |range| {
-                let handler = handler.clone();
-                async move {
-                    let (stat, res) = handler.handle(range).await;
-                    completed_regions.fetch_add(stat.completed_regions, Ordering::Relaxed);
-                    failed_regions.fetch_add(stat.failed_regions, Ordering::Relaxed);
-                    res.map_err(|err| match err {
-                        Error::StringError(message) => Error::StringError(format!(
-                            "range task runner {identifier} failed: {message}"
-                        )),
-                        other => other,
-                    })?;
-                    Ok(())
-                }
+        let consumer_stream = stream_fn(rx, |mut rx| async move {
+            Ok::<_, crate::Error>(match rx.recv().await {
+                Some(range) => Some((rx, range)),
+                None => None,
             })
-            .await
+        });
+
+        let consumer = consumer_stream.try_for_each_concurrent(self.concurrency, move |range| {
+            let handler = handler.clone();
+            async move {
+                let (stat, res) = handler.handle(range).await;
+
+                completed_regions.fetch_add(stat.completed_regions, Ordering::Relaxed);
+                failed_regions.fetch_add(stat.failed_regions, Ordering::Relaxed);
+                add_range_task_stats(identifier, stat.completed_regions, stat.failed_regions);
+
+                res.map_err(|err| match err {
+                    Error::StringError(message) => Error::StringError(format!(
+                        "range task runner {identifier} failed: {message}"
+                    )),
+                    other => other,
+                })?;
+                Ok(())
+            }
+        });
+
+        let ((), ()) = tokio::try_join!(producer, consumer)?;
+        Ok(())
+    }
+}
+
+struct RangeTaskStatsReset<'a> {
+    identifier: &'a str,
+}
+
+impl Drop for RangeTaskStatsReset<'_> {
+    fn drop(&mut self) {
+        set_range_task_stats(self.identifier, 0, 0);
     }
 }
 
@@ -224,7 +268,9 @@ struct TaskRangesState {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use serial_test::serial;
     use tokio::sync::Mutex;
 
     use super::{RangeTaskRunner, RangeTaskStat};
@@ -358,5 +404,89 @@ mod tests {
 
         let mut runner = RangeTaskRunner::new("test", pd_client, 1, handler).unwrap();
         assert!(runner.set_regions_per_task(0).is_err());
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_range_task_runner_records_range_task_metrics_and_resets_gauge() {
+        fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+            metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.get_name() == name)
+                .map(|pair| pair.get_value())
+        }
+
+        fn range_task_completed_gauge_value(task: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_range_task_stats")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(task)
+                            && label_value(metric, "result") == Some("completed-regions")
+                            && metric.has_gauge()
+                    })
+                })
+                .map(|metric| metric.get_gauge().get_value())
+                .unwrap_or(0.0)
+        }
+
+        fn range_task_push_duration_sample_count(task: &str) -> u64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_range_task_push_duration")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(task) && metric.has_histogram()
+                    })
+                })
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        }
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::default()));
+        let task_label = "range-task-metrics-test";
+
+        let handler = |_range: BoundRange| async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            (
+                RangeTaskStat {
+                    completed_regions: 1,
+                    failed_regions: 0,
+                },
+                Ok(()),
+            )
+        };
+
+        let runner = RangeTaskRunner::new(task_label, pd_client, 1, handler).unwrap();
+
+        let monitor = async {
+            for _ in 0..50 {
+                if runner.completed_regions() >= 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            assert!(
+                range_task_completed_gauge_value(task_label) >= 1.0,
+                "expected completed-regions gauge to be updated during execution"
+            );
+            assert!(
+                range_task_push_duration_sample_count(task_label) >= 1,
+                "expected push duration histogram to record samples"
+            );
+        };
+
+        let (run_res, ()) = tokio::join!(runner.run_on_range(..), monitor);
+        run_res.unwrap();
+
+        assert!(
+            (range_task_completed_gauge_value(task_label) - 0.0).abs() < 1e-6,
+            "expected completed-regions gauge to be reset to 0 after execution"
+        );
+        assert_eq!(runner.completed_regions(), 3);
+        assert_eq!(runner.failed_regions(), 0);
     }
 }
