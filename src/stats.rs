@@ -5,6 +5,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use log::warn;
+use prometheus::Gauge;
 use prometheus::GaugeVec;
 use prometheus::Histogram;
 use prometheus::HistogramOpts;
@@ -334,6 +335,13 @@ pub(crate) fn inc_load_safepoint_total(label: &'static str) {
 pub(crate) fn inc_validate_read_ts_from_pd_count() {
     if let Some(counter) = TIKV_CLIENT_RUST_VALIDATE_READ_TS_FROM_PD_COUNT.as_ref() {
         counter.inc();
+    }
+}
+
+pub(crate) fn set_low_resolution_tso_update_interval_seconds(update_interval: Duration) {
+    if let Some(gauge) = TIKV_CLIENT_RUST_LOW_RESOLUTION_TSO_UPDATE_INTERVAL_SECONDS_GAUGE.as_ref()
+    {
+        gauge.set(update_interval.as_secs_f64());
     }
 }
 
@@ -939,6 +947,21 @@ fn register_gauge_vec(
     Some(metric)
 }
 
+fn register_gauge(name: &'static str, help: &'static str) -> Option<Gauge> {
+    let metric = match Gauge::with_opts(Opts::new(name, help)) {
+        Ok(metric) => metric,
+        Err(err) => {
+            warn!("failed to build prometheus gauge {name}: {err}");
+            return None;
+        }
+    };
+    if let Err(err) = prometheus::register(Box::new(metric.clone())) {
+        warn!("failed to register prometheus gauge {name}: {err}");
+        return None;
+    }
+    Some(metric)
+}
+
 fn register_int_counter(name: &'static str, help: &'static str) -> Option<IntCounter> {
     let metric = match IntCounter::with_opts(Opts::new(name, help)) {
         Ok(metric) => metric,
@@ -1152,6 +1175,12 @@ lazy_static::lazy_static! {
         register_int_counter(
             "tikv_client_rust_validate_read_ts_from_pd_count",
             "Counter of validating read ts by getting a timestamp from PD",
+        );
+
+    static ref TIKV_CLIENT_RUST_LOW_RESOLUTION_TSO_UPDATE_INTERVAL_SECONDS_GAUGE: Option<Gauge> =
+        register_gauge(
+            "tikv_client_rust_low_resolution_tso_update_interval_seconds",
+            "The actual working update interval for the low resolution TSO. As there are adaptive mechanism internally, this value may differ from the config.",
         );
 
     static ref TIKV_CLIENT_RUST_TXN_WRITE_CONFLICT_COUNTER: Option<IntCounter> = register_int_counter(
@@ -1465,7 +1494,8 @@ mod tests {
         observe_txn_cmd_duration_seconds, observe_txn_heart_beat_seconds,
         observe_txn_lag_commit_ts_attempt_count, observe_txn_lag_commit_ts_wait_seconds,
         observe_txn_write_kv_num, observe_txn_write_size_bytes, region_cache_operation,
-        set_min_safe_ts_gap_seconds, tikv_stats_with_context,
+        set_low_resolution_tso_update_interval_seconds, set_min_safe_ts_gap_seconds,
+        tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -2243,6 +2273,30 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected validate_read_ts_from_pd_count to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_low_resolution_tso_update_interval_seconds_gauge_records_value() {
+        set_low_resolution_tso_update_interval_seconds(Duration::from_millis(1500));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| {
+                family.get_name() == "tikv_client_rust_low_resolution_tso_update_interval_seconds"
+            })
+            .expect("low_resolution_tso_update_interval_seconds gauge not registered");
+
+        let value = family
+            .get_metric()
+            .get(0)
+            .map(|metric| metric.get_gauge().get_value())
+            .unwrap_or(0.0);
+        assert!(
+            (value - 1.5).abs() < 1e-6,
+            "expected low_resolution_tso_update_interval_seconds gauge to be set"
         );
     }
 

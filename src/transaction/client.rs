@@ -24,6 +24,7 @@ use crate::request::Keyspace;
 use crate::request::Plan;
 use crate::safe_ts::SafeTsCache;
 use crate::stats::inc_validate_read_ts_from_pd_count;
+use crate::stats::set_low_resolution_tso_update_interval_seconds;
 use crate::timestamp::TimestampExt;
 use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_check_lock_observer_request;
@@ -204,6 +205,9 @@ impl Client {
         }
         let txn_latches = (txn_local_latches_capacity > 0)
             .then(|| Arc::new(TxnLocalLatches::new(txn_local_latches_capacity)));
+        set_low_resolution_tso_update_interval_seconds(Duration::from_millis(
+            DEFAULT_LOW_RESOLUTION_TS_UPDATE_INTERVAL_MS,
+        ));
         Ok(Client {
             safe_ts: SafeTsCache::new(pd.clone(), keyspace),
             gc_safe_point: GcSafePointCache::new(pd.clone(), keyspace),
@@ -244,6 +248,9 @@ impl Client {
         }
         let txn_latches = (txn_local_latches_capacity > 0)
             .then(|| Arc::new(TxnLocalLatches::new(txn_local_latches_capacity)));
+        set_low_resolution_tso_update_interval_seconds(Duration::from_millis(
+            DEFAULT_LOW_RESOLUTION_TS_UPDATE_INTERVAL_MS,
+        ));
         Ok(Client {
             safe_ts: SafeTsCache::new(pd.clone(), Keyspace::ApiV2NoPrefix),
             gc_safe_point: GcSafePointCache::new(pd.clone(), Keyspace::ApiV2NoPrefix),
@@ -615,6 +622,7 @@ impl<PdC: PdClient> Client<PdC> {
             .map_err(|_| crate::Error::StringError("updateInterval is too large".to_owned()))?;
         self.low_resolution_ts_update_interval_ms
             .store(interval_ms, Ordering::Relaxed);
+        set_low_resolution_tso_update_interval_seconds(Duration::from_millis(interval_ms));
         Ok(())
     }
 
@@ -1429,6 +1437,20 @@ mod tests {
                     .map(|metric| metric.get_counter().get_value())
             })
             .unwrap_or(0.0)
+    }
+
+    fn low_resolution_tso_update_interval_seconds_gauge_value() -> Option<f64> {
+        prometheus::gather()
+            .iter()
+            .find(|family| {
+                family.get_name() == "tikv_client_rust_low_resolution_tso_update_interval_seconds"
+            })
+            .and_then(|family| {
+                family
+                    .get_metric()
+                    .get(0)
+                    .map(|metric| metric.get_gauge().get_value())
+            })
     }
 
     #[test]
@@ -2842,6 +2864,34 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("updateInterval must be > 0"));
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_set_low_resolution_timestamp_update_interval_records_metrics() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        client
+            .set_low_resolution_timestamp_update_interval(Duration::from_millis(1500))
+            .unwrap();
+
+        let value = low_resolution_tso_update_interval_seconds_gauge_value()
+            .expect("low_resolution_tso_update_interval_seconds gauge not registered");
+        assert!(
+            (value - 1.5).abs() < 1e-6,
+            "expected low_resolution_tso_update_interval_seconds gauge to be set"
+        );
     }
 
     #[tokio::test]
