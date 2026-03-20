@@ -6,6 +6,7 @@ use tokio::sync::{watch, Mutex, RwLock};
 
 use crate::pd::PdClient;
 use crate::request::Keyspace;
+use crate::stats::inc_load_safepoint_total;
 use crate::Error;
 use crate::Result;
 
@@ -155,21 +156,54 @@ impl<PdC: PdClient> GcSafePointCache<PdC> {
                     .gc_safe_point_v2_unimplemented
                     .load(Ordering::Acquire)
                 {
-                    return pd.clone().get_gc_safe_point().await;
+                    return match pd.clone().get_gc_safe_point().await {
+                        Ok(safe_point) => {
+                            inc_load_safepoint_total("ok_compatible");
+                            Ok(safe_point)
+                        }
+                        Err(err) => {
+                            inc_load_safepoint_total("fail_compatible");
+                            Err(err)
+                        }
+                    };
                 }
 
                 match pd.clone().get_gc_safe_point_v2(keyspace_id).await {
-                    Ok(safe_point) => Ok(safe_point),
+                    Ok(safe_point) => {
+                        inc_load_safepoint_total("ok");
+                        Ok(safe_point)
+                    }
                     Err(Error::Unimplemented) => {
                         self.inner
                             .gc_safe_point_v2_unimplemented
                             .store(true, Ordering::Release);
-                        pd.get_gc_safe_point().await
+                        match pd.get_gc_safe_point().await {
+                            Ok(safe_point) => {
+                                inc_load_safepoint_total("ok_compatible");
+                                Ok(safe_point)
+                            }
+                            Err(err) => {
+                                inc_load_safepoint_total("fail_compatible");
+                                Err(err)
+                            }
+                        }
                     }
-                    Err(err) => Err(err),
+                    Err(err) => {
+                        inc_load_safepoint_total("fail");
+                        Err(err)
+                    }
                 }
             }
-            _ => pd.get_gc_safe_point().await,
+            _ => match pd.get_gc_safe_point().await {
+                Ok(safe_point) => {
+                    inc_load_safepoint_total("ok_compatible");
+                    Ok(safe_point)
+                }
+                Err(err) => {
+                    inc_load_safepoint_total("fail_compatible");
+                    Err(err)
+                }
+            },
         }
     }
 }
@@ -181,6 +215,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use serial_test::serial;
     use tokio::sync::Notify;
 
     use super::GcSafePointCache;
@@ -192,6 +227,14 @@ mod tests {
     use crate::request::Keyspace;
     use crate::store::{RegionStore, Store};
     use crate::{Error, Key, Result, Timestamp};
+
+    fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+        metric
+            .get_label()
+            .iter()
+            .find(|pair| pair.get_name() == name)
+            .map(|pair| pair.get_value())
+    }
 
     #[derive(Clone)]
     struct BlockingGcSafePointPdClient {
@@ -259,7 +302,86 @@ mod tests {
         async fn invalidate_store_cache(&self, _store_id: StoreId) {}
     }
 
+    #[derive(Clone, Copy)]
+    enum SafePointOutcome {
+        Ok(u64),
+        Unimplemented,
+        Err,
+    }
+
+    #[derive(Clone)]
+    struct MetricGcSafePointPdClient {
+        v1: SafePointOutcome,
+        v2: SafePointOutcome,
+    }
+
+    #[async_trait]
+    impl PdClient for MetricGcSafePointPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            _region: RegionWithLeader,
+        ) -> Result<RegionStore> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_key(&self, _key: &Key) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
+            match self.v1 {
+                SafePointOutcome::Ok(safe_point) => Ok(safe_point),
+                SafePointOutcome::Unimplemented => Err(Error::Unimplemented),
+                SafePointOutcome::Err => Err(Error::StringError(
+                    "injected gc safe point error".to_owned(),
+                )),
+            }
+        }
+
+        async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
+            let _ = keyspace_id;
+            match self.v2 {
+                SafePointOutcome::Ok(safe_point) => Ok(safe_point),
+                SafePointOutcome::Unimplemented => Err(Error::Unimplemented),
+                SafePointOutcome::Err => Err(Error::StringError(
+                    "injected gc safe point v2 error".to_owned(),
+                )),
+            }
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn all_stores(&self) -> Result<Vec<Store>> {
+            Ok(Vec::new())
+        }
+
+        async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {}
+
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+    }
+
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_gc_safe_point_refresh_gate_is_not_held_across_await() {
         let called = Arc::new(Notify::new());
         let ready = Arc::new(Notify::new());
@@ -290,6 +412,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_gc_safe_point_refresh_dedupes_concurrent_calls() {
         let called = Arc::new(Notify::new());
         let ready = Arc::new(Notify::new());
@@ -343,6 +466,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_gc_safe_point_refresh_propagates_error_to_waiters() {
         let called = Arc::new(Notify::new());
         let ready = Arc::new(Notify::new());
@@ -394,6 +518,86 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "refresh errors should be returned to all waiters"
+        );
+    }
+
+    fn load_safepoint_counter_value(
+        families: &[prometheus::proto::MetricFamily],
+        label: &str,
+    ) -> f64 {
+        families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_load_safepoint_total")
+            .and_then(|family| {
+                family
+                    .get_metric()
+                    .iter()
+                    .find(|metric| label_value(metric, "type") == Some(label))
+                    .map(|metric| metric.get_counter().get_value())
+            })
+            .unwrap_or(0.0)
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_gc_safe_point_fetch_records_load_safepoint_ok() -> Result<()> {
+        let pd_client = Arc::new(MetricGcSafePointPdClient {
+            v1: SafePointOutcome::Ok(42),
+            v2: SafePointOutcome::Ok(7),
+        });
+        let cache = GcSafePointCache::new(pd_client, Keyspace::Enable { keyspace_id: 1 });
+
+        let before = load_safepoint_counter_value(&prometheus::gather(), "ok");
+        let _ = cache.safe_point().await?;
+        let after = load_safepoint_counter_value(&prometheus::gather(), "ok");
+
+        assert!(
+            after >= before + 1.0,
+            "expected load_safepoint_total ok counter to increase"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_gc_safe_point_fetch_records_load_safepoint_ok_compatible() -> Result<()> {
+        let pd_client = Arc::new(MetricGcSafePointPdClient {
+            v1: SafePointOutcome::Ok(42),
+            v2: SafePointOutcome::Unimplemented,
+        });
+        let cache = GcSafePointCache::new(pd_client, Keyspace::Enable { keyspace_id: 1 });
+
+        let before = load_safepoint_counter_value(&prometheus::gather(), "ok_compatible");
+        let _ = cache.safe_point().await?;
+        let after = load_safepoint_counter_value(&prometheus::gather(), "ok_compatible");
+
+        assert!(
+            after >= before + 1.0,
+            "expected load_safepoint_total ok_compatible counter to increase"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_gc_safe_point_fetch_records_load_safepoint_fail() {
+        let pd_client = Arc::new(MetricGcSafePointPdClient {
+            v1: SafePointOutcome::Ok(42),
+            v2: SafePointOutcome::Err,
+        });
+        let cache = GcSafePointCache::new(pd_client, Keyspace::Enable { keyspace_id: 1 });
+
+        let before = load_safepoint_counter_value(&prometheus::gather(), "fail");
+        let err = cache.safe_point().await.unwrap_err();
+        match err {
+            Error::StringError(message) => assert_eq!(message, "injected gc safe point v2 error"),
+            other => panic!("expected StringError, got {other:?}"),
+        }
+        let after = load_safepoint_counter_value(&prometheus::gather(), "fail");
+
+        assert!(
+            after >= before + 1.0,
+            "expected load_safepoint_total fail counter to increase"
         );
     }
 }

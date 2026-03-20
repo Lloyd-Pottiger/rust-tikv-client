@@ -325,6 +325,12 @@ pub(crate) fn inc_one_pc_txn_counter(label: &'static str) {
     }
 }
 
+pub(crate) fn inc_load_safepoint_total(label: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_LOAD_SAFEPOINT_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[label]).inc();
+    }
+}
+
 pub(crate) fn observe_txn_cmd_duration_seconds(
     label: &'static str,
     internal: bool,
@@ -989,6 +995,13 @@ lazy_static::lazy_static! {
         "Counter of no available batch client.",
     );
 
+    static ref TIKV_CLIENT_RUST_LOAD_SAFEPOINT_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_load_safepoint_total",
+            "Counter of load safepoint.",
+            &["type"],
+        );
+
     static ref TIKV_CLIENT_RUST_COMMIT_TXN_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_commit_txn_counter",
         "Counter of 2PC transactions.",
@@ -1167,11 +1180,12 @@ mod tests {
 
     use super::{
         inc_async_commit_txn_counter, inc_batch_client_no_available_connection,
-        inc_commit_txn_counter, inc_one_pc_txn_counter, inc_safe_ts_update_counter,
-        observe_backoff_seconds, observe_batch_client_wait_connection_establish,
-        observe_batch_pending_requests, observe_batch_requests, observe_kv_request_traffic_metrics,
-        observe_load_region_cache, observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes,
-        observe_request_retry_times, observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
+        inc_commit_txn_counter, inc_load_safepoint_total, inc_one_pc_txn_counter,
+        inc_safe_ts_update_counter, observe_backoff_seconds,
+        observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
+        observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
+        observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
+        observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
         observe_txn_heart_beat_seconds, region_cache_operation, set_min_safe_ts_gap_seconds,
         tikv_stats_with_context,
     };
@@ -1700,6 +1714,31 @@ mod tests {
             fail_found,
             "expected safets_update_counter fail label metric"
         );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_load_safepoint_total_counter_records_labels() {
+        inc_load_safepoint_total("ok");
+        inc_load_safepoint_total("fail");
+        inc_load_safepoint_total("ok_compatible");
+        inc_load_safepoint_total("fail_compatible");
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_load_safepoint_total")
+            .expect("load_safepoint_total not registered");
+
+        for label in ["ok", "fail", "ok_compatible", "fail_compatible"] {
+            assert!(
+                family.get_metric().iter().any(|metric| {
+                    label_value(metric, "type") == Some(label)
+                        && metric.get_counter().get_value() >= 1.0
+                }),
+                "expected load_safepoint_total {label} label"
+            );
+        }
     }
 
     #[test]
