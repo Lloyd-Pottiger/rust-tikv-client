@@ -485,6 +485,20 @@ pub(crate) fn observe_txn_heart_beat_seconds(label: &'static str, elapsed: Durat
         .observe(duration_to_sec(elapsed));
 }
 
+pub(crate) fn observe_txn_ttl_manager(elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TXN_TTL_MANAGER_HISTOGRAM.as_ref() else {
+        return;
+    };
+    histogram.observe(duration_to_sec(elapsed));
+}
+
+pub(crate) fn inc_ttl_lifetime_reach_total() {
+    let Some(counter) = TIKV_CLIENT_RUST_TTL_LIFETIME_REACH_COUNTER.as_ref() else {
+        return;
+    };
+    counter.inc();
+}
+
 pub(crate) fn observe_txn_lag_commit_ts_wait_seconds(result: &'static str, elapsed: Duration) {
     let Some(histogram) = TIKV_CLIENT_RUST_TXN_LAG_COMMIT_TS_WAIT_SECONDS_HISTOGRAM_VEC.as_ref()
     else {
@@ -1478,6 +1492,24 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["type"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_TXN_TTL_MANAGER_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_txn_ttl_manager";
+        let help = "Bucketed histogram of the txn ttl manager lifetime duration.";
+        let buckets = match prometheus::exponential_buckets(1.0, 2.0, 20) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_TTL_LIFETIME_REACH_COUNTER: Option<IntCounter> = register_int_counter(
+        "tikv_client_rust_ttl_lifetime_reach_total",
+        "Counter of ttlManager live too long.",
+    );
+
     static ref TIKV_CLIENT_RUST_TXN_LAG_COMMIT_TS_WAIT_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_txn_lag_commit_ts_wait_seconds";
         let help = "Bucketed histogram of seconds waiting commit TSO lag.";
@@ -1654,16 +1686,17 @@ mod tests {
         inc_gc_unsafe_destroy_range_failures, inc_health_feedback_ops_counter,
         inc_load_safepoint_total, inc_lock_resolver_actions, inc_one_pc_txn_counter,
         inc_prewrite_assertion_count_for_mutations, inc_safe_ts_update_counter,
-        inc_stale_region_from_pd_counter, inc_validate_read_ts_from_pd_count,
-        observe_backoff_seconds, observe_batch_client_wait_connection_establish,
-        observe_batch_pending_requests, observe_batch_requests, observe_kv_request_traffic_metrics,
-        observe_load_region_cache, observe_local_latch_wait_seconds,
-        observe_pipelined_flush_duration, observe_pipelined_flush_len,
-        observe_pipelined_flush_size, observe_pipelined_flush_throttle_seconds,
-        observe_range_task_push_duration, observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes,
-        observe_request_retry_times, observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
+        inc_stale_region_from_pd_counter, inc_ttl_lifetime_reach_total,
+        inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
+        observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
+        observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
+        observe_local_latch_wait_seconds, observe_pipelined_flush_duration,
+        observe_pipelined_flush_len, observe_pipelined_flush_size,
+        observe_pipelined_flush_throttle_seconds, observe_range_task_push_duration,
+        observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
+        observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
         observe_txn_heart_beat_seconds, observe_txn_lag_commit_ts_attempt_count,
-        observe_txn_lag_commit_ts_wait_seconds, observe_txn_write_kv_num,
+        observe_txn_lag_commit_ts_wait_seconds, observe_txn_ttl_manager, observe_txn_write_kv_num,
         observe_txn_write_size_bytes, region_cache_operation, set_feedback_slow_score,
         set_low_resolution_tso_update_interval_seconds, set_min_safe_ts_gap_seconds,
         set_range_task_stats, tikv_stats_with_context,
@@ -2191,6 +2224,52 @@ mod tests {
         assert!(
             err_found,
             "expected txn_heart_beat err label metric not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_txn_ttl_manager_histogram_records_observations() {
+        let before = prometheus::gather()
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_txn_ttl_manager")
+            .and_then(|family| family.get_metric().first())
+            .map(|metric| metric.get_histogram().get_sample_count())
+            .unwrap_or(0);
+
+        observe_txn_ttl_manager(Duration::from_millis(12));
+
+        let after = prometheus::gather()
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_txn_ttl_manager")
+            .and_then(|family| family.get_metric().first())
+            .map(|metric| metric.get_histogram().get_sample_count())
+            .unwrap_or(0);
+
+        assert!(
+            after >= before + 1,
+            "expected txn_ttl_manager histogram to record observations"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_ttl_lifetime_reach_total_counter_increments() {
+        fn counter_value() -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_ttl_lifetime_reach_total")
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value();
+        inc_ttl_lifetime_reach_total();
+        let after = counter_value();
+        assert!(
+            after >= before + 1.0,
+            "expected ttl_lifetime_reach_total counter to increase"
         );
     }
 

@@ -5414,6 +5414,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                             exceeded.max_txn_ttl_ms,
                             broadcast_pipelined_txn_status
                         );
+                        crate::stats::inc_ttl_lifetime_reach_total();
                         if broadcast_pipelined_txn_status {
                             if let Some(flag) = pipelined_ttl_manager_closed.as_ref() {
                                 flag.store(true, atomic::Ordering::SeqCst);
@@ -5504,9 +5505,11 @@ impl<PdC: PdClient> Transaction<PdC> {
         };
 
         spawn_with_lifecycle_hooks(background_task_lifecycle_hooks, async move {
+            let start_keep_alive = Instant::now();
             if let Err(err) = heartbeat_task.await {
                 log::error!("Error: While sending heartbeat. {}", err);
             }
+            crate::stats::observe_txn_ttl_manager(start_keep_alive.elapsed());
             let _ = heartbeat_running_generation.compare_exchange(
                 heartbeat_generation_id,
                 0,
@@ -13787,7 +13790,29 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_auto_heartbeat_stops_after_max_txn_ttl_exceeded() {
+        fn ttl_lifetime_reach_total() -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_ttl_lifetime_reach_total")
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        fn txn_ttl_manager_samples() -> u64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_txn_ttl_manager")
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        }
+
+        let lifetime_before = ttl_lifetime_reach_total();
+        let samples_before = txn_ttl_manager_samples();
+
         let heartbeat_calls = Arc::new(AtomicUsize::new(0));
         let heartbeat_calls_captured = heartbeat_calls.clone();
 
@@ -13825,6 +13850,14 @@ mod tests {
         .expect("running heartbeat state should reset after exceeding max_txn_ttl");
 
         assert_eq!(heartbeat_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            ttl_lifetime_reach_total() >= lifetime_before + 1.0,
+            "expected ttl_lifetime_reach_total to increase"
+        );
+        assert!(
+            txn_ttl_manager_samples() >= samples_before + 1,
+            "expected txn_ttl_manager to record a lifetime observation"
+        );
     }
 
     #[rstest::rstest]
