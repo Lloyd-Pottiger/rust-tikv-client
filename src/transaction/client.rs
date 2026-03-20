@@ -23,6 +23,7 @@ use crate::request::KeyMode;
 use crate::request::Keyspace;
 use crate::request::Plan;
 use crate::safe_ts::SafeTsCache;
+use crate::stats::inc_validate_read_ts_from_pd_count;
 use crate::timestamp::TimestampExt;
 use crate::transaction::lock::ResolveLocksOptions;
 use crate::transaction::lowering::new_check_lock_observer_request;
@@ -581,6 +582,7 @@ impl<PdC: PdClient> Client<PdC> {
             }
         }
 
+        inc_validate_read_ts_from_pd_count();
         let current_ts = self
             .current_timestamp_with_txn_scope(txn_scope.as_ref())
             .await?;
@@ -1395,6 +1397,8 @@ mod tests {
     use std::time::Duration;
     use std::time::Instant;
 
+    use serial_test::serial;
+
     use crate::gc_safe_point::GcSafePointCache;
     use crate::mock::{MockKvClient, MockPdClient};
     use crate::proto::errorpb;
@@ -1413,6 +1417,19 @@ mod tests {
     use crate::TransactionOptions;
 
     use super::Client;
+
+    fn validate_read_ts_from_pd_counter_value() -> f64 {
+        prometheus::gather()
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_validate_read_ts_from_pd_count")
+            .and_then(|family| {
+                family
+                    .get_metric()
+                    .get(0)
+                    .map(|metric| metric.get_counter().get_value())
+            })
+            .unwrap_or(0.0)
+    }
 
     #[test]
     fn test_pd_client_accessor_returns_inner_pd_handle() {
@@ -2680,6 +2697,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_validate_read_ts_allows_latest_for_non_stale_read() {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
@@ -2694,11 +2712,15 @@ mod tests {
             txn_latches: None,
         };
 
+        let before = validate_read_ts_from_pd_counter_value();
         client.validate_read_ts(u64::MAX, false).await.unwrap();
+        let after = validate_read_ts_from_pd_counter_value();
+        assert_eq!(before, after);
         assert_eq!(pd_client.get_timestamp_call_count(), 0);
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_validate_read_ts_rejects_latest_for_stale_read() {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
@@ -2713,16 +2735,20 @@ mod tests {
             txn_latches: None,
         };
 
+        let before = validate_read_ts_from_pd_counter_value();
         let err = client
             .validate_read_ts(u64::MAX, true)
             .await
             .unwrap_err()
             .to_string();
+        let after = validate_read_ts_from_pd_counter_value();
+        assert_eq!(before, after);
         assert!(err.contains("max uint64"));
         assert_eq!(pd_client.get_timestamp_call_count(), 0);
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_validate_read_ts_uses_cached_last_tso_without_fetching_pd_timestamp() {
         let pd_client = Arc::new(MockPdClient::default());
         let client = Client {
@@ -2754,14 +2780,18 @@ mod tests {
             );
         }
 
+        let before = validate_read_ts_from_pd_counter_value();
         client
             .validate_read_ts(cached_version, false)
             .await
             .unwrap();
+        let after = validate_read_ts_from_pd_counter_value();
+        assert_eq!(before, after);
         assert_eq!(pd_client.get_timestamp_call_count(), 0);
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_validate_read_ts_rejects_future_ts() {
         let start_version = 10_000u64 << 18;
         let pd_client = Arc::new(MockPdClient::default().with_tso_sequence(start_version));
@@ -2777,11 +2807,17 @@ mod tests {
             txn_latches: None,
         };
 
+        let before = validate_read_ts_from_pd_counter_value();
         let err = client
             .validate_read_ts(start_version + 1, false)
             .await
             .unwrap_err()
             .to_string();
+        let after = validate_read_ts_from_pd_counter_value();
+        assert!(
+            after >= before + 1.0,
+            "expected validate_read_ts_from_pd_count to increase"
+        );
         assert!(err.contains("future time"));
         assert_eq!(pd_client.get_timestamp_call_count(), 1);
     }

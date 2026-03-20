@@ -331,6 +331,12 @@ pub(crate) fn inc_load_safepoint_total(label: &'static str) {
     }
 }
 
+pub(crate) fn inc_validate_read_ts_from_pd_count() {
+    if let Some(counter) = TIKV_CLIENT_RUST_VALIDATE_READ_TS_FROM_PD_COUNT.as_ref() {
+        counter.inc();
+    }
+}
+
 pub(crate) fn observe_txn_cmd_duration_seconds(
     label: &'static str,
     internal: bool,
@@ -1002,6 +1008,12 @@ lazy_static::lazy_static! {
             &["type"],
         );
 
+    static ref TIKV_CLIENT_RUST_VALIDATE_READ_TS_FROM_PD_COUNT: Option<IntCounter> =
+        register_int_counter(
+            "tikv_client_rust_validate_read_ts_from_pd_count",
+            "Counter of validating read ts by getting a timestamp from PD",
+        );
+
     static ref TIKV_CLIENT_RUST_COMMIT_TXN_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_commit_txn_counter",
         "Counter of 2PC transactions.",
@@ -1181,7 +1193,7 @@ mod tests {
     use super::{
         inc_async_commit_txn_counter, inc_batch_client_no_available_connection,
         inc_commit_txn_counter, inc_load_safepoint_total, inc_one_pc_txn_counter,
-        inc_safe_ts_update_counter, observe_backoff_seconds,
+        inc_safe_ts_update_counter, inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
         observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
@@ -1739,6 +1751,34 @@ mod tests {
                 "expected load_safepoint_total {label} label"
             );
         }
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_validate_read_ts_from_pd_count_counter_increments() {
+        fn counter_value() -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| {
+                    family.get_name() == "tikv_client_rust_validate_read_ts_from_pd_count"
+                })
+                .and_then(|family| {
+                    family
+                        .get_metric()
+                        .get(0)
+                        .map(|metric| metric.get_counter().get_value())
+                })
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value();
+        inc_validate_read_ts_from_pd_count();
+        let after = counter_value();
+
+        assert!(
+            after >= before + 1.0,
+            "expected validate_read_ts_from_pd_count to increase"
+        );
     }
 
     #[test]
