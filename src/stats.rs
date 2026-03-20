@@ -324,6 +324,41 @@ pub(crate) fn inc_one_pc_txn_counter(label: &'static str) {
     }
 }
 
+pub(crate) fn observe_txn_cmd_duration_seconds(
+    label: &'static str,
+    internal: bool,
+    elapsed: Duration,
+) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TXN_CMD_DURATION_SECONDS_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    histogram
+        .with_label_values(&[label, bool_label_value(internal)])
+        .observe(duration_to_sec(elapsed));
+}
+
+pub(crate) struct TxnCmdTimer {
+    label: &'static str,
+    internal: bool,
+    start: Instant,
+}
+
+impl TxnCmdTimer {
+    pub(crate) fn new(label: &'static str, internal: bool) -> Self {
+        Self {
+            label,
+            internal,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Drop for TxnCmdTimer {
+    fn drop(&mut self) {
+        observe_txn_cmd_duration_seconds(self.label, self.internal, self.start.elapsed());
+    }
+}
+
 pub(crate) fn observe_rawkv_cmd_seconds(label: &'static str, elapsed: Duration) {
     let Some(histogram) = TIKV_CLIENT_RUST_RAWKV_CMD_SECONDS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -931,6 +966,19 @@ lazy_static::lazy_static! {
         &["type"],
     );
 
+    static ref TIKV_CLIENT_RUST_TXN_CMD_DURATION_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_txn_cmd_duration_seconds";
+        let help = "Bucketed histogram of processing time of txn cmds.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 29) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["type", "scope"], buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_RAWKV_CMD_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_rawkv_cmd_seconds";
         let help = "Bucketed histogram of processing time of rawkv cmds.";
@@ -1055,7 +1103,8 @@ mod tests {
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
         observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
-        observe_stale_read_hit_miss, region_cache_operation, tikv_stats_with_context,
+        observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds, region_cache_operation,
+        tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1491,6 +1540,25 @@ mod tests {
             value_found,
             "expected rawkv_kv_size_bytes value label metric not found"
         );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_txn_cmd_duration_seconds_histogram_records_labels() {
+        observe_txn_cmd_duration_seconds("get", true, Duration::from_millis(5));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+            .expect("txn_cmd_duration_seconds histogram not registered");
+
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("get")
+                && label_value(metric, "scope") == Some("true")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(found, "expected histogram metric with labels not found");
     }
 
     #[test]

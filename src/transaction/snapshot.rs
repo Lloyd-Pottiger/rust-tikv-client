@@ -577,6 +577,7 @@ impl<PdC: PdClient> Snapshot<PdC> {
     /// Get the value associated with the given key.
     pub async fn get(&mut self, key: impl Into<Key>) -> Result<Option<Value>> {
         trace!("invoking get request on snapshot");
+        let _timer = crate::stats::TxnCmdTimer::new("get", self.is_internal());
         let key = key.into();
         if self.cache_enabled() {
             if let Some(entry) = self.cache.get(&key, false) {
@@ -606,6 +607,7 @@ impl<PdC: PdClient> Snapshot<PdC> {
         key: impl Into<Key>,
     ) -> Result<Option<(Value, u64)>> {
         trace!("invoking get_with_commit_ts request on snapshot");
+        let _timer = crate::stats::TxnCmdTimer::new("get", self.is_internal());
         let key = key.into();
         if self.cache_enabled() {
             if let Some(entry) = self.cache.get(&key, true) {
@@ -667,7 +669,9 @@ impl<PdC: PdClient> Snapshot<PdC> {
             return Ok(out.into_iter());
         }
 
+        let timer = crate::stats::TxnCmdTimer::new("batch_get", self.is_internal());
         let fetched: Vec<KvPair> = self.transaction.batch_get(missing.clone()).await?.collect();
+        drop(timer);
 
         if self.cache_enabled() {
             let mut returned = HashSet::new();
@@ -734,11 +738,13 @@ impl<PdC: PdClient> Snapshot<PdC> {
             return Ok(out.into_iter());
         }
 
+        let timer = crate::stats::TxnCmdTimer::new("batch_get", self.is_internal());
         let fetched: Vec<(KvPair, u64)> = self
             .transaction
             .batch_get_with_commit_ts(missing.clone())
             .await?
             .collect();
+        drop(timer);
 
         if self.cache_enabled() {
             let mut returned = HashSet::new();
@@ -951,6 +957,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use serial_test::serial;
+
     use crate::mock::{MockKvClient, MockPdClient};
     use crate::proto::kvrpcpb;
     use crate::request::Keyspace;
@@ -1005,6 +1013,151 @@ mod tests {
         assert_eq!(get_calls.load(Ordering::SeqCst), 1);
         assert_eq!(snapshot.snap_cache_hit_count(), 1);
         assert_eq!(snapshot.snap_cache_size(), 1);
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_snapshot_get_records_txn_cmd_duration_seconds_histogram() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls_cloned = get_calls.clone();
+
+        let sample_count =
+            |type_label: &str, scope: &str| {
+                let families = prometheus::gather();
+                families
+                    .iter()
+                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .and_then(|family| {
+                        family.get_metric().iter().find(|metric| {
+                            metric.get_label().iter().any(|pair| {
+                                pair.get_name() == "type" && pair.get_value() == type_label
+                            }) && metric
+                                .get_label()
+                                .iter()
+                                .any(|pair| pair.get_name() == "scope" && pair.get_value() == scope)
+                        })
+                    })
+                    .map(|metric| metric.get_histogram().get_sample_count())
+                    .unwrap_or(0)
+            };
+
+        let before = sample_count("get", "true");
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::GetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                assert!(!req.need_commit_ts);
+
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = false;
+                resp.value = b"v".to_vec();
+                resp.commit_ts = 0;
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+        snapshot.set_request_source("internal_unit_test");
+
+        assert_eq!(
+            snapshot.get(b"k".to_vec()).await.unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(
+            snapshot.get(b"k".to_vec()).await.unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(get_calls.load(Ordering::SeqCst), 1);
+
+        let after = sample_count("get", "true");
+        assert!(
+            after >= before + 2,
+            "expected txn_cmd_duration_seconds get to record cache hit and miss"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_snapshot_batch_get_records_txn_cmd_duration_seconds_histogram() {
+        let batch_get_calls = Arc::new(AtomicUsize::new(0));
+        let batch_get_calls_cloned = batch_get_calls.clone();
+
+        let sample_count =
+            |type_label: &str, scope: &str| {
+                let families = prometheus::gather();
+                families
+                    .iter()
+                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .and_then(|family| {
+                        family.get_metric().iter().find(|metric| {
+                            metric.get_label().iter().any(|pair| {
+                                pair.get_name() == "type" && pair.get_value() == type_label
+                            }) && metric
+                                .get_label()
+                                .iter()
+                                .any(|pair| pair.get_name() == "scope" && pair.get_value() == scope)
+                        })
+                    })
+                    .map(|metric| metric.get_histogram().get_sample_count())
+                    .unwrap_or(0)
+            };
+
+        let before = sample_count("batch_get", "true");
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::BatchGetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                batch_get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+
+                let mut resp = kvrpcpb::BatchGetResponse::default();
+                for key in &req.keys {
+                    resp.pairs.push(kvrpcpb::KvPair {
+                        key: key.clone(),
+                        value: b"v".to_vec(),
+                        error: None,
+                        commit_ts: 0,
+                    });
+                }
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+        snapshot.set_request_source("internal_unit_test");
+
+        let keys = vec![b"k".to_vec()];
+        let pairs: Vec<_> = snapshot.batch_get(keys.clone()).await.unwrap().collect();
+        assert_eq!(pairs.len(), 1);
+        let pairs: Vec<_> = snapshot.batch_get(keys).await.unwrap().collect();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(batch_get_calls.load(Ordering::SeqCst), 1);
+
+        let after = sample_count("batch_get", "true");
+        assert!(
+            after >= before + 1,
+            "expected txn_cmd_duration_seconds batch_get to record when snapshot fetches"
+        );
     }
 
     #[tokio::test]

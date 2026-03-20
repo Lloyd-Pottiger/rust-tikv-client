@@ -1590,6 +1590,11 @@ impl<PdC: PdClient> Transaction<PdC> {
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let key = key.into().encode_keyspace(self.keyspace, KeyMode::Txn);
+        let internal = self
+            .request_source()
+            .is_some_and(crate::request_context::is_internal_request_source);
+        let _timer = (!self.options.read_only && !self.buffer.has_mutation(&key))
+            .then(|| crate::stats::TxnCmdTimer::new("get", internal));
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
@@ -2012,6 +2017,10 @@ impl<PdC: PdClient> Transaction<PdC> {
         debug!("invoking transactional batch_get request");
         self.check_allow_operation().await?;
         self.check_visibility().await?;
+        let observe_txn_cmd = !self.options.read_only;
+        let internal = self
+            .request_source()
+            .is_some_and(crate::request_context::is_internal_request_source);
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let keyspace = self.keyspace;
@@ -2064,6 +2073,8 @@ impl<PdC: PdClient> Transaction<PdC> {
                 let match_store_labels = match_store_labels.clone();
 
                 async move {
+                    let _timer = (observe_txn_cmd && key_count > 0)
+                        .then(|| crate::stats::TxnCmdTimer::new("batch_get", internal));
                     let mut keys = keys;
                     let mut buffer_pairs = Vec::new();
                     if let Some(puts) = pipelined_flushing_puts.as_ref() {
@@ -3482,6 +3493,15 @@ impl<PdC: PdClient> Transaction<PdC> {
         lock_wait_timeout: LockWaitTimeout,
         in_share_mode: bool,
     ) -> Result<()> {
+        let internal = self
+            .request_source()
+            .is_some_and(crate::request_context::is_internal_request_source);
+        let label = if in_share_mode {
+            "shared_lock_keys"
+        } else {
+            "lock_keys"
+        };
+        let _timer = crate::stats::TxnCmdTimer::new(label, internal);
         self.check_allow_operation().await?;
         let keyspace = self.keyspace;
         let keys = keys
@@ -3554,6 +3574,11 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
 
         self.options.validate()?;
+
+        let internal = self
+            .request_source()
+            .is_some_and(crate::request_context::is_internal_request_source);
+        let _timer = crate::stats::TxnCmdTimer::new("commit", internal);
 
         let mut flush_wait_ms = 0i64;
         if let Some(state) = self.pipelined.as_mut() {
@@ -3780,6 +3805,11 @@ impl<PdC: PdClient> Transaction<PdC> {
         // after successful heartbeats; once rollback starts, we don't want further heartbeats to
         // keep the transaction alive.
         self.stop_auto_heartbeat();
+
+        let internal = self
+            .request_source()
+            .is_some_and(crate::request_context::is_internal_request_source);
+        let _timer = crate::stats::TxnCmdTimer::new("rollback", internal);
 
         if let Some(state) = self.pipelined.as_mut() {
             // Match client-go: wait for in-flight pipelined flushes to finish on rollback to avoid
@@ -15709,6 +15739,286 @@ mod tests {
         assert!(
             two_pc_ok_after >= two_pc_ok_before + 1.0,
             "expected commit_txn_counter ok to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_get_records_txn_cmd_duration_seconds_histogram() {
+        let start_version = 7;
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls_cloned = get_calls.clone();
+
+        let sample_count =
+            |type_label: &str, scope: &str| {
+                let families = prometheus::gather();
+                families
+                    .iter()
+                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .and_then(|family| {
+                        family.get_metric().iter().find(|metric| {
+                            metric.get_label().iter().any(|pair| {
+                                pair.get_name() == "type" && pair.get_value() == type_label
+                            }) && metric
+                                .get_label()
+                                .iter()
+                                .any(|pair| pair.get_name() == "scope" && pair.get_value() == scope)
+                        })
+                    })
+                    .map(|metric| metric.get_histogram().get_sample_count())
+                    .unwrap_or(0)
+            };
+
+        let before = sample_count("get", "true");
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::GetRequest>().is_some() {
+                get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                let mut resp = kvrpcpb::GetResponse::default();
+                resp.not_found = false;
+                resp.value = b"v".to_vec();
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            Err(Error::Unimplemented)
+        });
+        let pd_client = Arc::new(MockPdClient::new(client));
+
+        let mut txn = Transaction::new(
+            crate::Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_request_source("internal_unit_test");
+
+        assert_eq!(txn.get(b"k".to_vec()).await.unwrap(), Some(b"v".to_vec()));
+        assert_eq!(txn.get(b"k".to_vec()).await.unwrap(), Some(b"v".to_vec()));
+        assert_eq!(
+            get_calls.load(Ordering::SeqCst),
+            1,
+            "expected second get to be served from transaction cache"
+        );
+
+        let after = sample_count("get", "true");
+        assert!(
+            after >= before + 2,
+            "expected txn_cmd_duration_seconds get to record twice"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_get_skips_txn_cmd_duration_seconds_for_mutations() {
+        let start_version = 7;
+
+        let sample_count =
+            |type_label: &str, scope: &str| {
+                let families = prometheus::gather();
+                families
+                    .iter()
+                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .and_then(|family| {
+                        family.get_metric().iter().find(|metric| {
+                            metric.get_label().iter().any(|pair| {
+                                pair.get_name() == "type" && pair.get_value() == type_label
+                            }) && metric
+                                .get_label()
+                                .iter()
+                                .any(|pair| pair.get_name() == "scope" && pair.get_value() == scope)
+                        })
+                    })
+                    .map(|metric| metric.get_histogram().get_sample_count())
+                    .unwrap_or(0)
+            };
+
+        let before = sample_count("get", "true");
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::default()));
+        let mut txn = Transaction::new(
+            crate::Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_request_source("internal_unit_test");
+
+        txn.put(b"k".to_vec(), b"v".to_vec()).await.unwrap();
+        assert_eq!(txn.get(b"k".to_vec()).await.unwrap(), Some(b"v".to_vec()));
+
+        let after = sample_count("get", "true");
+        assert_eq!(
+            after, before,
+            "expected txn_cmd_duration_seconds get to skip mutated key reads"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_batch_get_records_txn_cmd_duration_seconds_only_for_missing_keys() {
+        let start_version = 7;
+        let batch_get_calls = Arc::new(AtomicUsize::new(0));
+        let batch_get_calls_cloned = batch_get_calls.clone();
+
+        let sample_count =
+            |type_label: &str, scope: &str| {
+                let families = prometheus::gather();
+                families
+                    .iter()
+                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .and_then(|family| {
+                        family.get_metric().iter().find(|metric| {
+                            metric.get_label().iter().any(|pair| {
+                                pair.get_name() == "type" && pair.get_value() == type_label
+                            }) && metric
+                                .get_label()
+                                .iter()
+                                .any(|pair| pair.get_name() == "scope" && pair.get_value() == scope)
+                        })
+                    })
+                    .map(|metric| metric.get_histogram().get_sample_count())
+                    .unwrap_or(0)
+            };
+
+        let before = sample_count("batch_get", "true");
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::BatchGetRequest>() {
+                batch_get_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                let mut resp = kvrpcpb::BatchGetResponse::default();
+                for key in &req.keys {
+                    resp.pairs.push(kvrpcpb::KvPair {
+                        key: key.clone(),
+                        value: b"v".to_vec(),
+                        error: None,
+                        commit_ts: 0,
+                    });
+                }
+                return Ok(Box::new(resp) as Box<dyn Any>);
+            }
+            Err(Error::Unimplemented)
+        });
+        let pd_client = Arc::new(MockPdClient::new(client));
+
+        let mut txn = Transaction::new(
+            crate::Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_request_source("internal_unit_test");
+
+        let keys = vec![b"k".to_vec()];
+        let pairs: Vec<_> = txn.batch_get(keys.clone()).await.unwrap().collect();
+        assert_eq!(pairs.len(), 1);
+        let pairs: Vec<_> = txn.batch_get(keys).await.unwrap().collect();
+        assert_eq!(pairs.len(), 1);
+
+        assert_eq!(
+            batch_get_calls.load(Ordering::SeqCst),
+            1,
+            "expected second batch_get to be served from transaction cache"
+        );
+
+        let after = sample_count("batch_get", "true");
+        assert!(
+            after >= before + 1,
+            "expected txn_cmd_duration_seconds batch_get to record once"
+        );
+        assert!(
+            after < before + 2,
+            "expected txn_cmd_duration_seconds batch_get not to record for cached results"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_commit_rollback_and_lock_keys_record_txn_cmd_duration_seconds() {
+        let start_version = 7;
+
+        let sample_count =
+            |type_label: &str, scope: &str| {
+                let families = prometheus::gather();
+                families
+                    .iter()
+                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .and_then(|family| {
+                        family.get_metric().iter().find(|metric| {
+                            metric.get_label().iter().any(|pair| {
+                                pair.get_name() == "type" && pair.get_value() == type_label
+                            }) && metric
+                                .get_label()
+                                .iter()
+                                .any(|pair| pair.get_name() == "scope" && pair.get_value() == scope)
+                        })
+                    })
+                    .map(|metric| metric.get_histogram().get_sample_count())
+                    .unwrap_or(0)
+            };
+
+        let before_commit = sample_count("commit", "true");
+        let before_rollback = sample_count("rollback", "true");
+        let before_lock_keys = sample_count("lock_keys", "true");
+        let before_shared_lock_keys = sample_count("shared_lock_keys", "true");
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::default()));
+
+        let mut txn = Transaction::new(
+            crate::Timestamp::from_version(start_version),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_request_source("internal_unit_test");
+        let _ = txn.commit().await.unwrap();
+
+        let mut txn = Transaction::new(
+            crate::Timestamp::from_version(start_version.saturating_add(1)),
+            pd_client.clone(),
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_request_source("internal_unit_test");
+        txn.lock_keys(vec![b"a".to_vec()]).await.unwrap();
+        txn.lock_keys_in_share_mode(vec![b"b".to_vec()])
+            .await
+            .unwrap();
+
+        let mut txn = Transaction::new(
+            crate::Timestamp::from_version(start_version.saturating_add(2)),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_request_source("internal_unit_test");
+        txn.rollback().await.unwrap();
+
+        assert!(
+            sample_count("commit", "true") >= before_commit + 1,
+            "expected txn_cmd_duration_seconds commit to increase"
+        );
+        assert!(
+            sample_count("rollback", "true") >= before_rollback + 1,
+            "expected txn_cmd_duration_seconds rollback to increase"
+        );
+        assert!(
+            sample_count("lock_keys", "true") >= before_lock_keys + 1,
+            "expected txn_cmd_duration_seconds lock_keys to increase"
+        );
+        assert!(
+            sample_count("shared_lock_keys", "true") >= before_shared_lock_keys + 1,
+            "expected txn_cmd_duration_seconds shared_lock_keys to increase"
         );
     }
 

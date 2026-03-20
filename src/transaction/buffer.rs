@@ -450,6 +450,18 @@ impl Buffer {
         }
     }
 
+    pub(crate) fn has_mutation(&self, key: &Key) -> bool {
+        self.entry_map.get(key).is_some_and(|entry| {
+            matches!(
+                entry,
+                BufferEntry::Put(_)
+                    | BufferEntry::Del
+                    | BufferEntry::Insert(_)
+                    | BufferEntry::CheckNotExist
+            )
+        })
+    }
+
     /// Unlock the given key if locked.
     pub fn unlock(&mut self, key: &Key) {
         let was_locked = matches!(self.entry_map.get(key), Some(BufferEntry::Locked(_, _)));
