@@ -382,6 +382,30 @@ pub(crate) fn observe_txn_lag_commit_ts_attempt_count(result: &'static str, atte
         .observe(attempts as f64);
 }
 
+pub(crate) fn observe_txn_write_kv_num(internal: bool, write_keys: usize) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TXN_WRITE_KV_NUM_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    if write_keys == 0 {
+        return;
+    }
+    histogram
+        .with_label_values(&[bool_label_value(internal)])
+        .observe(write_keys as f64);
+}
+
+pub(crate) fn observe_txn_write_size_bytes(internal: bool, write_size: u64) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TXN_WRITE_SIZE_BYTES_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    if write_size == 0 {
+        return;
+    }
+    histogram
+        .with_label_values(&[bool_label_value(internal)])
+        .observe(write_size as f64);
+}
+
 pub(crate) struct TxnCmdTimer {
     label: &'static str,
     internal: bool,
@@ -1104,6 +1128,32 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["type", "scope"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_TXN_WRITE_KV_NUM_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_txn_write_kv_num";
+        let help = "Count of kv pairs to write in a transaction.";
+        let buckets = match prometheus::exponential_buckets(1.0, 4.0, 17) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["scope"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_TXN_WRITE_SIZE_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_txn_write_size_bytes";
+        let help = "Size of kv pairs to write in a transaction.";
+        let buckets = match prometheus::exponential_buckets(16.0, 4.0, 17) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["scope"], buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_TXN_HEART_BEAT_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_txn_heart_beat";
         let help = "Bucketed histogram of the txn_heartbeat request duration.";
@@ -1284,8 +1334,9 @@ mod tests {
         observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
         observe_stale_read_hit_miss, observe_txn_cmd_duration_seconds,
         observe_txn_heart_beat_seconds, observe_txn_lag_commit_ts_attempt_count,
-        observe_txn_lag_commit_ts_wait_seconds, region_cache_operation,
-        set_min_safe_ts_gap_seconds, tikv_stats_with_context,
+        observe_txn_lag_commit_ts_wait_seconds, observe_txn_write_kv_num,
+        observe_txn_write_size_bytes, region_cache_operation, set_min_safe_ts_gap_seconds,
+        tikv_stats_with_context,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -1826,6 +1877,62 @@ mod tests {
         assert!(
             err_found,
             "expected txn_lag_commit_ts_attempt_count err label metric not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_txn_write_histograms_record_labels() {
+        observe_txn_write_kv_num(true, 1);
+        observe_txn_write_kv_num(false, 2);
+        observe_txn_write_size_bytes(true, 16);
+        observe_txn_write_size_bytes(false, 64);
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_txn_write_kv_num")
+            .expect("txn_write_kv_num histogram not registered");
+
+        let internal_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "scope") == Some("true")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            internal_found,
+            "expected txn_write_kv_num internal label metric not found"
+        );
+
+        let general_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "scope") == Some("false")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            general_found,
+            "expected txn_write_kv_num general label metric not found"
+        );
+
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_txn_write_size_bytes")
+            .expect("txn_write_size_bytes histogram not registered");
+
+        let internal_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "scope") == Some("true")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            internal_found,
+            "expected txn_write_size_bytes internal label metric not found"
+        );
+
+        let general_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "scope") == Some("false")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            general_found,
+            "expected txn_write_size_bytes general label metric not found"
         );
     }
 

@@ -3667,6 +3667,9 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
         }
 
+        crate::stats::observe_txn_write_kv_num(internal, mutations.len());
+        crate::stats::observe_txn_write_size_bytes(internal, write_size);
+
         let mut committer = Committer::new(
             primary_key,
             mutations,
@@ -14678,6 +14681,78 @@ mod tests {
         assert!(
             after_err_attempt >= before_err_attempt + 1,
             "expected lag commit ts attempt histogram to record err label"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_commit_records_txn_write_metrics() {
+        let metric_kv = "tikv_client_rust_txn_write_kv_num";
+        let metric_size = "tikv_client_rust_txn_write_size_bytes";
+
+        let histogram_samples = |name: &str, scope: &str| -> u64 {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| family.get_name() == name)
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "scope" && pair.get_value() == scope)
+                    })
+                })
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        };
+
+        let before_kv = histogram_samples(metric_kv, "false");
+        let before_size = histogram_samples(metric_size, "false");
+
+        let start_version = 7;
+        let commit_version = 8;
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert_eq!(req.start_version, start_version);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                assert_eq!(req.start_version, start_version);
+                assert!(req.commit_version > start_version);
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.put("k".to_owned(), "v".to_owned()).await.unwrap();
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert!(commit_ts.version() > start_version);
+
+        let after_kv = histogram_samples(metric_kv, "false");
+        let after_size = histogram_samples(metric_size, "false");
+
+        assert!(
+            after_kv >= before_kv + 1,
+            "expected txn_write_kv_num histogram to record a sample"
+        );
+        assert!(
+            after_size >= before_size + 1,
+            "expected txn_write_size_bytes histogram to record a sample"
         );
     }
 
