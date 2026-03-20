@@ -108,6 +108,7 @@ pub struct WriteConflictError {
 
 impl WriteConflictError {
     pub fn new(conflict: ProtoWriteConflict) -> Self {
+        crate::stats::inc_txn_write_conflict_counter();
         Self { conflict }
     }
 

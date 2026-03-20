@@ -337,6 +337,12 @@ pub(crate) fn inc_validate_read_ts_from_pd_count() {
     }
 }
 
+pub(crate) fn inc_txn_write_conflict_counter() {
+    if let Some(counter) = TIKV_CLIENT_RUST_TXN_WRITE_CONFLICT_COUNTER.as_ref() {
+        counter.inc();
+    }
+}
+
 pub(crate) fn observe_txn_cmd_duration_seconds(
     label: &'static str,
     internal: bool,
@@ -1148,6 +1154,11 @@ lazy_static::lazy_static! {
             "Counter of validating read ts by getting a timestamp from PD",
         );
 
+    static ref TIKV_CLIENT_RUST_TXN_WRITE_CONFLICT_COUNTER: Option<IntCounter> = register_int_counter(
+        "tikv_client_rust_txn_write_conflict_counter",
+        "Counter of txn write conflict",
+    );
+
     static ref TIKV_CLIENT_RUST_COMMIT_TXN_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
         "tikv_client_rust_commit_txn_counter",
         "Counter of 2PC transactions.",
@@ -1749,6 +1760,46 @@ mod tests {
         assert!(
             after >= before + 200.0,
             "expected no-available-connection counter to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_txn_write_conflict_counter_increments() {
+        let before = {
+            let families = prometheus::gather();
+            families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_txn_write_conflict_counter")
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        };
+
+        for idx in 0..200_u64 {
+            let conflict = kvrpcpb::WriteConflict {
+                start_ts: idx,
+                ..Default::default()
+            };
+            let _ = crate::WriteConflictError::new(conflict);
+        }
+
+        let after = {
+            let families = prometheus::gather();
+            let family = families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_txn_write_conflict_counter")
+                .expect("txn_write_conflict_counter not registered");
+            family
+                .get_metric()
+                .first()
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        };
+
+        assert!(
+            after >= before + 200.0,
+            "expected txn_write_conflict_counter to increase"
         );
     }
 
