@@ -3888,6 +3888,9 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         let res = committer.rollback().await;
 
+        if res.is_err() {
+            crate::stats::inc_lock_cleanup_task_total("rollback");
+        }
         if res.is_ok() {
             self.set_status(TransactionStatus::Rolledback);
         }
@@ -7150,6 +7153,7 @@ impl<PdC: PdClient> Committer<PdC> {
             hooks,
             self.commit_secondary(commit_ts.clone()).map(|res| {
                 if let Err(e) = res {
+                    crate::stats::inc_lock_cleanup_task_total("commit");
                     log::warn!("Failed to commit secondary keys: {}", e);
                 }
             }),
@@ -16150,6 +16154,140 @@ mod tests {
         assert!(
             count_sum_after >= count_sum_before + 2.0,
             "expected txn_commit_backoff_count histogram sum to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_secondary_commit_failure_increments_lock_cleanup_task_total_commit() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_lock_cleanup_task_total")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == label)
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("commit");
+
+        let secondary_commit_notify = Arc::new(tokio::sync::Notify::new());
+        let secondary_commit_notify_captured = secondary_commit_notify.clone();
+        let secondary_key = vec![11u8];
+        let secondary_key_captured = secondary_key.clone();
+
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                if req
+                    .keys
+                    .iter()
+                    .any(|key| key.as_slice() == secondary_key_captured.as_slice())
+                {
+                    secondary_commit_notify_captured.notify_one();
+                    return Err(Error::StringError(
+                        "injected secondary commit error".to_owned(),
+                    ));
+                }
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let start_version = 7;
+        let commit_version = 8;
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_causal_consistency(true);
+
+        txn.put(vec![1u8], vec![42u8]).await.unwrap();
+        txn.put(secondary_key, vec![43u8]).await.unwrap();
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+
+        tokio::time::timeout(Duration::from_secs(1), secondary_commit_notify.notified())
+            .await
+            .expect("expected secondary commit request");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if counter_value("commit") >= before + 1.0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expected lock_cleanup_task_total(commit) to increase");
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_rollback_failure_increments_lock_cleanup_task_total_rollback() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_lock_cleanup_task_total")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == label)
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("rollback");
+
+        let client = MockKvClient::with_dispatch_hook(|req: &dyn Any| {
+            if req
+                .downcast_ref::<kvrpcpb::BatchRollbackRequest>()
+                .is_some()
+            {
+                return Err(Error::StringError("injected rollback error".to_owned()));
+            }
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let start_version = 7;
+        let pd_client = Arc::new(MockPdClient::new(client));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+
+        txn.put(vec![1u8], vec![42u8]).await.unwrap();
+        assert!(txn.rollback().await.is_err());
+
+        let after = counter_value("rollback");
+        assert!(
+            after >= before + 1.0,
+            "expected lock_cleanup_task_total(rollback) to increase"
         );
     }
 

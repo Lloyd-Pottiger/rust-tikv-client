@@ -1,5 +1,7 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
+#![recursion_limit = "256"]
+
 //! This crate provides an easy-to-use client for [TiKV](https://github.com/tikv/tikv), a
 //! distributed, transactional key-value database written in Rust.
 //!
