@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use std::time::Instant;
 
+use futures::future::BoxFuture;
 use futures::stream;
+use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
 use log::warn;
@@ -18,6 +20,7 @@ use crate::proto::kvrpcpb;
 use crate::proto::tikvpb;
 use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::stats::{
+    observe_batch_client_reset, observe_batch_client_unavailable,
     observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
     observe_batch_requests,
 };
@@ -31,6 +34,15 @@ pub(crate) struct BatchDispatchResult {
 }
 
 type BatchResponse = std::result::Result<BatchDispatchResult, Error>;
+type BatchInbound = std::result::Result<tikvpb::BatchCommandsResponse, Status>;
+type BatchInboundStream = futures::stream::BoxStream<'static, BatchInbound>;
+type ReconnectFn = Arc<
+    dyn Fn(
+            mpsc::Receiver<tikvpb::BatchCommandsRequest>,
+        ) -> BoxFuture<'static, Result<BatchInboundStream>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 pub(crate) struct BatchCommandsClient {
@@ -38,7 +50,7 @@ pub(crate) struct BatchCommandsClient {
 }
 
 struct BatchCommandsClientInner {
-    outbound: mpsc::Sender<tikvpb::BatchCommandsRequest>,
+    outbound: Arc<RwLock<mpsc::Sender<tikvpb::BatchCommandsRequest>>>,
     inflight: Arc<Mutex<HashMap<u64, oneshot::Sender<BatchResponse>>>>,
     next_id: AtomicU64,
     reader: JoinHandle<()>,
@@ -116,15 +128,33 @@ impl BatchCommandsClient {
         max_outbound_requests: usize,
         target: String,
     ) -> Result<Self> {
-        let (outbound_tx, outbound_rx) = mpsc::channel(1024);
-        let outbound_stream = outbound_stream(outbound_rx, max_outbound_requests, target);
+        let connector: ReconnectFn = {
+            let client = client.clone();
+            let target = target.clone();
+            Arc::new(move |outbound_rx| {
+                let client = client.clone();
+                let target = target.clone();
+                async move {
+                    let outbound_stream =
+                        outbound_stream(outbound_rx, max_outbound_requests, target);
+                    let req = outbound_stream.into_streaming_request();
+                    let response = client
+                        .clone()
+                        .batch_commands(req)
+                        .await
+                        .map_err(Error::GrpcAPI)?;
+                    Ok(response.into_inner().boxed())
+                }
+                .boxed()
+            })
+        };
 
-        let req = outbound_stream.into_streaming_request();
+        let (outbound_tx, outbound_rx) = mpsc::channel(1024);
         let started_at = Instant::now();
-        let response = client.clone().batch_commands(req).await;
+        let inbound = connector(outbound_rx).await;
         observe_batch_client_wait_connection_establish(started_at.elapsed());
-        let response = response.map_err(Error::GrpcAPI)?;
-        Self::new_with_inbound(outbound_tx, response.into_inner())
+        let inbound = inbound?;
+        Self::new_with_inbound(outbound_tx, inbound, Some(connector), target)
     }
 
     #[cfg(test)]
@@ -134,39 +164,78 @@ impl BatchCommandsClient {
             + Send
             + 'static,
     ) -> Result<Self> {
-        Self::new_with_inbound(outbound, inbound)
+        Self::new_with_inbound(outbound, inbound.boxed(), None, "test".to_owned())
     }
 
-    fn new_with_inbound(
+    #[cfg(test)]
+    fn new_with_inbound_and_reconnector_for_test(
         outbound: mpsc::Sender<tikvpb::BatchCommandsRequest>,
         inbound: impl Stream<Item = std::result::Result<tikvpb::BatchCommandsResponse, Status>>
             + Send
             + 'static,
+        reconnector: ReconnectFn,
     ) -> Result<Self> {
+        Self::new_with_inbound(
+            outbound,
+            inbound.boxed(),
+            Some(reconnector),
+            "unit_test".to_owned(),
+        )
+    }
+
+    fn new_with_inbound(
+        outbound: mpsc::Sender<tikvpb::BatchCommandsRequest>,
+        inbound: BatchInboundStream,
+        reconnect: Option<ReconnectFn>,
+        target: String,
+    ) -> Result<Self> {
+        let outbound = Arc::new(RwLock::new(outbound));
         let inflight: Arc<Mutex<HashMap<u64, oneshot::Sender<BatchResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let inflight_reader = inflight.clone();
         let stream_error = Arc::new(Mutex::new(None));
         let stream_error_reader = stream_error.clone();
+        let reconnect_reader = reconnect.clone();
+        let outbound_reader = outbound.clone();
+        let target_reader = target.clone();
 
         let reader = tokio::spawn(async move {
-            let mut inbound = Box::pin(inbound);
-            let stream_err = loop {
-                match inbound.next().await {
-                    Some(Ok(message)) => {
-                        let request_ids_len = message.request_ids.len();
-                        let responses_len = message.responses.len();
-                        if request_ids_len != responses_len {
-                            warn!(
-                                "batch_commands response mismatch: request_ids={}, responses={}",
-                                request_ids_len, responses_len
-                            );
-                        }
+            let mut inbound = inbound;
 
-                        let health_feedback = message.health_feedback.clone();
-                        let mut responses = message.responses.into_iter();
-                        for request_id in message.request_ids.into_iter() {
-                            let Some(response) = responses.next() else {
+            loop {
+                let stream_err = loop {
+                    match inbound.next().await {
+                        Some(Ok(message)) => {
+                            let request_ids_len = message.request_ids.len();
+                            let responses_len = message.responses.len();
+                            if request_ids_len != responses_len {
+                                warn!(
+                                    "batch_commands response mismatch: request_ids={}, responses={}",
+                                    request_ids_len, responses_len
+                                );
+                            }
+
+                            let health_feedback = message.health_feedback.clone();
+                            let mut responses = message.responses.into_iter();
+                            for request_id in message.request_ids.into_iter() {
+                                let Some(response) = responses.next() else {
+                                    let sender = {
+                                        let mut inflight = inflight_reader
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        inflight.remove(&request_id)
+                                    };
+                                    let Some(sender) = sender else {
+                                        continue;
+                                    };
+                                    let _ = sender.send(Err(Error::GrpcAPI(Status::internal(
+                                        format!(
+                                            "batch_commands response missing response for request_id={request_id} (request_ids={request_ids_len}, responses={responses_len})",
+                                        ),
+                                    ))));
+                                    continue;
+                                };
+
                                 let sender = {
                                     let mut inflight =
                                         inflight_reader.lock().unwrap_or_else(|e| e.into_inner());
@@ -175,55 +244,85 @@ impl BatchCommandsClient {
                                 let Some(sender) = sender else {
                                     continue;
                                 };
-                                let _ = sender.send(Err(Error::GrpcAPI(Status::internal(format!(
-                                    "batch_commands response missing response for request_id={request_id} (request_ids={request_ids_len}, responses={responses_len})",
-                                )))));
-                                continue;
-                            };
 
-                            let sender = {
-                                let mut inflight =
-                                    inflight_reader.lock().unwrap_or_else(|e| e.into_inner());
-                                inflight.remove(&request_id)
-                            };
-                            let Some(sender) = sender else {
-                                continue;
-                            };
-
-                            let result = response
-                                .cmd
-                                .ok_or_else(|| {
-                                    Error::StringError(
-                                        "batch_commands response missing cmd".to_owned(),
-                                    )
-                                })
-                                .map(|cmd| BatchDispatchResult {
-                                    cmd,
-                                    health_feedback: health_feedback.clone(),
-                                });
-                            let _ = sender.send(result);
+                                let result = response
+                                    .cmd
+                                    .ok_or_else(|| {
+                                        Error::StringError(
+                                            "batch_commands response missing cmd".to_owned(),
+                                        )
+                                    })
+                                    .map(|cmd| BatchDispatchResult {
+                                        cmd,
+                                        health_feedback: health_feedback.clone(),
+                                    });
+                                let _ = sender.send(result);
+                            }
+                            if responses.next().is_some() {
+                                warn!(
+                                    "batch_commands response has extra responses: request_ids={}, responses={}",
+                                    request_ids_len, responses_len
+                                );
+                            }
                         }
-                        if responses.next().is_some() {
+                        Some(Err(status)) => break status,
+                        None => break Status::unavailable("batch_commands stream ended"),
+                    }
+                };
+
+                {
+                    let mut guard = stream_error_reader
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    *guard = Some(stream_err.clone());
+                }
+
+                {
+                    let mut inflight = inflight_reader.lock().unwrap_or_else(|e| e.into_inner());
+                    for (_, sender) in inflight.drain() {
+                        let _ = sender.send(Err(Error::GrpcAPI(stream_err.clone())));
+                    }
+                }
+
+                let Some(reconnect) = reconnect_reader.as_ref() else {
+                    break;
+                };
+
+                let unavailable_started_at = Instant::now();
+                let mut retry_backoff = Duration::from_millis(200);
+                loop {
+                    let attempt_started_at = Instant::now();
+                    let (outbound_tx, outbound_rx) = mpsc::channel(1024);
+
+                    match reconnect(outbound_rx).await {
+                        Ok(new_inbound) => {
+                            observe_batch_client_unavailable(unavailable_started_at.elapsed());
+                            observe_batch_client_reset(attempt_started_at.elapsed());
+
+                            let mut guard = stream_error_reader
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            *guard = None;
+                            drop(guard);
+
+                            let mut guard =
+                                outbound_reader.write().unwrap_or_else(|e| e.into_inner());
+                            *guard = outbound_tx;
+                            drop(guard);
+
+                            inbound = new_inbound;
+                            break;
+                        }
+                        Err(err) => {
                             warn!(
-                                "batch_commands response has extra responses: request_ids={}, responses={}",
-                                request_ids_len, responses_len
+                                "batch_commands stream reconnect failed: target={}, err={err:?}",
+                                target_reader
                             );
+                            tokio::time::sleep(retry_backoff).await;
+                            retry_backoff = (retry_backoff * 2).min(Duration::from_secs(10));
                         }
                     }
-                    Some(Err(status)) => break status,
-                    None => break Status::unavailable("batch_commands stream ended"),
                 }
-            };
-
-            let mut guard = stream_error_reader
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *guard = Some(stream_err.clone());
-            drop(guard);
-
-            let mut inflight = inflight_reader.lock().unwrap_or_else(|e| e.into_inner());
-            for (_, sender) in inflight.drain() {
-                let _ = sender.send(Err(Error::GrpcAPI(stream_err.clone())));
             }
         });
 
@@ -274,7 +373,13 @@ impl BatchCommandsClient {
             request_ids: vec![request_id],
         };
 
-        if self.inner.outbound.send(request).await.is_err() {
+        let outbound = self
+            .inner
+            .outbound
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if outbound.send(request).await.is_err() {
             let status =
                 Status::unavailable("batch_commands stream is unavailable (sender dropped)");
             let mut guard = self
@@ -330,7 +435,7 @@ mod tests {
         let inbound_stream = stream::unfold(inbound, |mut rx| async move {
             rx.recv().await.map(|message| (message, rx))
         });
-        BatchCommandsClient::new_with_inbound(outbound, inbound_stream).unwrap()
+        BatchCommandsClient::new_with_inbound_for_test(outbound, inbound_stream).unwrap()
     }
 
     #[tokio::test]
@@ -626,6 +731,145 @@ mod tests {
                 .is_err(),
             "stream error should prevent sending new batch requests"
         );
+    }
+
+    #[tokio::test]
+    async fn test_batch_commands_client_reconnects_after_stream_error() -> Result<()> {
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let inbound_stream = stream::unfold(in_rx, |mut rx| async move {
+            rx.recv().await.map(|message| (message, rx))
+        });
+
+        let (reconnect_in_tx, reconnect_in_rx) = mpsc::channel(8);
+        let (reconnect_out_tx, reconnect_out_rx) =
+            tokio::sync::oneshot::channel::<mpsc::Receiver<tikvpb::BatchCommandsRequest>>();
+
+        let reconnect_out_tx = Arc::new(Mutex::new(Some(reconnect_out_tx)));
+        let reconnect_in_rx = Arc::new(Mutex::new(Some(reconnect_in_rx)));
+        let reconnector: ReconnectFn = {
+            let reconnect_out_tx = Arc::clone(&reconnect_out_tx);
+            let reconnect_in_rx = Arc::clone(&reconnect_in_rx);
+            Arc::new(move |outbound_rx| {
+                let reconnect_out_tx = Arc::clone(&reconnect_out_tx);
+                let reconnect_in_rx = Arc::clone(&reconnect_in_rx);
+                Box::pin(async move {
+                    if let Some(tx) = reconnect_out_tx.lock().unwrap().take() {
+                        let _ = tx.send(outbound_rx);
+                    }
+
+                    let inbound_rx = reconnect_in_rx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .expect("reconnect inbound receiver");
+                    let inbound_stream = stream::unfold(inbound_rx, |mut rx| async move {
+                        rx.recv().await.map(|message| (message, rx))
+                    });
+                    Ok(inbound_stream.boxed())
+                })
+            })
+        };
+
+        let client = BatchCommandsClient::new_with_inbound_and_reconnector_for_test(
+            out_tx,
+            inbound_stream,
+            reconnector,
+        )?;
+
+        let task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .dispatch(
+                        tikvpb::batch_commands_request::request::Cmd::Empty(
+                            tikvpb::BatchCommandsEmptyRequest::default(),
+                        ),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            })
+        };
+
+        let _req = out_rx.recv().await.expect("batch request");
+        in_tx
+            .send(Err(Status::unavailable("boom")))
+            .await
+            .expect("send stream error");
+
+        let err = task
+            .await
+            .expect("task join")
+            .expect_err("expected stream error");
+        match err {
+            Error::GrpcAPI(status) => assert_eq!(status.code(), tonic::Code::Unavailable),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let mut reconnect_out_rx = tokio::time::timeout(Duration::from_secs(1), reconnect_out_rx)
+            .await
+            .expect("reconnect should create a new outbound channel")
+            .expect("reconnect outbound channel");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let is_healthy = client
+                    .inner
+                    .stream_error
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_none();
+                if is_healthy {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reconnect should clear stream error");
+
+        let dispatch = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .dispatch(
+                        tikvpb::batch_commands_request::request::Cmd::Empty(
+                            tikvpb::BatchCommandsEmptyRequest::default(),
+                        ),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            })
+        };
+
+        let req = tokio::time::timeout(Duration::from_secs(1), reconnect_out_rx.recv())
+            .await
+            .expect("dispatch should send via reconnected batch stream")
+            .expect("batch request");
+        let request_id = *req.request_ids.first().expect("request id");
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyResponse::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        reconnect_in_tx
+            .send(Ok(response))
+            .await
+            .expect("send response");
+
+        let result = dispatch.await.expect("dispatch join")?;
+        assert!(matches!(
+            result.cmd,
+            tikvpb::batch_commands_response::response::Cmd::Empty(_)
+        ));
+
+        Ok(())
     }
 
     #[tokio::test]
