@@ -125,11 +125,16 @@ impl RequestStats {
                     }
                 }
 
+                let exec_details = exec_details_v2_from_response(resp as &dyn Any);
+                if let Some(details) = exec_details {
+                    observe_read_sli_from_response(resp as &dyn Any, details);
+                }
+
                 if let (Some(histogram), Some(labels)) = (
                     self.tikv_client_rpc_net_latency_seconds,
                     self.tikv_client_request_labels,
                 ) {
-                    if let Some(details) = exec_details_v2_from_response(resp as &dyn Any) {
+                    if let Some(details) = exec_details {
                         let total_rpc_wall_time_ns = details
                             .time_detail_v2
                             .as_ref()
@@ -1091,6 +1096,9 @@ fn exec_details_v2_from_response(response: &dyn Any) -> Option<&kvrpcpb::ExecDet
     if let Some(resp) = response.downcast_ref::<kvrpcpb::BatchGetResponse>() {
         return resp.exec_details_v2.as_ref();
     }
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::BufferBatchGetResponse>() {
+        return resp.exec_details_v2.as_ref();
+    }
     if let Some(resp) = response.downcast_ref::<kvrpcpb::BatchRollbackResponse>() {
         return resp.exec_details_v2.as_ref();
     }
@@ -1105,6 +1113,74 @@ fn exec_details_v2_from_response(response: &dyn Any) -> Option<&kvrpcpb::ExecDet
     }
     if let Some(resp) = response.downcast_ref::<kvrpcpb::ScanLockResponse>() {
         return resp.exec_details_v2.as_ref();
+    }
+    None
+}
+
+const SMALL_TXN_READ_KEYS_THRESHOLD: u64 = 20;
+const SMALL_TXN_READ_SIZE_THRESHOLD_BYTES: u64 = 1 * 1024 * 1024;
+
+fn observe_read_sli_from_response(response: &dyn Any, details: &kvrpcpb::ExecDetailsV2) {
+    if TIKV_SLI_TIKV_SMALL_READ_DURATION_HISTOGRAM.is_none()
+        && TIKV_SLI_TIKV_READ_THROUGHPUT_HISTOGRAM.is_none()
+    {
+        return;
+    }
+
+    let Some(read_keys) = read_sli_keys_from_response(response) else {
+        return;
+    };
+    if read_keys == 0 {
+        return;
+    }
+
+    let read_time_ns = details
+        .time_detail_v2
+        .as_ref()
+        .map(|detail| detail.kv_read_wall_time_ns)
+        .or_else(|| {
+            details
+                .time_detail
+                .as_ref()
+                .map(|detail| detail.kv_read_wall_time_ms.saturating_mul(1_000_000))
+        })
+        .unwrap_or(0);
+    if read_time_ns == 0 {
+        return;
+    }
+
+    let read_size_bytes = details
+        .scan_detail_v2
+        .as_ref()
+        .map(|detail| detail.processed_versions_size)
+        .unwrap_or(0);
+
+    let read_time = Duration::from_nanos(read_time_ns);
+    let read_time_sec = duration_to_sec(read_time);
+    if read_time_sec == 0.0 {
+        return;
+    }
+
+    if read_keys <= SMALL_TXN_READ_KEYS_THRESHOLD
+        && read_size_bytes < SMALL_TXN_READ_SIZE_THRESHOLD_BYTES
+    {
+        if let Some(histogram) = TIKV_SLI_TIKV_SMALL_READ_DURATION_HISTOGRAM.as_ref() {
+            histogram.observe(read_time_sec);
+        }
+    } else if let Some(histogram) = TIKV_SLI_TIKV_READ_THROUGHPUT_HISTOGRAM.as_ref() {
+        histogram.observe(read_size_bytes as f64 / read_time_sec);
+    }
+}
+
+fn read_sli_keys_from_response(response: &dyn Any) -> Option<u64> {
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::GetResponse>() {
+        return u64::try_from(resp.value.len()).ok();
+    }
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::BatchGetResponse>() {
+        return u64::try_from(resp.pairs.len()).ok();
+    }
+    if let Some(resp) = response.downcast_ref::<kvrpcpb::BufferBatchGetResponse>() {
+        return u64::try_from(resp.pairs.len()).ok();
     }
     None
 }
@@ -1308,6 +1384,32 @@ lazy_static::lazy_static! {
         "pd_tso_batch_size",
         "Bucketed histogram of TSO request batch size",
     );
+
+    static ref TIKV_SLI_TIKV_SMALL_READ_DURATION_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_sli_tikv_small_read_duration";
+        let help = "Read time of TiKV small read.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 28) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
+    static ref TIKV_SLI_TIKV_READ_THROUGHPUT_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_sli_tikv_read_throughput";
+        let help = "Read throughput of TiKV read in Bytes/s.";
+        let buckets = match prometheus::exponential_buckets(1024.0, 2.0, 13) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
 
     static ref TIKV_CLIENT_RUST_REQUEST_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_request_seconds";
@@ -3204,6 +3306,96 @@ mod tests {
         assert!(
             after >= before + 1,
             "expected ts_future_wait_seconds histogram to record observations"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_tikv_small_read_duration_histogram_records_observations() {
+        fn sample_count() -> u64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_sli_tikv_small_read_duration")
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        }
+
+        let mut ctx = kvrpcpb::Context::default();
+        ctx.peer = Some(metapb::Peer {
+            store_id: 1,
+            ..Default::default()
+        });
+
+        let mut resp = kvrpcpb::GetResponse::default();
+        resp.value = vec![0u8; 10];
+        resp.exec_details_v2 = Some(kvrpcpb::ExecDetailsV2 {
+            time_detail_v2: Some(kvrpcpb_alias::TimeDetailV2 {
+                kv_read_wall_time_ns: 5_000_000,
+                ..Default::default()
+            }),
+            scan_detail_v2: Some(kvrpcpb_alias::ScanDetailV2 {
+                processed_versions_size: 1024,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let before = sample_count();
+        let stats = tikv_stats_with_context("kv_get", Some(&ctx));
+        let _ = stats.done(Ok(resp));
+        let after = sample_count();
+
+        assert!(
+            after >= before + 1,
+            "expected tikv_small_read_duration histogram to record observations"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_tikv_read_throughput_histogram_records_observations() {
+        fn sample_count() -> u64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_sli_tikv_read_throughput")
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        }
+
+        let mut ctx = kvrpcpb::Context::default();
+        ctx.peer = Some(metapb::Peer {
+            store_id: 1,
+            ..Default::default()
+        });
+
+        let mut resp = kvrpcpb::BatchGetResponse::default();
+        resp.pairs.push(kvrpcpb::KvPair {
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+            ..Default::default()
+        });
+        resp.exec_details_v2 = Some(kvrpcpb::ExecDetailsV2 {
+            time_detail_v2: Some(kvrpcpb_alias::TimeDetailV2 {
+                kv_read_wall_time_ns: 200_000_000,
+                ..Default::default()
+            }),
+            scan_detail_v2: Some(kvrpcpb_alias::ScanDetailV2 {
+                processed_versions_size: 2 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let before = sample_count();
+        let stats = tikv_stats_with_context("kv_batch_get", Some(&ctx));
+        let _ = stats.done(Ok(resp));
+        let after = sample_count();
+
+        assert!(
+            after >= before + 1,
+            "expected tikv_read_throughput histogram to record observations"
         );
     }
 
