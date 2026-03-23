@@ -32,6 +32,7 @@ use crate::request::{KvRequest, StoreRequest};
 use crate::rpc_interceptor::RpcCallResult;
 use crate::rpc_interceptor::RpcInterceptors;
 use crate::rpc_interceptor::RpcRequest;
+use crate::stats::inc_async_send_req_total;
 use crate::stats::inc_replica_selector_failure_counter;
 use crate::stats::observe_backoff_seconds;
 use crate::stats::observe_kv_request_traffic_metrics;
@@ -2275,6 +2276,7 @@ where
         let mut resp = match res {
             Ok(resp) => resp,
             Err(e) if is_grpc_error(&e) => {
+                inc_async_send_req_total("rpc_error");
                 debug!("single_shard_handler:execute: grpc error: {:?}", e);
                 return Self::handle_other_error(
                     pd_client,
@@ -2296,6 +2298,11 @@ where
                 .await;
             }
             Err(e) => {
+                let result_label = match &e {
+                    Error::InternalError { .. } => "other_error",
+                    _ => "send_error",
+                };
+                inc_async_send_req_total(result_label);
                 debug!("single_shard_handler:execute: error: {:?}", e);
                 let retry_times = backoff.current_attempts();
                 observe_request_retry_times(retry_times);
@@ -2305,12 +2312,14 @@ where
         };
 
         if let Some(e) = resp.key_errors() {
+            inc_async_send_req_total("ok");
             debug!("single_shard_handler:execute: key errors: {:?}", e);
             let retry_times = backoff.current_attempts();
             observe_request_retry_times(retry_times);
             observe_stale_read_hit_miss(stale_read, retry_times);
             Ok(vec![Err(collapse_key_errors(e))])
         } else if let Some(e) = resp.region_error() {
+            inc_async_send_req_total("region_error");
             debug!("single_shard_handler:execute: region error: {:?}", e);
             let is_server_busy = e.server_is_busy.is_some();
             let is_data_is_not_ready = e.data_is_not_ready.is_some();
@@ -2436,6 +2445,7 @@ where
                 }
             }
         } else {
+            inc_async_send_req_total("ok");
             let retry_times = backoff.current_attempts();
             observe_request_retry_times(retry_times);
             observe_stale_read_hit_miss(stale_read, retry_times);
@@ -5835,6 +5845,89 @@ mod test {
         assert!(
             after_miss >= before_miss + RUNS as f64,
             "expected stale_read_counter miss to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_async_send_req_total_counter_records_ok_and_region_error() {
+        fn metric_label_value<'a>(
+            metric: &'a prometheus::proto::Metric,
+            name: &str,
+        ) -> Option<&'a str> {
+            metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.get_name() == name)
+                .map(|pair| pair.get_value())
+        }
+
+        fn async_send_req_counter_value(result: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_async_send_req_total")
+                .and_then(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .find(|metric| metric_label_value(metric, "result") == Some(result))
+                        .map(|metric| metric.get_counter().get_value())
+                })
+                .unwrap_or(0.0)
+        }
+
+        let before_ok = async_send_req_counter_value("ok");
+        let before_region_error = async_send_req_counter_value("region_error");
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_captured = call_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("expected context");
+                let peer = ctx.peer.as_ref().expect("expected peer");
+
+                let call = call_count_captured.fetch_add(1, Ordering::SeqCst);
+                let mut resp = kvrpcpb::GetResponse::default();
+                if call < 2 {
+                    let mut region_error = errorpb::Error::default();
+                    region_error.data_is_not_ready = Some(errorpb::DataIsNotReady {
+                        region_id: 1,
+                        peer_id: peer.id,
+                        safe_ts: 0,
+                    });
+                    resp.region_error = Some(region_error);
+                }
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context::default());
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region(Backoff::no_jitter_backoff(0, 0, 10))
+            .plan();
+
+        let results = plan.execute().await.expect("plan should succeed");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let after_ok = async_send_req_counter_value("ok");
+        let after_region_error = async_send_req_counter_value("region_error");
+
+        assert!(
+            after_region_error >= before_region_error + 2.0,
+            "expected async_send_req_total(region_error) to increase"
+        );
+        assert!(
+            after_ok >= before_ok + 1.0,
+            "expected async_send_req_total(ok) to increase"
         );
     }
 

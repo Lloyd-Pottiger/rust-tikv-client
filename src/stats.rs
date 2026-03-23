@@ -357,6 +357,12 @@ pub(crate) fn inc_replica_selector_failure_counter(label: &'static str) {
     }
 }
 
+pub(crate) fn inc_async_send_req_total(label: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_ASYNC_SEND_REQ_TOTAL_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[label]).inc();
+    }
+}
+
 pub(crate) fn observe_batch_pending_requests(target: &str, pending_requests: usize) {
     let Some(histogram) = TIKV_CLIENT_RUST_BATCH_PENDING_REQUESTS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1341,6 +1347,13 @@ lazy_static::lazy_static! {
         register_histogram_with_buckets(name, help, buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_ASYNC_SEND_REQ_TOTAL_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_async_send_req_total",
+            "Counter of async send req by request plan.",
+            &["result"],
+        );
+
     static ref TIKV_CLIENT_RUST_REPLICA_SELECTOR_FAILURE_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
             "tikv_client_rust_replica_selector_failure_counter",
@@ -1859,7 +1872,7 @@ mod tests {
 
     use super::{
         add_aggressive_locking_count, add_range_task_stats, inc_async_commit_txn_counter,
-        inc_batch_client_no_available_connection, inc_commit_txn_counter,
+        inc_async_send_req_total, inc_batch_client_no_available_connection, inc_commit_txn_counter,
         inc_gc_unsafe_destroy_range_failures, inc_health_feedback_ops_counter,
         inc_load_region_total, inc_load_safepoint_total, inc_lock_cleanup_task_total,
         inc_lock_resolver_actions, inc_one_pc_txn_counter,
@@ -2400,6 +2413,32 @@ mod tests {
         assert!(
             after >= before + 3.0,
             "expected aggressive_locking_count(new) to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_async_send_req_total_counter_increments() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_async_send_req_total")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "result") == Some(label)
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("ok");
+        inc_async_send_req_total("ok");
+        let after = counter_value("ok");
+        assert!(
+            after >= before + 1.0,
+            "expected async_send_req_total(ok) to increase"
         );
     }
 
