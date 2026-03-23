@@ -574,6 +574,11 @@ impl PdClient for MockPdClient {
             .ok_or(Error::Unimplemented)
     }
 
+    fn store_meta_by_id_cached(&self, store_id: StoreId) -> Option<metapb::Store> {
+        let guard = self.store_metas.try_read().ok()?;
+        guard.get(&store_id).cloned()
+    }
+
     async fn get_health_feedback(&self, store_id: StoreId) -> Result<kvrpcpb::HealthFeedback> {
         let _ = store_id;
         let mut req = kvrpcpb::GetHealthFeedbackRequest::default();

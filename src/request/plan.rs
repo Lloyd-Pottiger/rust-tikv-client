@@ -2339,19 +2339,12 @@ where
 
         // limit concurrent requests
         let (is_mpp, is_cross_zone) = match region_store.region_with_leader.get_store_id() {
-            Ok(store_id) => match pd_client.store_meta_by_id(store_id).await {
-                Ok(store) => (
+            Ok(store_id) => match pd_client.store_meta_by_id_cached(store_id) {
+                Some(store) => (
                     crate::region_cache::is_tiflash_related_store(&store),
                     is_cross_zone(self_zone_label.as_deref(), &store),
                 ),
-                Err(Error::Unimplemented) => (false, false),
-                Err(err) => {
-                    debug!(
-                        "single_shard_handler: traffic classification skipped: {:?}",
-                        err
-                    );
-                    (false, false)
-                }
+                None => (false, false),
             },
             Err(_) => (false, false),
         };

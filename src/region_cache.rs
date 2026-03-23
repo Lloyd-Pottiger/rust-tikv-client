@@ -397,6 +397,13 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         result
     }
 
+    pub(crate) fn store_meta_by_id_cached(&self, id: StoreId) -> Option<Store> {
+        self.store_cache
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.get(&id).cloned())
+    }
+
     /// Force read through (query from PD) and update cache
     pub async fn read_through_region_by_key(&self, key: Key) -> Result<RegionWithLeader> {
         let trace_enabled = trace::is_category_enabled(Category::RegionCache);

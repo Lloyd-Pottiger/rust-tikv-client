@@ -294,6 +294,19 @@ pub trait PdClient: Send + Sync + 'static {
         Err(Error::Unimplemented)
     }
 
+    /// Fetch cached PD store metadata by store id, without issuing new PD requests.
+    ///
+    /// This is a best-effort helper used in hot paths (for example traffic classification) where
+    /// making additional PD calls would be too expensive.
+    ///
+    /// Implementations should return `None` when the store metadata is not cached locally.
+    ///
+    /// The default implementation returns `None`.
+    fn store_meta_by_id_cached(&self, store_id: StoreId) -> Option<metapb::Store> {
+        let _ = store_id;
+        None
+    }
+
     /// Request health feedback from a TiKV store.
     ///
     /// Implementations may use the returned feedback to update internal heuristics (for example
@@ -891,6 +904,10 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
         self.region_cache.get_store_by_id(store_id).await
+    }
+
+    fn store_meta_by_id_cached(&self, store_id: StoreId) -> Option<metapb::Store> {
+        self.region_cache.store_meta_by_id_cached(store_id)
     }
 
     async fn get_health_feedback(&self, store_id: StoreId) -> Result<kvrpcpb::HealthFeedback> {
