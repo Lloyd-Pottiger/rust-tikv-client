@@ -22,10 +22,13 @@ use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::stats::{
     observe_batch_client_reset, observe_batch_client_unavailable,
     observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
-    observe_batch_requests,
+    observe_batch_recv_tail_latency_seconds, observe_batch_requests,
+    observe_batch_send_tail_latency_seconds,
 };
 use crate::Error;
 use crate::Result;
+
+const BATCH_TAIL_LATENCY_THRESHOLD: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Debug)]
 pub(crate) struct BatchDispatchResult {
@@ -55,6 +58,7 @@ struct BatchCommandsClientInner {
     next_id: AtomicU64,
     reader: JoinHandle<()>,
     stream_error: Arc<Mutex<Option<Status>>>,
+    target: String,
 }
 
 impl Drop for BatchCommandsClientInner {
@@ -204,7 +208,13 @@ impl BatchCommandsClient {
 
             loop {
                 let stream_err = loop {
-                    match inbound.next().await {
+                    let recv_started_at = Instant::now();
+                    let next = inbound.next().await;
+                    let recv_elapsed = recv_started_at.elapsed();
+                    if recv_elapsed > BATCH_TAIL_LATENCY_THRESHOLD {
+                        observe_batch_recv_tail_latency_seconds(&target_reader, recv_elapsed);
+                    }
+                    match next {
                         Some(Ok(message)) => {
                             let request_ids_len = message.request_ids.len();
                             let responses_len = message.responses.len();
@@ -332,6 +342,7 @@ impl BatchCommandsClient {
             next_id: AtomicU64::new(1),
             reader,
             stream_error,
+            target,
         };
         Ok(BatchCommandsClient {
             inner: Arc::new(inner),
@@ -379,7 +390,13 @@ impl BatchCommandsClient {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if outbound.send(request).await.is_err() {
+        let send_started_at = Instant::now();
+        let send_result = outbound.send(request).await;
+        let send_elapsed = send_started_at.elapsed();
+        if send_elapsed > BATCH_TAIL_LATENCY_THRESHOLD {
+            observe_batch_send_tail_latency_seconds(&self.inner.target, send_elapsed);
+        }
+        if send_result.is_err() {
             let status =
                 Status::unavailable("batch_commands stream is unavailable (sender dropped)");
             let mut guard = self
@@ -942,5 +959,130 @@ mod tests {
             Error::GrpcAPI(status) => assert_eq!(status.code(), tonic::Code::Internal),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_batch_commands_client_records_batch_recv_tail_latency_seconds_histogram() {
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let client = client_with_channels(out_tx, in_rx);
+
+        let request_task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .dispatch(
+                        tikvpb::batch_commands_request::request::Cmd::Empty(
+                            tikvpb::BatchCommandsEmptyRequest::default(),
+                        ),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            })
+        };
+
+        let req = out_rx.recv().await.expect("batch request");
+        let request_id = *req.request_ids.first().expect("request id");
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyResponse::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let result = request_task.await.expect("request task");
+        assert!(matches!(
+            result.expect("dispatch response").cmd,
+            tikvpb::batch_commands_response::response::Cmd::Empty(_)
+        ));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_batch_recv_tail_latency_seconds")
+            .expect("batch_recv_tail_latency_seconds histogram not registered");
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some("test")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            found,
+            "expected batch_recv_tail_latency_seconds histogram to record observations"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_batch_commands_client_records_batch_send_tail_latency_seconds_histogram() {
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let (in_tx, in_rx) = mpsc::channel(8);
+
+        out_tx
+            .send(tikvpb::BatchCommandsRequest::default())
+            .await
+            .expect("fill outbound channel");
+
+        let client = client_with_channels(out_tx, in_rx);
+
+        let request_task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .dispatch(
+                        tikvpb::batch_commands_request::request::Cmd::Empty(
+                            tikvpb::BatchCommandsEmptyRequest::default(),
+                        ),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            })
+        };
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        out_rx.recv().await.expect("drain dummy request");
+
+        let req = out_rx.recv().await.expect("batch request");
+        let request_id = *req.request_ids.first().expect("request id");
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyResponse::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let result = request_task.await.expect("request task");
+        assert!(matches!(
+            result.expect("dispatch response").cmd,
+            tikvpb::batch_commands_response::response::Cmd::Empty(_)
+        ));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_batch_send_tail_latency_seconds")
+            .expect("batch_send_tail_latency_seconds histogram not registered");
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some("test")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            found,
+            "expected batch_send_tail_latency_seconds histogram to record observations"
+        );
     }
 }

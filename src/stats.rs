@@ -394,6 +394,26 @@ pub(crate) fn observe_batch_requests(target: &str, batch_size: usize) {
         .observe(batch_size as f64);
 }
 
+pub(crate) fn observe_batch_send_tail_latency_seconds(target: &str, elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_BATCH_SEND_TAIL_LATENCY_SECONDS_HISTOGRAM_VEC.as_ref()
+    else {
+        return;
+    };
+    histogram
+        .with_label_values(&[target])
+        .observe(duration_to_sec(elapsed));
+}
+
+pub(crate) fn observe_batch_recv_tail_latency_seconds(target: &str, elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_BATCH_RECV_TAIL_LATENCY_SECONDS_HISTOGRAM_VEC.as_ref()
+    else {
+        return;
+    };
+    histogram
+        .with_label_values(&[target])
+        .observe(duration_to_sec(elapsed));
+}
+
 pub(crate) fn observe_batch_client_wait_connection_establish(elapsed: Duration) {
     if let Some(histogram) = TIKV_CLIENT_RUST_BATCH_CLIENT_WAIT_ESTABLISH_HISTOGRAM.as_ref() {
         histogram.observe(duration_to_sec(elapsed));
@@ -1407,6 +1427,34 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["target"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_BATCH_SEND_TAIL_LATENCY_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> =
+    {
+        let name = "tikv_client_rust_batch_send_tail_latency_seconds";
+        let help = "Batch send tail latency.";
+        let buckets = match prometheus::exponential_buckets(0.02, 2.0, 8) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["target"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_BATCH_RECV_TAIL_LATENCY_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> =
+    {
+        let name = "tikv_client_rust_batch_recv_tail_latency_seconds";
+        let help = "Batch recv tail latency.";
+        let buckets = match prometheus::exponential_buckets(0.02, 2.0, 8) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["target"], buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_BATCH_CLIENT_WAIT_ESTABLISH_HISTOGRAM: Option<Histogram> = {
         let name = "tikv_client_rust_batch_client_wait_connection_establish";
         let help = "Batch client wait new connection establish.";
@@ -1901,12 +1949,13 @@ mod tests {
         inc_validate_read_ts_from_pd_count, observe_backoff_seconds, observe_batch_client_reset,
         observe_batch_client_unavailable, observe_batch_client_wait_connection_establish,
         observe_batch_executor_token_wait_duration, observe_batch_pending_requests,
-        observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
-        observe_local_latch_wait_seconds, observe_pipelined_flush_duration,
-        observe_pipelined_flush_len, observe_pipelined_flush_size,
-        observe_pipelined_flush_throttle_seconds, observe_range_task_push_duration,
-        observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
-        observe_stale_read_hit_miss, observe_ts_future_wait_seconds,
+        observe_batch_recv_tail_latency_seconds, observe_batch_requests,
+        observe_batch_send_tail_latency_seconds, observe_kv_request_traffic_metrics,
+        observe_load_region_cache, observe_local_latch_wait_seconds,
+        observe_pipelined_flush_duration, observe_pipelined_flush_len,
+        observe_pipelined_flush_size, observe_pipelined_flush_throttle_seconds,
+        observe_range_task_push_duration, observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes,
+        observe_request_retry_times, observe_stale_read_hit_miss, observe_ts_future_wait_seconds,
         observe_txn_cmd_duration_seconds, observe_txn_commit_backoff_count,
         observe_txn_commit_backoff_seconds, observe_txn_heart_beat_seconds,
         observe_txn_lag_commit_ts_attempt_count, observe_txn_lag_commit_ts_wait_seconds,
@@ -2156,6 +2205,42 @@ mod tests {
         assert!(
             requests_found,
             "expected batch_requests metric with labels not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_batch_tail_latency_seconds_histograms_record_observations() {
+        let target = "unit_test_target_batch_tail_latency";
+        observe_batch_send_tail_latency_seconds(target, Duration::from_millis(30));
+        observe_batch_recv_tail_latency_seconds(target, Duration::from_millis(30));
+
+        let families = prometheus::gather();
+
+        let send_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_batch_send_tail_latency_seconds")
+            .expect("batch_send_tail_latency_seconds histogram not registered");
+        let send_found = send_family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some(target)
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            send_found,
+            "expected batch_send_tail_latency_seconds histogram to record observations"
+        );
+
+        let recv_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_batch_recv_tail_latency_seconds")
+            .expect("batch_recv_tail_latency_seconds histogram not registered");
+        let recv_found = recv_family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some(target)
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            recv_found,
+            "expected batch_recv_tail_latency_seconds histogram to record observations"
         );
     }
 
