@@ -41,6 +41,7 @@ use crate::stats::observe_backoff_seconds;
 use crate::stats::observe_kv_request_traffic_metrics;
 use crate::stats::observe_request_retry_times;
 use crate::stats::observe_stale_read_hit_miss;
+use crate::stats::record_prefer_leader_flow;
 use crate::stats::record_store_slow_score;
 use crate::stats::tikv_stats_with_context;
 use crate::store::HasRegionError;
@@ -1690,8 +1691,22 @@ fn select_replica_read_peer(
         }
     }
 
-    peer.or_else(|| region.leader.clone())
-        .or_else(|| region.region.peers.first().cloned())
+    let selected_peer = peer
+        .or_else(|| region.leader.clone())
+        .or_else(|| region.region.peers.first().cloned());
+
+    if replica_read == ReplicaReadType::PreferLeader {
+        if let (Some(selected_peer), Some(leader_store_id)) =
+            (selected_peer.as_ref(), leader_store_id)
+        {
+            record_prefer_leader_flow(
+                selected_peer.store_id,
+                selected_peer.store_id == leader_store_id,
+            );
+        }
+    }
+
+    selected_peer
 }
 
 #[derive(Debug, Default)]
@@ -4310,6 +4325,198 @@ mod test {
         assert!(
             store_slow_score("4242424243").is_some(),
             "expected store_slow_score gauge for store {STORE_ID} after executing"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_single_shard_handler_prefer_leader_records_prefer_leader_flows_gauge_to_leader() {
+        const STORE_ID: u64 = 4_242_424_244;
+
+        fn prefer_leader_flows(ty: &str, store: &str) -> Option<f64> {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_prefer_leader_flows_gauge")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == ty)
+                            && metric
+                                .get_label()
+                                .iter()
+                                .any(|pair| pair.get_name() == "store" && pair.get_value() == store)
+                    })
+                })
+                .map(|metric| metric.get_gauge().get_value())
+        }
+
+        assert!(
+            prefer_leader_flows("ToLeader", "4242424244").is_none(),
+            "expected no prefer_leader_flows_gauge(ToLeader) for store {STORE_ID} before executing"
+        );
+
+        let response = kvrpcpb::GetResponse::default();
+        let kv = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            req.downcast_ref::<kvrpcpb::GetRequest>()
+                .expect("expected GetRequest");
+            Ok(Box::new(response.clone()) as Box<dyn Any>)
+        });
+        let pd_client = std::sync::Arc::new(MockPdClient::new(kv));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context::default());
+
+        let peer = metapb::Peer {
+            store_id: STORE_ID,
+            ..Default::default()
+        };
+        let region = RegionWithLeader {
+            region: metapb::Region {
+                id: 42,
+                peers: vec![peer.clone()],
+                ..Default::default()
+            },
+            leader: Some(peer),
+        };
+
+        let plan = Dispatch {
+            request,
+            kv_client: None,
+        };
+
+        let permits = std::sync::Arc::new(Semaphore::new(1));
+        let match_store_ids = std::sync::Arc::new(Vec::new());
+        let match_store_labels = std::sync::Arc::new(Vec::new());
+        let replica_read = Some(ReplicaReadState::new(ReplicaReadType::PreferLeader, false));
+
+        let results = RetryableMultiRegion::<Dispatch<kvrpcpb::GetRequest>, MockPdClient>::single_shard_handler(
+            pd_client,
+            plan,
+            region,
+            Backoff::no_backoff(),
+            None,
+            permits,
+            false,
+            false,
+            replica_read,
+            match_store_ids,
+            match_store_labels,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        assert!(
+            prefer_leader_flows("ToLeader", "4242424244").unwrap_or(0.0) >= 1.0,
+            "expected prefer_leader_flows_gauge(ToLeader) for store {STORE_ID} after executing"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_single_shard_handler_prefer_leader_records_prefer_leader_flows_gauge_to_follower()
+    {
+        const LEADER_STORE_ID: u64 = 4_242_424_245;
+        const FOLLOWER_STORE_ID: u64 = 4_242_424_246;
+
+        fn prefer_leader_flows(ty: &str, store: &str) -> Option<f64> {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_prefer_leader_flows_gauge")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == ty)
+                            && metric
+                                .get_label()
+                                .iter()
+                                .any(|pair| pair.get_name() == "store" && pair.get_value() == store)
+                    })
+                })
+                .map(|metric| metric.get_gauge().get_value())
+        }
+
+        assert!(
+            prefer_leader_flows("ToFollower", "4242424246").is_none(),
+            "expected no prefer_leader_flows_gauge(ToFollower) for store {FOLLOWER_STORE_ID} before executing"
+        );
+
+        let response = kvrpcpb::GetResponse::default();
+        let kv = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            req.downcast_ref::<kvrpcpb::GetRequest>()
+                .expect("expected GetRequest");
+            Ok(Box::new(response.clone()) as Box<dyn Any>)
+        });
+        let pd_client = std::sync::Arc::new(MockPdClient::new(kv));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context::default());
+
+        let leader_peer = metapb::Peer {
+            store_id: LEADER_STORE_ID,
+            ..Default::default()
+        };
+        let follower_peer = metapb::Peer {
+            store_id: FOLLOWER_STORE_ID,
+            ..Default::default()
+        };
+        let region = RegionWithLeader {
+            region: metapb::Region {
+                id: 42,
+                peers: vec![leader_peer.clone(), follower_peer.clone()],
+                ..Default::default()
+            },
+            leader: Some(leader_peer),
+        };
+
+        let plan = Dispatch {
+            request,
+            kv_client: None,
+        };
+
+        let permits = std::sync::Arc::new(Semaphore::new(1));
+        let match_store_ids = std::sync::Arc::new(Vec::new());
+        let match_store_labels = std::sync::Arc::new(Vec::new());
+        let replica_read = ReplicaReadState::new(ReplicaReadType::PreferLeader, false);
+        replica_read
+            .mark_store_server_is_busy(LEADER_STORE_ID)
+            .await;
+        let replica_read = Some(replica_read);
+
+        let results = RetryableMultiRegion::<Dispatch<kvrpcpb::GetRequest>, MockPdClient>::single_shard_handler(
+            pd_client,
+            plan,
+            region,
+            Backoff::no_backoff(),
+            None,
+            permits,
+            false,
+            false,
+            replica_read,
+            match_store_ids,
+            match_store_labels,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        assert!(
+            prefer_leader_flows("ToFollower", "4242424246").unwrap_or(0.0) >= 1.0,
+            "expected prefer_leader_flows_gauge(ToFollower) for store {FOLLOWER_STORE_ID} after executing"
         );
     }
 

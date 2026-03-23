@@ -330,6 +330,16 @@ pub(crate) fn record_store_slow_score(store_id: u64, timecost: Duration) {
     STORE_SLOW_SCORE_TRACKER.record(store_id, timecost, gauge);
 }
 
+pub(crate) fn record_prefer_leader_flow(store_id: u64, to_leader: bool) {
+    if store_id == 0 {
+        return;
+    }
+    let Some(gauge) = TIKV_CLIENT_RUST_PREFER_LEADER_FLOWS_GAUGE_VEC.as_ref() else {
+        return;
+    };
+    PREFER_LEADER_FLOWS_TRACKER.record(store_id, to_leader, gauge);
+}
+
 pub(crate) fn inc_health_feedback_ops_counter(scope: u64, label: &'static str) {
     let Some(counter) = TIKV_CLIENT_RUST_HEALTH_FEEDBACK_OPS_COUNTER_VEC.as_ref() else {
         return;
@@ -1356,6 +1366,10 @@ const STORE_SLOW_SCORE_TICK_INTERVAL: Duration = Duration::from_secs(15);
 const STORE_SLOW_SCORE_TICK_MAX_STEPS: u64 = 64;
 const STORE_SLOW_SCORE_SHARDS: usize = 32;
 
+const PREFER_LEADER_FLOWS_ROLLOVER_INTERVAL: Duration = Duration::from_secs(30);
+const PREFER_LEADER_FLOWS_ROLLOVER_MAX_STEPS: u64 = 64;
+const PREFER_LEADER_FLOWS_SHARDS: usize = 32;
+
 const SLOW_SCORE_INIT_VAL: u64 = 1;
 const SLOW_SCORE_THRESHOLD: u64 = 80;
 const SLOW_SCORE_MAX: u64 = 100;
@@ -1365,6 +1379,7 @@ const SLOW_SCORE_SLIDING_WINDOW_SIZE: usize = 10;
 
 lazy_static::lazy_static! {
     static ref STORE_SLOW_SCORE_TRACKER: StoreSlowScoreTracker = StoreSlowScoreTracker::new();
+    static ref PREFER_LEADER_FLOWS_TRACKER: PreferLeaderFlowsTracker = PreferLeaderFlowsTracker::new();
 }
 
 struct StoreSlowScoreTracker {
@@ -1452,6 +1467,114 @@ impl StoreSlowScoreState {
                     for _ in 0..tick_count {
                         self.stat.update_slow_score();
                     }
+                    return;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+}
+
+struct PreferLeaderFlowsTracker {
+    started_at: Instant,
+    shards: Vec<Mutex<HashMap<u64, Arc<PreferLeaderFlowsState>>>>,
+}
+
+impl PreferLeaderFlowsTracker {
+    fn new() -> PreferLeaderFlowsTracker {
+        let mut shards = Vec::with_capacity(PREFER_LEADER_FLOWS_SHARDS);
+        for _ in 0..PREFER_LEADER_FLOWS_SHARDS {
+            shards.push(Mutex::new(HashMap::new()));
+        }
+        PreferLeaderFlowsTracker {
+            started_at: Instant::now(),
+            shards,
+        }
+    }
+
+    fn record(&self, store_id: u64, to_leader: bool, gauge: &GaugeVec) {
+        let state = self.state(store_id);
+        let now_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let rollover_interval_ms =
+            u64::try_from(PREFER_LEADER_FLOWS_ROLLOVER_INTERVAL.as_millis()).unwrap_or(u64::MAX);
+        state.maybe_rollover(store_id, now_ms, rollover_interval_ms, gauge);
+
+        let (label, value) = if to_leader {
+            (
+                "ToLeader",
+                state.to_leader.fetch_add(1, Ordering::Relaxed) + 1,
+            )
+        } else {
+            (
+                "ToFollower",
+                state.to_follower.fetch_add(1, Ordering::Relaxed) + 1,
+            )
+        };
+
+        let mut buf = [0u8; 20];
+        let store = u64_label_value(store_id, &mut buf);
+        gauge.with_label_values(&[label, store]).set(value as f64);
+    }
+
+    fn state(&self, store_id: u64) -> Arc<PreferLeaderFlowsState> {
+        let shard = usize::try_from(store_id).unwrap_or(usize::MAX) % self.shards.len();
+        let mut guard = self.shards[shard]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .entry(store_id)
+            .or_insert_with(|| Arc::new(PreferLeaderFlowsState::new()))
+            .clone()
+    }
+}
+
+struct PreferLeaderFlowsState {
+    last_rollover_ms: AtomicU64,
+    to_leader: AtomicU64,
+    to_follower: AtomicU64,
+}
+
+impl PreferLeaderFlowsState {
+    fn new() -> PreferLeaderFlowsState {
+        PreferLeaderFlowsState {
+            last_rollover_ms: AtomicU64::new(0),
+            to_leader: AtomicU64::new(0),
+            to_follower: AtomicU64::new(0),
+        }
+    }
+
+    fn maybe_rollover(&self, store_id: u64, now_ms: u64, interval_ms: u64, gauge: &GaugeVec) {
+        if interval_ms == 0 {
+            return;
+        }
+
+        loop {
+            let last_rollover_ms = self.last_rollover_ms.load(Ordering::Relaxed);
+            let Some(elapsed_ms) = now_ms.checked_sub(last_rollover_ms) else {
+                return;
+            };
+            if elapsed_ms < interval_ms {
+                return;
+            }
+
+            let steps = (elapsed_ms / interval_ms).min(PREFER_LEADER_FLOWS_ROLLOVER_MAX_STEPS);
+            let new_rollover_ms =
+                last_rollover_ms.saturating_add(steps.saturating_mul(interval_ms));
+
+            match self.last_rollover_ms.compare_exchange(
+                last_rollover_ms,
+                new_rollover_ms,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.to_leader.swap(0, Ordering::Relaxed);
+                    self.to_follower.swap(0, Ordering::Relaxed);
+
+                    let mut buf = [0u8; 20];
+                    let store = u64_label_value(store_id, &mut buf);
+                    gauge.with_label_values(&["ToLeader", store]).set(0.0);
+                    gauge.with_label_values(&["ToFollower", store]).set(0.0);
                     return;
                 }
                 Err(_) => continue,
@@ -1770,6 +1893,12 @@ lazy_static::lazy_static! {
         "tikv_client_rust_store_slow_score",
         "Slow scores of each tikv node based on RPC timecosts.",
         &["store"],
+    );
+
+    static ref TIKV_CLIENT_RUST_PREFER_LEADER_FLOWS_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
+        "tikv_client_rust_prefer_leader_flows_gauge",
+        "Counter of flows under PreferLeader mode.",
+        &["type", "store"],
     );
 
     static ref TIKV_CLIENT_RUST_HEALTH_FEEDBACK_OPS_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
@@ -2409,9 +2538,9 @@ mod tests {
         observe_txn_commit_backoff_seconds, observe_txn_heart_beat_seconds,
         observe_txn_lag_commit_ts_attempt_count, observe_txn_lag_commit_ts_wait_seconds,
         observe_txn_ttl_manager, observe_txn_write_kv_num, observe_txn_write_size_bytes,
-        record_store_slow_score, region_cache_operation, set_feedback_slow_score,
-        set_low_resolution_tso_update_interval_seconds, set_min_safe_ts_gap_seconds,
-        set_range_task_stats, tikv_stats_with_context, SlowScoreStat,
+        record_prefer_leader_flow, record_store_slow_score, region_cache_operation,
+        set_feedback_slow_score, set_low_resolution_tso_update_interval_seconds,
+        set_min_safe_ts_gap_seconds, set_range_task_stats, tikv_stats_with_context, SlowScoreStat,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -3934,6 +4063,42 @@ mod tests {
                 && metric.get_gauge().get_value() == super::SLOW_SCORE_MAX as f64
         });
         assert!(found, "expected store_slow_score gauge for store 4242");
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_prefer_leader_flows_gauge_records_values_for_type_and_store() {
+        const STORE_ID: u64 = 4_242_424_247;
+
+        record_prefer_leader_flow(STORE_ID, true);
+        record_prefer_leader_flow(STORE_ID, true);
+        record_prefer_leader_flow(STORE_ID, false);
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_prefer_leader_flows_gauge")
+            .expect("prefer_leader_flows_gauge not registered");
+
+        let to_leader_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("ToLeader")
+                && label_value(metric, "store") == Some("4242424247")
+                && metric.get_gauge().get_value() >= 2.0
+        });
+        assert!(
+            to_leader_found,
+            "expected prefer_leader_flows_gauge(ToLeader) for store {STORE_ID}"
+        );
+
+        let to_follower_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("ToFollower")
+                && label_value(metric, "store") == Some("4242424247")
+                && metric.get_gauge().get_value() >= 1.0
+        });
+        assert!(
+            to_follower_found,
+            "expected prefer_leader_flows_gauge(ToFollower) for store {STORE_ID}"
+        );
     }
 
     #[test]
