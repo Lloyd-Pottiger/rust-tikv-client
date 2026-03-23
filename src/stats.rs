@@ -382,6 +382,16 @@ pub(crate) fn inc_panic_total(label: &'static str) {
     }
 }
 
+pub(crate) fn inc_connection_transient_failure_count(address: &str, store_id: u64) {
+    let Some(counter) = TIKV_CLIENT_RUST_CONNECTION_TRANSIENT_FAILURE_COUNT_COUNTER_VEC.as_ref()
+    else {
+        return;
+    };
+    let mut buf = [0u8; 20];
+    let store = u64_label_value(store_id, &mut buf);
+    counter.with_label_values(&[address, store]).inc();
+}
+
 pub(crate) fn observe_batch_pending_requests(target: &str, pending_requests: usize) {
     let Some(histogram) = TIKV_CLIENT_RUST_BATCH_PENDING_REQUESTS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1403,6 +1413,13 @@ lazy_static::lazy_static! {
     static ref TIKV_CLIENT_RUST_PANIC_TOTAL_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec("tikv_client_rust_panic_total", "Counter of panic.", &["type"]);
 
+    static ref TIKV_CLIENT_RUST_CONNECTION_TRANSIENT_FAILURE_COUNT_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_connection_transient_failure_count",
+            "Counter of gRPC connection transient failure",
+            &["address", "store"],
+        );
+
     static ref TIKV_CLIENT_RUST_BATCH_EXECUTOR_TOKEN_WAIT_DURATION_HISTOGRAM: Option<Histogram> = {
         let name = "tikv_client_rust_batch_executor_token_wait_duration";
         let help = "tidb txn token wait duration to process batches";
@@ -1964,11 +1981,12 @@ mod tests {
         add_aggressive_locking_count, add_range_task_stats, inc_async_batch_get_total,
         inc_async_commit_txn_counter, inc_async_send_req_total,
         inc_batch_client_no_available_connection, inc_commit_txn_counter,
-        inc_gc_unsafe_destroy_range_failures, inc_health_feedback_ops_counter,
-        inc_load_region_total, inc_load_safepoint_total, inc_lock_cleanup_task_total,
-        inc_lock_resolver_actions, inc_one_pc_txn_counter, inc_panic_total,
-        inc_prewrite_assertion_count_for_mutations, inc_replica_selector_failure_counter,
-        inc_safe_ts_update_counter, inc_stale_region_from_pd_counter, inc_ttl_lifetime_reach_total,
+        inc_connection_transient_failure_count, inc_gc_unsafe_destroy_range_failures,
+        inc_health_feedback_ops_counter, inc_load_region_total, inc_load_safepoint_total,
+        inc_lock_cleanup_task_total, inc_lock_resolver_actions, inc_one_pc_txn_counter,
+        inc_panic_total, inc_prewrite_assertion_count_for_mutations,
+        inc_replica_selector_failure_counter, inc_safe_ts_update_counter,
+        inc_stale_region_from_pd_counter, inc_ttl_lifetime_reach_total,
         inc_validate_read_ts_from_pd_count, observe_backoff_seconds, observe_batch_client_reset,
         observe_batch_client_unavailable, observe_batch_client_wait_connection_establish,
         observe_batch_executor_token_wait_duration, observe_batch_pending_requests,
@@ -2653,6 +2671,35 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected panic_total(batch-recv-loop) to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_connection_transient_failure_count_counter_increments() {
+        fn counter_value(address: &str, store: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| {
+                    family.get_name() == "tikv_client_rust_connection_transient_failure_count"
+                })
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "address") == Some(address)
+                            && label_value(metric, "store") == Some(store)
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("127.0.0.1:20160", "42");
+        inc_connection_transient_failure_count("127.0.0.1:20160", 42);
+        let after = counter_value("127.0.0.1:20160", "42");
+        assert!(
+            after >= before + 1.0,
+            "expected connection_transient_failure_count to increase"
         );
     }
 

@@ -34,6 +34,7 @@ use crate::rpc_interceptor::RpcInterceptors;
 use crate::rpc_interceptor::RpcRequest;
 use crate::stats::inc_async_batch_get_total;
 use crate::stats::inc_async_send_req_total;
+use crate::stats::inc_connection_transient_failure_count;
 use crate::stats::inc_replica_selector_failure_counter;
 use crate::stats::observe_backoff_seconds;
 use crate::stats::observe_kv_request_traffic_metrics;
@@ -2382,6 +2383,19 @@ where
             Ok(resp) => resp,
             Err(e) if is_grpc_error(&e) => {
                 inc_async_send_req_total("rpc_error");
+                let is_transient_failure = match &e {
+                    Error::Grpc(_) => true,
+                    Error::GrpcAPI(status) if status.code() == tonic::Code::Unavailable => true,
+                    _ => false,
+                };
+                if is_transient_failure {
+                    if let Ok(store_id) = region_store.region_with_leader.get_store_id() {
+                        inc_connection_transient_failure_count(
+                            &region_store.store_address,
+                            store_id,
+                        );
+                    }
+                }
                 debug!("single_shard_handler:execute: grpc error: {:?}", e);
                 return Self::handle_other_error(
                     pd_client,
@@ -6068,6 +6082,61 @@ mod test {
         assert!(
             after_ok >= before_ok + 1.0,
             "expected async_send_req_total(ok) to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_connection_transient_failure_count_counter_records_unavailable() {
+        fn counter_sum(families: &[prometheus::proto::MetricFamily]) -> f64 {
+            families
+                .iter()
+                .find(|family| {
+                    family.get_name() == "tikv_client_rust_connection_transient_failure_count"
+                })
+                .map(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .map(|metric| metric.get_counter().get_value())
+                        .sum()
+                })
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_sum(&prometheus::gather());
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_captured = call_count.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |_req: &dyn Any| {
+                let call = call_count_captured.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    return Err(Error::GrpcAPI(tonic::Status::unavailable(
+                        "unit_test_transient_failure",
+                    )));
+                }
+                Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            },
+        )));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context::default());
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region(Backoff::no_jitter_backoff(0, 0, 10))
+            .plan();
+
+        let results = plan.execute().await.expect("plan should succeed");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        let after = counter_sum(&prometheus::gather());
+        assert!(
+            after >= before + 1.0,
+            "expected connection_transient_failure_count to increase"
         );
     }
 
