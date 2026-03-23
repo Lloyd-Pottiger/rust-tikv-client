@@ -330,6 +330,33 @@ pub(crate) fn record_store_slow_score(store_id: u64, timecost: Duration) {
     STORE_SLOW_SCORE_TRACKER.record(store_id, timecost, gauge);
 }
 
+pub(crate) fn set_store_liveness_state(store_id: u64, state: u32) {
+    if store_id == 0 {
+        return;
+    }
+    let Some(gauge) = TIKV_CLIENT_RUST_STORE_LIVENESS_STATE_GAUGE_VEC.as_ref() else {
+        return;
+    };
+    let mut buf = [0u8; 20];
+    let store = u64_label_value(store_id, &mut buf);
+    gauge.with_label_values(&[store]).set(f64::from(state));
+}
+
+pub(crate) fn observe_kv_status_api_duration(store_address: &str, duration: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_KV_STATUS_API_DURATION_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    histogram
+        .with_label_values(&[store_address])
+        .observe(duration_to_sec(duration));
+}
+
+pub(crate) fn inc_kv_status_api_count(label: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_KV_STATUS_API_COUNT_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[label]).inc();
+    }
+}
+
 pub(crate) fn record_prefer_leader_flow(store_id: u64, to_leader: bool) {
     if store_id == 0 {
         return;
@@ -1371,6 +1398,7 @@ const PREFER_LEADER_FLOWS_ROLLOVER_MAX_STEPS: u64 = 64;
 const PREFER_LEADER_FLOWS_SHARDS: usize = 32;
 
 const SLOW_SCORE_INIT_VAL: u64 = 1;
+#[cfg(test)]
 const SLOW_SCORE_THRESHOLD: u64 = 80;
 const SLOW_SCORE_MAX: u64 = 100;
 const SLOW_SCORE_INIT_TIMEOUT_US: u64 = 500_000;
@@ -1642,10 +1670,12 @@ impl SlowScoreStat {
         self.avg_score.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     fn is_slow(&self) -> bool {
         self.get_slow_score() >= SLOW_SCORE_THRESHOLD
     }
 
+    #[cfg(test)]
     fn mark_already_slow(&self) {
         self.avg_score.store(SLOW_SCORE_MAX, Ordering::Relaxed);
     }
@@ -1863,6 +1893,32 @@ lazy_static::lazy_static! {
         "tikv_client_rust_prewrite_assertion_count",
         "Counter of assertions used in prewrite requests.",
         &["type"],
+    );
+
+    static ref TIKV_CLIENT_RUST_KV_STATUS_API_DURATION_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_kv_status_api_duration";
+        let help = "duration for kv status api.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 20) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["store"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_KV_STATUS_API_COUNT_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_kv_status_api_count",
+            "Counter of access kv status api.",
+            &["result"],
+        );
+
+    static ref TIKV_CLIENT_RUST_STORE_LIVENESS_STATE_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
+        "tikv_client_rust_store_liveness_state",
+        "Liveness state of each tikv.",
+        &["store"],
     );
 
     static ref TIKV_CLIENT_RUST_FEEDBACK_SLOW_SCORE_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
@@ -4045,6 +4101,73 @@ mod tests {
                 && metric.get_gauge().get_value() == super::SLOW_SCORE_MAX as f64
         });
         assert!(found, "expected store_slow_score gauge for store 4242");
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_store_liveness_state_gauge_sets_value_for_store() {
+        super::set_store_liveness_state(42, 2);
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_store_liveness_state")
+            .expect("store_liveness_state gauge not registered");
+
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "store") == Some("42")
+                && (metric.get_gauge().get_value() - 2.0).abs() < 1e-6
+        });
+        assert!(found, "expected store_liveness_state gauge for store 42");
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_kv_status_api_duration_histogram_records_observations() {
+        super::observe_kv_status_api_duration("unit_test_store_addr", Duration::from_millis(12));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_kv_status_api_duration")
+            .expect("kv_status_api_duration histogram not registered");
+
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "store") == Some("unit_test_store_addr")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            found,
+            "expected kv_status_api_duration histogram metric with labels not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_kv_status_api_count_counter_increments_for_result() {
+        fn counter_value(families: &[prometheus::proto::MetricFamily], result: &str) -> f64 {
+            families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_kv_status_api_count")
+                .and_then(|family| {
+                    family.get_metric().iter().find_map(|metric| {
+                        if label_value(metric, "result") == Some(result) {
+                            Some(metric.get_counter().get_value())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or(0.0)
+        }
+
+        let before_ok = counter_value(&prometheus::gather(), "ok");
+        super::inc_kv_status_api_count("ok");
+        let after_ok = counter_value(&prometheus::gather(), "ok");
+        assert!(
+            after_ok >= before_ok + 1.0,
+            "expected kv_status_api_count(ok) to increase"
+        );
     }
 
     #[test]

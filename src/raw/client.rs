@@ -122,10 +122,17 @@ impl Client<PdRpcClient> {
         let enable_region_cache_preload = config.enable_region_cache_preload;
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let health_feedback_update_interval = config.health_feedback_update_interval;
+        let store_liveness_update_interval = config.store_liveness_update_interval;
+        let store_liveness_timeout = config.store_liveness_timeout;
         let rpc =
             Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), enable_codec).await?);
         rpc.install_health_feedback_observer();
         crate::pd::spawn_health_feedback_updater(rpc.clone(), health_feedback_update_interval);
+        crate::pd::spawn_store_liveness_updater(
+            rpc.clone(),
+            store_liveness_update_interval,
+            store_liveness_timeout,
+        );
         let keyspace = match config.keyspace {
             Some(name) => {
                 let keyspace = rpc.load_keyspace(&name).await?;

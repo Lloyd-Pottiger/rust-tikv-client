@@ -688,6 +688,7 @@ impl<C> KvClientPool<C> {
 
 pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl = Cluster> {
     pd: Arc<RetryClient<Cl>>,
+    security_mgr: Arc<SecurityManager>,
     kv_connect: KvC,
     grpc_connection_count: usize,
     kv_client_cache: Arc<RwLock<HashMap<String, KvClientPool<KvC::KvClient>>>>,
@@ -1161,6 +1162,10 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         self.pd.cluster_id()
     }
 
+    pub(crate) fn security_manager(&self) -> Arc<SecurityManager> {
+        self.security_mgr.clone()
+    }
+
     pub async fn new<PdFut, MakeKvC, MakePd>(
         config: Config,
         kv_connect: MakeKvC,
@@ -1201,11 +1206,13 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         );
 
         let pd = Arc::new(pd(security_mgr.clone()).await?);
+        let kv_connect = kv_connect(security_mgr.clone());
         let kv_client_cache = Default::default();
         Ok(PdRpcClient {
             pd: pd.clone(),
+            security_mgr,
             kv_client_cache,
-            kv_connect: kv_connect(security_mgr),
+            kv_connect,
             grpc_connection_count,
             slow_store_until: Mutex::new(HashMap::new()),
             store_estimated_wait_until: Mutex::new(HashMap::new()),

@@ -2,11 +2,13 @@ mod client;
 mod cluster;
 mod health_feedback;
 mod retry;
+mod store_liveness;
 mod timestamp;
 
 pub use self::client::PdClient;
 pub use self::client::PdRpcClient;
 pub(crate) use self::health_feedback::spawn_health_feedback_updater;
+pub(crate) use self::store_liveness::spawn_store_liveness_updater;
 
 pub(crate) trait HealthFeedbackObserver: Send + Sync {
     fn observe_health_feedback(&self, feedback: &crate::proto::kvrpcpb::HealthFeedback);

@@ -165,6 +165,17 @@ pub struct Config {
     ///
     /// Defaults to disabled (`0s`).
     pub health_feedback_update_interval: Duration,
+    /// How often to refresh TiKV store liveness via the KV status API (gRPC health check).
+    ///
+    /// When non-zero, the client periodically issues `grpc.health.v1.Health/Check` to all stores
+    /// and records best-effort liveness state metrics.
+    ///
+    /// Defaults to disabled (`0s`).
+    pub store_liveness_update_interval: Duration,
+    /// Timeout for each KV status API call (gRPC health check).
+    ///
+    /// This maps to client-go `storeLivenessTimeout`.
+    pub store_liveness_timeout: Duration,
     /// Enable transaction local latches (client-side commit latches).
     ///
     /// When non-zero, the transactional client serializes optimistic transaction commits on
@@ -186,6 +197,7 @@ const DEFAULT_GRPC_KEEPALIVE_TIME: Duration = Duration::from_secs(10);
 const DEFAULT_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_GRPC_INITIAL_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
 const DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE: u32 = 1 << 27; // 128MiB
+const DEFAULT_STORE_LIVENESS_TIMEOUT: Duration = Duration::from_secs(1);
 const MIN_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) const DEFAULT_RESOLVE_LOCK_LITE_THRESHOLD: u64 = 16;
 pub(crate) const DEFAULT_TTL_REFRESHED_TXN_SIZE: u64 = 32 * 1024 * 1024;
@@ -222,6 +234,8 @@ impl Default for Config {
             enable_region_cache_preload: false,
             zone_label: None,
             health_feedback_update_interval: Duration::ZERO,
+            store_liveness_update_interval: Duration::ZERO,
+            store_liveness_timeout: DEFAULT_STORE_LIVENESS_TIMEOUT,
             txn_local_latches_capacity: 0,
         }
     }
@@ -550,6 +564,24 @@ impl Config {
     #[must_use]
     pub fn with_health_feedback_update_interval(mut self, interval: Duration) -> Self {
         self.health_feedback_update_interval = interval;
+        self
+    }
+
+    /// Set how often to refresh TiKV store liveness via the KV status API (gRPC health check).
+    ///
+    /// Set to `Duration::ZERO` to disable the background refresher (default).
+    #[must_use]
+    pub fn with_store_liveness_update_interval(mut self, interval: Duration) -> Self {
+        self.store_liveness_update_interval = interval;
+        self
+    }
+
+    /// Set the timeout for each KV status API call (gRPC health check).
+    ///
+    /// This maps to client-go `storeLivenessTimeout`.
+    #[must_use]
+    pub fn with_store_liveness_timeout(mut self, timeout: Duration) -> Self {
+        self.store_liveness_timeout = timeout;
         self
     }
 

@@ -187,10 +187,17 @@ impl Client {
         let enable_region_cache_preload = config.enable_region_cache_preload;
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let health_feedback_update_interval = config.health_feedback_update_interval;
+        let store_liveness_update_interval = config.store_liveness_update_interval;
+        let store_liveness_timeout = config.store_liveness_timeout;
         let txn_local_latches_capacity = config.txn_local_latches_capacity;
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
         pd.install_health_feedback_observer();
         crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
+        crate::pd::spawn_store_liveness_updater(
+            pd.clone(),
+            store_liveness_update_interval,
+            store_liveness_timeout,
+        );
         let keyspace = match config.keyspace {
             Some(name) => {
                 let keyspace = pd.load_keyspace(&name).await?;
@@ -239,10 +246,17 @@ impl Client {
         let enable_region_cache_preload = config.enable_region_cache_preload;
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let health_feedback_update_interval = config.health_feedback_update_interval;
+        let store_liveness_update_interval = config.store_liveness_update_interval;
+        let store_liveness_timeout = config.store_liveness_timeout;
         let txn_local_latches_capacity = config.txn_local_latches_capacity;
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
         pd.install_health_feedback_observer();
         crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
+        crate::pd::spawn_store_liveness_updater(
+            pd.clone(),
+            store_liveness_update_interval,
+            store_liveness_timeout,
+        );
         if enable_region_cache_preload {
             let (start_key, end_key) = Keyspace::ApiV2NoPrefix.prefix_range(KeyMode::Txn);
             pd.clone().spawn_region_cache_preload(start_key, end_key);
