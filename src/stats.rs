@@ -242,6 +242,12 @@ pub(crate) fn observe_load_region_cache(op: &'static str, elapsed: Duration) {
     }
 }
 
+pub(crate) fn inc_load_region_total(tag: &'static str, reason: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_LOAD_REGION_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[tag, reason]).inc();
+    }
+}
+
 pub(crate) fn inc_stale_region_from_pd_counter() {
     if let Some(counter) = TIKV_CLIENT_RUST_STALE_REGION_FROM_PD_COUNTER.as_ref() {
         counter.inc();
@@ -1716,6 +1722,13 @@ lazy_static::lazy_static! {
         &["type", "result"],
     );
 
+    static ref TIKV_CLIENT_RUST_LOAD_REGION_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_load_region_total",
+            "Counter of loading region.",
+            &["type", "reason"],
+        );
+
     static ref TIKV_CLIENT_RUST_LOAD_REGION_CACHE_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_load_region_cache_seconds";
         let help = "Load region information duration.";
@@ -1775,9 +1788,10 @@ mod tests {
         add_aggressive_locking_count, add_range_task_stats, inc_async_commit_txn_counter,
         inc_batch_client_no_available_connection, inc_commit_txn_counter,
         inc_gc_unsafe_destroy_range_failures, inc_health_feedback_ops_counter,
-        inc_load_safepoint_total, inc_lock_cleanup_task_total, inc_lock_resolver_actions,
-        inc_one_pc_txn_counter, inc_prewrite_assertion_count_for_mutations,
-        inc_safe_ts_update_counter, inc_stale_region_from_pd_counter, inc_ttl_lifetime_reach_total,
+        inc_load_region_total, inc_load_safepoint_total, inc_lock_cleanup_task_total,
+        inc_lock_resolver_actions, inc_one_pc_txn_counter,
+        inc_prewrite_assertion_count_for_mutations, inc_safe_ts_update_counter,
+        inc_stale_region_from_pd_counter, inc_ttl_lifetime_reach_total,
         inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
@@ -3139,6 +3153,33 @@ mod tests {
         assert!(
             hist_found,
             "expected load region cache histogram metric with labels not found"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_load_region_total_counter_increments() {
+        fn counter_value(tag: &str, reason: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_load_region_total")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(tag)
+                            && label_value(metric, "reason") == Some(reason)
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("ByKey", "Missing");
+        inc_load_region_total("ByKey", "Missing");
+        let after = counter_value("ByKey", "Missing");
+        assert!(
+            after >= before + 1.0,
+            "expected load_region_total(ByKey,Missing) to increase"
         );
     }
 

@@ -269,6 +269,11 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             }
         }
         drop(region_cache_guard);
+        let reason = if expired_ver_id.is_some() {
+            "Expired:Normal"
+        } else {
+            "Missing"
+        };
         if let Some(ver_id) = expired_ver_id {
             self.invalidate_region_cache(ver_id).await;
         } else if trace_enabled {
@@ -280,6 +285,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 &[TraceField::u64("keyLen", key_len)],
             );
         }
+        stats::inc_load_region_total("ByKey", reason);
         self.read_through_region_by_key(key.clone()).await
     }
 
@@ -347,6 +353,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             let notified = notify.as_ref().map(|notify| notify.notified());
             drop(region_cache_guard);
 
+            let expired = expired_ver_id.is_some();
             if let Some(ver_id) = expired_ver_id {
                 self.invalidate_region_cache(ver_id).await;
             }
@@ -362,6 +369,8 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                         &[TraceField::u64("regionID", id)],
                     );
                 }
+                let reason = if expired { "Expired:Normal" } else { "Missing" };
+                stats::inc_load_region_total("ByID", reason);
                 let result = self.read_through_region_by_id(id).await;
                 stats::region_cache_operation("get_region_by_id", result.is_ok());
                 stats::observe_load_region_cache("get_region_by_id", started_at.elapsed());
@@ -798,6 +807,26 @@ mod test {
                     .get(0)
                     .map(|metric| metric.get_counter().get_value())
             })
+            .unwrap_or(0.0)
+    }
+
+    fn load_region_total_counter_value(tag: &str, reason: &str) -> f64 {
+        prometheus::gather()
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_load_region_total")
+            .and_then(|family| {
+                family.get_metric().iter().find(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|pair| pair.get_name() == "type" && pair.get_value() == tag)
+                        && metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "reason" && pair.get_value() == reason)
+                })
+            })
+            .map(|metric| metric.get_counter().get_value())
             .unwrap_or(0.0)
     }
 
@@ -1311,6 +1340,81 @@ mod test {
             !guard.id_to_ver_id.contains_key(&3),
             "expected stale region not to be inserted"
         );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_region_cache_load_region_total_records_missing_and_expired() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(1, region(1, vec![], vec![100]));
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(2, region(2, vec![100], vec![]));
+
+        let cache =
+            RegionCache::new_with_ttl(retry_client.clone(), Duration::from_secs(1), Duration::ZERO);
+
+        let before_by_key_missing = load_region_total_counter_value("ByKey", "Missing");
+        let region1 = cache.get_region_by_key(&vec![10].into()).await?;
+        assert_eq!(region1.id(), 1);
+        let after_by_key_missing = load_region_total_counter_value("ByKey", "Missing");
+        assert!(
+            after_by_key_missing >= before_by_key_missing + 1.0,
+            "expected load_region_total(ByKey,Missing) to increase"
+        );
+
+        {
+            let guard = cache.region_cache.read().await;
+            let ttl_deadline = guard
+                .ver_id_to_ttl_deadline_ms
+                .get(&region1.ver_id())
+                .expect("region 1 ttl missing");
+            ttl_deadline.store(0, SeqCst);
+        }
+
+        let before_by_key_expired = load_region_total_counter_value("ByKey", "Expired:Normal");
+        let region1 = cache.get_region_by_key(&vec![10].into()).await?;
+        assert_eq!(region1.id(), 1);
+        let after_by_key_expired = load_region_total_counter_value("ByKey", "Expired:Normal");
+        assert!(
+            after_by_key_expired >= before_by_key_expired + 1.0,
+            "expected load_region_total(ByKey,Expired:Normal) to increase"
+        );
+
+        let before_by_id_missing = load_region_total_counter_value("ByID", "Missing");
+        let region2 = cache.get_region_by_id(2).await?;
+        assert_eq!(region2.id(), 2);
+        let after_by_id_missing = load_region_total_counter_value("ByID", "Missing");
+        assert!(
+            after_by_id_missing >= before_by_id_missing + 1.0,
+            "expected load_region_total(ByID,Missing) to increase"
+        );
+
+        {
+            let guard = cache.region_cache.read().await;
+            let ttl_deadline = guard
+                .ver_id_to_ttl_deadline_ms
+                .get(&region2.ver_id())
+                .expect("region 2 ttl missing");
+            ttl_deadline.store(0, SeqCst);
+        }
+
+        let before_by_id_expired = load_region_total_counter_value("ByID", "Expired:Normal");
+        let region2 = cache.get_region_by_id(2).await?;
+        assert_eq!(region2.id(), 2);
+        let after_by_id_expired = load_region_total_counter_value("ByID", "Expired:Normal");
+        assert!(
+            after_by_id_expired >= before_by_id_expired + 1.0,
+            "expected load_region_total(ByID,Expired:Normal) to increase"
+        );
+
+        Ok(())
     }
 
     #[tokio::test]
