@@ -32,6 +32,7 @@ use crate::request::{KvRequest, StoreRequest};
 use crate::rpc_interceptor::RpcCallResult;
 use crate::rpc_interceptor::RpcInterceptors;
 use crate::rpc_interceptor::RpcRequest;
+use crate::stats::inc_replica_selector_failure_counter;
 use crate::stats::observe_backoff_seconds;
 use crate::stats::observe_kv_request_traffic_metrics;
 use crate::stats::observe_request_retry_times;
@@ -1261,6 +1262,10 @@ fn select_replica_read_peer(
 ) -> Option<metapb::Peer> {
     let leader_store_id = region.leader.as_ref().map(|p| p.store_id);
     let peers = &region.region.peers;
+    if peers.is_empty() {
+        inc_replica_selector_failure_counter("invalid");
+        return None;
+    }
 
     fn is_store_available(unavailable_store_ids: &[StoreId], store_id: StoreId) -> bool {
         !unavailable_store_ids.contains(&store_id)
@@ -1450,7 +1455,7 @@ fn select_replica_read_peer(
     }
 
     if match_configured {
-        return select_replica_read_peer_by_score(
+        let peer = select_replica_read_peer_by_score(
             region,
             peers,
             replica_read,
@@ -1464,6 +1469,10 @@ fn select_replica_read_peer(
             label_matched_store_ids,
             false,
         );
+        if peer.is_none() {
+            inc_replica_selector_failure_counter("exhausted");
+        }
+        return peer;
     }
 
     fn select_peer_with_attempt<F>(
@@ -1581,6 +1590,23 @@ fn select_replica_read_peer(
             ),
         },
     };
+
+    if peer.is_none() {
+        match replica_read {
+            ReplicaReadType::Follower | ReplicaReadType::Learner => {
+                inc_replica_selector_failure_counter("exhausted");
+            }
+            ReplicaReadType::Mixed | ReplicaReadType::PreferLeader => match leader_store_id {
+                Some(leader_store_id) => {
+                    if unavailable_store_ids.contains(&leader_store_id) {
+                        inc_replica_selector_failure_counter("exhausted");
+                    }
+                }
+                None => inc_replica_selector_failure_counter("exhausted"),
+            },
+            ReplicaReadType::Leader => {}
+        }
+    }
 
     peer.or_else(|| region.leader.clone())
         .or_else(|| region.region.peers.first().cloned())
@@ -4748,6 +4774,75 @@ mod test {
         )
         .expect("expected a reachable replica");
         assert_eq!(peer.store_id, 61);
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_select_replica_read_peer_records_replica_selector_failure_metrics() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| {
+                    family.get_name() == "tikv_client_rust_replica_selector_failure_counter"
+                })
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == label)
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before_invalid = counter_value("invalid");
+        let invalid_region = RegionWithLeader::default();
+        assert!(select_replica_read_peer(
+            &invalid_region,
+            ReplicaReadType::Mixed,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+            false,
+            &[],
+        )
+        .is_none());
+        let after_invalid = counter_value("invalid");
+        assert!(
+            after_invalid >= before_invalid + 1.0,
+            "expected replica_selector_failure_counter(invalid) to increase"
+        );
+
+        let before_exhausted = counter_value("exhausted");
+        let region = MockPdClient::region1();
+        let unavailable_store_ids: Vec<StoreId> = region
+            .region
+            .peers
+            .iter()
+            .map(|peer| peer.store_id)
+            .collect();
+        let _ = select_replica_read_peer(
+            &region,
+            ReplicaReadType::Mixed,
+            0,
+            &unavailable_store_ids,
+            &[],
+            &[],
+            &[],
+            false,
+            false,
+            &[],
+        );
+        let after_exhausted = counter_value("exhausted");
+        assert!(
+            after_exhausted >= before_exhausted + 1.0,
+            "expected replica_selector_failure_counter(exhausted) to increase"
+        );
     }
 
     #[test]

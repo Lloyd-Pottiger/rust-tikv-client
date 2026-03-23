@@ -351,6 +351,12 @@ pub(crate) fn observe_stale_read_hit_miss(is_stale_read: bool, retry_times: u32)
     counter.with_label_values(&[result]).inc();
 }
 
+pub(crate) fn inc_replica_selector_failure_counter(label: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_REPLICA_SELECTOR_FAILURE_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[label]).inc();
+    }
+}
+
 pub(crate) fn observe_batch_pending_requests(target: &str, pending_requests: usize) {
     let Some(histogram) = TIKV_CLIENT_RUST_BATCH_PENDING_REQUESTS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1314,6 +1320,13 @@ lazy_static::lazy_static! {
         register_histogram_with_buckets(name, help, buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_REPLICA_SELECTOR_FAILURE_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_replica_selector_failure_counter",
+            "Counter of the reason why the replica selector cannot yield a potential leader.",
+            &["type"],
+        );
+
     static ref TIKV_CLIENT_RUST_BATCH_PENDING_REQUESTS_HISTOGRAM_VEC: Option<HistogramVec> = {
         let name = "tikv_client_rust_batch_pending_requests";
         let help = "Number of requests pending in the batch channel.";
@@ -1790,8 +1803,8 @@ mod tests {
         inc_gc_unsafe_destroy_range_failures, inc_health_feedback_ops_counter,
         inc_load_region_total, inc_load_safepoint_total, inc_lock_cleanup_task_total,
         inc_lock_resolver_actions, inc_one_pc_txn_counter,
-        inc_prewrite_assertion_count_for_mutations, inc_safe_ts_update_counter,
-        inc_stale_region_from_pd_counter, inc_ttl_lifetime_reach_total,
+        inc_prewrite_assertion_count_for_mutations, inc_replica_selector_failure_counter,
+        inc_safe_ts_update_counter, inc_stale_region_from_pd_counter, inc_ttl_lifetime_reach_total,
         inc_validate_read_ts_from_pd_count, observe_backoff_seconds,
         observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
         observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
@@ -3180,6 +3193,34 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected load_region_total(ByKey,Missing) to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_replica_selector_failure_counter_increments() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| {
+                    family.get_name() == "tikv_client_rust_replica_selector_failure_counter"
+                })
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(label)
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("exhausted");
+        inc_replica_selector_failure_counter("exhausted");
+        let after = counter_value("exhausted");
+        assert!(
+            after >= before + 1.0,
+            "expected replica_selector_failure_counter(exhausted) to increase"
         );
     }
 
