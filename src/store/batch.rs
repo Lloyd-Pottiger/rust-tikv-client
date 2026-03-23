@@ -20,7 +20,7 @@ use crate::proto::kvrpcpb;
 use crate::proto::tikvpb;
 use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::stats::{
-    observe_batch_client_reset, observe_batch_client_unavailable,
+    inc_panic_total, observe_batch_client_reset, observe_batch_client_unavailable,
     observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
     observe_batch_recv_tail_latency_seconds, observe_batch_requests,
     observe_batch_send_tail_latency_seconds,
@@ -207,15 +207,16 @@ impl BatchCommandsClient {
             let mut inbound = inbound;
 
             loop {
-                let stream_err = loop {
-                    let recv_started_at = Instant::now();
-                    let next = inbound.next().await;
-                    let recv_elapsed = recv_started_at.elapsed();
-                    if recv_elapsed > BATCH_TAIL_LATENCY_THRESHOLD {
-                        observe_batch_recv_tail_latency_seconds(&target_reader, recv_elapsed);
-                    }
-                    match next {
-                        Some(Ok(message)) => {
+                let stream_err = match std::panic::AssertUnwindSafe(async {
+                    loop {
+                        let recv_started_at = Instant::now();
+                        let next = inbound.next().await;
+                        let recv_elapsed = recv_started_at.elapsed();
+                        if recv_elapsed > BATCH_TAIL_LATENCY_THRESHOLD {
+                            observe_batch_recv_tail_latency_seconds(&target_reader, recv_elapsed);
+                        }
+                        match next {
+                            Some(Ok(message)) => {
                             let request_ids_len = message.request_ids.len();
                             let responses_len = message.responses.len();
                             if request_ids_len != responses_len {
@@ -274,9 +275,32 @@ impl BatchCommandsClient {
                                     request_ids_len, responses_len
                                 );
                             }
+                            }
+                            Some(Err(status)) => break status,
+                            None => break Status::unavailable("batch_commands stream ended"),
                         }
-                        Some(Err(status)) => break status,
-                        None => break Status::unavailable("batch_commands stream ended"),
+                    }
+                })
+                .catch_unwind()
+                .await
+                {
+                    Ok(status) => status,
+                    Err(panic) => {
+                        inc_panic_total("batch-recv-loop");
+                        let message = if let Some(message) =
+                            panic.as_ref().downcast_ref::<&'static str>()
+                        {
+                            (*message).to_owned()
+                        } else if let Some(message) = panic.as_ref().downcast_ref::<String>() {
+                            message.clone()
+                        } else {
+                            "non-string panic payload".to_owned()
+                        };
+                        warn!(
+                            "batch_commands reader loop panicked: target={}, payload={}",
+                            target_reader, message
+                        );
+                        Status::internal("batch_commands reader loop panicked")
                     }
                 };
 
@@ -688,6 +712,72 @@ mod tests {
             Error::GrpcAPI(status) => assert_eq!(status.code(), tonic::Code::Unavailable),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_batch_commands_client_reader_panic_records_panic_total() {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::Poll;
+
+        fn counter_value(families: &[prometheus::proto::MetricFamily], label: &str) -> f64 {
+            families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_panic_total")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(label)
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value(&prometheus::gather(), "batch-recv-loop");
+
+        let (start_tx, start_rx) = oneshot::channel::<()>();
+        let mut start_rx = start_rx;
+        let inbound = stream::poll_fn(move |cx| match Pin::new(&mut start_rx).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(_) => panic!("unit_test_batch_recv_loop_panic"),
+        });
+
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let client = BatchCommandsClient::new_with_inbound_for_test(out_tx, inbound).unwrap();
+
+        let task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .dispatch(
+                        tikvpb::batch_commands_request::request::Cmd::Empty(
+                            tikvpb::BatchCommandsEmptyRequest::default(),
+                        ),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            })
+        };
+
+        let _req = out_rx.recv().await.expect("batch request");
+        let _ = start_tx.send(());
+
+        let err = task
+            .await
+            .expect("task join")
+            .expect_err("expected panic error");
+        match err {
+            Error::GrpcAPI(status) => assert_eq!(status.code(), tonic::Code::Internal),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let after = counter_value(&prometheus::gather(), "batch-recv-loop");
+        assert!(
+            after >= before + 1.0,
+            "expected panic_total(batch-recv-loop) to increase"
+        );
     }
 
     #[tokio::test]

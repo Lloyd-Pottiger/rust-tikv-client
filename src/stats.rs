@@ -376,6 +376,12 @@ pub(crate) fn inc_async_batch_get_total(label: &'static str) {
     }
 }
 
+pub(crate) fn inc_panic_total(label: &'static str) {
+    if let Some(counter) = TIKV_CLIENT_RUST_PANIC_TOTAL_COUNTER_VEC.as_ref() {
+        counter.with_label_values(&[label]).inc();
+    }
+}
+
 pub(crate) fn observe_batch_pending_requests(target: &str, pending_requests: usize) {
     let Some(histogram) = TIKV_CLIENT_RUST_BATCH_PENDING_REQUESTS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1394,6 +1400,9 @@ lazy_static::lazy_static! {
             &["result"],
         );
 
+    static ref TIKV_CLIENT_RUST_PANIC_TOTAL_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec("tikv_client_rust_panic_total", "Counter of panic.", &["type"]);
+
     static ref TIKV_CLIENT_RUST_BATCH_EXECUTOR_TOKEN_WAIT_DURATION_HISTOGRAM: Option<Histogram> = {
         let name = "tikv_client_rust_batch_executor_token_wait_duration";
         let help = "tidb txn token wait duration to process batches";
@@ -1957,7 +1966,7 @@ mod tests {
         inc_batch_client_no_available_connection, inc_commit_txn_counter,
         inc_gc_unsafe_destroy_range_failures, inc_health_feedback_ops_counter,
         inc_load_region_total, inc_load_safepoint_total, inc_lock_cleanup_task_total,
-        inc_lock_resolver_actions, inc_one_pc_txn_counter,
+        inc_lock_resolver_actions, inc_one_pc_txn_counter, inc_panic_total,
         inc_prewrite_assertion_count_for_mutations, inc_replica_selector_failure_counter,
         inc_safe_ts_update_counter, inc_stale_region_from_pd_counter, inc_ttl_lifetime_reach_total,
         inc_validate_read_ts_from_pd_count, observe_backoff_seconds, observe_batch_client_reset,
@@ -2618,6 +2627,32 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected async_batch_get_total(ok) to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_panic_total_counter_increments() {
+        fn counter_value(label: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_panic_total")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "type") == Some(label)
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("batch-recv-loop");
+        inc_panic_total("batch-recv-loop");
+        let after = counter_value("batch-recv-loop");
+        assert!(
+            after >= before + 1.0,
+            "expected panic_total(batch-recv-loop) to increase"
         );
     }
 
