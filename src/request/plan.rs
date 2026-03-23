@@ -32,6 +32,7 @@ use crate::request::{KvRequest, StoreRequest};
 use crate::rpc_interceptor::RpcCallResult;
 use crate::rpc_interceptor::RpcInterceptors;
 use crate::rpc_interceptor::RpcRequest;
+use crate::stats::inc_async_batch_get_total;
 use crate::stats::inc_async_send_req_total;
 use crate::stats::inc_replica_selector_failure_counter;
 use crate::stats::observe_backoff_seconds;
@@ -1157,6 +1158,83 @@ pub trait HasKvContext {
     fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context>;
 }
 
+#[doc(hidden)]
+pub trait HasRequestLabel {
+    fn request_label(&self) -> &'static str;
+}
+
+impl<Req: KvRequest> HasRequestLabel for Dispatch<Req> {
+    fn request_label(&self) -> &'static str {
+        self.request.label()
+    }
+}
+
+impl<Req: KvRequest> HasRequestLabel for DispatchWithInterceptor<Req> {
+    fn request_label(&self) -> &'static str {
+        self.request.label()
+    }
+}
+
+impl<Req: KvRequest> HasRequestLabel for DispatchWithRuntimeStats<Req> {
+    fn request_label(&self) -> &'static str {
+        self.inner.request.label()
+    }
+}
+
+impl<Req: KvRequest> HasRequestLabel for DispatchWithInterceptorRuntimeStats<Req> {
+    fn request_label(&self) -> &'static str {
+        self.inner.request.label()
+    }
+}
+
+impl<P: Plan + HasRequestLabel, In, M: Merge<In>> HasRequestLabel for MergeResponse<P, In, M> {
+    fn request_label(&self) -> &'static str {
+        self.inner.request_label()
+    }
+}
+
+impl<P: Plan + HasRequestLabel, Pr: Process<P::Result>> HasRequestLabel for ProcessResponse<P, Pr> {
+    fn request_label(&self) -> &'static str {
+        self.inner.request_label()
+    }
+}
+
+impl<P: Plan + HasRequestLabel, PdC: PdClient> HasRequestLabel for ResolveLock<P, PdC> {
+    fn request_label(&self) -> &'static str {
+        self.inner.request_label()
+    }
+}
+
+impl<P: Plan + HasRequestLabel, PdC: PdClient> HasRequestLabel for ResolveLockInContext<P, PdC> {
+    fn request_label(&self) -> &'static str {
+        self.inner.request_label()
+    }
+}
+
+impl<P: Plan + HasRequestLabel, PdC: PdClient> HasRequestLabel for ResolveLockForRead<P, PdC> {
+    fn request_label(&self) -> &'static str {
+        self.inner.request_label()
+    }
+}
+
+impl<P: Plan + HasRequestLabel, PdC: PdClient> HasRequestLabel for CleanupLocks<P, PdC> {
+    fn request_label(&self) -> &'static str {
+        self.inner.request_label()
+    }
+}
+
+impl<P: Plan + Shardable + HasRequestLabel> HasRequestLabel for PreserveShard<P> {
+    fn request_label(&self) -> &'static str {
+        self.inner.request_label()
+    }
+}
+
+impl<P: Plan + HasRequestLabel> HasRequestLabel for ExtractError<P> {
+    fn request_label(&self) -> &'static str {
+        self.inner.request_label()
+    }
+}
+
 impl<Req: KvRequest> HasKvContext for Dispatch<Req> {
     fn kv_context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
         self.request.context_mut()
@@ -1815,7 +1893,8 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     pub(super) match_store_labels: Arc<Vec<StoreLabel>>,
 }
 
-impl<P: Plan + Shardable + HasKvContext, PdC: PdClient> RetryableMultiRegion<P, PdC>
+impl<P: Plan + Shardable + HasKvContext + HasRequestLabel, PdC: PdClient>
+    RetryableMultiRegion<P, PdC>
 where
     P::Result: HasKeyErrors + HasRegionError,
 {
@@ -2753,7 +2832,8 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
 }
 
 #[async_trait]
-impl<P: Plan + Shardable + HasKvContext, PdC: PdClient> Plan for RetryableMultiRegion<P, PdC>
+impl<P: Plan + Shardable + HasKvContext + HasRequestLabel, PdC: PdClient> Plan
+    for RetryableMultiRegion<P, PdC>
 where
     P::Result: HasKeyErrors + HasRegionError,
 {
@@ -3335,14 +3415,20 @@ impl<P: Plan, PdC: PdClient> Clone for ResolveLockForRead<P, PdC> {
 }
 
 #[async_trait]
-impl<P: Plan + Shardable + HasKvContext, PdC: PdClient> Plan for ResolveLockForRead<P, PdC>
+impl<P: Plan + Shardable + HasKvContext + HasRequestLabel, PdC: PdClient> Plan
+    for ResolveLockForRead<P, PdC>
 where
-    P::Result: HasLocks,
+    P::Result: HasLocks + HasKeyErrors + HasRegionError + Clone,
 {
     type Result = P::Result;
 
     async fn execute(&self) -> Result<Self::Result> {
         let mut plan = self.inner.clone();
+        let is_async_batch_get = plan.request_label() == "kv_batch_get";
+        let is_retry_request = plan
+            .kv_context_mut()
+            .map(|ctx| ctx.is_retry_request)
+            .unwrap_or(false);
         let mut backoff = self.backoff.clone();
         let mut forced_leader = false;
         let caller_start_ts = self.timestamp.version();
@@ -3355,7 +3441,27 @@ where
             ctx.committed_locks = committed_locks;
         }
 
-        let mut result = plan.execute().await?;
+        let execute_res = plan.execute().await;
+        if is_async_batch_get && !is_retry_request {
+            let label = match &execute_res {
+                Err(_) => "other_error",
+                Ok(result) => {
+                    let mut cloned = result.clone();
+                    if cloned.region_error().is_some() {
+                        "region_error"
+                    } else if !cloned.take_locks().is_empty() {
+                        "lock_error"
+                    } else if cloned.key_errors().is_some() {
+                        "other_error"
+                    } else {
+                        "ok"
+                    }
+                }
+            };
+            inc_async_batch_get_total(label);
+        }
+
+        let mut result = execute_res?;
         loop {
             let locks = result.take_locks();
             if locks.is_empty() {
@@ -6309,6 +6415,12 @@ mod test {
 
         fn apply_store(&mut self, _: &crate::store::RegionStore) -> Result<()> {
             Ok(())
+        }
+    }
+
+    impl HasRequestLabel for ErrPlan {
+        fn request_label(&self) -> &'static str {
+            "unit_test_err_plan"
         }
     }
 

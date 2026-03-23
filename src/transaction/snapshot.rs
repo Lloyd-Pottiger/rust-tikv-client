@@ -1161,6 +1161,90 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(metrics)]
+    async fn test_snapshot_batch_get_records_async_batch_get_total_counter() {
+        fn counter_value(families: &[prometheus::proto::MetricFamily], result: &str) -> f64 {
+            families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_async_batch_get_total")
+                .and_then(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .find(|metric| {
+                            metric.get_label().iter().any(|pair| {
+                                pair.get_name() == "result" && pair.get_value() == result
+                            })
+                        })
+                        .map(|metric| metric.get_counter().get_value())
+                })
+                .unwrap_or(0.0)
+        }
+
+        let before_ok = counter_value(&prometheus::gather(), "ok");
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            |req: &dyn Any| {
+                let Some(req) = req.downcast_ref::<kvrpcpb::BatchGetRequest>() else {
+                    return Err(Error::Unimplemented);
+                };
+
+                let mut resp = kvrpcpb::BatchGetResponse::default();
+                for key in &req.keys {
+                    resp.pairs.push(kvrpcpb::KvPair {
+                        key: key.clone(),
+                        value: b"v".to_vec(),
+                        error: None,
+                        commit_ts: 0,
+                    });
+                }
+
+                Ok(Box::new(resp) as Box<dyn Any>)
+            },
+        )));
+
+        let mut snapshot = Snapshot::new(Transaction::new(
+            Timestamp::from_version(10),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .read_only()
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        ));
+        snapshot.set_request_source("internal_unit_test");
+
+        let pairs: Vec<_> = snapshot
+            .batch_get(vec![b"k".to_vec()])
+            .await
+            .unwrap()
+            .collect();
+        assert_eq!(pairs.len(), 1);
+
+        let families = prometheus::gather();
+        let after_ok = {
+            let family = families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_async_batch_get_total")
+                .expect("async_batch_get_total counter not registered");
+            family
+                .get_metric()
+                .iter()
+                .find(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|pair| pair.get_name() == "result" && pair.get_value() == "ok")
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        };
+        assert!(
+            after_ok >= before_ok + 1.0,
+            "expected async_batch_get_total(ok) counter to increase"
+        );
+    }
+
+    #[tokio::test]
     async fn test_snapshot_cache_bypassed_for_read_latest_start_ts() {
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
             |req: &dyn Any| {

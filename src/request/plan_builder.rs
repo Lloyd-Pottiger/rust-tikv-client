@@ -13,7 +13,7 @@ use crate::request::plan::DispatchWithInterceptorRuntimeStats;
 use crate::request::plan::DispatchWithRuntimeStats;
 use crate::request::plan::ResolveLockInContext;
 use crate::request::plan::{
-    CleanupLocks, HasKvContext, RetryableAllStores, RetryableStores,
+    CleanupLocks, HasKvContext, HasRequestLabel, RetryableAllStores, RetryableStores,
     DEFAULT_MULTI_REGION_CONCURRENCY,
 };
 use crate::request::shard::HasNextBatch;
@@ -183,8 +183,8 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         rpc_context: LockResolverRpcContext,
     ) -> PlanBuilder<PdC, ResolveLockForRead<P, PdC>, Ph>
     where
-        P: Shardable + HasKvContext,
-        P::Result: HasLocks,
+        P: Shardable + HasKvContext + HasRequestLabel,
+        P::Result: HasLocks + HasKeyErrors + HasRegionError + Clone,
     {
         PlanBuilder {
             pd_client: self.pd_client.clone(),
@@ -346,7 +346,8 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
     }
 }
 
-impl<PdC: PdClient, P: Plan + Shardable + HasKvContext> PlanBuilder<PdC, P, NoTarget>
+impl<PdC: PdClient, P: Plan + Shardable + HasKvContext + HasRequestLabel>
+    PlanBuilder<PdC, P, NoTarget>
 where
     P::Result: HasKeyErrors + HasRegionError,
 {
@@ -501,7 +502,7 @@ where
     }
 }
 
-impl<PdC: PdClient, P: Plan + Shardable + HasKvContext>
+impl<PdC: PdClient, P: Plan + Shardable + HasKvContext + HasRequestLabel>
     PlanBuilder<PdC, RetryableMultiRegion<P, PdC>, Targetted>
 where
     P::Result: HasKeyErrors + HasRegionError,
