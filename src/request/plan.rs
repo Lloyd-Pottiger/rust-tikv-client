@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1803,6 +1803,7 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
 
     pub(super) concurrency: usize,
     pub(super) txn_regions_num_observer: Option<(&'static str, bool)>,
+    pub(super) batch_executor_token_wait_observer: bool,
 
     /// Preserve all regions' results for other downstream plans to handle.
     /// If true, return Ok and preserve all regions' results, even if some of them are Err.
@@ -1833,6 +1834,7 @@ where
         match_store_ids: Arc<Vec<u64>>,
         match_store_labels: Arc<Vec<StoreLabel>>,
         txn_regions_num_observer: Option<(&'static str, bool)>,
+        batch_executor_token_wait_observer: bool,
     ) -> Result<<Self as Plan>::Result> {
         if backoff.current_attempts() > 0 {
             if let Some(ctx) = current_plan.kv_context_mut() {
@@ -1850,6 +1852,11 @@ where
                 crate::stats::observe_txn_regions_num(label, internal, unique_region_ids.len());
             }
         }
+        let batch_executor_token_wait_nanos = if batch_executor_token_wait_observer {
+            Some(Arc::new(AtomicU64::new(0)))
+        } else {
+            None
+        };
         debug!("single_plan_handler, shards: {}", shards.len());
         let mut handles = Vec::with_capacity(shards.len());
         for shard in shards {
@@ -1858,6 +1865,7 @@ where
             let replica_read = replica_read.clone();
             let match_store_ids = match_store_ids.clone();
             let match_store_labels = match_store_labels.clone();
+            let batch_executor_token_wait_nanos = batch_executor_token_wait_nanos.clone();
             let handle = crate::util::spawn_with_inherited_task_locals(Self::single_shard_handler(
                 pd_client.clone(),
                 clone,
@@ -1871,11 +1879,18 @@ where
                 match_store_ids,
                 match_store_labels,
                 txn_regions_num_observer,
+                batch_executor_token_wait_nanos,
             ));
             handles.push(handle);
         }
 
-        let results = try_join_all(handles).await?;
+        let results = try_join_all(handles).await;
+        if let Some(batch_executor_token_wait_nanos) = batch_executor_token_wait_nanos.as_ref() {
+            crate::stats::observe_batch_executor_token_wait_duration(
+                batch_executor_token_wait_nanos.load(Ordering::Relaxed),
+            );
+        }
+        let results = results?;
         if preserve_region_results {
             Ok(results
                 .into_iter()
@@ -1910,6 +1925,7 @@ where
         match_store_ids: Arc<Vec<u64>>,
         match_store_labels: Arc<Vec<StoreLabel>>,
         txn_regions_num_observer: Option<(&'static str, bool)>,
+        batch_executor_token_wait_nanos: Option<Arc<AtomicU64>>,
     ) -> Result<<Self as Plan>::Result> {
         debug!("single_shard_handler");
         let self_zone_label = crate::config::get_global_config().zone_label;
@@ -2222,6 +2238,7 @@ where
                     match_store_ids,
                     match_store_labels,
                     txn_regions_num_observer,
+                    batch_executor_token_wait_nanos.is_some(),
                     stale_read,
                     false,
                     Error::LeaderNotFound { region },
@@ -2258,9 +2275,18 @@ where
             },
             Err(_) => (false, false),
         };
+        let permit_wait_started_at = batch_executor_token_wait_nanos.is_some().then(Instant::now);
         let permit = permits.acquire().await.map_err(|_| Error::InternalError {
             message: "request concurrency semaphore closed".to_owned(),
         })?;
+        if let (Some(permit_wait_started_at), Some(batch_executor_token_wait_nanos)) = (
+            permit_wait_started_at,
+            batch_executor_token_wait_nanos.as_ref(),
+        ) {
+            let waited = permit_wait_started_at.elapsed();
+            let waited_nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
+            batch_executor_token_wait_nanos.fetch_add(waited_nanos, Ordering::Relaxed);
+        }
         let res = crate::util::scope_task_traffic_kind(is_mpp, is_cross_zone, plan.execute()).await;
         drop(permit);
 
@@ -2291,6 +2317,7 @@ where
                     match_store_ids,
                     match_store_labels,
                     txn_regions_num_observer,
+                    batch_executor_token_wait_nanos.is_some(),
                     stale_read,
                     true,
                     e,
@@ -2434,6 +2461,7 @@ where
                         match_store_ids,
                         match_store_labels,
                         txn_regions_num_observer,
+                        batch_executor_token_wait_nanos.is_some(),
                     )
                     .await
                 }
@@ -2467,6 +2495,7 @@ where
         match_store_ids: Arc<Vec<u64>>,
         match_store_labels: Arc<Vec<StoreLabel>>,
         txn_regions_num_observer: Option<(&'static str, bool)>,
+        batch_executor_token_wait_observer: bool,
         stale_read: bool,
         executed: bool,
         e: Error,
@@ -2518,6 +2547,7 @@ where
                     match_store_ids,
                     match_store_labels,
                     txn_regions_num_observer,
+                    batch_executor_token_wait_observer,
                 )
                 .await
             }
@@ -2713,6 +2743,7 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
             killed: self.killed.clone(),
             concurrency: self.concurrency,
             txn_regions_num_observer: self.txn_regions_num_observer,
+            batch_executor_token_wait_observer: self.batch_executor_token_wait_observer,
             preserve_region_results: self.preserve_region_results,
             replica_read: self.replica_read,
             match_store_ids: self.match_store_ids.clone(),
@@ -2756,6 +2787,7 @@ where
             self.match_store_ids.clone(),
             self.match_store_labels.clone(),
             self.txn_regions_num_observer,
+            self.batch_executor_token_wait_observer,
         )
         .await
     }
@@ -4028,6 +4060,7 @@ mod test {
                 match_store_ids,
                 match_store_labels,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -4156,6 +4189,7 @@ mod test {
             killed: None,
             concurrency: 2,
             txn_regions_num_observer: None,
+            batch_executor_token_wait_observer: false,
             preserve_region_results: false,
             replica_read: None,
             match_store_ids: Arc::new(Vec::new()),
@@ -6294,6 +6328,7 @@ mod test {
             killed: None,
             concurrency: DEFAULT_MULTI_REGION_CONCURRENCY,
             txn_regions_num_observer: None,
+            batch_executor_token_wait_observer: false,
             preserve_region_results: false,
             replica_read: None,
             match_store_ids: Arc::new(Vec::new()),

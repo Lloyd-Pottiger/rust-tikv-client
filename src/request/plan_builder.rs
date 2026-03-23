@@ -490,6 +490,7 @@ where
                 killed: None,
                 concurrency,
                 txn_regions_num_observer: None,
+                batch_executor_token_wait_observer: false,
                 preserve_region_results,
                 replica_read,
                 match_store_ids,
@@ -512,6 +513,11 @@ where
 
     pub(crate) fn observe_txn_regions_num(mut self, label: &'static str, internal: bool) -> Self {
         self.plan.txn_regions_num_observer = Some((label, internal));
+        self
+    }
+
+    pub(crate) fn observe_batch_executor_token_wait_duration(mut self) -> Self {
+        self.plan.batch_executor_token_wait_observer = true;
         self
     }
 }

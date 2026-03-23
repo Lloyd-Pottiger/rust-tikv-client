@@ -340,6 +340,13 @@ pub(crate) fn observe_request_retry_times(retry_times: u32) {
     }
 }
 
+pub(crate) fn observe_batch_executor_token_wait_duration(wait_nanos: u64) {
+    if let Some(histogram) = TIKV_CLIENT_RUST_BATCH_EXECUTOR_TOKEN_WAIT_DURATION_HISTOGRAM.as_ref()
+    {
+        histogram.observe(wait_nanos as f64);
+    }
+}
+
 pub(crate) fn observe_stale_read_hit_miss(is_stale_read: bool, retry_times: u32) {
     if !is_stale_read {
         return;
@@ -1354,6 +1361,19 @@ lazy_static::lazy_static! {
             &["result"],
         );
 
+    static ref TIKV_CLIENT_RUST_BATCH_EXECUTOR_TOKEN_WAIT_DURATION_HISTOGRAM: Option<Histogram> = {
+        let name = "tikv_client_rust_batch_executor_token_wait_duration";
+        let help = "tidb txn token wait duration to process batches";
+        let buckets = match prometheus::exponential_buckets(1.0, 2.0, 34) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_with_buckets(name, help, buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_REPLICA_SELECTOR_FAILURE_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
             "tikv_client_rust_replica_selector_failure_counter",
@@ -1880,12 +1900,13 @@ mod tests {
         inc_safe_ts_update_counter, inc_stale_region_from_pd_counter, inc_ttl_lifetime_reach_total,
         inc_validate_read_ts_from_pd_count, observe_backoff_seconds, observe_batch_client_reset,
         observe_batch_client_unavailable, observe_batch_client_wait_connection_establish,
-        observe_batch_pending_requests, observe_batch_requests, observe_kv_request_traffic_metrics,
-        observe_load_region_cache, observe_local_latch_wait_seconds,
-        observe_pipelined_flush_duration, observe_pipelined_flush_len,
-        observe_pipelined_flush_size, observe_pipelined_flush_throttle_seconds,
-        observe_range_task_push_duration, observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes,
-        observe_request_retry_times, observe_stale_read_hit_miss, observe_ts_future_wait_seconds,
+        observe_batch_executor_token_wait_duration, observe_batch_pending_requests,
+        observe_batch_requests, observe_kv_request_traffic_metrics, observe_load_region_cache,
+        observe_local_latch_wait_seconds, observe_pipelined_flush_duration,
+        observe_pipelined_flush_len, observe_pipelined_flush_size,
+        observe_pipelined_flush_throttle_seconds, observe_range_task_push_duration,
+        observe_rawkv_cmd_seconds, observe_rawkv_kv_size_bytes, observe_request_retry_times,
+        observe_stale_read_hit_miss, observe_ts_future_wait_seconds,
         observe_txn_cmd_duration_seconds, observe_txn_commit_backoff_count,
         observe_txn_commit_backoff_seconds, observe_txn_heart_beat_seconds,
         observe_txn_lag_commit_ts_attempt_count, observe_txn_lag_commit_ts_wait_seconds,
@@ -2022,6 +2043,39 @@ mod tests {
         assert!(
             after_sum >= before_sum + 123.0,
             "expected request retry times histogram sample sum to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_batch_executor_token_wait_duration_histogram_records_observations() {
+        fn histogram_sample(name: &str) -> (u64, f64) {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == name)
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| {
+                    let histogram = metric.get_histogram();
+                    (histogram.get_sample_count(), histogram.get_sample_sum())
+                })
+                .unwrap_or((0, 0.0))
+        }
+
+        let (count_before, sum_before) =
+            histogram_sample("tikv_client_rust_batch_executor_token_wait_duration");
+
+        observe_batch_executor_token_wait_duration(7);
+
+        let (count_after, sum_after) =
+            histogram_sample("tikv_client_rust_batch_executor_token_wait_duration");
+
+        assert!(
+            count_after >= count_before + 1,
+            "expected batch_executor_token_wait_duration histogram to record observations"
+        );
+        assert!(
+            sum_after >= sum_before + 7.0,
+            "expected batch_executor_token_wait_duration histogram sum to increase"
         );
     }
 

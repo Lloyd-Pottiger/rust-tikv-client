@@ -4946,6 +4946,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             .preserve_shard()
             .retry_multi_region_preserve_results(region_backoff.clone())
             .observe_txn_regions_num("2pc_pessimistic_lock", internal)
+            .observe_batch_executor_token_wait_duration()
             .with_killed(killed.clone())
             .plan();
             let results = plan.execute().await?;
@@ -5262,6 +5263,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         )
         .retry_multi_region(region_backoff)
         .observe_txn_regions_num("2pc_pessimistic_rollback", internal)
+        .observe_batch_executor_token_wait_duration()
         .with_killed(killed)
         .extract_error()
         .plan();
@@ -7588,6 +7590,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 )
                 .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
                 .observe_txn_regions_num("2pc_prewrite", internal)
+                .observe_batch_executor_token_wait_duration()
                 .with_killed(killed.clone())
                 .merge(CollectError)
                 .extract_error()
@@ -7604,6 +7607,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 )
                 .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
                 .observe_txn_regions_num("2pc_prewrite", internal)
+                .observe_batch_executor_token_wait_duration()
                 .with_killed(killed.clone())
                 .merge(CollectError)
                 .extract_error()
@@ -7811,6 +7815,7 @@ impl<PdC: PdClient> Committer<PdC> {
         )
         .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
         .observe_txn_regions_num("2pc_commit", internal)
+        .observe_batch_executor_token_wait_duration()
         .with_killed(killed)
         .extract_error()
         .plan();
@@ -7990,6 +7995,7 @@ impl<PdC: PdClient> Committer<PdC> {
         )
         .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
         .observe_txn_regions_num("2pc_commit", internal)
+        .observe_batch_executor_token_wait_duration()
         .with_killed(killed)
         .extract_error()
         .plan();
@@ -8044,6 +8050,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 )
                 .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
                 .observe_txn_regions_num("2pc_cleanup", internal)
+                .observe_batch_executor_token_wait_duration()
                 .with_killed(killed)
                 .extract_error()
                 .plan();
@@ -8083,6 +8090,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 )
                 .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
                 .observe_txn_regions_num("2pc_pessimistic_rollback", internal)
+                .observe_batch_executor_token_wait_duration()
                 .with_killed(killed)
                 .extract_error()
                 .plan();
@@ -16294,6 +16302,55 @@ mod tests {
         assert!(
             (delta_sum - delta_count as f64).abs() < 0.0001,
             "expected each txn_regions_num observation to be 1 (single region), got delta_sum={delta_sum} delta_count={delta_count}",
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_commit_records_batch_executor_token_wait_duration_histogram() {
+        fn histogram_sample_count(name: &str) -> u64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == name)
+                .and_then(|family| family.get_metric().first())
+                .map(|metric| metric.get_histogram().get_sample_count())
+                .unwrap_or(0)
+        }
+
+        let before = histogram_sample_count("tikv_client_rust_batch_executor_token_wait_duration");
+
+        let start_version = 7;
+        let commit_version = 8;
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+
+        txn.put(b"key".to_vec(), vec![42u8]).await.unwrap();
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+
+        let after = histogram_sample_count("tikv_client_rust_batch_executor_token_wait_duration");
+        assert!(
+            after >= before + 1,
+            "expected batch_executor_token_wait_duration histogram to record observations"
         );
     }
 
