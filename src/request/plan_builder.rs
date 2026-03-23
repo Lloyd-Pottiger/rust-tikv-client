@@ -489,6 +489,7 @@ where
                 backoff,
                 killed: None,
                 concurrency,
+                txn_regions_num_observer: None,
                 preserve_region_results,
                 replica_read,
                 match_store_ids,
@@ -506,6 +507,11 @@ where
 {
     pub(crate) fn with_killed(mut self, killed: Option<Arc<AtomicU32>>) -> Self {
         self.plan.killed = killed;
+        self
+    }
+
+    pub(crate) fn observe_txn_regions_num(mut self, label: &'static str, internal: bool) -> Self {
+        self.plan.txn_regions_num_observer = Some((label, internal));
         self
     }
 }

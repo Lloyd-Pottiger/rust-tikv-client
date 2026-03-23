@@ -517,6 +517,15 @@ pub(crate) fn observe_txn_cmd_duration_seconds(
         .observe(duration_to_sec(elapsed));
 }
 
+pub(crate) fn observe_txn_regions_num(label: &'static str, internal: bool, regions: usize) {
+    let Some(histogram) = TIKV_CLIENT_RUST_TXN_REGIONS_NUM_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    histogram
+        .with_label_values(&[label, bool_label_value(internal)])
+        .observe(regions as f64);
+}
+
 pub(crate) fn observe_txn_commit_backoff_seconds(elapsed: Duration) {
     let Some(histogram) = TIKV_CLIENT_RUST_TXN_COMMIT_BACKOFF_SECONDS_HISTOGRAM.as_ref() else {
         return;
@@ -1534,6 +1543,19 @@ lazy_static::lazy_static! {
             }
         };
         register_histogram_with_buckets(name, help, buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_TXN_REGIONS_NUM_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_rust_txn_regions_num";
+        let help = "Number of regions in a transaction.";
+        let buckets = match prometheus::exponential_buckets(1.0, 2.0, 25) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["type", "scope"], buckets)
     };
 
     static ref TIKV_CLIENT_RUST_TXN_WRITE_KV_NUM_HISTOGRAM_VEC: Option<HistogramVec> = {

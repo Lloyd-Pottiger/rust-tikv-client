@@ -1801,6 +1801,7 @@ pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     pub(super) killed: Option<Arc<AtomicU32>>,
 
     pub(super) concurrency: usize,
+    pub(super) txn_regions_num_observer: Option<(&'static str, bool)>,
 
     /// Preserve all regions' results for other downstream plans to handle.
     /// If true, return Ok and preserve all regions' results, even if some of them are Err.
@@ -1830,6 +1831,7 @@ where
         replica_read: Option<ReplicaReadState>,
         match_store_ids: Arc<Vec<u64>>,
         match_store_labels: Arc<Vec<StoreLabel>>,
+        txn_regions_num_observer: Option<(&'static str, bool)>,
     ) -> Result<<Self as Plan>::Result> {
         if backoff.current_attempts() > 0 {
             if let Some(ctx) = current_plan.kv_context_mut() {
@@ -1837,6 +1839,16 @@ where
             }
         }
         let shards = current_plan.shards(&pd_client).collect::<Vec<_>>().await;
+        if let Some((label, internal)) = txn_regions_num_observer {
+            if shards.iter().all(|shard| shard.is_ok()) {
+                let mut unique_region_ids = std::collections::HashSet::new();
+                for shard in &shards {
+                    let (_shard, region) = shard.as_ref().expect("checked shard ok");
+                    unique_region_ids.insert(region.id());
+                }
+                crate::stats::observe_txn_regions_num(label, internal, unique_region_ids.len());
+            }
+        }
         debug!("single_plan_handler, shards: {}", shards.len());
         let mut handles = Vec::with_capacity(shards.len());
         for shard in shards {
@@ -1857,6 +1869,7 @@ where
                 replica_read,
                 match_store_ids,
                 match_store_labels,
+                txn_regions_num_observer,
             ));
             handles.push(handle);
         }
@@ -1895,6 +1908,7 @@ where
         replica_read: Option<ReplicaReadState>,
         match_store_ids: Arc<Vec<u64>>,
         match_store_labels: Arc<Vec<StoreLabel>>,
+        txn_regions_num_observer: Option<(&'static str, bool)>,
     ) -> Result<<Self as Plan>::Result> {
         debug!("single_shard_handler");
         let self_zone_label = crate::config::get_global_config().zone_label;
@@ -2206,6 +2220,7 @@ where
                     replica_read,
                     match_store_ids,
                     match_store_labels,
+                    txn_regions_num_observer,
                     stale_read,
                     false,
                     Error::LeaderNotFound { region },
@@ -2273,6 +2288,7 @@ where
                     replica_read,
                     match_store_ids,
                     match_store_labels,
+                    txn_regions_num_observer,
                     stale_read,
                     true,
                     e,
@@ -2408,6 +2424,7 @@ where
                         replica_read,
                         match_store_ids,
                         match_store_labels,
+                        txn_regions_num_observer,
                     )
                     .await
                 }
@@ -2439,6 +2456,7 @@ where
         replica_read: Option<ReplicaReadState>,
         match_store_ids: Arc<Vec<u64>>,
         match_store_labels: Arc<Vec<StoreLabel>>,
+        txn_regions_num_observer: Option<(&'static str, bool)>,
         stale_read: bool,
         executed: bool,
         e: Error,
@@ -2489,6 +2507,7 @@ where
                     replica_read,
                     match_store_ids,
                     match_store_labels,
+                    txn_regions_num_observer,
                 )
                 .await
             }
@@ -2683,6 +2702,7 @@ impl<P: Plan, PdC: PdClient> Clone for RetryableMultiRegion<P, PdC> {
             backoff: self.backoff.clone(),
             killed: self.killed.clone(),
             concurrency: self.concurrency,
+            txn_regions_num_observer: self.txn_regions_num_observer,
             preserve_region_results: self.preserve_region_results,
             replica_read: self.replica_read,
             match_store_ids: self.match_store_ids.clone(),
@@ -2725,6 +2745,7 @@ where
                 .map(|read_type| ReplicaReadState::new(read_type, stale_read)),
             self.match_store_ids.clone(),
             self.match_store_labels.clone(),
+            self.txn_regions_num_observer,
         )
         .await
     }
@@ -3996,6 +4017,7 @@ mod test {
                 None,
                 match_store_ids,
                 match_store_labels,
+                None,
             )
             .await
             .unwrap();
@@ -4123,6 +4145,7 @@ mod test {
             backoff: Backoff::no_backoff(),
             killed: None,
             concurrency: 2,
+            txn_regions_num_observer: None,
             preserve_region_results: false,
             replica_read: None,
             match_store_ids: Arc::new(Vec::new()),
@@ -6177,6 +6200,7 @@ mod test {
             backoff: Backoff::no_backoff(),
             killed: None,
             concurrency: DEFAULT_MULTI_REGION_CONCURRENCY,
+            txn_regions_num_observer: None,
             preserve_region_results: false,
             replica_read: None,
             match_store_ids: Arc::new(Vec::new()),

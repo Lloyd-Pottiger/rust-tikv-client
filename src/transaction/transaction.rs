@@ -2169,10 +2169,12 @@ impl<PdC: PdClient> Transaction<PdC> {
                                         match_store_ids.clone(),
                                         match_store_labels.clone(),
                                     )
+                                    .observe_txn_regions_num("snapshot", internal)
                                     .with_killed(killed.clone())
                             } else {
                                 plan_builder
                                     .retry_multi_region(retry_options.region_backoff.clone())
+                                    .observe_txn_regions_num("snapshot", internal)
                                     .with_killed(killed.clone())
                             };
                             let plan = plan_builder.merge(Collect).plan();
@@ -2238,10 +2240,12 @@ impl<PdC: PdClient> Transaction<PdC> {
                                         match_store_ids,
                                         match_store_labels,
                                     )
+                                    .observe_txn_regions_num("snapshot", internal)
                                     .with_killed(killed.clone())
                             } else {
                                 plan_builder
                                     .retry_multi_region(retry_options.region_backoff)
+                                    .observe_txn_regions_num("snapshot", internal)
                                     .with_killed(killed.clone())
                             };
                         let plan = plan_builder.merge(Collect).plan();
@@ -2294,10 +2298,12 @@ impl<PdC: PdClient> Transaction<PdC> {
                                     match_store_ids,
                                     match_store_labels,
                                 )
+                                .observe_txn_regions_num("snapshot", internal)
                                 .with_killed(killed.clone())
                         } else {
                             plan_builder
                                 .retry_multi_region(retry_options.region_backoff)
+                                .observe_txn_regions_num("snapshot", internal)
                                 .with_killed(killed.clone())
                         };
                     let plan = plan_builder.merge(Collect).plan();
@@ -2336,6 +2342,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let timestamp = self.timestamp.clone();
         let rpc = self.rpc.clone();
         let keyspace = self.keyspace;
+        let internal = self
+            .request_source()
+            .is_some_and(crate::request_context::is_internal_request_source);
         let keys = keys
             .into_iter()
             .map(|k| k.into().encode_keyspace(keyspace, KeyMode::Txn))
@@ -2404,10 +2413,12 @@ impl<PdC: PdClient> Transaction<PdC> {
                     match_store_ids,
                     match_store_labels,
                 )
+                .observe_txn_regions_num("snapshot", internal)
                 .with_killed(killed)
         } else {
             plan_builder
                 .retry_multi_region(retry_options.region_backoff)
+                .observe_txn_regions_num("snapshot", internal)
                 .with_killed(killed)
         };
         let plan = plan_builder.merge(CollectBatchGetWithCommitTs).plan();
@@ -4919,6 +4930,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
+        let internal = self
+            .request_source()
+            .is_some_and(crate::request_context::is_internal_request_source);
 
         loop {
             request.wait_timeout = lock_wait_timeout.effective_wait_timeout_ms(lock_wait_start);
@@ -4931,6 +4945,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             )
             .preserve_shard()
             .retry_multi_region_preserve_results(region_backoff.clone())
+            .observe_txn_regions_num("2pc_pessimistic_lock", internal)
             .with_killed(killed.clone())
             .plan();
             let results = plan.execute().await?;
@@ -5228,6 +5243,9 @@ impl<PdC: PdClient> Transaction<PdC> {
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
         let killed = self.vars.killed.clone();
+        let internal = self
+            .request_source()
+            .is_some_and(crate::request_context::is_internal_request_source);
         let plan = PlanBuilder::new_with_rpc_interceptors(
             self.rpc.clone(),
             self.keyspace,
@@ -5243,6 +5261,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             lock_resolver_rpc_context,
         )
         .retry_multi_region(region_backoff)
+        .observe_txn_regions_num("2pc_pessimistic_rollback", internal)
         .with_killed(killed)
         .extract_error()
         .plan();
@@ -7438,6 +7457,11 @@ impl<PdC: PdClient> Committer<PdC> {
         let primary_lock_key = primary_lock.clone();
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = self.calc_txn_lock_ttl();
+        let internal = self
+            .options
+            .request_source
+            .as_deref()
+            .is_some_and(crate::request_context::is_internal_request_source);
         if self.options.assertion_level != AssertionLevel::Off {
             crate::stats::inc_prewrite_assertion_count_for_mutations(&self.mutations);
         }
@@ -7563,6 +7587,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     lock_resolver_rpc_context,
                 )
                 .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
+                .observe_txn_regions_num("2pc_prewrite", internal)
                 .with_killed(killed.clone())
                 .merge(CollectError)
                 .extract_error()
@@ -7578,6 +7603,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     self.rpc_interceptors.clone(),
                 )
                 .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
+                .observe_txn_regions_num("2pc_prewrite", internal)
                 .with_killed(killed.clone())
                 .merge(CollectError)
                 .extract_error()
@@ -7744,6 +7770,11 @@ impl<PdC: PdClient> Committer<PdC> {
     /// Commits the primary key and returns the commit version
     async fn commit_primary(&mut self) -> Result<Timestamp> {
         debug!("committing primary");
+        let internal = self
+            .options
+            .request_source
+            .as_deref()
+            .is_some_and(crate::request_context::is_internal_request_source);
         let primary_key = self.primary_key.clone().into_iter();
         let commit_version = self.get_timestamp_for_commit_inner().await?;
         let mut req = new_commit_request(
@@ -7779,6 +7810,7 @@ impl<PdC: PdClient> Committer<PdC> {
             lock_resolver_rpc_context,
         )
         .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
+        .observe_txn_regions_num("2pc_commit", internal)
         .with_killed(killed)
         .extract_error()
         .plan();
@@ -7870,6 +7902,11 @@ impl<PdC: PdClient> Committer<PdC> {
 
     async fn commit_secondary(self, commit_version: Timestamp) -> Result<()> {
         debug!("committing secondary");
+        let internal = self
+            .options
+            .request_source
+            .as_deref()
+            .is_some_and(crate::request_context::is_internal_request_source);
         let start_version = self.start_version.clone();
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
@@ -7952,6 +7989,7 @@ impl<PdC: PdClient> Committer<PdC> {
             lock_resolver_rpc_context,
         )
         .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
+        .observe_txn_regions_num("2pc_commit", internal)
         .with_killed(killed)
         .extract_error()
         .plan();
@@ -7961,6 +7999,11 @@ impl<PdC: PdClient> Committer<PdC> {
 
     async fn rollback(self) -> Result<()> {
         debug!("rolling back");
+        let internal = self
+            .options
+            .request_source
+            .as_deref()
+            .is_some_and(crate::request_context::is_internal_request_source);
         if self.options.kind == TransactionKind::Optimistic && self.mutations.is_empty() {
             return Ok(());
         }
@@ -8000,6 +8043,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     lock_resolver_rpc_context.clone(),
                 )
                 .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
+                .observe_txn_regions_num("2pc_cleanup", internal)
                 .with_killed(killed)
                 .extract_error()
                 .plan();
@@ -8038,6 +8082,7 @@ impl<PdC: PdClient> Committer<PdC> {
                     lock_resolver_rpc_context.clone(),
                 )
                 .retry_multi_region_with_concurrency(region_backoff, committer_concurrency)
+                .observe_txn_regions_num("2pc_pessimistic_rollback", internal)
                 .with_killed(killed)
                 .extract_error()
                 .plan();
@@ -16154,6 +16199,101 @@ mod tests {
         assert!(
             count_sum_after >= count_sum_before + 2.0,
             "expected txn_commit_backoff_count histogram sum to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_transaction_commit_records_txn_regions_num_histogram() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn histogram_sample(type_label: &str, scope: &str) -> (u64, f64) {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_txn_regions_num")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "type" && pair.get_value() == type_label)
+                            && metric
+                                .get_label()
+                                .iter()
+                                .any(|pair| pair.get_name() == "scope" && pair.get_value() == scope)
+                    })
+                })
+                .map(|metric| {
+                    let histogram = metric.get_histogram();
+                    (histogram.get_sample_count(), histogram.get_sample_sum())
+                })
+                .unwrap_or((0, 0.0))
+        }
+
+        let (count_before, sum_before) = histogram_sample("2pc_prewrite", "false");
+
+        let start_version = 7;
+        let commit_version = 8;
+
+        let prewrite_calls = Arc::new(AtomicUsize::new(0));
+        let prewrite_calls_captured = prewrite_calls.clone();
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if req.downcast_ref::<kvrpcpb::PrewriteRequest>().is_some() {
+                prewrite_calls_captured.fetch_add(1, Ordering::SeqCst);
+                return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+            }
+
+            if req.downcast_ref::<kvrpcpb::CommitRequest>().is_some() {
+                return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client).with_tso_sequence(commit_version));
+        let mut txn = Transaction::new(
+            Timestamp::from_version(start_version),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .drop_check(CheckLevel::None)
+                .heartbeat_option(HeartbeatOption::NoHeartbeat),
+            Keyspace::Disable,
+        );
+        txn.set_causal_consistency(true);
+
+        fn make_large_region1_key(suffix: u8) -> Vec<u8> {
+            let mut key = vec![1u8];
+            key.extend(std::iter::repeat(0u8).take(998));
+            key.push(suffix);
+            key
+        }
+
+        for i in 0..40u8 {
+            txn.put(make_large_region1_key(i), vec![42u8])
+                .await
+                .unwrap();
+        }
+
+        let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
+        assert_eq!(commit_ts.version(), commit_version);
+
+        assert!(
+            prewrite_calls.load(Ordering::SeqCst) > 1,
+            "expected prewrite requests to be batched, got {}",
+            prewrite_calls.load(Ordering::SeqCst)
+        );
+
+        let (count_after, sum_after) = histogram_sample("2pc_prewrite", "false");
+        let delta_count = count_after.saturating_sub(count_before);
+        let delta_sum = sum_after - sum_before;
+
+        assert!(
+            delta_count > 0,
+            "expected txn_regions_num histogram to record observations"
+        );
+        assert!(
+            (delta_sum - delta_count as f64).abs() < 0.0001,
+            "expected each txn_regions_num observation to be 1 (single region), got delta_sum={delta_sum} delta_count={delta_count}",
         );
     }
 
