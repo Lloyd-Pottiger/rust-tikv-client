@@ -1,6 +1,9 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::any::Any;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -315,6 +318,16 @@ pub(crate) fn set_feedback_slow_score(store_id: u64, slow_score: i32) {
     let mut buf = [0u8; 20];
     let store = u64_label_value(store_id, &mut buf);
     gauge.with_label_values(&[store]).set(f64::from(slow_score));
+}
+
+pub(crate) fn record_store_slow_score(store_id: u64, timecost: Duration) {
+    if store_id == 0 {
+        return;
+    }
+    let Some(gauge) = TIKV_CLIENT_RUST_STORE_SLOW_SCORE_GAUGE_VEC.as_ref() else {
+        return;
+    };
+    STORE_SLOW_SCORE_TRACKER.record(store_id, timecost, gauge);
 }
 
 pub(crate) fn inc_health_feedback_ops_counter(scope: u64, label: &'static str) {
@@ -1339,6 +1352,293 @@ fn register_histogram_with_buckets(
     Some(metric)
 }
 
+const STORE_SLOW_SCORE_TICK_INTERVAL: Duration = Duration::from_secs(15);
+const STORE_SLOW_SCORE_TICK_MAX_STEPS: u64 = 64;
+const STORE_SLOW_SCORE_SHARDS: usize = 32;
+
+const SLOW_SCORE_INIT_VAL: u64 = 1;
+const SLOW_SCORE_THRESHOLD: u64 = 80;
+const SLOW_SCORE_MAX: u64 = 100;
+const SLOW_SCORE_INIT_TIMEOUT_US: u64 = 500_000;
+const SLOW_SCORE_MAX_TIMEOUT_US: u64 = 30_000_000;
+const SLOW_SCORE_SLIDING_WINDOW_SIZE: usize = 10;
+
+lazy_static::lazy_static! {
+    static ref STORE_SLOW_SCORE_TRACKER: StoreSlowScoreTracker = StoreSlowScoreTracker::new();
+}
+
+struct StoreSlowScoreTracker {
+    started_at: Instant,
+    shards: Vec<Mutex<HashMap<u64, Arc<StoreSlowScoreState>>>>,
+}
+
+impl StoreSlowScoreTracker {
+    fn new() -> StoreSlowScoreTracker {
+        let mut shards = Vec::with_capacity(STORE_SLOW_SCORE_SHARDS);
+        for _ in 0..STORE_SLOW_SCORE_SHARDS {
+            shards.push(Mutex::new(HashMap::new()));
+        }
+        StoreSlowScoreTracker {
+            started_at: Instant::now(),
+            shards,
+        }
+    }
+
+    fn record(&self, store_id: u64, timecost: Duration, gauge: &GaugeVec) {
+        let state = self.state(store_id);
+        state.stat.record_slow_score_stat(timecost);
+
+        let now_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let tick_interval_ms =
+            u64::try_from(STORE_SLOW_SCORE_TICK_INTERVAL.as_millis()).unwrap_or(u64::MAX);
+        state.maybe_tick(now_ms, tick_interval_ms);
+
+        let score = state.stat.get_slow_score();
+        let mut buf = [0u8; 20];
+        let store = u64_label_value(store_id, &mut buf);
+        gauge.with_label_values(&[store]).set(score as f64);
+    }
+
+    fn state(&self, store_id: u64) -> Arc<StoreSlowScoreState> {
+        let shard = usize::try_from(store_id).unwrap_or(usize::MAX) % self.shards.len();
+        let mut guard = self.shards[shard]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .entry(store_id)
+            .or_insert_with(|| Arc::new(StoreSlowScoreState::new()))
+            .clone()
+    }
+}
+
+struct StoreSlowScoreState {
+    last_tick_ms: AtomicU64,
+    stat: SlowScoreStat,
+}
+
+impl StoreSlowScoreState {
+    fn new() -> StoreSlowScoreState {
+        StoreSlowScoreState {
+            last_tick_ms: AtomicU64::new(0),
+            stat: SlowScoreStat::new(),
+        }
+    }
+
+    fn maybe_tick(&self, now_ms: u64, tick_interval_ms: u64) {
+        if tick_interval_ms == 0 {
+            return;
+        }
+
+        loop {
+            let last_tick_ms = self.last_tick_ms.load(Ordering::Relaxed);
+            let Some(elapsed_ms) = now_ms.checked_sub(last_tick_ms) else {
+                return;
+            };
+            if elapsed_ms < tick_interval_ms {
+                return;
+            }
+
+            let tick_count = (elapsed_ms / tick_interval_ms).min(STORE_SLOW_SCORE_TICK_MAX_STEPS);
+            let new_tick_ms =
+                last_tick_ms.saturating_add(tick_count.saturating_mul(tick_interval_ms));
+
+            match self.last_tick_ms.compare_exchange(
+                last_tick_ms,
+                new_tick_ms,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    for _ in 0..tick_count {
+                        self.stat.update_slow_score();
+                    }
+                    return;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+}
+
+struct CountSlidingWindow {
+    avg: u64,
+    sum: u64,
+    history: Vec<u64>,
+}
+
+impl CountSlidingWindow {
+    fn avg(&self) -> u64 {
+        self.avg
+    }
+
+    fn append(&mut self, value: u64) -> f64 {
+        let prev_avg = self.avg;
+        if self.history.len() < SLOW_SCORE_SLIDING_WINDOW_SIZE {
+            self.sum += value;
+        } else {
+            self.sum = self.sum - self.history[0] + value;
+            self.history.remove(0);
+        }
+        self.history.push(value);
+        self.avg = self.sum / u64::try_from(self.history.len()).unwrap_or(u64::MAX);
+
+        let mut gradient = 1e-6_f64;
+        if prev_avg > 0 && value != prev_avg {
+            gradient = (value as f64 - prev_avg as f64) / prev_avg as f64;
+        }
+        gradient
+    }
+}
+
+impl Default for CountSlidingWindow {
+    fn default() -> Self {
+        CountSlidingWindow {
+            avg: 0,
+            sum: 0,
+            history: Vec::new(),
+        }
+    }
+}
+
+struct SlowScoreWindows {
+    ts_cnt_sliding_window: CountSlidingWindow,
+    upd_cnt_sliding_window: CountSlidingWindow,
+}
+
+impl Default for SlowScoreWindows {
+    fn default() -> Self {
+        SlowScoreWindows {
+            ts_cnt_sliding_window: CountSlidingWindow::default(),
+            upd_cnt_sliding_window: CountSlidingWindow::default(),
+        }
+    }
+}
+
+struct SlowScoreStat {
+    avg_score: AtomicU64,
+    avg_timecost: AtomicU64,
+    interval_timecost: AtomicU64,
+    interval_upd_count: AtomicU64,
+    windows: Mutex<SlowScoreWindows>,
+}
+
+impl SlowScoreStat {
+    fn new() -> SlowScoreStat {
+        SlowScoreStat {
+            avg_score: AtomicU64::new(SLOW_SCORE_INIT_VAL),
+            avg_timecost: AtomicU64::new(0),
+            interval_timecost: AtomicU64::new(0),
+            interval_upd_count: AtomicU64::new(0),
+            windows: Mutex::new(SlowScoreWindows::default()),
+        }
+    }
+
+    fn get_slow_score(&self) -> u64 {
+        self.avg_score.load(Ordering::Relaxed)
+    }
+
+    fn is_slow(&self) -> bool {
+        self.get_slow_score() >= SLOW_SCORE_THRESHOLD
+    }
+
+    fn mark_already_slow(&self) {
+        self.avg_score.store(SLOW_SCORE_MAX, Ordering::Relaxed);
+    }
+
+    fn update_slow_score(&self) {
+        if self.avg_timecost.load(Ordering::Relaxed) == 0 {
+            self.avg_score.store(SLOW_SCORE_INIT_VAL, Ordering::Relaxed);
+            self.avg_timecost
+                .store(SLOW_SCORE_INIT_TIMEOUT_US, Ordering::Relaxed);
+            return;
+        }
+
+        let avg_timecost = self.avg_timecost.load(Ordering::Relaxed);
+        let interval_upd_count = self.interval_upd_count.load(Ordering::Relaxed);
+        let interval_timecost = self.interval_timecost.load(Ordering::Relaxed);
+
+        let mut windows = self
+            .windows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut upd_gradient = 1.0_f64;
+        let mut ts_gradient = 1.0_f64;
+        if interval_upd_count > 0 {
+            let interval_avg_timecost = interval_timecost / interval_upd_count;
+            upd_gradient = windows.upd_cnt_sliding_window.append(interval_upd_count);
+            ts_gradient = windows.ts_cnt_sliding_window.append(interval_avg_timecost);
+        }
+
+        let avg_score = self.avg_score.load(Ordering::Relaxed);
+        if upd_gradient + 0.1 <= 1e-9 && ts_gradient - 0.1 >= 1e-9 {
+            let risen_ratio = 5.43_f64.min((ts_gradient / upd_gradient).abs());
+            let cur_avg_score = (avg_score as f64 * risen_ratio + 1.0)
+                .min(SLOW_SCORE_MAX as f64)
+                .ceil();
+            let _ = self.avg_score.compare_exchange(
+                avg_score,
+                u64::try_from(cur_avg_score as u128).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        } else {
+            let cost_score = (1.0_f64 + upd_gradient.abs())
+                .min(2.71_f64)
+                .max(SLOW_SCORE_INIT_VAL as f64)
+                .ceil();
+            let cost_score = u64::try_from(cost_score as u128).unwrap_or(u64::MAX);
+
+            if avg_score <= SLOW_SCORE_INIT_VAL.saturating_add(cost_score) {
+                let _ = self.avg_score.compare_exchange(
+                    avg_score,
+                    SLOW_SCORE_INIT_VAL,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            } else {
+                let _ = self.avg_score.compare_exchange(
+                    avg_score,
+                    avg_score.saturating_sub(cost_score),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            }
+        }
+
+        let _ = self.avg_timecost.compare_exchange(
+            avg_timecost,
+            windows.ts_cnt_sliding_window.avg(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+
+        self.interval_timecost.store(0, Ordering::Relaxed);
+        self.interval_upd_count.store(0, Ordering::Relaxed);
+    }
+
+    fn record_slow_score_stat(&self, timecost: Duration) {
+        self.interval_upd_count.fetch_add(1, Ordering::Relaxed);
+
+        let avg_timecost = self.avg_timecost.load(Ordering::Relaxed);
+        if avg_timecost == 0 {
+            self.avg_score.store(SLOW_SCORE_INIT_VAL, Ordering::Relaxed);
+            self.avg_timecost
+                .store(SLOW_SCORE_INIT_TIMEOUT_US, Ordering::Relaxed);
+            let timecost_us = u64::try_from(timecost.as_micros()).unwrap_or(u64::MAX);
+            self.interval_timecost.store(timecost_us, Ordering::Relaxed);
+            return;
+        }
+
+        let cur_timecost_us = u64::try_from(timecost.as_micros()).unwrap_or(u64::MAX);
+        if cur_timecost_us >= SLOW_SCORE_MAX_TIMEOUT_US {
+            self.avg_score.store(SLOW_SCORE_MAX, Ordering::Relaxed);
+            return;
+        }
+        self.interval_timecost
+            .fetch_add(cur_timecost_us, Ordering::Relaxed);
+    }
+}
+
 lazy_static::lazy_static! {
     static ref TIKV_REQUEST_DURATION_HISTOGRAM_VEC: Option<HistogramVec> = register_histogram_vec(
         "tikv_request_duration_seconds",
@@ -1463,6 +1763,12 @@ lazy_static::lazy_static! {
     static ref TIKV_CLIENT_RUST_FEEDBACK_SLOW_SCORE_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
         "tikv_client_rust_feedback_slow_score",
         "Slow scores of each tikv node that is calculated by TiKV and sent to the client by health feedback.",
+        &["store"],
+    );
+
+    static ref TIKV_CLIENT_RUST_STORE_SLOW_SCORE_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
+        "tikv_client_rust_store_slow_score",
+        "Slow scores of each tikv node based on RPC timecosts.",
         &["store"],
     );
 
@@ -2103,9 +2409,9 @@ mod tests {
         observe_txn_commit_backoff_seconds, observe_txn_heart_beat_seconds,
         observe_txn_lag_commit_ts_attempt_count, observe_txn_lag_commit_ts_wait_seconds,
         observe_txn_ttl_manager, observe_txn_write_kv_num, observe_txn_write_size_bytes,
-        region_cache_operation, set_feedback_slow_score,
+        record_store_slow_score, region_cache_operation, set_feedback_slow_score,
         set_low_resolution_tso_update_interval_seconds, set_min_safe_ts_gap_seconds,
-        set_range_task_stats, tikv_stats_with_context,
+        set_range_task_stats, tikv_stats_with_context, SlowScoreStat,
     };
     use crate::proto::kvrpcpb;
     use crate::proto::metapb;
@@ -3578,6 +3884,56 @@ mod tests {
             label_value(metric, "store") == Some("42") && metric.get_gauge().get_value() == 81.0
         });
         assert!(found, "expected feedback_slow_score gauge for store 42");
+    }
+
+    #[test]
+    fn test_slow_score_stat_smoke_matches_client_go() {
+        let slow_score = SlowScoreStat::new();
+        assert!(!slow_score.is_slow());
+
+        slow_score.record_slow_score_stat(Duration::from_millis(1));
+        slow_score.update_slow_score();
+        assert!(!slow_score.is_slow());
+
+        for i in 2..=100 {
+            slow_score.record_slow_score_stat(Duration::from_millis(i));
+            if i % 5 == 0 {
+                slow_score.update_slow_score();
+                assert!(!slow_score.is_slow());
+            }
+        }
+
+        for i in (2..=100).rev() {
+            slow_score.record_slow_score_stat(Duration::from_millis(i));
+            if i % 5 == 0 {
+                slow_score.update_slow_score();
+                assert!(!slow_score.is_slow());
+            }
+        }
+
+        slow_score.mark_already_slow();
+        assert!(slow_score.is_slow());
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_store_slow_score_gauge_sets_value_for_store() {
+        // The first record initializes the stat (client-go parity). The second record triggers the
+        // slow-path.
+        record_store_slow_score(4242, Duration::from_millis(1));
+        record_store_slow_score(4242, Duration::from_secs(31));
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_rust_store_slow_score")
+            .expect("store_slow_score gauge not registered");
+
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "store") == Some("4242")
+                && metric.get_gauge().get_value() == super::SLOW_SCORE_MAX as f64
+        });
+        assert!(found, "expected store_slow_score gauge for store 4242");
     }
 
     #[test]

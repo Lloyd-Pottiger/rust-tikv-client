@@ -29,6 +29,7 @@ use crate::request::shard::HasNextBatch;
 use crate::request::NextBatch;
 use crate::request::Shardable;
 use crate::request::{KvRequest, StoreRequest};
+use crate::request_context::is_internal_request_source;
 use crate::rpc_interceptor::RpcCallResult;
 use crate::rpc_interceptor::RpcInterceptors;
 use crate::rpc_interceptor::RpcRequest;
@@ -40,6 +41,7 @@ use crate::stats::observe_backoff_seconds;
 use crate::stats::observe_kv_request_traffic_metrics;
 use crate::stats::observe_request_retry_times;
 use crate::stats::observe_stale_read_hit_miss;
+use crate::stats::record_store_slow_score;
 use crate::stats::tikv_stats_with_context;
 use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
@@ -2360,8 +2362,23 @@ where
             let waited_nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
             batch_executor_token_wait_nanos.fetch_add(waited_nanos, Ordering::Relaxed);
         }
+        let rpc_started_at = Instant::now();
         let res = crate::util::scope_task_traffic_kind(is_mpp, is_cross_zone, plan.execute()).await;
+        let rpc_elapsed = rpc_started_at.elapsed();
         drop(permit);
+
+        if matches!(
+            replica_read.as_ref(),
+            Some(state) if state.read_type == ReplicaReadType::PreferLeader
+        ) && plan
+            .kv_context_mut()
+            .map(|ctx| !is_internal_request_source(&ctx.request_source))
+            .unwrap_or(false)
+        {
+            if let Ok(store_id) = region_store.region_with_leader.get_store_id() {
+                record_store_slow_score(store_id, rpc_elapsed);
+            }
+        }
 
         if patched_stale_read {
             if let (Some(replica_read), Some(ctx)) = (replica_read.as_ref(), plan.kv_context_mut())
@@ -4208,6 +4225,91 @@ mod test {
                 .traffic_details()
                 .unpacked_bytes_received_mpp_cross_zone(),
             expected_received
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_single_shard_handler_prefer_leader_records_store_slow_score_metric() {
+        const STORE_ID: u64 = 4_242_424_243;
+
+        fn store_slow_score(store: &str) -> Option<f64> {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_store_slow_score")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|pair| pair.get_name() == "store" && pair.get_value() == store)
+                    })
+                })
+                .map(|metric| metric.get_gauge().get_value())
+        }
+
+        assert!(
+            store_slow_score("4242424243").is_none(),
+            "expected no store_slow_score gauge for store {STORE_ID} before executing"
+        );
+
+        let response = kvrpcpb::GetResponse::default();
+        let kv = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            req.downcast_ref::<kvrpcpb::GetRequest>()
+                .expect("expected GetRequest");
+            Ok(Box::new(response.clone()) as Box<dyn Any>)
+        });
+        let pd_client = std::sync::Arc::new(MockPdClient::new(kv));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context::default());
+
+        let region = RegionWithLeader {
+            region: metapb::Region {
+                id: 42,
+                ..Default::default()
+            },
+            leader: Some(metapb::Peer {
+                store_id: STORE_ID,
+                ..Default::default()
+            }),
+        };
+
+        let plan = Dispatch {
+            request,
+            kv_client: None,
+        };
+
+        let permits = std::sync::Arc::new(Semaphore::new(1));
+        let match_store_ids = std::sync::Arc::new(Vec::new());
+        let match_store_labels = std::sync::Arc::new(Vec::new());
+        let replica_read = Some(ReplicaReadState::new(ReplicaReadType::PreferLeader, false));
+
+        let results = RetryableMultiRegion::<Dispatch<kvrpcpb::GetRequest>, MockPdClient>::single_shard_handler(
+            pd_client,
+            plan,
+            region,
+            Backoff::no_backoff(),
+            None,
+            permits,
+            false,
+            false,
+            replica_read,
+            match_store_ids,
+            match_store_labels,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        assert!(
+            store_slow_score("4242424243").is_some(),
+            "expected store_slow_score gauge for store {STORE_ID} after executing"
         );
     }
 
