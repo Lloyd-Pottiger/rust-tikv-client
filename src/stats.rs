@@ -1499,21 +1499,10 @@ impl PreferLeaderFlowsTracker {
             u64::try_from(PREFER_LEADER_FLOWS_ROLLOVER_INTERVAL.as_millis()).unwrap_or(u64::MAX);
         state.maybe_rollover(store_id, now_ms, rollover_interval_ms, gauge);
 
-        let (label, value) = if to_leader {
-            (
-                "ToLeader",
-                state.to_leader.fetch_add(1, Ordering::Relaxed) + 1,
-            )
-        } else {
-            (
-                "ToFollower",
-                state.to_follower.fetch_add(1, Ordering::Relaxed) + 1,
-            )
-        };
-
         let mut buf = [0u8; 20];
         let store = u64_label_value(store_id, &mut buf);
-        gauge.with_label_values(&[label, store]).set(value as f64);
+        let label = if to_leader { "ToLeader" } else { "ToFollower" };
+        gauge.with_label_values(&[label, store]).inc();
     }
 
     fn state(&self, store_id: u64) -> Arc<PreferLeaderFlowsState> {
@@ -1530,16 +1519,12 @@ impl PreferLeaderFlowsTracker {
 
 struct PreferLeaderFlowsState {
     last_rollover_ms: AtomicU64,
-    to_leader: AtomicU64,
-    to_follower: AtomicU64,
 }
 
 impl PreferLeaderFlowsState {
     fn new() -> PreferLeaderFlowsState {
         PreferLeaderFlowsState {
             last_rollover_ms: AtomicU64::new(0),
-            to_leader: AtomicU64::new(0),
-            to_follower: AtomicU64::new(0),
         }
     }
 
@@ -1568,9 +1553,6 @@ impl PreferLeaderFlowsState {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    self.to_leader.swap(0, Ordering::Relaxed);
-                    self.to_follower.swap(0, Ordering::Relaxed);
-
                     let mut buf = [0u8; 20];
                     let store = u64_label_value(store_id, &mut buf);
                     gauge.with_label_values(&["ToLeader", store]).set(0.0);
