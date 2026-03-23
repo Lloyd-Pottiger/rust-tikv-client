@@ -447,6 +447,15 @@ pub(crate) fn inc_connection_transient_failure_count(address: &str, store_id: u6
     counter.with_label_values(&[address, store]).inc();
 }
 
+pub(crate) fn inc_get_store_limit_token_error(address: &str, store_id: u64) {
+    let Some(counter) = TIKV_CLIENT_RUST_GET_STORE_LIMIT_TOKEN_ERROR_COUNTER_VEC.as_ref() else {
+        return;
+    };
+    let mut buf = [0u8; 20];
+    let store = u64_label_value(store_id, &mut buf);
+    counter.with_label_values(&[address, store]).inc();
+}
+
 pub(crate) fn observe_batch_pending_requests(target: &str, pending_requests: usize) {
     let Some(histogram) = TIKV_CLIENT_RUST_BATCH_PENDING_REQUESTS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1995,6 +2004,13 @@ lazy_static::lazy_static! {
             &["address", "store"],
         );
 
+    static ref TIKV_CLIENT_RUST_GET_STORE_LIMIT_TOKEN_ERROR_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_get_store_limit_token_error",
+            "store token is up to the limit, probably because one of the stores is the hotspot or unavailable",
+            &["address", "store"],
+        );
+
     static ref TIKV_CLIENT_RUST_BATCH_EXECUTOR_TOKEN_WAIT_DURATION_HISTOGRAM: Option<Histogram> = {
         let name = "tikv_client_rust_batch_executor_token_wait_duration";
         let help = "tidb txn token wait duration to process batches";
@@ -3275,6 +3291,33 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected connection_transient_failure_count to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_get_store_limit_token_error_counter_increments() {
+        fn counter_value(address: &str, store: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_get_store_limit_token_error")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "address") == Some(address)
+                            && label_value(metric, "store") == Some(store)
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("127.0.0.1:20160", "42");
+        super::inc_get_store_limit_token_error("127.0.0.1:20160", 42);
+        let after = counter_value("127.0.0.1:20160", "42");
+        assert!(
+            after >= before + 1.0,
+            "expected get_store_limit_token_error to increase"
         );
     }
 

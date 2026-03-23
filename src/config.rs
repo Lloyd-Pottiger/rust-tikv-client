@@ -36,6 +36,15 @@ pub struct Config {
     pub cert_path: Option<PathBuf>,
     pub key_path: Option<PathBuf>,
     pub timeout: Duration,
+    /// Maximum number of in-flight requests allowed per TiKV store.
+    ///
+    /// When set to a value greater than 0, the client applies a best-effort per-store token limit
+    /// and returns an error immediately once the limit is exceeded.
+    ///
+    /// This maps to client-go `kv.StoreLimit`.
+    ///
+    /// Defaults to disabled (`0`).
+    pub store_limit: i64,
     /// Maximum concurrency for 2PC committer multi-region requests.
     ///
     /// This limits the number of region shards executed concurrently for the prewrite, secondary
@@ -211,6 +220,7 @@ impl Default for Config {
             cert_path: None,
             key_path: None,
             timeout: DEFAULT_REQUEST_TIMEOUT,
+            store_limit: 0,
             committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
             max_txn_ttl: DEFAULT_MAX_TXN_TTL,
             tso_max_pending_count: DEFAULT_TSO_MAX_PENDING_COUNT,
@@ -247,6 +257,11 @@ impl Config {
     /// This is called internally by client constructors, and can also be called by users to catch
     /// invalid configurations early.
     pub fn validate(&self) -> crate::Result<()> {
+        if self.store_limit < 0 {
+            return Err(crate::Error::StringError(
+                "store-limit should be greater than or equal to 0".to_owned(),
+            ));
+        }
         if self.committer_concurrency == 0 {
             return Err(crate::Error::StringError(
                 "committer-concurrency should be greater than 0".to_owned(),
@@ -329,6 +344,15 @@ impl Config {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the maximum number of in-flight requests allowed per TiKV store (client-go `kv.StoreLimit`).
+    ///
+    /// Set to `0` to disable (default).
+    #[must_use]
+    pub fn with_store_limit(mut self, limit: i64) -> Self {
+        self.store_limit = limit;
         self
     }
 

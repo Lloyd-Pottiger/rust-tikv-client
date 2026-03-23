@@ -1,6 +1,8 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::any::Any;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
@@ -8,6 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use log::debug;
+use log::warn;
 use tonic::codec::CompressionEncoding;
 use tonic::codegen::Body;
 use tonic::codegen::Bytes;
@@ -139,6 +142,81 @@ pub trait KvClient {
 
     fn store_address(&self) -> Option<&str> {
         None
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct StoreLimitKvClient {
+    inner: Arc<dyn KvClient + Send + Sync>,
+    store_id: u64,
+    store_address: String,
+    store_limit: i64,
+    token_count: Arc<AtomicI64>,
+}
+
+impl StoreLimitKvClient {
+    pub(crate) fn new(
+        inner: Arc<dyn KvClient + Send + Sync>,
+        store_id: u64,
+        store_address: String,
+        store_limit: i64,
+        token_count: Arc<AtomicI64>,
+    ) -> StoreLimitKvClient {
+        StoreLimitKvClient {
+            inner,
+            store_id,
+            store_address,
+            store_limit,
+            token_count,
+        }
+    }
+
+    fn try_acquire_token(&self) -> std::result::Result<StoreLimitTokenGuard, Error> {
+        let count = self.token_count.load(Ordering::Relaxed);
+        if count < self.store_limit {
+            self.token_count.fetch_add(1, Ordering::Relaxed);
+            return Ok(StoreLimitTokenGuard {
+                token_count: self.token_count.clone(),
+            });
+        }
+        crate::stats::inc_get_store_limit_token_error(&self.store_address, self.store_id);
+        Err(Error::StringError(format!(
+            "Store token is up to the limit, store id = {}.",
+            self.store_id
+        )))
+    }
+}
+
+struct StoreLimitTokenGuard {
+    token_count: Arc<AtomicI64>,
+}
+
+impl Drop for StoreLimitTokenGuard {
+    fn drop(&mut self) {
+        let prev = self.token_count.fetch_sub(1, Ordering::Relaxed);
+        if prev <= 0 {
+            self.token_count.fetch_add(1, Ordering::Relaxed);
+            warn!("release store token failed, count equals to 0");
+        }
+    }
+}
+
+#[async_trait]
+impl KvClient for StoreLimitKvClient {
+    async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any>> {
+        if self.store_limit <= 0 {
+            return self.inner.dispatch(request).await;
+        }
+        let _guard = self.try_acquire_token()?;
+        self.inner.dispatch(request).await
+    }
+
+    fn timeout(&self) -> Duration {
+        self.inner.timeout()
+    }
+
+    fn store_address(&self) -> Option<&str> {
+        Some(&self.store_address)
     }
 }
 
@@ -3276,5 +3354,101 @@ mod tests {
         resp.downcast::<kvrpcpb::BroadcastTxnStatusResponse>()
             .map_err(|_| Error::StringError("expected broadcast_txn_status response".to_owned()))?;
         Ok(())
+    }
+
+    #[derive(Clone)]
+    struct BlockingKvClient {
+        started: Arc<tokio::sync::Notify>,
+        proceed: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl KvClient for BlockingKvClient {
+        async fn dispatch(&self, _request: &dyn Request) -> Result<Box<dyn Any>> {
+            self.started.notify_one();
+            self.proceed.notified().await;
+            Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+        }
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_store_limit_kv_client_rejects_when_limit_exceeded_and_records_metric() {
+        fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+            metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.get_name() == name)
+                .map(|pair| pair.get_value())
+        }
+
+        fn counter_value(address: &str, store: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_get_store_limit_token_error")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "address") == Some(address)
+                            && label_value(metric, "store") == Some(store)
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let proceed = Arc::new(tokio::sync::Notify::new());
+        let inner: Arc<dyn KvClient + Send + Sync> = Arc::new(BlockingKvClient {
+            started: started.clone(),
+            proceed: proceed.clone(),
+        });
+
+        let token_count = Arc::new(AtomicI64::new(0));
+        let client = Arc::new(StoreLimitKvClient::new(
+            inner,
+            42,
+            "127.0.0.1:20160".to_owned(),
+            1,
+            token_count.clone(),
+        ));
+
+        let first_dispatch = {
+            let client = client.clone();
+            async move {
+                let req = kvrpcpb::GetRequest::default();
+                client.dispatch(&req).await
+            }
+        };
+
+        let second_dispatch = async {
+            started.notified().await;
+            assert_eq!(token_count.load(Ordering::Relaxed), 1);
+
+            let before = counter_value("127.0.0.1:20160", "42");
+            let err = {
+                let req = kvrpcpb::GetRequest::default();
+                client.dispatch(&req).await.unwrap_err()
+            };
+            let after = counter_value("127.0.0.1:20160", "42");
+            assert!(
+                after >= before + 1.0,
+                "expected get_store_limit_token_error to increase"
+            );
+
+            let Error::StringError(message) = err else {
+                panic!("expected StringError, got {err:?}");
+            };
+            assert!(
+                message.contains("Store token is up to the limit"),
+                "unexpected store limit error message: {message}"
+            );
+
+            assert_eq!(token_count.load(Ordering::Relaxed), 1);
+            proceed.notify_one();
+        };
+
+        let (first_result, ()) = tokio::join!(first_dispatch, second_dispatch);
+        first_result.expect("dispatch ok");
+        assert_eq!(token_count.load(Ordering::Relaxed), 0);
     }
 }

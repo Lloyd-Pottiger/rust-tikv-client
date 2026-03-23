@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicI64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -37,7 +38,7 @@ use crate::region_cache::RegionCache;
 use crate::store::KvConnect;
 use crate::store::RegionStore;
 use crate::store::TikvConnect;
-use crate::store::{KvClient, Store};
+use crate::store::{KvClient, Store, StoreLimitKvClient};
 use crate::BoundRange;
 use crate::Config;
 use crate::Error;
@@ -694,6 +695,8 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     kv_client_cache: Arc<RwLock<HashMap<String, KvClientPool<KvC::KvClient>>>>,
     slow_store_until: Mutex<HashMap<StoreId, Instant>>,
     store_estimated_wait_until: Mutex<HashMap<StoreId, Instant>>,
+    store_limit: i64,
+    store_token_count: Mutex<HashMap<StoreId, Arc<AtomicI64>>>,
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
     resolve_lock_lite_threshold: u64,
@@ -791,7 +794,18 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         let store = self.region_cache.get_store_by_id(store_id).await?;
         let metapb::Store { address, .. } = store;
         let kv_client = self.kv_client(&address).await?;
-        Ok(RegionStore::new(region, Arc::new(kv_client), address))
+        let mut client: Arc<dyn KvClient + Send + Sync> = Arc::new(kv_client);
+        if self.store_limit > 0 {
+            let token_count = self.store_token_counter(store_id);
+            client = Arc::new(StoreLimitKvClient::new(
+                client,
+                store_id,
+                address.clone(),
+                self.store_limit,
+                token_count,
+            ));
+        }
+        Ok(RegionStore::new(region, client, address))
     }
 
     async fn region_for_key(&self, key: &Key) -> Result<RegionWithLeader> {
@@ -1166,6 +1180,17 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         self.security_mgr.clone()
     }
 
+    fn store_token_counter(&self, store_id: StoreId) -> Arc<AtomicI64> {
+        let mut guard = self
+            .store_token_count
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .entry(store_id)
+            .or_insert_with(|| Arc::new(AtomicI64::new(0)))
+            .clone()
+    }
+
     pub async fn new<PdFut, MakeKvC, MakePd>(
         config: Config,
         kv_connect: MakeKvC,
@@ -1180,6 +1205,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         config.validate()?;
 
         let grpc_connection_count = config.grpc_connection_count;
+        let store_limit = config.store_limit;
         let resolve_lock_lite_threshold = config.resolve_lock_lite_threshold;
         let ttl_refreshed_txn_size = config.ttl_refreshed_txn_size;
         let committer_concurrency = config.committer_concurrency;
@@ -1216,6 +1242,8 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             grpc_connection_count,
             slow_store_until: Mutex::new(HashMap::new()),
             store_estimated_wait_until: Mutex::new(HashMap::new()),
+            store_limit,
+            store_token_count: Mutex::new(HashMap::new()),
             enable_codec,
             region_cache: RegionCache::new_with_ttl(
                 pd,

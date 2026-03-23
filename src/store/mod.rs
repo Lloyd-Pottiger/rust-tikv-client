@@ -15,6 +15,7 @@ use futures::stream::BoxStream;
 
 pub use self::client::KvClient;
 pub use self::client::KvConnect;
+pub(crate) use self::client::StoreLimitKvClient;
 pub use self::client::TikvConnect;
 pub use self::errors::HasKeyErrors;
 pub use self::errors::HasRegionError;
