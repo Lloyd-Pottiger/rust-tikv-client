@@ -911,6 +911,22 @@ lazy_static! {
     static ref GLOBAL_CONFIG: RwLock<Config> = RwLock::new(Config::default());
 }
 
+/// Restores the previous global client configuration snapshot captured by
+/// [`update_global_config`].
+#[derive(Debug)]
+pub struct GlobalConfigRestore {
+    previous: Option<Config>,
+}
+
+impl GlobalConfigRestore {
+    /// Restore the previous global config snapshot.
+    pub fn restore(mut self) {
+        if let Some(previous) = self.previous.take() {
+            set_global_config(previous);
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) static GLOBAL_CONFIG_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
@@ -948,9 +964,18 @@ pub fn set_global_config(config: Config) {
 }
 
 /// Update the global client configuration in-place.
-pub fn update_global_config(update: impl FnOnce(&mut Config)) {
+///
+/// Returns a restore handle for the previous global config snapshot.
+///
+/// This mirrors client-go `config.UpdateGlobal`, while using a Rust value type instead of a
+/// closure so callers can ignore the return value without triggering a warning.
+pub fn update_global_config(update: impl FnOnce(&mut Config)) -> GlobalConfigRestore {
     let mut config = GLOBAL_CONFIG.write().unwrap_or_else(|e| e.into_inner());
+    let prev = config.clone();
     update(&mut config);
+    GlobalConfigRestore {
+        previous: Some(prev),
+    }
 }
 
 #[cfg(test)]
@@ -1057,6 +1082,28 @@ mod tests {
         assert_eq!(get_global_config(), config);
         update_global_config(|cfg| cfg.enable_batch_rpc = false);
         assert!(!get_global_config().enable_batch_rpc);
+    }
+
+    #[test]
+    fn test_update_global_config_returns_restore_handle() {
+        let _lock = super::GLOBAL_CONFIG_TEST_LOCK.blocking_lock();
+
+        let mut original = Config::default();
+        original.enable_batch_rpc = true;
+        let _guard = set_global_config_scoped(original.clone());
+
+        let restore = update_global_config(|cfg| {
+            cfg.enable_batch_rpc = false;
+            cfg.store_limit = 7;
+        });
+
+        let updated = get_global_config();
+        assert!(!updated.enable_batch_rpc);
+        assert_eq!(updated.store_limit, 7);
+
+        restore.restore();
+
+        assert_eq!(get_global_config(), original);
     }
 
     #[test]
