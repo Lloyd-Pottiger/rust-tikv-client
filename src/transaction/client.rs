@@ -144,6 +144,11 @@ impl Client {
     /// PD must be provided, not the TiKV nodes. It's important to include more than one PD endpoint
     /// (include all endpoints, if possible), this helps avoid having a single point of failure.
     ///
+    /// By default, this uses the global client configuration returned by
+    /// [`config::get_global_config`](crate::config::get_global_config). Use
+    /// [`TransactionClient::new_with_config`](crate::TransactionClient::new_with_config) to
+    /// provide a per-client [`Config`](crate::Config).
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -155,7 +160,7 @@ impl Client {
     /// ```
     pub async fn new<S: Into<String>>(pd_endpoints: Vec<S>) -> Result<Client> {
         // debug!("creating transactional client");
-        Self::new_with_config(pd_endpoints, Config::default()).await
+        Self::new_with_config(pd_endpoints, crate::config::get_global_config()).await
     }
 
     /// Create a transactional [`Client`] with a custom configuration, and connect to the TiKV cluster.

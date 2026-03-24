@@ -978,6 +978,26 @@ pub fn update_global_config(update: impl FnOnce(&mut Config)) -> GlobalConfigRes
     }
 }
 
+/// Set the global region cache TTL with jitter.
+///
+/// This mirrors client-go `tikv.SetRegionCacheTTLWithJitter`. The effective TTL is in the range
+/// `[base, base + jitter)`.
+pub fn set_region_cache_ttl_with_jitter(base: Duration, jitter: Duration) {
+    update_global_config(|cfg| {
+        cfg.region_cache_ttl = base;
+        cfg.region_cache_ttl_jitter = jitter;
+    });
+}
+
+/// Set the global timeout used for store liveness checks.
+///
+/// This mirrors client-go `tikv.SetStoreLivenessTimeout`.
+pub fn set_store_liveness_timeout(timeout: Duration) {
+    update_global_config(|cfg| {
+        cfg.store_liveness_timeout = timeout;
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1104,6 +1124,128 @@ mod tests {
         restore.restore();
 
         assert_eq!(get_global_config(), original);
+    }
+
+    #[test]
+    fn test_set_region_cache_ttl_with_jitter_updates_global_config() {
+        let _lock = super::GLOBAL_CONFIG_TEST_LOCK.blocking_lock();
+
+        let prev = get_global_config();
+        struct RestoreGuard {
+            prev: Config,
+        }
+        impl Drop for RestoreGuard {
+            fn drop(&mut self) {
+                set_global_config(self.prev.clone());
+            }
+        }
+        let _guard = RestoreGuard { prev };
+
+        set_region_cache_ttl_with_jitter(Duration::from_secs(9), Duration::from_secs(3));
+
+        let updated = get_global_config();
+        assert_eq!(updated.region_cache_ttl, Duration::from_secs(9));
+        assert_eq!(updated.region_cache_ttl_jitter, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_set_store_liveness_timeout_updates_global_config() {
+        let _lock = super::GLOBAL_CONFIG_TEST_LOCK.blocking_lock();
+
+        let prev = get_global_config();
+        struct RestoreGuard {
+            prev: Config,
+        }
+        impl Drop for RestoreGuard {
+            fn drop(&mut self) {
+                set_global_config(self.prev.clone());
+            }
+        }
+        let _guard = RestoreGuard { prev };
+
+        set_store_liveness_timeout(Duration::from_secs(7));
+
+        let updated = get_global_config();
+        assert_eq!(updated.store_liveness_timeout, Duration::from_secs(7));
+    }
+
+    #[tokio::test]
+    async fn test_default_clients_new_use_global_config() {
+        let _lock = super::GLOBAL_CONFIG_TEST_LOCK.lock().await;
+
+        let prev = get_global_config();
+        struct RestoreGuard {
+            prev: Config,
+        }
+        impl Drop for RestoreGuard {
+            fn drop(&mut self) {
+                set_global_config(self.prev.clone());
+            }
+        }
+        let _guard = RestoreGuard { prev: prev.clone() };
+
+        // An invalid global config should make the default constructors fail fast before
+        // attempting any network operations.
+        set_global_config(prev.with_grpc_keepalive_timeout(Duration::from_millis(1)));
+
+        let err = crate::TransactionClient::new(Vec::<String>::new())
+            .await
+            .err()
+            .expect("expected TransactionClient::new to validate global config");
+        match err {
+            crate::Error::StringError(message) => {
+                assert!(
+                    message.contains("grpc-keepalive-timeout should be at least"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let err = crate::RawClient::new(Vec::<String>::new())
+            .await
+            .err()
+            .expect("expected RawClient::new to validate global config");
+        match err {
+            crate::Error::StringError(message) => {
+                assert!(
+                    message.contains("grpc-keepalive-timeout should be at least"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sync_transaction_client_new_uses_global_config() {
+        let _lock = super::GLOBAL_CONFIG_TEST_LOCK.blocking_lock();
+
+        let prev = get_global_config();
+        struct RestoreGuard {
+            prev: Config,
+        }
+        impl Drop for RestoreGuard {
+            fn drop(&mut self) {
+                set_global_config(self.prev.clone());
+            }
+        }
+        let _guard = RestoreGuard { prev: prev.clone() };
+
+        set_global_config(prev.with_grpc_keepalive_timeout(Duration::from_millis(1)));
+
+        let err = crate::SyncTransactionClient::new(Vec::<String>::new())
+            .err()
+            .expect("expected SyncTransactionClient::new to validate global config");
+        match err {
+            crate::Error::StringError(message) => {
+                assert!(
+                    message.contains("grpc-keepalive-timeout should be at least"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

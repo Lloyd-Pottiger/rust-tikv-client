@@ -71,8 +71,13 @@ impl SyncTransactionClient {
     /// Create a synchronous transactional [`SyncTransactionClient`] and connect to the TiKV cluster.
     ///
     /// See usage example in the documentation of [`TransactionClient::new`](crate::TransactionClient::new).
+    ///
+    /// By default, this uses the global client configuration returned by
+    /// [`config::get_global_config`](crate::config::get_global_config). Use
+    /// [`SyncTransactionClient::new_with_config`](crate::SyncTransactionClient::new_with_config)
+    /// to provide a per-client [`Config`](crate::Config).
     pub fn new<S: Into<String>>(pd_endpoints: Vec<S>) -> Result<Self> {
-        Self::new_with_config(pd_endpoints, Config::default())
+        Self::new_with_config(pd_endpoints, crate::config::get_global_config())
     }
 
     /// Create a synchronous transactional [`SyncTransactionClient`] with a custom configuration.

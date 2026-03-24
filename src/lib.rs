@@ -168,6 +168,10 @@ pub use common::Result;
 #[doc(inline)]
 pub use common::WriteConflictError;
 #[doc(inline)]
+pub use config::set_region_cache_ttl_with_jitter;
+#[doc(inline)]
+pub use config::set_store_liveness_timeout;
+#[doc(inline)]
 pub use config::Config;
 #[doc(inline)]
 pub use config::GrpcCompressionType;
