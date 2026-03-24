@@ -1339,6 +1339,7 @@ impl PdRpcClient<TikvConnect, Cluster> {
                 TikvConnect::new(
                     security_mgr,
                     config.timeout,
+                    config.copr_req_timeout,
                     config.grpc_max_decoding_message_size,
                     config.grpc_compression_type,
                     config.enable_batch_rpc,

@@ -41,6 +41,7 @@ pub trait KvConnect: Sized + Send + Sync + 'static {
 pub struct TikvConnect {
     security_mgr: Arc<SecurityManager>,
     timeout: Duration,
+    copr_req_timeout: Duration,
     grpc_max_decoding_message_size: usize,
     grpc_compression_type: GrpcCompressionType,
     enable_batch_rpc: bool,
@@ -54,6 +55,7 @@ impl TikvConnect {
     pub fn new(
         security_mgr: Arc<SecurityManager>,
         timeout: Duration,
+        copr_req_timeout: Duration,
         grpc_max_decoding_message_size: usize,
         grpc_compression_type: GrpcCompressionType,
         enable_batch_rpc: bool,
@@ -64,6 +66,7 @@ impl TikvConnect {
         TikvConnect {
             security_mgr,
             timeout,
+            copr_req_timeout,
             grpc_max_decoding_message_size,
             grpc_compression_type,
             enable_batch_rpc,
@@ -109,6 +112,7 @@ impl KvConnect for TikvConnect {
 
     async fn connect(&self, address: &str) -> Result<KvRpcClient> {
         let timeout = self.timeout;
+        let copr_req_timeout = self.copr_req_timeout;
         let grpc_max_decoding_message_size = self.grpc_max_decoding_message_size;
         let grpc_compression_type = self.grpc_compression_type;
         let enable_batch_rpc = self.enable_batch_rpc;
@@ -131,6 +135,7 @@ impl KvConnect for TikvConnect {
         Ok(KvRpcClient::new(
             rpc_client,
             timeout,
+            copr_req_timeout,
             address.to_owned(),
             enable_batch_rpc,
             batch_rpc_max_batch_size,
@@ -301,6 +306,7 @@ impl KvClient for StoreLimitKvClient {
 pub struct KvRpcClient {
     rpc_client: TikvClient<Channel>,
     timeout: Duration,
+    copr_req_timeout: Duration,
     store_address: String,
     batch: Option<BatchCommandsClient>,
     health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
@@ -310,6 +316,7 @@ impl KvRpcClient {
     async fn new(
         rpc_client: TikvClient<Channel>,
         timeout: Duration,
+        copr_req_timeout: Duration,
         store_address: String,
         enable_batch_rpc: bool,
         batch_rpc_max_batch_size: usize,
@@ -341,10 +348,26 @@ impl KvRpcClient {
         KvRpcClient {
             rpc_client,
             timeout,
+            copr_req_timeout,
             store_address,
             batch,
             health_feedback_observer,
         }
+    }
+
+    fn timeout_for_request(&self, request: &dyn Request) -> Duration {
+        if let Some(timeout) = request.timeout_override() {
+            return timeout;
+        }
+        if !self.copr_req_timeout.is_zero()
+            && matches!(
+                request.label(),
+                "coprocessor" | "batch_coprocessor" | "coprocessor_stream" | "raw_coprocessor"
+            )
+        {
+            return self.copr_req_timeout;
+        }
+        self.timeout
     }
 
     fn observe_health_feedback(&self, feedback: Option<&kvrpcpb::HealthFeedback>) {
@@ -378,10 +401,11 @@ impl KvRpcClient {
         let Some(batch) = self.batch.as_ref() else {
             return Ok(None);
         };
+        let timeout = self.timeout_for_request(request);
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::GetRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Get(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -399,7 +423,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::BatchGetRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::BatchGet(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -420,7 +444,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::BatchRollbackRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::BatchRollback(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -438,7 +462,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::ScanRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Scan(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -456,7 +480,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::PrewriteRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Prewrite(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -474,7 +498,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::CommitRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Commit(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -492,7 +516,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::CleanupRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Cleanup(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -510,7 +534,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<coprocessor::Request>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Coprocessor(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -528,7 +552,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::ScanLockRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::ScanLock(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -549,7 +573,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::PessimisticLockRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::PessimisticLock(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -570,7 +594,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::CheckTxnStatusRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::CheckTxnStatus(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -592,7 +616,7 @@ impl KvRpcClient {
         {
             let cmd =
                 tikvpb::batch_commands_request::request::Cmd::CheckSecondaryLocks(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -613,7 +637,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::TxnHeartBeatRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::TxnHeartBeat(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -634,7 +658,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::ResolveLockRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::ResolveLock(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -652,7 +676,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::GcRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Gc(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -673,7 +697,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::DeleteRangeRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::DeleteRange(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -696,7 +720,7 @@ impl KvRpcClient {
             let cmd = tikvpb::batch_commands_request::request::Cmd::PrepareFlashbackToVersion(
                 req.clone(),
             );
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -717,7 +741,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::FlashbackToVersionRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::FlashbackToVersion(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -735,7 +759,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::FlushRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::Flush(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -756,7 +780,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::BufferBatchGetRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::BufferBatchGet(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -778,7 +802,7 @@ impl KvRpcClient {
         {
             let cmd =
                 tikvpb::batch_commands_request::request::Cmd::PessimisticRollback(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -799,7 +823,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::GetHealthFeedbackRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::GetHealthFeedback(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => match result.cmd {
                     tikvpb::batch_commands_response::response::Cmd::GetHealthFeedback(resp) => {
                         let health_feedback = result.health_feedback.or(resp.health_feedback);
@@ -823,7 +847,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::BroadcastTxnStatusRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::BroadcastTxnStatus(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -841,7 +865,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawGetRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawGet(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -862,7 +886,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::RawBatchGetRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawBatchGet(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -880,7 +904,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawPutRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawPut(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -901,7 +925,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::RawBatchPutRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawBatchPut(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -919,7 +943,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawDeleteRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawDelete(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -940,7 +964,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::RawBatchDeleteRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawBatchDelete(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -961,7 +985,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::RawDeleteRangeRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawDeleteRange(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -979,7 +1003,7 @@ impl KvRpcClient {
 
         if let Some(req) = request.as_any().downcast_ref::<kvrpcpb::RawScanRequest>() {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawScan(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -1000,7 +1024,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::RawBatchScanRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawBatchScan(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -1021,7 +1045,7 @@ impl KvRpcClient {
             .downcast_ref::<kvrpcpb::RawCoprocessorRequest>()
         {
             let cmd = tikvpb::batch_commands_request::request::Cmd::RawCoprocessor(req.clone());
-            return match batch.dispatch(cmd, self.timeout).await {
+            return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
@@ -1045,12 +1069,14 @@ impl KvRpcClient {
 impl KvClient for KvRpcClient {
     async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any>> {
         if crate::store::has_forwarded_host() {
-            return request.dispatch(&self.rpc_client, self.timeout).await;
+            let timeout = self.timeout_for_request(request);
+            return request.dispatch(&self.rpc_client, timeout).await;
         }
         if let Some(resp) = self.try_dispatch_batch(request).await? {
             return Ok(resp);
         }
-        request.dispatch(&self.rpc_client, self.timeout).await
+        let timeout = self.timeout_for_request(request);
+        request.dispatch(&self.rpc_client, timeout).await
     }
 
     fn timeout(&self) -> Duration {
@@ -1187,6 +1213,7 @@ mod tests {
         let client = KvRpcClient {
             rpc_client,
             timeout: Duration::from_secs(1),
+            copr_req_timeout: Duration::ZERO,
             store_address: "127.0.0.1:1".to_owned(),
             batch: Some(batch),
             health_feedback_observer: Arc::new(Mutex::new(None)),
@@ -1246,6 +1273,132 @@ mod tests {
             "expected no-available-connection counter to increase"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_try_dispatch_batch_respects_request_timeout_override() -> Result<()> {
+        let (client, _out_rx, _in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = b"k".to_vec();
+        request.version = 7;
+        let request = crate::request::RequestWithTimeout::new(request, Duration::from_millis(1));
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(50),
+            client.try_dispatch_batch(&request),
+        )
+        .await
+        .expect("expected batch dispatch to time out quickly");
+
+        assert!(
+            response?.is_none(),
+            "expected batch dispatch to fall back to unary"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_try_dispatch_batch_uses_coprocessor_timeout_override() -> Result<()> {
+        let (mut client, _out_rx, _in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+        client.copr_req_timeout = Duration::from_millis(1);
+
+        let request = coprocessor::Request::default();
+        let response = tokio::time::timeout(
+            Duration::from_millis(50),
+            client.try_dispatch_batch(&request),
+        )
+        .await
+        .expect("expected batch dispatch to time out quickly");
+
+        assert!(
+            response?.is_none(),
+            "expected batch dispatch to fall back to unary"
+        );
+        Ok(())
+    }
+
+    #[derive(Clone, Debug)]
+    struct TimeoutEchoRequest {
+        label: &'static str,
+    }
+
+    #[async_trait]
+    impl Request for TimeoutEchoRequest {
+        async fn dispatch(
+            &self,
+            _client: &TikvClient<Channel>,
+            timeout: Duration,
+        ) -> Result<Box<dyn Any>> {
+            Ok(Box::new(timeout) as Box<dyn Any>)
+        }
+
+        fn label(&self) -> &'static str {
+            self.label
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn set_leader(&mut self, _leader: &crate::store::RegionWithLeader) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_api_version(&mut self, _api_version: kvrpcpb::ApiVersion) {}
+
+        fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_uses_coprocessor_timeout_for_coprocessor_labels() -> Result<()> {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+        let client = KvRpcClient {
+            rpc_client,
+            timeout: Duration::from_secs(1),
+            copr_req_timeout: Duration::from_secs(9),
+            store_address: "127.0.0.1:1".to_owned(),
+            batch: None,
+            health_feedback_observer: Arc::new(Mutex::new(None)),
+        };
+
+        let request = TimeoutEchoRequest {
+            label: "batch_coprocessor",
+        };
+        let timeout = client
+            .dispatch(&request)
+            .await?
+            .downcast::<Duration>()
+            .map(|timeout| *timeout)
+            .map_err(|_| Error::StringError("expected duration response".to_owned()))?;
+        assert_eq!(timeout, Duration::from_secs(9));
+
+        let request = TimeoutEchoRequest { label: "get" };
+        let timeout = client
+            .dispatch(&request)
+            .await?
+            .downcast::<Duration>()
+            .map(|timeout| *timeout)
+            .map_err(|_| Error::StringError("expected duration response".to_owned()))?;
+        assert_eq!(timeout, Duration::from_secs(1));
+
+        let request = crate::request::RequestWithTimeout::new(
+            TimeoutEchoRequest {
+                label: "coprocessor",
+            },
+            Duration::from_millis(3),
+        );
+        let timeout = client
+            .dispatch(&request)
+            .await?
+            .downcast::<Duration>()
+            .map(|timeout| *timeout)
+            .map_err(|_| Error::StringError("expected duration response".to_owned()))?;
+        assert_eq!(timeout, Duration::from_millis(3));
         Ok(())
     }
 

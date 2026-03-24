@@ -291,6 +291,16 @@ pub struct Config {
     /// Defaults to 500ms (client-go default).
     pub async_commit_allowed_clock_drift: Duration,
     pub timeout: Duration,
+    /// Timeout for a single coprocessor request.
+    ///
+    /// When non-zero, coprocessor requests use this timeout instead of [`Config::timeout`],
+    /// mirroring client-go `TiKVClient.CoprReqTimeout`.
+    ///
+    /// Per-request overrides (for example via [`crate::request::RequestWithTimeout`]) take
+    /// precedence.
+    ///
+    /// Defaults to 60 seconds (client-go default).
+    pub copr_req_timeout: Duration,
     /// Maximum number of in-flight requests allowed per TiKV store.
     ///
     /// When set to a value greater than 0, the client applies a best-effort per-store token limit
@@ -485,6 +495,7 @@ pub struct Config {
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const DEFAULT_COMMIT_TIMEOUT: Duration = Duration::from_secs(41);
+pub(crate) const DEFAULT_COPR_REQ_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DEFAULT_ASYNC_COMMIT_KEYS_LIMIT: usize = 256;
 pub(crate) const DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT: u64 = 4 * 1024;
 pub(crate) const DEFAULT_ASYNC_COMMIT_SAFE_WINDOW: Duration = Duration::from_secs(2);
@@ -521,6 +532,7 @@ impl Default for Config {
             async_commit_safe_window: DEFAULT_ASYNC_COMMIT_SAFE_WINDOW,
             async_commit_allowed_clock_drift: DEFAULT_ASYNC_COMMIT_ALLOWED_CLOCK_DRIFT,
             timeout: DEFAULT_REQUEST_TIMEOUT,
+            copr_req_timeout: DEFAULT_COPR_REQ_TIMEOUT,
             store_limit: 0,
             committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
             max_txn_ttl: DEFAULT_MAX_TXN_TTL,
@@ -681,6 +693,17 @@ impl Config {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the timeout for coprocessor requests (client-go `TiKVClient.CoprReqTimeout`).
+    ///
+    /// When non-zero, coprocessor requests use this timeout instead of [`Config::timeout`].
+    ///
+    /// Set to `Duration::ZERO` to disable the override and use the global timeout.
+    #[must_use]
+    pub fn with_copr_req_timeout(mut self, timeout: Duration) -> Self {
+        self.copr_req_timeout = timeout;
         self
     }
 
@@ -1186,6 +1209,7 @@ mod tests {
             DEFAULT_TTL_REFRESHED_TXN_SIZE
         );
         assert_eq!(config.commit_timeout, DEFAULT_COMMIT_TIMEOUT);
+        assert_eq!(config.copr_req_timeout, DEFAULT_COPR_REQ_TIMEOUT);
         assert_eq!(
             config.async_commit_keys_limit,
             DEFAULT_ASYNC_COMMIT_KEYS_LIMIT
@@ -1205,6 +1229,12 @@ mod tests {
         assert_eq!(config.region_cache_ttl, Duration::from_secs(600));
         assert_eq!(config.region_cache_ttl_jitter, Duration::from_secs(60));
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_config_copr_req_timeout_is_configurable() {
+        let config = Config::default().with_copr_req_timeout(Duration::from_secs(123));
+        assert_eq!(config.copr_req_timeout, Duration::from_secs(123));
     }
 
     #[test]
