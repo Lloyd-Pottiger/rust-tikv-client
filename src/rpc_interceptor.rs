@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::request_context::{CommandPriority, DiskFullOpt};
+use crate::request_context::{CommandPriority, DiskFullOpt, TraceControlFlags};
 use crate::tikvrpc::CmdType;
 use crate::Error;
 
@@ -305,6 +305,27 @@ impl<'a> RpcRequest<'a> {
         }
     }
 
+    /// Returns the trace-control flags attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.trace_control_flags`.
+    #[must_use]
+    pub fn trace_control_flags(&self) -> TraceControlFlags {
+        TraceControlFlags::from(
+            self.context
+                .as_ref()
+                .map_or(0, |ctx| ctx.trace_control_flags),
+        )
+    }
+
+    /// Set the trace-control flags attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.trace_control_flags`.
+    pub fn set_trace_control_flags(&mut self, flags: TraceControlFlags) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.trace_control_flags = flags.bits();
+        }
+    }
+
     /// Returns the resource group tag attached to this request, if any.
     ///
     /// This maps to `kvrpcpb::Context.resource_group_tag`.
@@ -473,7 +494,7 @@ mod tests {
     use crate::proto::kvrpcpb;
     use crate::tikvrpc::CmdType;
     use crate::Error;
-    use crate::{CommandPriority, DiskFullOpt};
+    use crate::{CommandPriority, DiskFullOpt, TraceControlFlags};
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -709,6 +730,41 @@ mod tests {
         assert_eq!(req_without_context.busy_threshold_ms(), 0);
         req_without_context.set_busy_threshold_ms(42);
         assert_eq!(req_without_context.busy_threshold_ms(), 0);
+    }
+
+    #[test]
+    fn test_rpc_request_exposes_trace_control_flags() {
+        let initial =
+            TraceControlFlags::IMMEDIATE_LOG.with(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS);
+        let mut ctx = kvrpcpb::Context {
+            trace_control_flags: initial.bits(),
+            ..Default::default()
+        };
+        let mut req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+
+        assert!(req
+            .trace_control_flags()
+            .has(TraceControlFlags::IMMEDIATE_LOG));
+        assert!(req
+            .trace_control_flags()
+            .has(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS));
+
+        req.set_trace_control_flags(TraceControlFlags::TIKV_CATEGORY_READ_DETAILS);
+        assert!(!req
+            .trace_control_flags()
+            .has(TraceControlFlags::IMMEDIATE_LOG));
+        assert!(req
+            .trace_control_flags()
+            .has(TraceControlFlags::TIKV_CATEGORY_READ_DETAILS));
+        assert_eq!(
+            ctx.trace_control_flags,
+            TraceControlFlags::TIKV_CATEGORY_READ_DETAILS.bits()
+        );
+
+        let mut req_without_context = RpcRequest::new("target", "kv_get", None);
+        assert_eq!(req_without_context.trace_control_flags().bits(), 0);
+        req_without_context.set_trace_control_flags(TraceControlFlags::IMMEDIATE_LOG);
+        assert_eq!(req_without_context.trace_control_flags().bits(), 0);
     }
 
     #[test]
