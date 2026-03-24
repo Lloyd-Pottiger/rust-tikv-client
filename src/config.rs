@@ -179,9 +179,11 @@ pub enum GrpcCompressionType {
 ///
 /// This mirrors client-go `config.TiKVClient.CoprCache`.
 ///
-/// Note: The Rust client currently does not implement coprocessor response caching. This struct is
-/// preserved for API parity, and the configuration will become effective once coprocessor caching
-/// is implemented.
+/// When enabled (`capacity_mb > 0`), the client performs best-effort response caching for unary
+/// and batch coprocessor requests using TiKV's conditional cache protocol (`is_cache_enabled` /
+/// `cache_if_match_version` / `is_cache_hit`).
+///
+/// Admission rules (`admission_*`) control which responses are eligible for caching.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -337,8 +339,8 @@ pub struct Config {
     pub copr_req_timeout: Duration,
     /// Coprocessor cache settings (client-go `TiKVClient.CoprCache`).
     ///
-    /// Note: This field is preserved for API parity. The Rust client does not yet implement
-    /// coprocessor response caching.
+    /// When enabled, the client caches eligible coprocessor responses and may fill `data` from the
+    /// local cache on TiKV cache-hit responses.
     pub copr_cache: CoprocessorCacheConfig,
     /// Maximum number of in-flight requests allowed per TiKV store.
     ///
