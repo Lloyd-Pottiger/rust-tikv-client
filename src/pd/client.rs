@@ -1224,25 +1224,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         let committer_concurrency = config.committer_concurrency;
         let max_txn_ttl = config.max_txn_ttl;
         let (pd_http_client, pd_http_use_https) = build_pd_http_client(&config);
-        let security_mgr = Arc::new(
-            (if let (Some(ca_path), Some(cert_path), Some(key_path)) =
-                (&config.ca_path, &config.cert_path, &config.key_path)
-            {
-                SecurityManager::load(ca_path, cert_path, key_path)?
-            } else {
-                SecurityManager::default()
-            })
-            .with_grpc_keepalive(config.grpc_keepalive_time, config.grpc_keepalive_timeout)
-            .with_grpc_initial_window_sizes(
-                config.grpc_initial_window_size,
-                config.grpc_initial_conn_window_size,
-            )
-            .with_grpc_connect_timeout(config.grpc_connect_timeout)
-            .with_grpc_custom_dns(
-                config.grpc_custom_dns_server,
-                config.grpc_custom_dns_domain.clone(),
-            ),
-        );
+        let security_mgr = Arc::new(config.security_manager()?);
 
         let pd = Arc::new(pd(security_mgr.clone()).await?);
         let kv_connect = kv_connect(security_mgr.clone());

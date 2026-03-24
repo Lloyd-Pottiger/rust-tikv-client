@@ -457,6 +457,34 @@ impl Config {
         Ok(())
     }
 
+    /// Build a [`crate::SecurityManager`] from this config.
+    ///
+    /// This is the Rust equivalent of materializing client-go `config.Security`
+    /// into a TLS-enabled client configuration. When the config does not contain
+    /// a complete CA/cert/key triple, the returned manager uses insecure
+    /// defaults, matching the client’s current connection behavior.
+    pub fn security_manager(&self) -> crate::Result<crate::SecurityManager> {
+        let manager = if let (Some(ca_path), Some(cert_path), Some(key_path)) =
+            (&self.ca_path, &self.cert_path, &self.key_path)
+        {
+            crate::SecurityManager::load(ca_path, cert_path, key_path)?
+        } else {
+            crate::SecurityManager::default()
+        };
+
+        Ok(manager
+            .with_grpc_keepalive(self.grpc_keepalive_time, self.grpc_keepalive_timeout)
+            .with_grpc_initial_window_sizes(
+                self.grpc_initial_window_size,
+                self.grpc_initial_conn_window_size,
+            )
+            .with_grpc_connect_timeout(self.grpc_connect_timeout)
+            .with_grpc_custom_dns(
+                self.grpc_custom_dns_server,
+                self.grpc_custom_dns_domain.clone(),
+            ))
+    }
+
     /// Set the certificate authority, certificate, and key locations for clients.
     ///
     /// By default, this client will use an insecure connection over instead of one protected by
@@ -964,5 +992,51 @@ mod tests {
             parse_path("tikv://pd:2379?keyspaceName=hello%2Bworld+space&disableGC=false").unwrap();
         assert_eq!(parsed.keyspace_name.as_deref(), Some("hello+world space"));
         assert!(!parsed.disable_gc);
+    }
+
+    #[test]
+    fn test_config_security_manager_defaults_without_tls_material() {
+        let manager = Config::default().security_manager().unwrap();
+
+        assert_eq!(
+            manager.grpc_keepalive_config(),
+            (DEFAULT_GRPC_KEEPALIVE_TIME, DEFAULT_GRPC_KEEPALIVE_TIMEOUT)
+        );
+        assert_eq!(
+            manager.grpc_window_sizes(),
+            (
+                DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
+                DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE
+            )
+        );
+        assert_eq!(manager.grpc_connect_timeout(), DEFAULT_GRPC_CONNECT_TIMEOUT);
+    }
+
+    #[test]
+    fn test_config_security_manager_loads_tls_and_applies_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let ca_path = temp.path().join("ca.pem");
+        let cert_path = temp.path().join("cert.pem");
+        let key_path = temp.path().join("key.pem");
+        for (id, path) in [&ca_path, &cert_path, &key_path].iter().enumerate() {
+            std::fs::write(path, [id as u8]).unwrap();
+        }
+
+        let manager = Config::default()
+            .with_security(&ca_path, &cert_path, &key_path)
+            .with_grpc_keepalive_time(Duration::from_secs(11))
+            .with_grpc_keepalive_timeout(Duration::from_secs(12))
+            .with_grpc_initial_window_size(123)
+            .with_grpc_initial_conn_window_size(456)
+            .with_grpc_connect_timeout(Duration::from_secs(7))
+            .security_manager()
+            .unwrap();
+
+        assert_eq!(
+            manager.grpc_keepalive_config(),
+            (Duration::from_secs(11), Duration::from_secs(12))
+        );
+        assert_eq!(manager.grpc_window_sizes(), (123, 456));
+        assert_eq!(manager.grpc_connect_timeout(), Duration::from_secs(7));
     }
 }
