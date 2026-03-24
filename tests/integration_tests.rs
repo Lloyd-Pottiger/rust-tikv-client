@@ -380,6 +380,7 @@ async fn txn_pipelined_snapshot_get_skips_flushed_self_lock() -> Result<()> {
         start_ts,
         TransactionOptions::new_optimistic()
             .pipelined()
+            .drop_check(tikv_client::CheckLevel::None)
             .heartbeat_option(HeartbeatOption::NoHeartbeat),
     );
 
