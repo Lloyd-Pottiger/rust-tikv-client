@@ -167,6 +167,69 @@ pub enum GrpcCompressionType {
     Gzip,
 }
 
+/// Standalone TLS/security settings.
+///
+/// This mirrors client-go `config.Security`, but integrates with the Rust client through
+/// [`Security::apply_to_config`] and [`Security::security_manager`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct Security {
+    /// CA certificate path used to verify TiKV / PD servers.
+    pub ca_path: Option<PathBuf>,
+    /// Client certificate path presented to TiKV / PD.
+    pub cert_path: Option<PathBuf>,
+    /// Client private key path presented to TiKV / PD.
+    pub key_path: Option<PathBuf>,
+    /// Expected server certificate common names.
+    ///
+    /// This field is preserved for API parity. The current transport path does not yet enforce it.
+    pub verify_cn: Vec<String>,
+}
+
+impl Security {
+    /// Create a new standalone security config.
+    #[must_use]
+    pub fn new(
+        ca_path: impl Into<PathBuf>,
+        cert_path: impl Into<PathBuf>,
+        key_path: impl Into<PathBuf>,
+        verify_cn: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            ca_path: normalize_optional_path(ca_path),
+            cert_path: normalize_optional_path(cert_path),
+            key_path: normalize_optional_path(key_path),
+            verify_cn: verify_cn.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Apply these security settings to an existing [`Config`].
+    #[must_use]
+    pub fn apply_to_config(&self, mut config: Config) -> Config {
+        config.ca_path = self.ca_path.clone();
+        config.cert_path = self.cert_path.clone();
+        config.key_path = self.key_path.clone();
+        config
+    }
+
+    /// Convert these security settings into a standalone [`Config`].
+    #[must_use]
+    pub fn into_config(self) -> Config {
+        self.apply_to_config(Config::default())
+    }
+
+    /// Build a [`crate::SecurityManager`] from these security settings.
+    pub fn security_manager(&self) -> crate::Result<crate::SecurityManager> {
+        self.apply_to_config(Config::default()).security_manager()
+    }
+}
+
+fn normalize_optional_path(path: impl Into<PathBuf>) -> Option<PathBuf> {
+    let path = path.into();
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+
 /// The configuration for either a [`RawClient`](crate::RawClient) or a
 /// [`TransactionClient`](crate::TransactionClient).
 ///
@@ -1038,5 +1101,82 @@ mod tests {
         );
         assert_eq!(manager.grpc_window_sizes(), (123, 456));
         assert_eq!(manager.grpc_connect_timeout(), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn test_security_new_and_apply_to_config() {
+        let security = Security::new(
+            "ca.pem",
+            "cert.pem",
+            "key.pem",
+            ["tikv-server", "pd-server"],
+        );
+
+        assert_eq!(
+            security.ca_path.as_deref(),
+            Some(std::path::Path::new("ca.pem"))
+        );
+        assert_eq!(
+            security.cert_path.as_deref(),
+            Some(std::path::Path::new("cert.pem"))
+        );
+        assert_eq!(
+            security.key_path.as_deref(),
+            Some(std::path::Path::new("key.pem"))
+        );
+        assert_eq!(security.verify_cn, vec!["tikv-server", "pd-server"]);
+
+        let config =
+            security.apply_to_config(Config::default().with_timeout(Duration::from_secs(9)));
+        assert_eq!(
+            config.ca_path.as_deref(),
+            Some(std::path::Path::new("ca.pem"))
+        );
+        assert_eq!(
+            config.cert_path.as_deref(),
+            Some(std::path::Path::new("cert.pem"))
+        );
+        assert_eq!(
+            config.key_path.as_deref(),
+            Some(std::path::Path::new("key.pem"))
+        );
+        assert_eq!(config.timeout, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn test_security_manager_matches_config_security_manager() {
+        let temp = tempfile::tempdir().unwrap();
+        let ca_path = temp.path().join("ca.pem");
+        let cert_path = temp.path().join("cert.pem");
+        let key_path = temp.path().join("key.pem");
+        for (id, path) in [&ca_path, &cert_path, &key_path].iter().enumerate() {
+            std::fs::write(path, [id as u8]).unwrap();
+        }
+
+        let security = Security::new(
+            &ca_path,
+            &cert_path,
+            &key_path,
+            std::iter::empty::<String>(),
+        );
+        let from_security = security.security_manager().unwrap();
+        let from_config = security
+            .clone()
+            .apply_to_config(Config::default())
+            .security_manager()
+            .unwrap();
+
+        assert_eq!(
+            from_security.grpc_keepalive_config(),
+            from_config.grpc_keepalive_config()
+        );
+        assert_eq!(
+            from_security.grpc_window_sizes(),
+            from_config.grpc_window_sizes()
+        );
+        assert_eq!(
+            from_security.grpc_connect_timeout(),
+            from_config.grpc_connect_timeout()
+        );
     }
 }
