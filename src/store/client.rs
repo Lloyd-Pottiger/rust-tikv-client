@@ -24,6 +24,7 @@ use crate::proto::coprocessor;
 use crate::proto::kvrpcpb;
 use crate::proto::tikvpb;
 use crate::proto::tikvpb::tikv_client::TikvClient;
+use crate::util::RateLimit;
 use crate::Error;
 use crate::GrpcCompressionType;
 use crate::Result;
@@ -48,6 +49,7 @@ pub struct TikvConnect {
     batch_rpc_max_batch_size: usize,
     batch_rpc_wait_size: usize,
     batch_rpc_max_wait_time: Duration,
+    max_concurrency_request_limit: i64,
     health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
 }
 
@@ -73,8 +75,14 @@ impl TikvConnect {
             batch_rpc_max_batch_size,
             batch_rpc_wait_size,
             batch_rpc_max_wait_time,
+            max_concurrency_request_limit: crate::config::DEFAULT_MAX_CONCURRENCY_REQUEST_LIMIT,
             health_feedback_observer: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn with_max_concurrency_request_limit(mut self, limit: i64) -> Self {
+        self.max_concurrency_request_limit = limit;
+        self
     }
 
     pub(crate) fn set_health_feedback_observer(&self, observer: Weak<dyn HealthFeedbackObserver>) {
@@ -119,6 +127,7 @@ impl KvConnect for TikvConnect {
         let batch_rpc_max_batch_size = self.batch_rpc_max_batch_size;
         let batch_rpc_wait_size = self.batch_rpc_wait_size;
         let batch_rpc_max_wait_time = self.batch_rpc_max_wait_time;
+        let max_concurrency_request_limit = self.max_concurrency_request_limit;
         let health_feedback_observer = Arc::clone(&self.health_feedback_observer);
 
         let rpc_client = self
@@ -141,6 +150,7 @@ impl KvConnect for TikvConnect {
             batch_rpc_max_batch_size,
             batch_rpc_wait_size,
             batch_rpc_max_wait_time,
+            max_concurrency_request_limit,
             health_feedback_observer,
         )
         .await)
@@ -309,6 +319,7 @@ pub struct KvRpcClient {
     copr_req_timeout: Duration,
     store_address: String,
     batch: Option<BatchCommandsClient>,
+    max_concurrency_request_limit: Option<RateLimit>,
     health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
 }
 
@@ -322,8 +333,16 @@ impl KvRpcClient {
         batch_rpc_max_batch_size: usize,
         batch_rpc_wait_size: usize,
         batch_rpc_max_wait_time: Duration,
+        max_concurrency_request_limit: i64,
         health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
     ) -> KvRpcClient {
+        let max_concurrency_request_limit =
+            match max_concurrency_request_limit > 0 && max_concurrency_request_limit != i64::MAX {
+                true => usize::try_from(max_concurrency_request_limit)
+                    .ok()
+                    .map(RateLimit::new),
+                false => None,
+            };
         let batch = if enable_batch_rpc {
             match BatchCommandsClient::connect(
                 rpc_client.clone(),
@@ -351,6 +370,7 @@ impl KvRpcClient {
             copr_req_timeout,
             store_address,
             batch,
+            max_concurrency_request_limit,
             health_feedback_observer,
         }
     }
@@ -1068,6 +1088,13 @@ impl KvRpcClient {
 #[async_trait]
 impl KvClient for KvRpcClient {
     async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any>> {
+        let _permit = match &self.max_concurrency_request_limit {
+            Some(limit) => Some(limit.acquire().await.map_err(|err| Error::InternalError {
+                message: err.to_string(),
+            })?),
+            None => None,
+        };
+
         if crate::store::has_forwarded_host() {
             let timeout = self.timeout_for_request(request);
             return request.dispatch(&self.rpc_client, timeout).await;
@@ -1107,6 +1134,7 @@ mod tests {
     use tonic::codegen::Service;
 
     use super::*;
+    use crate::util::RateLimit;
 
     #[derive(Clone)]
     struct CaptureService {
@@ -1216,6 +1244,7 @@ mod tests {
             copr_req_timeout: Duration::ZERO,
             store_address: "127.0.0.1:1".to_owned(),
             batch: Some(batch),
+            max_concurrency_request_limit: None,
             health_feedback_observer: Arc::new(Mutex::new(None)),
         };
 
@@ -1363,6 +1392,7 @@ mod tests {
             copr_req_timeout: Duration::from_secs(9),
             store_address: "127.0.0.1:1".to_owned(),
             batch: None,
+            max_concurrency_request_limit: None,
             health_feedback_observer: Arc::new(Mutex::new(None)),
         };
 
@@ -3604,6 +3634,108 @@ mod tests {
             self.proceed.notified().await;
             Ok(Box::new(kvrpcpb::GetResponse::default()) as Box<dyn Any>)
         }
+    }
+
+    struct BlockingRequest {
+        started: Arc<tokio::sync::Notify>,
+        proceed: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Request for BlockingRequest {
+        async fn dispatch(
+            &self,
+            _client: &TikvClient<Channel>,
+            _timeout: Duration,
+        ) -> Result<Box<dyn Any>> {
+            self.started.notify_one();
+            self.proceed.notified().await;
+            Ok(Box::new(()) as Box<dyn Any>)
+        }
+
+        fn label(&self) -> &'static str {
+            "blocking"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn set_leader(&mut self, _leader: &crate::store::RegionWithLeader) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_api_version(&mut self, _api_version: kvrpcpb::ApiVersion) {}
+
+        fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_dispatch_blocks_when_max_concurrency_request_limit_reached() {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+
+        let client = KvRpcClient {
+            rpc_client,
+            timeout: Duration::from_secs(1),
+            copr_req_timeout: Duration::from_secs(1),
+            store_address: "test".to_owned(),
+            batch: None,
+            health_feedback_observer: Arc::new(Mutex::new(None)),
+            max_concurrency_request_limit: Some(RateLimit::new(1)),
+        };
+
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let first_proceed = Arc::new(tokio::sync::Notify::new());
+        let first_request = BlockingRequest {
+            started: Arc::clone(&first_started),
+            proceed: Arc::clone(&first_proceed),
+        };
+
+        let second_started = Arc::new(tokio::sync::Notify::new());
+        let second_proceed = Arc::new(tokio::sync::Notify::new());
+        let second_request = BlockingRequest {
+            started: Arc::clone(&second_started),
+            proceed: Arc::clone(&second_proceed),
+        };
+
+        let dispatch_one = {
+            let client = client.clone();
+            async move {
+                client
+                    .dispatch(&first_request)
+                    .await
+                    .expect("dispatch one ok");
+            }
+        };
+
+        let dispatch_two = {
+            let client = client.clone();
+            async move {
+                client
+                    .dispatch(&second_request)
+                    .await
+                    .expect("dispatch two ok");
+            }
+        };
+
+        let first_task = tokio::spawn(dispatch_one);
+        first_started.notified().await;
+
+        let second_task = tokio::spawn(dispatch_two);
+        let second_wait =
+            tokio::time::timeout(Duration::from_millis(20), second_started.notified());
+        assert!(
+            second_wait.await.is_err(),
+            "second dispatch should be blocked"
+        );
+
+        first_proceed.notify_one();
+        first_task.await.expect("task one finished");
+
+        second_started.notified().await;
+        second_proceed.notify_one();
+        second_task.await.expect("task two finished");
     }
 
     #[tokio::test]

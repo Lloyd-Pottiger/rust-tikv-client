@@ -1347,6 +1347,7 @@ impl PdRpcClient<TikvConnect, Cluster> {
                     config.batch_rpc_wait_size,
                     config.batch_rpc_max_wait_time,
                 )
+                .with_max_concurrency_request_limit(config.max_concurrency_request_limit)
             },
             |security_mgr| {
                 RetryClient::connect(

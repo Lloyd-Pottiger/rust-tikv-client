@@ -349,6 +349,18 @@ pub struct Config {
     ///
     /// Defaults to disabled (`0`).
     pub store_limit: i64,
+    /// Maximum concurrency number of in-flight requests sent to each TiKV store connection.
+    ///
+    /// When set to a value greater than 0, the client uses a semaphore to apply backpressure and
+    /// will wait for a permit before dispatching a KV request on a single gRPC connection.
+    ///
+    /// This maps to client-go `TiKVClient.MaxConcurrencyRequestLimit` (default: `MaxInt64`).
+    ///
+    /// Notes:
+    /// - client-go uses `0` to mean "auto adjust by feedback". The Rust client does not yet
+    ///   implement feedback-based auto-adjust, so `0` is currently treated as disabled.
+    /// - `i64::MAX` (the default) disables the limiter, matching client-go `DefMaxConcurrencyRequestLimit`.
+    pub max_concurrency_request_limit: i64,
     /// Maximum concurrency for 2PC committer multi-region requests.
     ///
     /// This limits the number of region shards executed concurrently for the prewrite, secondary
@@ -545,6 +557,7 @@ pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
 pub(crate) const DEFAULT_BATCH_RPC_MAX_BATCH_SIZE: usize = 128;
 pub(crate) const DEFAULT_BATCH_RPC_WAIT_SIZE: usize = 8;
 pub(crate) const DEFAULT_BATCH_RPC_MAX_WAIT_TIME: Duration = Duration::ZERO;
+pub(crate) const DEFAULT_MAX_CONCURRENCY_REQUEST_LIMIT: i64 = i64::MAX;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
 const DEFAULT_GRPC_CONNECTION_COUNT: usize = 4;
 const DEFAULT_GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -574,6 +587,7 @@ impl Default for Config {
             copr_req_timeout: DEFAULT_COPR_REQ_TIMEOUT,
             copr_cache: CoprocessorCacheConfig::default(),
             store_limit: 0,
+            max_concurrency_request_limit: DEFAULT_MAX_CONCURRENCY_REQUEST_LIMIT,
             committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
             max_txn_ttl: DEFAULT_MAX_TXN_TTL,
             tso_max_pending_count: DEFAULT_TSO_MAX_PENDING_COUNT,
@@ -617,6 +631,11 @@ impl Config {
         if self.store_limit < 0 {
             return Err(crate::Error::StringError(
                 "store-limit should be greater than or equal to 0".to_owned(),
+            ));
+        }
+        if self.max_concurrency_request_limit < 0 {
+            return Err(crate::Error::StringError(
+                "max-concurrency-request-limit should be greater than or equal to 0".to_owned(),
             ));
         }
         if self.committer_concurrency == 0 {
@@ -806,6 +825,19 @@ impl Config {
     #[must_use]
     pub fn with_store_limit(mut self, limit: i64) -> Self {
         self.store_limit = limit;
+        self
+    }
+
+    /// Set the maximum concurrency request limit (client-go `TiKVClient.MaxConcurrencyRequestLimit`).
+    ///
+    /// When set to a value greater than 0, the client will limit the number of in-flight requests
+    /// per TiKV gRPC connection using a semaphore. Set to `i64::MAX` to disable (default).
+    ///
+    /// Note: client-go uses `0` to mean "auto adjust by feedback". The Rust client does not yet
+    /// implement feedback-based auto-adjust, so `0` is currently treated as disabled.
+    #[must_use]
+    pub fn with_max_concurrency_request_limit(mut self, limit: i64) -> Self {
+        self.max_concurrency_request_limit = limit;
         self
     }
 
@@ -1279,7 +1311,17 @@ mod tests {
         );
         assert_eq!(config.region_cache_ttl, Duration::from_secs(600));
         assert_eq!(config.region_cache_ttl_jitter, Duration::from_secs(60));
+        assert_eq!(
+            config.max_concurrency_request_limit,
+            DEFAULT_MAX_CONCURRENCY_REQUEST_LIMIT
+        );
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_with_max_concurrency_request_limit() {
+        let config = Config::default().with_max_concurrency_request_limit(32);
+        assert_eq!(config.max_concurrency_request_limit, 32);
     }
 
     #[test]
