@@ -76,9 +76,12 @@ struct OutboundRequestState {
 fn outbound_stream(
     receiver: mpsc::Receiver<tikvpb::BatchCommandsRequest>,
     max_requests: usize,
+    batch_wait_size: usize,
+    max_wait_time: Duration,
     target: String,
 ) -> impl Stream<Item = tikvpb::BatchCommandsRequest> + Send {
     let max_requests = max_requests.max(1);
+    let batch_wait_size = batch_wait_size.min(max_requests);
     let state = OutboundRequestState {
         receiver,
         pending: None,
@@ -107,6 +110,63 @@ fn outbound_stream(
             }
         }
 
+        if max_wait_time > Duration::ZERO
+            && batch_wait_size > 0
+            && head.requests.len() < batch_wait_size
+            && head.requests.len() < max_requests
+        {
+            let deadline = tokio::time::Instant::now() + max_wait_time;
+            while head.requests.len() < batch_wait_size && head.requests.len() < max_requests {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline.duration_since(now);
+                if remaining.is_zero() {
+                    break;
+                }
+
+                match tokio::time::timeout(remaining, state.receiver.recv()).await {
+                    Ok(Some(mut next)) => {
+                        if head.requests.len() + next.requests.len() <= max_requests {
+                            head.requests.append(&mut next.requests);
+                            head.request_ids.append(&mut next.request_ids);
+                        } else {
+                            state.pending = Some(next);
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+
+            // Do an additional non-blocking try with a single yield, mirroring client-go's
+            // "try best to fetch more" behavior.
+            let mut yielded = false;
+            while head.requests.len() < max_requests {
+                match state.receiver.try_recv() {
+                    Ok(mut next) => {
+                        if head.requests.len() + next.requests.len() <= max_requests {
+                            head.requests.append(&mut next.requests);
+                            head.request_ids.append(&mut next.request_ids);
+                        } else {
+                            state.pending = Some(next);
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        if yielded {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                        yielded = true;
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+
         let batch_size = head.requests.len();
         observe_batch_requests(&state.target, batch_size);
         let pending_in_channel = state.receiver.len();
@@ -130,6 +190,8 @@ impl BatchCommandsClient {
     pub(crate) async fn connect(
         client: TikvClient<Channel>,
         max_outbound_requests: usize,
+        batch_wait_size: usize,
+        max_wait_time: Duration,
         target: String,
     ) -> Result<Self> {
         let connector: ReconnectFn = {
@@ -139,8 +201,13 @@ impl BatchCommandsClient {
                 let client = client.clone();
                 let target = target.clone();
                 async move {
-                    let outbound_stream =
-                        outbound_stream(outbound_rx, max_outbound_requests, target);
+                    let outbound_stream = outbound_stream(
+                        outbound_rx,
+                        max_outbound_requests,
+                        batch_wait_size,
+                        max_wait_time,
+                        target,
+                    );
                     let req = outbound_stream.into_streaming_request();
                     let response = client
                         .clone()
@@ -552,7 +619,13 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_stream_batches_ready_requests() {
         let (out_tx, out_rx) = mpsc::channel(8);
-        let mut stream = Box::pin(outbound_stream(out_rx, 8, "unit_test_ready".to_owned()));
+        let mut stream = Box::pin(outbound_stream(
+            out_rx,
+            8,
+            0,
+            Duration::ZERO,
+            "unit_test_ready".to_owned(),
+        ));
 
         let mk_req = |request_id| tikvpb::BatchCommandsRequest {
             requests: vec![tikvpb::batch_commands_request::Request {
@@ -581,7 +654,13 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_stream_respects_batch_limit() {
         let (out_tx, out_rx) = mpsc::channel(8);
-        let mut stream = Box::pin(outbound_stream(out_rx, 2, "unit_test_limit".to_owned()));
+        let mut stream = Box::pin(outbound_stream(
+            out_rx,
+            2,
+            0,
+            Duration::ZERO,
+            "unit_test_limit".to_owned(),
+        ));
 
         let mk_req = |request_id| tikvpb::BatchCommandsRequest {
             requests: vec![tikvpb::batch_commands_request::Request {
@@ -604,11 +683,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_outbound_stream_waits_for_more_requests_when_configured() {
+        let (out_tx, out_rx) = mpsc::channel(8);
+        let mut stream = Box::pin(outbound_stream(
+            out_rx,
+            8,
+            2,
+            Duration::from_millis(100),
+            "unit_test_wait".to_owned(),
+        ));
+
+        let mk_req = |request_id| tikvpb::BatchCommandsRequest {
+            requests: vec![tikvpb::batch_commands_request::Request {
+                cmd: Some(tikvpb::batch_commands_request::request::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyRequest::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+        };
+
+        out_tx.send(mk_req(1)).await.expect("send req 1");
+
+        let next = stream.next();
+        tokio::pin!(next);
+
+        tokio::select! {
+            batch = &mut next => {
+                let ids = batch.map(|batch| batch.request_ids);
+                panic!("expected outbound stream to wait for more requests, but got {ids:?}");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+
+        out_tx.send(mk_req(2)).await.expect("send req 2");
+
+        let batch = next.await.expect("first batch");
+        assert_eq!(batch.request_ids, vec![1, 2]);
+    }
+
+    #[tokio::test]
     #[serial(metrics)]
     async fn test_outbound_stream_records_batch_metrics() {
         let target = "unit_test_target_batch_metrics_outbound_stream".to_owned();
         let (out_tx, out_rx) = mpsc::channel(8);
-        let mut stream = Box::pin(outbound_stream(out_rx, 2, target.clone()));
+        let mut stream = Box::pin(outbound_stream(
+            out_rx,
+            2,
+            0,
+            Duration::ZERO,
+            target.clone(),
+        ));
 
         let mk_req = |request_id| tikvpb::BatchCommandsRequest {
             requests: vec![tikvpb::batch_commands_request::Request {

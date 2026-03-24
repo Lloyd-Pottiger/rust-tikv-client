@@ -45,6 +45,8 @@ pub struct TikvConnect {
     grpc_compression_type: GrpcCompressionType,
     enable_batch_rpc: bool,
     batch_rpc_max_batch_size: usize,
+    batch_rpc_wait_size: usize,
+    batch_rpc_max_wait_time: Duration,
     health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
 }
 
@@ -56,6 +58,8 @@ impl TikvConnect {
         grpc_compression_type: GrpcCompressionType,
         enable_batch_rpc: bool,
         batch_rpc_max_batch_size: usize,
+        batch_rpc_wait_size: usize,
+        batch_rpc_max_wait_time: Duration,
     ) -> TikvConnect {
         TikvConnect {
             security_mgr,
@@ -64,6 +68,8 @@ impl TikvConnect {
             grpc_compression_type,
             enable_batch_rpc,
             batch_rpc_max_batch_size,
+            batch_rpc_wait_size,
+            batch_rpc_max_wait_time,
             health_feedback_observer: Arc::new(Mutex::new(None)),
         }
     }
@@ -107,6 +113,8 @@ impl KvConnect for TikvConnect {
         let grpc_compression_type = self.grpc_compression_type;
         let enable_batch_rpc = self.enable_batch_rpc;
         let batch_rpc_max_batch_size = self.batch_rpc_max_batch_size;
+        let batch_rpc_wait_size = self.batch_rpc_wait_size;
+        let batch_rpc_max_wait_time = self.batch_rpc_max_wait_time;
         let health_feedback_observer = Arc::clone(&self.health_feedback_observer);
 
         let rpc_client = self
@@ -126,6 +134,8 @@ impl KvConnect for TikvConnect {
             address.to_owned(),
             enable_batch_rpc,
             batch_rpc_max_batch_size,
+            batch_rpc_wait_size,
+            batch_rpc_max_wait_time,
             health_feedback_observer,
         )
         .await)
@@ -303,12 +313,16 @@ impl KvRpcClient {
         store_address: String,
         enable_batch_rpc: bool,
         batch_rpc_max_batch_size: usize,
+        batch_rpc_wait_size: usize,
+        batch_rpc_max_wait_time: Duration,
         health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
     ) -> KvRpcClient {
         let batch = if enable_batch_rpc {
             match BatchCommandsClient::connect(
                 rpc_client.clone(),
                 batch_rpc_max_batch_size,
+                batch_rpc_wait_size,
+                batch_rpc_max_wait_time,
                 store_address.clone(),
             )
             .await

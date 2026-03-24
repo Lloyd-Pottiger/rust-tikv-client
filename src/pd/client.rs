@@ -1343,6 +1343,8 @@ impl PdRpcClient<TikvConnect, Cluster> {
                     config.grpc_compression_type,
                     config.enable_batch_rpc,
                     config.batch_rpc_max_batch_size,
+                    config.batch_rpc_wait_size,
+                    config.batch_rpc_max_wait_time,
                 )
             },
             |security_mgr| {

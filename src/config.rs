@@ -347,6 +347,21 @@ pub struct Config {
     ///
     /// This maps to client-go `TiKVClient.MaxBatchSize` (default: 128).
     pub batch_rpc_max_batch_size: usize,
+    /// Maximum number of requests to wait for before sending a batch RPC request.
+    ///
+    /// When batch RPC is enabled and [`Config::batch_rpc_max_wait_time`] is non-zero, the outbound
+    /// stream waits until it collects at least this many requests (or the wait time expires)
+    /// before sending.
+    ///
+    /// This maps to client-go `TiKVClient.BatchWaitSize` (default: 8).
+    pub batch_rpc_wait_size: usize,
+    /// Maximum time to wait for additional requests before sending a batch RPC request.
+    ///
+    /// Set to `Duration::ZERO` to disable the wait and send immediately-available requests
+    /// (default).
+    ///
+    /// This maps to client-go `TiKVClient.MaxBatchWaitTime` (default: 0).
+    pub batch_rpc_max_wait_time: Duration,
     /// Timeout for establishing gRPC connections (client-go `dialTimeout`).
     ///
     /// Set to `Duration::ZERO` to disable the connect timeout (use the system default).
@@ -478,6 +493,8 @@ pub(crate) const DEFAULT_COMMITTER_CONCURRENCY: usize = 128;
 pub(crate) const DEFAULT_MAX_TXN_TTL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
 pub(crate) const DEFAULT_BATCH_RPC_MAX_BATCH_SIZE: usize = 128;
+pub(crate) const DEFAULT_BATCH_RPC_WAIT_SIZE: usize = 8;
+pub(crate) const DEFAULT_BATCH_RPC_MAX_WAIT_TIME: Duration = Duration::ZERO;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
 const DEFAULT_GRPC_CONNECTION_COUNT: usize = 4;
 const DEFAULT_GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -514,6 +531,8 @@ impl Default for Config {
             enable_batch_rpc: false,
             enable_forwarding: false,
             batch_rpc_max_batch_size: DEFAULT_BATCH_RPC_MAX_BATCH_SIZE,
+            batch_rpc_wait_size: DEFAULT_BATCH_RPC_WAIT_SIZE,
+            batch_rpc_max_wait_time: DEFAULT_BATCH_RPC_MAX_WAIT_TIME,
             grpc_connect_timeout: DEFAULT_GRPC_CONNECT_TIMEOUT,
             grpc_custom_dns_server: None,
             grpc_custom_dns_domain: None,
@@ -800,6 +819,24 @@ impl Config {
     #[must_use]
     pub fn with_grpc_connect_timeout(mut self, timeout: Duration) -> Self {
         self.grpc_connect_timeout = timeout;
+        self
+    }
+
+    /// Set the maximum number of requests to wait for before sending a batch RPC request.
+    ///
+    /// This maps to client-go `TiKVClient.BatchWaitSize`.
+    #[must_use]
+    pub fn with_batch_rpc_wait_size(mut self, wait_size: usize) -> Self {
+        self.batch_rpc_wait_size = wait_size;
+        self
+    }
+
+    /// Set the maximum time to wait for additional requests before sending a batch RPC request.
+    ///
+    /// This maps to client-go `TiKVClient.MaxBatchWaitTime`.
+    #[must_use]
+    pub fn with_batch_rpc_max_wait_time(mut self, wait_time: Duration) -> Self {
+        self.batch_rpc_max_wait_time = wait_time;
         self
     }
 
@@ -1134,6 +1171,11 @@ mod tests {
         assert_eq!(
             config.batch_rpc_max_batch_size,
             DEFAULT_BATCH_RPC_MAX_BATCH_SIZE
+        );
+        assert_eq!(config.batch_rpc_wait_size, DEFAULT_BATCH_RPC_WAIT_SIZE);
+        assert_eq!(
+            config.batch_rpc_max_wait_time,
+            DEFAULT_BATCH_RPC_MAX_WAIT_TIME
         );
         assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
         assert!(config.zone_label.is_none());
