@@ -13,7 +13,9 @@ use log::warn;
 use serde_derive::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tonic::transport::Channel;
+use tonic::codegen::Body;
+use tonic::codegen::Bytes;
+use tonic::codegen::StdError;
 use tonic::IntoStreamingRequest;
 use tonic::Status;
 
@@ -404,15 +406,22 @@ fn outbound_stream(
 }
 
 impl BatchCommandsClient {
-    pub(crate) async fn connect(
-        client: TikvClient<Channel>,
+    pub(crate) async fn connect<T>(
+        client: TikvClient<T>,
         max_outbound_requests: usize,
         batch_policy: String,
         overload_threshold: u64,
         batch_wait_size: usize,
         max_wait_time: Duration,
         target: String,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + Sync + 'static,
+        T::Future: Send,
+        T::Error: Into<StdError> + Send + Sync,
+        T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+    {
         Self::connect_inner(
             client,
             max_outbound_requests,
@@ -426,8 +435,8 @@ impl BatchCommandsClient {
         .await
     }
 
-    pub(crate) async fn connect_with_forwarded_host(
-        client: TikvClient<Channel>,
+    pub(crate) async fn connect_with_forwarded_host<T>(
+        client: TikvClient<T>,
         max_outbound_requests: usize,
         batch_policy: String,
         overload_threshold: u64,
@@ -435,7 +444,14 @@ impl BatchCommandsClient {
         max_wait_time: Duration,
         target: String,
         forwarded_host: String,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + Sync + 'static,
+        T::Future: Send,
+        T::Error: Into<StdError> + Send + Sync,
+        T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+    {
         Self::connect_inner(
             client,
             max_outbound_requests,
@@ -449,8 +465,8 @@ impl BatchCommandsClient {
         .await
     }
 
-    async fn connect_inner(
-        client: TikvClient<Channel>,
+    async fn connect_inner<T>(
+        client: TikvClient<T>,
         max_outbound_requests: usize,
         batch_policy: String,
         overload_threshold: u64,
@@ -458,7 +474,14 @@ impl BatchCommandsClient {
         max_wait_time: Duration,
         target: String,
         forwarded_host: Option<String>,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + Sync + 'static,
+        T::Future: Send,
+        T::Error: Into<StdError> + Send + Sync,
+        T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+    {
         let transport_layer_load = Arc::new(AtomicU64::new(0));
         let connector: ReconnectFn = {
             let client = client.clone();
@@ -484,11 +507,8 @@ impl BatchCommandsClient {
                         target,
                     );
                     let mut req = outbound_stream.into_streaming_request();
-                    match forwarded_host.as_deref() {
-                        Some(host) => {
-                            crate::store::apply_forwarded_host_metadata_value(&mut req, host)?
-                        }
-                        None => crate::store::apply_forwarded_host_metadata(&mut req)?,
+                    if let Some(host) = forwarded_host.as_deref() {
+                        crate::store::apply_forwarded_host_metadata_value(&mut req, host)?;
                     }
                     let response = client
                         .clone()
@@ -824,7 +844,50 @@ impl Drop for InflightGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::Context;
+    use std::task::Poll;
+
     use serial_test::serial;
+    use tonic::body::BoxBody;
+    use tonic::codegen::http;
+    use tonic::codegen::Service;
+
+    #[derive(Clone)]
+    struct CaptureService {
+        seen_headers: Arc<Mutex<Option<http::HeaderMap>>>,
+    }
+
+    impl Service<http::Request<BoxBody>> for CaptureService {
+        type Response = http::Response<BoxBody>;
+        type Error = Infallible;
+        type Future =
+            Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(std::result::Result::Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<BoxBody>) -> Self::Future {
+            let seen_headers = Arc::clone(&self.seen_headers);
+            Box::pin(async move {
+                *seen_headers.lock().unwrap() = Some(req.headers().clone());
+
+                let resp = http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/grpc")
+                    .header("grpc-status", "12")
+                    .body(tonic::body::empty_body())
+                    .unwrap();
+                std::result::Result::Ok(resp)
+            })
+        }
+    }
 
     fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
         metric
@@ -842,6 +905,87 @@ mod tests {
             rx.recv().await.map(|message| (message, rx))
         });
         BatchCommandsClient::new_with_inbound_for_test(outbound, inbound_stream).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_batch_commands_connect_with_forwarded_host_sets_metadata_header() {
+        let forwarded_host = "127.0.0.1:20160".to_owned();
+
+        let seen_headers = Arc::new(Mutex::new(None));
+        let service = CaptureService {
+            seen_headers: Arc::clone(&seen_headers),
+        };
+        let client = TikvClient::new(service);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            BatchCommandsClient::connect_with_forwarded_host(
+                client,
+                128,
+                "basic".to_owned(),
+                0,
+                8,
+                Duration::ZERO,
+                "test".to_owned(),
+                forwarded_host.clone(),
+            ),
+        )
+        .await
+        .expect("connect_with_forwarded_host should not hang");
+        assert!(
+            result.is_err(),
+            "expected connect_with_forwarded_host to return a grpc error"
+        );
+
+        let headers = seen_headers
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("expected request headers captured");
+        let value = headers
+            .get(super::super::forwarding::FORWARD_METADATA_KEY)
+            .expect("expected forwarded host metadata header");
+        assert_eq!(value.to_str().unwrap(), forwarded_host);
+    }
+
+    #[tokio::test]
+    async fn test_batch_commands_connect_does_not_set_forwarded_host_metadata_from_task_locals() {
+        let seen_headers = Arc::new(Mutex::new(None));
+        let service = CaptureService {
+            seen_headers: Arc::clone(&seen_headers),
+        };
+        let client = TikvClient::new(service);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            super::super::scope_forwarded_host(
+                "127.0.0.1:20161".to_owned(),
+                BatchCommandsClient::connect(
+                    client,
+                    128,
+                    "basic".to_owned(),
+                    0,
+                    8,
+                    Duration::ZERO,
+                    "test".to_owned(),
+                ),
+            ),
+        )
+        .await
+        .expect("connect should not hang");
+        assert!(result.is_err(), "expected connect to return a grpc error");
+
+        let headers = seen_headers
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("expected request headers captured");
+        assert!(
+            headers
+                .get(super::super::forwarding::FORWARD_METADATA_KEY)
+                .is_none(),
+            "base batch stream should not include forwarded host metadata"
+        );
     }
 
     #[tokio::test]
