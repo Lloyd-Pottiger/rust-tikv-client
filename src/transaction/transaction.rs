@@ -1,6 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::iter;
 use std::sync::atomic::{self, AtomicBool, AtomicU64, AtomicU8};
 use std::sync::Arc;
@@ -5714,6 +5715,59 @@ fn next_heartbeat_ttl(
 /// TiKV recommends each RPC packet should be less than around 1MB. We keep KV size of
 /// each request below 16KB.
 pub const TXN_COMMIT_BATCH_SIZE: u64 = 16 * 1024;
+
+static GLOBAL_TXN_COMMIT_BATCH_SIZE: AtomicU64 = AtomicU64::new(TXN_COMMIT_BATCH_SIZE);
+
+tokio::task_local! {
+    static TASK_TXN_COMMIT_BATCH_SIZE: u64;
+}
+
+fn normalize_txn_commit_batch_size(batch_size: u64) -> u64 {
+    if batch_size == 0 {
+        TXN_COMMIT_BATCH_SIZE
+    } else {
+        batch_size
+    }
+}
+
+/// Override the global batch size threshold for transaction commit related requests.
+///
+/// This mirrors client-go `kv.TxnCommitBatchSize` (a global atomic).
+pub fn set_txn_commit_batch_size(batch_size: u64) {
+    GLOBAL_TXN_COMMIT_BATCH_SIZE.store(
+        normalize_txn_commit_batch_size(batch_size),
+        atomic::Ordering::Relaxed,
+    );
+}
+
+/// Get the global batch size threshold for transaction commit related requests.
+///
+/// This mirrors client-go `kv.TxnCommitBatchSize.Load()`.
+#[must_use]
+pub fn global_txn_commit_batch_size() -> u64 {
+    GLOBAL_TXN_COMMIT_BATCH_SIZE.load(atomic::Ordering::Relaxed)
+}
+
+/// Get the effective batch size threshold for transaction commit related requests.
+///
+/// Prefer [`with_txn_commit_batch_size`] for scoped overrides (for example, in tests).
+#[must_use]
+pub fn txn_commit_batch_size() -> u64 {
+    TASK_TXN_COMMIT_BATCH_SIZE
+        .try_with(|value| *value)
+        .unwrap_or_else(|_| global_txn_commit_batch_size())
+}
+
+/// Runs `future` with a task-local transaction commit batch size threshold.
+///
+/// The task-local value takes precedence over the global default used by [`txn_commit_batch_size`].
+pub fn with_txn_commit_batch_size<T, F>(batch_size: u64, future: F) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    TASK_TXN_COMMIT_BATCH_SIZE.scope(normalize_txn_commit_batch_size(batch_size), future)
+}
+
 const TTL_FACTOR: f64 = 6000.0;
 const PIPELINED_REQUEST_SOURCE: &str = "pipelined_flush";
 
@@ -8111,7 +8165,7 @@ impl<PdC: PdClient> Committer<PdC> {
 
     fn calc_txn_lock_ttl(&mut self) -> u64 {
         let mut lock_ttl = DEFAULT_LOCK_TTL;
-        if self.write_size > TXN_COMMIT_BATCH_SIZE {
+        if self.write_size > txn_commit_batch_size() {
             let size_mb = self.write_size as f64 / 1024.0 / 1024.0;
             lock_ttl = (TTL_FACTOR * size_mb.sqrt()) as u64;
             lock_ttl = lock_ttl.clamp(DEFAULT_LOCK_TTL, MAX_TTL);

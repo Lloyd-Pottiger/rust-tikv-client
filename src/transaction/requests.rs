@@ -10,7 +10,6 @@ use futures::stream::{self};
 use futures::StreamExt;
 use futures::TryStreamExt;
 
-use super::transaction::TXN_COMMIT_BATCH_SIZE;
 use crate::collect_single;
 use crate::common::Error::PessimisticLockError;
 use crate::pd::PdClient;
@@ -531,6 +530,7 @@ impl Shardable for kvrpcpb::FlushRequest {
             .collect::<Vec<_>>();
         mutations.sort_by(|a, b| a.key.cmp(&b.key));
 
+        let batch_size = super::transaction::txn_commit_batch_size();
         region_stream_for_keys(mutations.into_iter(), pd_client.clone())
             .flat_map(
                 move |result: Result<(Vec<FlushMutation>, RegionWithLeader)>| match result {
@@ -543,7 +543,7 @@ impl Shardable for kvrpcpb::FlushRequest {
                             for item in mutations {
                                 let item_size = item.mutation.key.len() as u64
                                     + item.mutation.value.len() as u64;
-                                if size + item_size >= TXN_COMMIT_BATCH_SIZE && !batch.is_empty() {
+                                if size + item_size >= batch_size && !batch.is_empty() {
                                     batches.push(batch);
                                     batch = Vec::new();
                                     size = 0;
@@ -653,6 +653,7 @@ impl Shardable for kvrpcpb::PrewriteRequest {
             .map(|ctx| ctx.is_retry_request)
             .unwrap_or(false);
 
+        let batch_size = super::transaction::txn_commit_batch_size();
         region_stream_for_keys(mutations.into_iter(), pd_client.clone())
             .flat_map(
                 move |result: Result<(Vec<PrewriteMutation>, RegionWithLeader)>| match result {
@@ -670,7 +671,7 @@ impl Shardable for kvrpcpb::PrewriteRequest {
                             for item in mutations {
                                 let item_size = item.mutation.key.len() as u64
                                     + item.mutation.value.len() as u64;
-                                if size + item_size >= TXN_COMMIT_BATCH_SIZE && !batch.is_empty() {
+                                if size + item_size >= batch_size && !batch.is_empty() {
                                     batches.push(batch);
                                     batch = Vec::new();
                                     size = 0;
@@ -794,10 +795,11 @@ impl Shardable for kvrpcpb::CommitRequest {
         let mut keys = self.keys.clone();
         keys.sort();
 
+        let batch_size = super::transaction::txn_commit_batch_size();
         region_stream_for_keys(keys.into_iter(), pd_client.clone())
-            .flat_map(|result| match result {
+            .flat_map(move |result| match result {
                 Ok((keys, region)) => {
-                    stream::iter(kvrpcpb::CommitRequest::batches(keys, TXN_COMMIT_BATCH_SIZE))
+                    stream::iter(kvrpcpb::CommitRequest::batches(keys, batch_size))
                         .map(move |batch| Ok((batch, region.clone())))
                         .boxed()
                 }
@@ -2707,6 +2709,40 @@ mod tests {
 
         let locks = crate::transaction::HasLocks::take_locks(&mut resp);
         assert_eq!(locks, vec![embedded]);
+    }
+
+    #[tokio::test]
+    async fn test_commit_request_shards_respects_task_local_txn_commit_batch_size() {
+        fn key(prefix: u8) -> Vec<u8> {
+            let mut key = Vec::with_capacity(100);
+            key.push(prefix);
+            key.extend(std::iter::repeat(0).take(99));
+            key
+        }
+
+        let keys = vec![key(1), key(2), key(3)];
+        let req = super::new_commit_request(keys, 1, 2);
+
+        let pd_client = Arc::new(MockPdClient::default());
+        let shards = req
+            .shards(&pd_client)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(shards.len(), 1);
+
+        let shards = crate::transaction::with_txn_commit_batch_size(150, async {
+            req.shards(&pd_client)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<crate::Result<Vec<_>>>()
+                .unwrap()
+        })
+        .await;
+        assert_eq!(shards.len(), 3);
     }
 
     #[tokio::test]
