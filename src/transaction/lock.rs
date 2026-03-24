@@ -1570,6 +1570,7 @@ pub struct ResolveLocksContext {
     clean_regions: Arc<RwLock<CleanedRegionsCache>>,
     resolving: Arc<RwLock<ResolvingLocksState>>,
     low_resolution_ts: Arc<LowResolutionTimestampCache>,
+    default_txn_scope: Option<Arc<str>>,
 }
 
 #[derive(Default)]
@@ -1667,6 +1668,16 @@ impl Default for ResolveLocksOptions {
 }
 
 impl ResolveLocksContext {
+    #[must_use]
+    pub(crate) fn with_default_txn_scope(mut self, txn_scope: Option<String>) -> Self {
+        self.default_txn_scope = txn_scope.map(Arc::<str>::from);
+        self
+    }
+
+    pub(crate) fn default_txn_scope(&self) -> Option<&str> {
+        self.default_txn_scope.as_deref()
+    }
+
     pub async fn get_resolved(&self, txn_id: u64) -> Option<Arc<TransactionStatus>> {
         self.resolved.read().await.get(txn_id)
     }

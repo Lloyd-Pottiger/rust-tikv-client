@@ -119,6 +119,14 @@ pub fn parse_path(path: &str) -> crate::Result<ParsedTikvPath> {
     })
 }
 
+pub(crate) fn normalize_txn_scope(txn_scope: &str) -> Option<String> {
+    if txn_scope.is_empty() || txn_scope == "global" {
+        None
+    } else {
+        Some(txn_scope.to_owned())
+    }
+}
+
 fn decode_query_component(component: &str) -> crate::Result<String> {
     let mut bytes = Vec::with_capacity(component.len());
     let mut iter = component.as_bytes().iter().copied();
@@ -388,6 +396,16 @@ pub struct Config {
     ///
     /// This maps to client-go global config `ZoneLabel`.
     pub zone_label: Option<String>,
+    /// Default transaction scope used when starting transactions without an explicit scope.
+    ///
+    /// When set to `"global"` (or empty), the client uses the global TSO allocator. Otherwise the
+    /// value is passed through as PD `dc_location`, matching client-go global config `TxnScope`.
+    ///
+    /// This affects transaction creation helpers such as
+    /// [`crate::TransactionClient::begin_optimistic`] and
+    /// [`crate::TransactionClient::begin_pessimistic`] when the caller does not set a scope via
+    /// [`crate::TransactionOptions::txn_scope`].
+    pub txn_scope: Option<String>,
     /// How often to refresh TiKV store health feedback (slow score).
     ///
     /// When non-zero, the client periodically issues `GetHealthFeedback` to all stores and uses
@@ -465,6 +483,7 @@ impl Default for Config {
             region_cache_ttl_jitter: DEFAULT_REGION_CACHE_TTL_JITTER,
             enable_region_cache_preload: false,
             zone_label: None,
+            txn_scope: None,
             health_feedback_update_interval: Duration::ZERO,
             store_liveness_update_interval: Duration::ZERO,
             store_liveness_timeout: DEFAULT_STORE_LIVENESS_TIMEOUT,
@@ -841,6 +860,16 @@ impl Config {
         self
     }
 
+    /// Set the default transaction scope for new transactions created by a client with this config.
+    ///
+    /// When `txn_scope` is `"global"` (or empty), the default is cleared and transactions use the
+    /// global TSO allocator unless an explicit scope is provided.
+    #[must_use]
+    pub fn with_txn_scope(mut self, txn_scope: impl AsRef<str>) -> Self {
+        self.txn_scope = normalize_txn_scope(txn_scope.as_ref());
+        self
+    }
+
     /// Set how often to refresh TiKV store health feedback (slow score).
     ///
     /// Set to `Duration::ZERO` to disable the background refresher (default).
@@ -895,6 +924,19 @@ pub fn get_global_config() -> Config {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
+}
+
+/// Get the effective default transaction scope from the global config.
+///
+/// This mirrors client-go `config.GetTxnScopeFromConfig`.
+///
+/// Returns `"global"` when the global config does not specify a local transaction scope.
+pub fn get_txn_scope_from_global_config() -> String {
+    get_global_config()
+        .txn_scope
+        .as_deref()
+        .and_then(normalize_txn_scope)
+        .unwrap_or_else(|| "global".to_owned())
 }
 
 /// Set the global client configuration.
@@ -1015,6 +1057,17 @@ mod tests {
         assert_eq!(get_global_config(), config);
         update_global_config(|cfg| cfg.enable_batch_rpc = false);
         assert!(!get_global_config().enable_batch_rpc);
+    }
+
+    #[test]
+    fn test_config_with_txn_scope_and_global_helper() {
+        let _lock = super::GLOBAL_CONFIG_TEST_LOCK.blocking_lock();
+
+        assert_eq!(get_txn_scope_from_global_config(), "global");
+
+        let _guard = set_global_config_scoped(Config::default().with_txn_scope("dc1"));
+        assert_eq!(get_global_config().txn_scope.as_deref(), Some("dc1"));
+        assert_eq!(get_txn_scope_from_global_config(), "dc1");
     }
 
     #[test]

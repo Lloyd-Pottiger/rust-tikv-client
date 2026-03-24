@@ -190,6 +190,8 @@ impl Client {
         let store_liveness_update_interval = config.store_liveness_update_interval;
         let store_liveness_timeout = config.store_liveness_timeout;
         let txn_local_latches_capacity = config.txn_local_latches_capacity;
+        let resolve_locks_ctx =
+            ResolveLocksContext::default().with_default_txn_scope(config.txn_scope.clone());
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
         pd.install_health_feedback_observer();
         crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
@@ -221,7 +223,7 @@ impl Client {
             gc_safe_point: GcSafePointCache::new(pd.clone(), keyspace),
             pd,
             keyspace,
-            resolve_locks_ctx: ResolveLocksContext::default(),
+            resolve_locks_ctx,
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms: default_low_resolution_ts_update_interval_ms(),
             txn_latches,
@@ -249,6 +251,8 @@ impl Client {
         let store_liveness_update_interval = config.store_liveness_update_interval;
         let store_liveness_timeout = config.store_liveness_timeout;
         let txn_local_latches_capacity = config.txn_local_latches_capacity;
+        let resolve_locks_ctx =
+            ResolveLocksContext::default().with_default_txn_scope(config.txn_scope.clone());
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config.clone(), true).await?);
         pd.install_health_feedback_observer();
         crate::pd::spawn_health_feedback_updater(pd.clone(), health_feedback_update_interval);
@@ -271,7 +275,7 @@ impl Client {
             gc_safe_point: GcSafePointCache::new(pd.clone(), Keyspace::ApiV2NoPrefix),
             pd,
             keyspace: Keyspace::ApiV2NoPrefix,
-            resolve_locks_ctx: ResolveLocksContext::default(),
+            resolve_locks_ctx,
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms: default_low_resolution_ts_update_interval_ms(),
             txn_latches,
@@ -303,6 +307,28 @@ impl<PdC: PdClient> Client<PdC> {
             String::new()
         } else {
             txn_scope.to_owned()
+        }
+    }
+
+    fn apply_default_txn_scope(&self, options: TransactionOptions) -> TransactionOptions {
+        if options.txn_scope_as_deref().is_some() {
+            return options;
+        }
+
+        if let Some(txn_scope) = self.resolve_locks_ctx.default_txn_scope() {
+            options.txn_scope(txn_scope)
+        } else {
+            options
+        }
+    }
+
+    async fn current_timestamp_for_options(
+        &self,
+        options: &TransactionOptions,
+    ) -> Result<Timestamp> {
+        match options.txn_scope_as_deref() {
+            None => self.current_timestamp().await,
+            Some(scope) => self.current_timestamp_with_txn_scope(scope).await,
         }
     }
 
@@ -411,10 +437,14 @@ impl<PdC: PdClient> Client<PdC> {
     /// transaction.commit().await.unwrap();
     /// # });
     /// ```
+    ///
+    /// When the client is constructed with [`Config::with_txn_scope`], that default scope is used
+    /// unless the caller later creates a transaction with an explicit scope.
     pub async fn begin_optimistic(&self) -> Result<Transaction<PdC>> {
         debug!("creating new optimistic transaction");
-        let timestamp = self.current_timestamp().await?;
-        Ok(self.new_transaction(timestamp, TransactionOptions::new_optimistic()))
+        let options = self.apply_default_txn_scope(TransactionOptions::new_optimistic());
+        let timestamp = self.current_timestamp_for_options(&options).await?;
+        Ok(self.new_transaction(timestamp, options))
     }
 
     /// Creates a new pessimistic [`Transaction`].
@@ -434,10 +464,14 @@ impl<PdC: PdClient> Client<PdC> {
     /// transaction.commit().await.unwrap();
     /// # });
     /// ```
+    ///
+    /// When the client is constructed with [`Config::with_txn_scope`], that default scope is used
+    /// unless the caller later creates a transaction with an explicit scope.
     pub async fn begin_pessimistic(&self) -> Result<Transaction<PdC>> {
         debug!("creating new pessimistic transaction");
-        let timestamp = self.current_timestamp().await?;
-        Ok(self.new_transaction(timestamp, TransactionOptions::new_pessimistic()))
+        let options = self.apply_default_txn_scope(TransactionOptions::new_pessimistic());
+        let timestamp = self.current_timestamp_for_options(&options).await?;
+        Ok(self.new_transaction(timestamp, options))
     }
 
     /// Create a new customized [`Transaction`].
@@ -457,19 +491,17 @@ impl<PdC: PdClient> Client<PdC> {
     /// transaction.commit().await.unwrap();
     /// # });
     /// ```
+    ///
+    /// If `options` does not set [`TransactionOptions::txn_scope`], the client falls back to the
+    /// default scope configured via [`Config::with_txn_scope`].
     pub async fn begin_with_options(
         &self,
         options: TransactionOptions,
     ) -> Result<Transaction<PdC>> {
         debug!("creating new customized transaction");
         options.validate()?;
-        let txn_scope = options
-            .txn_scope_as_deref()
-            .map(|txn_scope| txn_scope.to_owned());
-        let timestamp = match txn_scope.as_deref() {
-            None => self.current_timestamp().await?,
-            Some(scope) => self.current_timestamp_with_txn_scope(scope).await?,
-        };
+        let options = self.apply_default_txn_scope(options);
+        let timestamp = self.current_timestamp_for_options(&options).await?;
         Ok(self.new_transaction(timestamp, options))
     }
 
@@ -504,7 +536,7 @@ impl<PdC: PdClient> Client<PdC> {
         options: TransactionOptions,
     ) -> Transaction<PdC> {
         debug!("creating new customized transaction with explicit start timestamp");
-        self.new_transaction(timestamp, options)
+        self.new_transaction(timestamp, self.apply_default_txn_scope(options))
     }
 
     /// Retrieve the current [`Timestamp`].
@@ -1414,7 +1446,8 @@ impl Client {
     /// Create a new [`Snapshot`](Snapshot) at the given [`Timestamp`](Timestamp).
     pub fn snapshot(&self, timestamp: Timestamp, options: TransactionOptions) -> Snapshot {
         debug!("creating new snapshot");
-        Snapshot::new(self.new_transaction(timestamp, options.read_only()))
+        let options = self.apply_default_txn_scope(options).read_only();
+        Snapshot::new(self.new_transaction(timestamp, options))
     }
 }
 
@@ -1505,7 +1538,8 @@ mod tests {
             gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
             pd: pd_client.clone(),
             keyspace: Keyspace::Disable,
-            resolve_locks_ctx: ResolveLocksContext::default(),
+            resolve_locks_ctx: ResolveLocksContext::default()
+                .with_default_txn_scope(Some("dc2".to_owned())),
             last_tsos: Default::default(),
             low_resolution_ts_update_interval_ms:
                 super::default_low_resolution_ts_update_interval_ms(),
@@ -3341,6 +3375,62 @@ mod tests {
             pd_client.get_timestamp_dc_locations(),
             vec!["dc1".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn test_begin_optimistic_uses_default_txn_scope_from_config() {
+        let pd_client = Arc::new(MockPdClient::default());
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client.clone(),
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default()
+                .with_default_txn_scope(Some("dc1".to_owned())),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let mut txn = client.begin_optimistic().await.unwrap();
+
+        assert_eq!(pd_client.get_timestamp_call_count(), 1);
+        assert_eq!(
+            pd_client.get_timestamp_dc_locations(),
+            vec!["dc1".to_owned()]
+        );
+        txn.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_begin_with_start_timestamp_uses_default_txn_scope_from_config() {
+        let pd_client = Arc::new(MockPdClient::default());
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client,
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default()
+                .with_default_txn_scope(Some("dc1".to_owned())),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let txn = client.begin_with_start_timestamp(
+            Timestamp {
+                physical: 1,
+                logical: 2,
+                suffix_bits: 0,
+            },
+            TransactionOptions::new_optimistic().drop_check(crate::CheckLevel::None),
+        );
+
+        assert_eq!(txn.txn_scope(), "dc1");
     }
 
     #[tokio::test]
