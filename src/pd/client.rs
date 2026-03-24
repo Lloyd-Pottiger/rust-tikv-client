@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -71,6 +72,14 @@ pub(crate) const BROADCAST_TXN_STATUS_MAX_CONCURRENCY: usize = 10;
 #[async_trait]
 pub trait PdClient: Send + Sync + 'static {
     type KvClient: KvClient + Send + Sync + 'static;
+
+    /// Returns whether the client has been explicitly closed.
+    fn is_closed(&self) -> bool {
+        false
+    }
+
+    /// Closes the client and releases best-effort cached resources.
+    async fn close(&self) {}
 
     /// In transactional API, `region` is decoded (keys in raw format).
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore>;
@@ -698,6 +707,7 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     pd: Arc<RetryClient<Cl>>,
     security_mgr: Arc<SecurityManager>,
     kv_connect: KvC,
+    closed: AtomicBool,
     grpc_connection_count: usize,
     kv_client_cache: Arc<RwLock<HashMap<String, KvClientPool<KvC::KvClient>>>>,
     slow_store_until: Mutex<HashMap<StoreId, Instant>>,
@@ -718,6 +728,49 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
 
 const REGION_CACHE_PRELOAD_LIMIT: i32 = 10_000;
 
+impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
+    fn is_explicitly_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.is_explicitly_closed()
+    }
+
+    async fn close_inner(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        self.kv_client_cache.write().await.clear();
+        self.region_cache.clear().await;
+
+        match self.slow_store_until.lock() {
+            Ok(mut guard) => guard.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+        match self.store_estimated_wait_until.lock() {
+            Ok(mut guard) => guard.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+        match self.store_token_count.lock() {
+            Ok(mut guard) => guard.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+    }
+
+    pub(crate) async fn close(&self) {
+        self.close_inner().await;
+    }
+
+    fn ensure_open(&self) -> Result<()> {
+        if self.is_explicitly_closed() {
+            return Err(Error::StringError("client is closed".to_owned()));
+        }
+        Ok(())
+    }
+}
+
 impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC, Cluster> {
     pub(crate) fn spawn_region_cache_preload(self: Arc<Self>, start_key: Key, end_key: Key) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -730,6 +783,9 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC, Cluster> {
             let Some(client) = weak.upgrade() else {
                 return;
             };
+            if client.is_closed() {
+                return;
+            }
 
             let enable_codec = client.enable_codec;
             let start_key = if enable_codec {
@@ -777,6 +833,14 @@ impl<KvC: KvConnect + Send + Sync + 'static> HealthFeedbackObserver for PdRpcCli
 impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     type KvClient = KvC::KvClient;
 
+    fn is_closed(&self) -> bool {
+        self.is_explicitly_closed()
+    }
+
+    async fn close(&self) {
+        self.close_inner().await;
+    }
+
     fn resolve_lock_lite_threshold(&self) -> u64 {
         self.resolve_lock_lite_threshold
     }
@@ -802,6 +866,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
+        self.ensure_open()?;
         let store_id = region.get_store_id()?;
         let store = self.region_cache.get_store_by_id(store_id).await?;
         let metapb::Store { address, .. } = store;
@@ -821,6 +886,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn region_for_key(&self, key: &Key) -> Result<RegionWithLeader> {
+        self.ensure_open()?;
         let enable_codec = self.enable_codec;
         let key = if enable_codec {
             key.to_encoded()
@@ -833,6 +899,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn region_for_end_key(&self, key: &Key) -> Result<RegionWithLeader> {
+        self.ensure_open()?;
         if key.is_empty() {
             return Err(Error::Unimplemented);
         }
@@ -856,6 +923,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn region_for_id(&self, id: RegionId) -> Result<RegionWithLeader> {
+        self.ensure_open()?;
         let region = self.region_cache.get_region_by_id(id).await?;
         Self::decode_region(region, self.enable_codec)
     }
@@ -866,6 +934,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         end_key: Option<Key>,
         limit: i32,
     ) -> Result<Vec<RegionWithLeader>> {
+        self.ensure_open()?;
         let enable_codec = self.enable_codec;
         let start_key = if enable_codec {
             start_key.to_encoded()
@@ -887,6 +956,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn all_stores(&self) -> Result<Vec<Store>> {
+        self.ensure_open()?;
         let pb_stores = self.region_cache.read_through_all_stores().await?;
         let mut stores = Vec::with_capacity(pb_stores.len());
         for store in pb_stores {
@@ -897,6 +967,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn all_stores_for_safe_ts(&self) -> Result<Vec<Store>> {
+        self.ensure_open()?;
         let pb_stores = self
             .region_cache
             .read_through_all_stores_for_safe_ts()
@@ -914,6 +985,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         &self,
         store_ids: &[StoreId],
     ) -> Result<(u64, HashMap<StoreId, u64>)> {
+        self.ensure_open()?;
         let Some(http_client) = self.pd_http_client.as_ref() else {
             return Err(Error::Unimplemented);
         };
@@ -930,6 +1002,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
+        self.ensure_open()?;
         self.region_cache.get_store_by_id(store_id).await
     }
 
@@ -938,6 +1011,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn get_health_feedback(&self, store_id: StoreId) -> Result<kvrpcpb::HealthFeedback> {
+        self.ensure_open()?;
         let store = self.store_meta_by_id(store_id).await?;
         let address = safe_ts_store_address(&store);
         let client = self.kv_client(address).await?;
@@ -1031,6 +1105,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+        self.ensure_open()?;
         self.pd.clone().get_timestamp().await
     }
 
@@ -1038,6 +1113,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         self: Arc<Self>,
         dc_location: String,
     ) -> Result<Timestamp> {
+        self.ensure_open()?;
         self.pd
             .clone()
             .get_timestamp_with_dc_location(dc_location)
@@ -1045,14 +1121,17 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+        self.ensure_open()?;
         self.pd.clone().get_min_ts().await
     }
 
     async fn get_external_timestamp(self: Arc<Self>) -> Result<u64> {
+        self.ensure_open()?;
         self.pd.clone().get_external_timestamp().await
     }
 
     async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
+        self.ensure_open()?;
         self.pd.clone().set_external_timestamp(timestamp).await
     }
 
@@ -1061,6 +1140,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         region_ids: Vec<RegionId>,
         group: Option<String>,
     ) -> Result<pdpb::ScatterRegionResponse> {
+        self.ensure_open()?;
         if region_ids.is_empty() {
             return Ok(pdpb::ScatterRegionResponse::default());
         }
@@ -1071,18 +1151,22 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         self: Arc<Self>,
         region_id: RegionId,
     ) -> Result<pdpb::GetOperatorResponse> {
+        self.ensure_open()?;
         self.pd.clone().get_operator(region_id).await
     }
 
     async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
+        self.ensure_open()?;
         self.pd.clone().get_gc_safe_point().await
     }
 
     async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
+        self.ensure_open()?;
         self.pd.clone().get_gc_safe_point_v2(keyspace_id).await
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {
+        self.ensure_open()?;
         self.pd.clone().update_safepoint(safepoint).await
     }
 
@@ -1092,6 +1176,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         ttl: i64,
         safe_point: u64,
     ) -> Result<u64> {
+        self.ensure_open()?;
         self.pd
             .clone()
             .update_service_gc_safe_point(service_id, ttl, safe_point)
@@ -1105,6 +1190,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         ttl: i64,
         safe_point: u64,
     ) -> Result<u64> {
+        self.ensure_open()?;
         self.pd
             .clone()
             .update_service_safe_point_v2(keyspace_id, service_id, ttl, safe_point)
@@ -1116,6 +1202,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         keyspace_id: u32,
         safe_point: u64,
     ) -> Result<u64> {
+        self.ensure_open()?;
         self.pd
             .clone()
             .update_gc_safe_point_v2(keyspace_id, safe_point)
@@ -1139,6 +1226,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+        self.ensure_open()?;
         self.pd.load_keyspace(keyspace).await
     }
 }
@@ -1234,6 +1322,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             security_mgr,
             kv_client_cache,
             kv_connect,
+            closed: AtomicBool::new(false),
             grpc_connection_count,
             slow_store_until: Mutex::new(HashMap::new()),
             store_estimated_wait_until: Mutex::new(HashMap::new()),
@@ -1257,6 +1346,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
     }
 
     async fn kv_client(&self, address: &str) -> Result<KvC::KvClient> {
+        self.ensure_open()?;
         if let Some(pool) = self.kv_client_cache.read().await.get(address) {
             return Ok(pool.pick());
         };
@@ -1613,6 +1703,44 @@ pub mod test {
         let c1 = client.kv_client("foo").await.unwrap();
         assert_eq!(c1.id, 2);
         assert_eq!(client.kv_connect.connect_calls.load(Ordering::Relaxed), 4);
+    }
+
+    #[tokio::test]
+    async fn test_kv_client_close_clears_pool_and_prevents_reconnect() {
+        let config = Config::default().with_grpc_connection_count(2);
+        let client = PdRpcClient::new(
+            config.clone(),
+            |_| CountingKvConnect {
+                connect_calls: AtomicUsize::new(0),
+            },
+            |sm| {
+                futures::future::ok(RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    42,
+                    MockCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let c0 = client.kv_client("foo").await.unwrap();
+        assert_eq!(c0.id, 0);
+        assert_eq!(client.kv_connect.connect_calls.load(Ordering::Relaxed), 2);
+
+        client.close().await;
+        client.close().await;
+
+        assert!(client.kv_client_cache.read().await.is_empty());
+
+        let err = match client.kv_client("foo").await {
+            Ok(client) => panic!("expected closed client error, got client id {}", client.id),
+            Err(err) => err,
+        };
+        assert!(matches!(err, Error::StringError(msg) if msg == "client is closed"));
+        assert_eq!(client.kv_connect.connect_calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

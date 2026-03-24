@@ -29,6 +29,7 @@ struct GcSafePointCacheInner<PdC: PdClient> {
     pd: Arc<PdC>,
     keyspace: Keyspace,
     state: RwLock<GcSafePointState>,
+    closed: AtomicBool,
     refresh: Mutex<GcSafePointRefreshState>,
     refresh_generation: watch::Sender<u64>,
     gc_safe_point_v2_unimplemented: AtomicBool,
@@ -54,11 +55,25 @@ impl<PdC: PdClient> GcSafePointCache<PdC> {
                 pd,
                 keyspace,
                 state: RwLock::new(GcSafePointState::default()),
+                closed: AtomicBool::new(false),
                 refresh: Mutex::new(GcSafePointRefreshState::default()),
                 refresh_generation,
                 gc_safe_point_v2_unimplemented: AtomicBool::new(false),
             }),
         }
+    }
+
+    pub(crate) async fn close(&self) {
+        self.inner.closed.store(true, Ordering::Release);
+        *self.inner.state.write().await = GcSafePointState::default();
+        let generation = {
+            let mut refresh = self.inner.refresh.lock().await;
+            refresh.in_flight = false;
+            refresh.generation = refresh.generation.wrapping_add(1);
+            refresh.last_error = Some("client is closed".to_owned());
+            refresh.generation
+        };
+        let _ = self.inner.refresh_generation.send(generation);
     }
 
     pub(crate) async fn check_visibility(&self, start_ts: u64) -> Result<()> {
@@ -81,6 +96,9 @@ impl<PdC: PdClient> GcSafePointCache<PdC> {
     }
 
     pub(crate) async fn safe_point(&self) -> Result<u64> {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(Error::StringError("client is closed".to_owned()));
+        }
         loop {
             if let Some(cached) = self.cached_safe_point().await {
                 return Ok(cached);
@@ -103,6 +121,10 @@ impl<PdC: PdClient> GcSafePointCache<PdC> {
                     if refreshed.changed().await.is_err() {
                         break;
                     }
+                }
+
+                if self.inner.closed.load(Ordering::Acquire) {
+                    return Err(Error::StringError("client is closed".to_owned()));
                 }
 
                 let refresh = self.inner.refresh.lock().await;

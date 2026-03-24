@@ -45,6 +45,7 @@ struct SafeTsCacheInner<PdC: PdClient> {
     pd: Arc<PdC>,
     keyspace: Keyspace,
     state: RwLock<SafeTsState>,
+    closed: AtomicBool,
     started: AtomicBool,
     start_lock: Mutex<()>,
     refresh: Mutex<SafeTsRefreshState>,
@@ -66,6 +67,7 @@ impl<PdC: PdClient> SafeTsCache<PdC> {
                 pd,
                 keyspace,
                 state: RwLock::new(SafeTsState::default()),
+                closed: AtomicBool::new(false),
                 started: AtomicBool::new(false),
                 start_lock: Mutex::new(()),
                 refresh: Mutex::new(SafeTsRefreshState::default()),
@@ -74,11 +76,27 @@ impl<PdC: PdClient> SafeTsCache<PdC> {
         }
     }
 
+    pub(crate) async fn close(&self) {
+        self.inner.closed.store(true, Ordering::Release);
+        *self.inner.state.write().await = SafeTsState::default();
+        let generation = {
+            let mut refresh = self.inner.refresh.lock().await;
+            refresh.in_flight = false;
+            refresh.generation = refresh.generation.wrapping_add(1);
+            refresh.last_error = Some("client is closed".to_owned());
+            refresh.generation
+        };
+        let _ = self.inner.refresh_generation.send(generation);
+    }
+
     pub(crate) async fn min_safe_ts(&self) -> Result<u64> {
         self.min_safe_ts_with_txn_scope(GLOBAL_TXN_SCOPE).await
     }
 
     pub(crate) async fn min_safe_ts_with_txn_scope(&self, txn_scope: &str) -> Result<u64> {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(Error::StringError("client is closed".to_owned()));
+        }
         self.ensure_started().await;
 
         let txn_scope = if txn_scope.is_empty() || txn_scope == GLOBAL_TXN_SCOPE {
@@ -107,6 +125,9 @@ impl<PdC: PdClient> SafeTsCache<PdC> {
     }
 
     async fn ensure_started(&self) {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return;
+        }
         if self.inner.started.load(Ordering::Acquire) {
             return;
         }
@@ -125,6 +146,9 @@ impl<PdC: PdClient> SafeTsCache<PdC> {
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };
+                if inner.closed.load(Ordering::Acquire) {
+                    return;
+                }
                 if let Err(err) = inner.refresh().await {
                     debug!("safe-ts refresh failed: {:?}", err);
                 }
@@ -137,6 +161,9 @@ impl<PdC: PdClient> SafeTsCache<PdC> {
 
 impl<PdC: PdClient> SafeTsCacheInner<PdC> {
     async fn refresh(&self) -> Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::StringError("client is closed".to_owned()));
+        }
         let wait_for_generation = {
             let mut refresh = self.refresh.lock().await;
             if refresh.in_flight {
@@ -154,6 +181,10 @@ impl<PdC: PdClient> SafeTsCacheInner<PdC> {
                 if refreshed.changed().await.is_err() {
                     break;
                 }
+            }
+
+            if self.closed.load(Ordering::Acquire) {
+                return Err(Error::StringError("client is closed".to_owned()));
             }
 
             let refresh = self.refresh.lock().await;

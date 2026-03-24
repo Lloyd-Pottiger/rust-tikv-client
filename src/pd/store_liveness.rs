@@ -76,6 +76,9 @@ pub(crate) fn spawn_store_liveness_updater<KvC>(
             let Some(pd) = weak.upgrade() else {
                 return;
             };
+            if pd.is_closed() {
+                return;
+            }
             if let Err(err) = refresh_store_liveness_once(pd.clone(), timeout).await {
                 debug!("store liveness refresh failed: {:?}", err);
             }

@@ -242,6 +242,15 @@ impl Client<PdRpcClient> {
 }
 
 impl<PdC: PdClient> Client<PdC> {
+    /// Closes this client and releases cached resources.
+    ///
+    /// This is idempotent. After calling `close`, subsequent requests return an error instead of
+    /// silently reconnecting.
+    pub async fn close(&self) {
+        self.safe_ts.close().await;
+        self.rpc.close().await;
+    }
+
     fn apply_request_context(&self, ctx: &mut crate::proto::kvrpcpb::Context) {
         if ctx.request_source.is_empty() {
             if let Some(request_source) = crate::request_context::request_source() {
@@ -1384,6 +1393,27 @@ mod tests {
             trace_control_flags: TraceControlFlags::default(),
             keyspace: Keyspace::Disable,
         }
+    }
+
+    #[tokio::test]
+    async fn test_raw_client_close_is_idempotent_and_blocks_future_requests() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: None,
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
+            keyspace: Keyspace::Disable,
+        };
+
+        client.close().await;
+        client.close().await;
+
+        let err = client.get(vec![1]).await.unwrap_err();
+        assert!(matches!(err, Error::StringError(msg) if msg == "client is closed"));
     }
 
     #[tokio::test]

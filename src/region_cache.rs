@@ -202,6 +202,14 @@ impl<Client> RegionCache<Client> {
             region_cache_ttl_jitter_ms: duration_to_millis_saturating(region_cache_ttl_jitter),
         }
     }
+
+    pub async fn clear(&self) {
+        let mut region_cache = self.region_cache.write().await;
+        *region_cache = RegionCacheMap::new();
+        drop(region_cache);
+
+        self.store_cache.write().await.clear();
+    }
 }
 
 impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {

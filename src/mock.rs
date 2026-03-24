@@ -142,6 +142,8 @@ pub struct MockPdClient {
     all_stores_should_fail: AtomicBool,
     #[new(value = "AtomicBool::new(false)")]
     enable_forwarding: AtomicBool,
+    #[new(value = "AtomicBool::new(false)")]
+    closed: AtomicBool,
     #[new(value = "Mutex::new(Vec::new())")]
     scatter_regions_calls: Mutex<Vec<(Vec<RegionId>, Option<String>)>>,
     #[new(value = "Mutex::new(Vec::new())")]
@@ -203,6 +205,13 @@ impl KvConnect for MockKvConnect {
 impl MockPdClient {
     pub fn default() -> MockPdClient {
         MockPdClient::new(MockKvClient::default())
+    }
+
+    fn ensure_open(&self) -> Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::StringError("client is closed".to_owned()));
+        }
+        Ok(())
     }
 
     pub fn set_enable_forwarding(&self, enable: bool) {
@@ -551,6 +560,14 @@ impl MockPdClient {
 impl PdClient for MockPdClient {
     type KvClient = MockKvClient;
 
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    async fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
     fn ttl_refreshed_txn_size(&self) -> u64 {
         self.ttl_refreshed_txn_size.load(Ordering::SeqCst)
     }
@@ -572,6 +589,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
+        self.ensure_open()?;
         let store_id = region.get_store_id()?;
         let client = self
             .store_clients
@@ -588,6 +606,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {
+        self.ensure_open()?;
         self.store_meta_by_id_calls.fetch_add(1, Ordering::SeqCst);
         self.store_metas
             .read()
@@ -598,11 +617,15 @@ impl PdClient for MockPdClient {
     }
 
     fn store_meta_by_id_cached(&self, store_id: StoreId) -> Option<metapb::Store> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
         let guard = self.store_metas.try_read().ok()?;
         guard.get(&store_id).cloned()
     }
 
     async fn get_health_feedback(&self, store_id: StoreId) -> Result<kvrpcpb::HealthFeedback> {
+        self.ensure_open()?;
         let _ = store_id;
         let mut req = kvrpcpb::GetHealthFeedbackRequest::default();
         req.context = Some(kvrpcpb::Context::default());
@@ -694,6 +717,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn region_for_key(&self, key: &Key) -> Result<RegionWithLeader> {
+        self.ensure_open()?;
         let bytes: &[_] = key.into();
         let region = if bytes.is_empty() || bytes < &[10][..] {
             Self::region1()
@@ -707,6 +731,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn region_for_end_key(&self, key: &Key) -> Result<RegionWithLeader> {
+        self.ensure_open()?;
         let bytes: &[_] = key.into();
         if bytes.is_empty() {
             return Err(Error::Unimplemented);
@@ -724,6 +749,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn region_for_id(&self, id: RegionId) -> Result<RegionWithLeader> {
+        self.ensure_open()?;
         match id {
             1 => Ok(Self::region1()),
             2 => Ok(Self::region2()),
@@ -733,6 +759,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn all_stores(&self) -> Result<Vec<Store>> {
+        self.ensure_open()?;
         if self.all_stores_should_fail.load(Ordering::SeqCst) {
             return Err(Error::StringError("injected all_stores error".to_owned()));
         }
@@ -755,6 +782,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+        self.ensure_open()?;
         self.get_timestamp_calls.fetch_add(1, Ordering::SeqCst);
         if self.get_timestamp_delay > Duration::from_millis(0) {
             sleep(self.get_timestamp_delay).await;
@@ -776,6 +804,7 @@ impl PdClient for MockPdClient {
         self: Arc<Self>,
         dc_location: String,
     ) -> Result<Timestamp> {
+        self.ensure_open()?;
         self.get_timestamp_calls.fetch_add(1, Ordering::SeqCst);
         if self.get_timestamp_delay > Duration::from_millis(0) {
             sleep(self.get_timestamp_delay).await;
@@ -801,6 +830,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
+        self.ensure_open()?;
         self.get_min_ts_calls.fetch_add(1, Ordering::SeqCst);
         if self.use_min_ts {
             Ok(Timestamp::from_version(
@@ -812,12 +842,14 @@ impl PdClient for MockPdClient {
     }
 
     async fn get_external_timestamp(self: Arc<Self>) -> Result<u64> {
+        self.ensure_open()?;
         self.get_external_timestamp_calls
             .fetch_add(1, Ordering::SeqCst);
         Ok(self.external_timestamp.load(Ordering::SeqCst))
     }
 
     async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
+        self.ensure_open()?;
         self.set_external_timestamp_calls
             .fetch_add(1, Ordering::SeqCst);
         self.external_timestamp.store(timestamp, Ordering::SeqCst);
@@ -829,6 +861,7 @@ impl PdClient for MockPdClient {
         region_ids: Vec<RegionId>,
         group: Option<String>,
     ) -> Result<pdpb::ScatterRegionResponse> {
+        self.ensure_open()?;
         let mut calls = match self.scatter_regions_calls.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -841,6 +874,7 @@ impl PdClient for MockPdClient {
         self: Arc<Self>,
         region_id: RegionId,
     ) -> Result<pdpb::GetOperatorResponse> {
+        self.ensure_open()?;
         let mut calls = match self.get_operator_calls.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -859,6 +893,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
+        self.ensure_open()?;
         self.get_gc_safe_point_calls.fetch_add(1, Ordering::SeqCst);
         let mut responses = match self.get_gc_safe_point_responses.lock() {
             Ok(guard) => guard,
@@ -868,6 +903,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
+        self.ensure_open()?;
         let mut calls = match self.get_gc_safe_point_v2_calls.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -887,6 +923,7 @@ impl PdClient for MockPdClient {
         ttl: i64,
         safe_point: u64,
     ) -> Result<u64> {
+        self.ensure_open()?;
         let mut calls = match self.update_service_gc_safe_point_calls.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -907,6 +944,7 @@ impl PdClient for MockPdClient {
         ttl: i64,
         safe_point: u64,
     ) -> Result<u64> {
+        self.ensure_open()?;
         let mut calls = match self.update_service_safe_point_v2_calls.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -925,6 +963,7 @@ impl PdClient for MockPdClient {
         keyspace_id: u32,
         safe_point: u64,
     ) -> Result<u64> {
+        self.ensure_open()?;
         let mut calls = match self.update_gc_safe_point_v2_calls.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -939,6 +978,7 @@ impl PdClient for MockPdClient {
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {
+        self.ensure_open()?;
         let mut calls = match self.update_safepoint_calls.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),

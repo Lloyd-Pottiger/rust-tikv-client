@@ -36,6 +36,9 @@ pub(crate) fn spawn_health_feedback_updater<PdC: PdClient>(
             let Some(pd) = weak.upgrade() else {
                 return;
             };
+            if pd.is_closed() {
+                return;
+            }
 
             match refresh_health_feedback_once(pd.clone()).await {
                 Ok(HealthFeedbackRefreshOutcome::Completed) => {}

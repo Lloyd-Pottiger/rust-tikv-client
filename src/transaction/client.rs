@@ -296,6 +296,17 @@ impl Client {
 }
 
 impl<PdC: PdClient> Client<PdC> {
+    /// Closes this client and releases cached resources.
+    ///
+    /// This is idempotent. After calling `close`, cloned handles observe the same closed state and
+    /// subsequent operations return an error.
+    pub async fn close(&self) {
+        self.safe_ts.close().await;
+        self.gc_safe_point.close().await;
+        self.last_tsos.write().await.clear();
+        self.pd.close().await;
+    }
+
     /// Returns a handle to the underlying PD client.
     #[must_use]
     pub fn pd_client(&self) -> Arc<PdC> {
@@ -1480,6 +1491,29 @@ mod tests {
     use crate::TransactionOptions;
 
     use super::Client;
+
+    #[tokio::test]
+    async fn test_transaction_client_close_is_idempotent_and_shared_with_clones() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), Keyspace::Disable),
+            pd: pd_client,
+            keyspace: Keyspace::Disable,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+        let clone = client.clone();
+
+        client.close().await;
+        client.close().await;
+
+        let err = clone.current_timestamp().await.unwrap_err();
+        assert!(matches!(err, Error::StringError(msg) if msg == "client is closed"));
+    }
 
     fn validate_read_ts_from_pd_counter_value() -> f64 {
         prometheus::gather()
