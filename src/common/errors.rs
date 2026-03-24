@@ -814,7 +814,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert_eq!("", super::extract_debug_info_str_from_key_error_with_redaction(&empty, false));
+        assert_eq!(
+            "",
+            super::extract_debug_info_str_from_key_error_with_redaction(&empty, false)
+        );
 
         let debug_info = kvrpcpb::DebugInfo {
             mvcc_info: vec![kvrpcpb::MvccDebugInfo {
