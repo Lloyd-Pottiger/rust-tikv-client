@@ -129,6 +129,40 @@ impl<'a> RpcRequest<'a> {
         }
     }
 
+    /// Returns the task ID attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.task_id`.
+    #[must_use]
+    pub fn task_id(&self) -> u64 {
+        self.context.as_ref().map_or(0, |ctx| ctx.task_id)
+    }
+
+    /// Set the task ID attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.task_id`.
+    pub fn set_task_id(&mut self, task_id: u64) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.task_id = task_id;
+        }
+    }
+
+    /// Returns the busy-threshold attached to this request, in milliseconds.
+    ///
+    /// This maps to `kvrpcpb::Context.busy_threshold_ms`.
+    #[must_use]
+    pub fn busy_threshold_ms(&self) -> u32 {
+        self.context.as_ref().map_or(0, |ctx| ctx.busy_threshold_ms)
+    }
+
+    /// Set the busy-threshold attached to this request, in milliseconds.
+    ///
+    /// This maps to `kvrpcpb::Context.busy_threshold_ms`.
+    pub fn set_busy_threshold_ms(&mut self, busy_threshold_ms: u32) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.busy_threshold_ms = busy_threshold_ms;
+        }
+    }
+
     /// Returns the command priority configured for the request.
     ///
     /// This maps to `kvrpcpb::Context.priority`.
@@ -637,6 +671,44 @@ mod tests {
         assert_eq!(ctx.disk_full_opt, DiskFullOpt::AllowedOnAlreadyFull as i32);
         assert!(!ctx.sync_log);
         assert_eq!(ctx.max_execution_duration_ms, 321);
+    }
+
+    #[test]
+    fn test_rpc_request_exposes_task_id() {
+        let mut ctx = kvrpcpb::Context {
+            task_id: 42,
+            ..Default::default()
+        };
+        let mut req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+
+        assert_eq!(req.task_id(), 42);
+        req.set_task_id(7);
+        assert_eq!(req.task_id(), 7);
+        assert_eq!(ctx.task_id, 7);
+
+        let mut req_without_context = RpcRequest::new("target", "kv_get", None);
+        assert_eq!(req_without_context.task_id(), 0);
+        req_without_context.set_task_id(9);
+        assert_eq!(req_without_context.task_id(), 0);
+    }
+
+    #[test]
+    fn test_rpc_request_exposes_busy_threshold_ms() {
+        let mut ctx = kvrpcpb::Context {
+            busy_threshold_ms: 123,
+            ..Default::default()
+        };
+        let mut req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+
+        assert_eq!(req.busy_threshold_ms(), 123);
+        req.set_busy_threshold_ms(0);
+        assert_eq!(req.busy_threshold_ms(), 0);
+        assert_eq!(ctx.busy_threshold_ms, 0);
+
+        let mut req_without_context = RpcRequest::new("target", "kv_get", None);
+        assert_eq!(req_without_context.busy_threshold_ms(), 0);
+        req_without_context.set_busy_threshold_ms(42);
+        assert_eq!(req_without_context.busy_threshold_ms(), 0);
     }
 
     #[test]
