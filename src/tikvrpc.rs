@@ -1,10 +1,64 @@
-//! Lightweight TiKV RPC typing helpers mirroring client-go `tikvrpc`.
+//! Lightweight TiKV RPC helpers mirroring client-go `tikvrpc`.
 //!
-//! This module intentionally exposes only small stable enums and label mappings used by the Rust
-//! client's existing typed request pipeline. It does not attempt to recreate client-go's full
-//! `tikvrpc::Request` / `Response` wrappers.
+//! The Rust client uses a typed protobuf request pipeline internally, but still needs a small set
+//! of stable identifiers and views for metrics, tracing, and optional hooks.
+//!
+//! This module provides:
+//! - [`CmdType`] and [`EndpointType`] for upstream-compatible identifiers and label mappings.
+//! - [`Request`] and [`Response`], lightweight wrappers that expose a stable `label` / [`CmdType`]
+//!   plus common context accessors.
 
+use std::any::Any;
 use std::fmt;
+
+/// A lightweight view of a TiKV RPC request.
+///
+/// This is a compatibility alias for [`crate::RpcRequest`], re-exported from this module so users
+/// familiar with client-go can reach it via `tikv_client::tikvrpc::Request`.
+pub use crate::RpcRequest as Request;
+
+/// A lightweight view of a TiKV RPC response.
+///
+/// Unlike client-go, the Rust client does not currently expose a single unified request/response
+/// send API. This wrapper exists primarily for hooks that need access to a stable label (and thus
+/// [`CmdType`]) plus a way to downcast into the concrete protobuf response type.
+#[derive(Clone, Copy, Debug)]
+pub struct Response<'a> {
+    label: &'static str,
+    response: &'a dyn Any,
+}
+
+impl<'a> Response<'a> {
+    /// Create a new response wrapper.
+    #[must_use]
+    pub fn new(label: &'static str, response: &'a dyn Any) -> Self {
+        Self { label, response }
+    }
+
+    /// A stable response label (for example, `"kv_get"` or `"kv_commit"`).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        self.label
+    }
+
+    /// The stable command type derived from [`Self::label`].
+    #[must_use]
+    pub fn cmd_type(self) -> CmdType {
+        CmdType::from_label(self.label)
+    }
+
+    /// Returns the underlying response as an [`Any`] trait object.
+    #[must_use]
+    pub fn as_any(self) -> &'a dyn Any {
+        self.response
+    }
+
+    /// Downcast the response to the expected concrete type.
+    #[must_use]
+    pub fn downcast_ref<T: Any>(self) -> Option<&'a T> {
+        self.response.downcast_ref::<T>()
+    }
+}
 
 macro_rules! cmd_type_table {
     ($(($variant:ident, $label:literal, $name:literal),)*) => {
@@ -225,5 +279,34 @@ mod tests {
             EndpointType::from_store_labels(&unrelated),
             EndpointType::TiKv
         );
+    }
+
+    #[test]
+    fn test_request_alias_has_cmd_type_and_accessors() {
+        let mut ctx = crate::proto::kvrpcpb::Context::default();
+        let mut req = Request::new("mock://tikv", "raw_get", Some(&mut ctx));
+
+        assert_eq!(req.label(), "raw_get");
+        assert_eq!(req.cmd_type(), CmdType::RawGet);
+
+        assert_eq!(req.request_source(), None);
+        req.set_request_source("tests");
+        assert_eq!(req.request_source(), Some("tests"));
+    }
+
+    #[test]
+    fn test_response_wrapper_cmd_type_and_downcast() {
+        #[derive(Debug)]
+        struct MockResponse {
+            value: u64,
+        }
+
+        let response = MockResponse { value: 42 };
+        let wrapper = Response::new("raw_get", &response);
+
+        assert_eq!(wrapper.label(), "raw_get");
+        assert_eq!(wrapper.cmd_type(), CmdType::RawGet);
+        assert_eq!(wrapper.downcast_ref::<MockResponse>().unwrap().value, 42);
+        assert!(wrapper.downcast_ref::<u32>().is_none());
     }
 }
