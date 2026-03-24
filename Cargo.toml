@@ -27,6 +27,7 @@ members = [
 [dependencies]
 async-recursion = "0.3"
 async-trait = "0.1"
+base64 = "0.22"
 derive-new = "0.5"
 either = "1.6"
 fail = "0.4"

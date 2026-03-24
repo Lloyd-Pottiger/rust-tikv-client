@@ -3,6 +3,8 @@
 use std::fmt;
 use std::result;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use thiserror::Error;
 
 use crate::proto::kvrpcpb;
@@ -43,6 +45,287 @@ pub use crate::proto::kvrpcpb::WriteConflict as ProtoWriteConflict;
 /// future release even if the wire format is compatible.
 #[doc(inline)]
 pub use crate::proto::kvrpcpb::AssertionFailed as ProtoAssertionFailed;
+
+/// Extract debug info JSON string from a TiKV `KeyError`.
+///
+/// Returns an empty string when `debug_info` is missing.
+///
+/// This mirrors client-go `error.ExtractDebugInfoStrFromKeyErr`. When redaction is enabled via
+/// [`crate::redact::set_redact_mode`], key material inside `debug_info` will be redacted.
+pub fn extract_debug_info_str_from_key_error(key_err: &ProtoKeyError) -> String {
+    extract_debug_info_str_from_key_error_with_redaction(key_err, crate::redact::need_redact())
+}
+
+fn extract_debug_info_str_from_key_error_with_redaction(
+    key_err: &ProtoKeyError,
+    need_redact: bool,
+) -> String {
+    let Some(debug_info) = key_err.debug_info.as_ref() else {
+        return String::new();
+    };
+
+    let mut debug_info = debug_info.clone();
+    if need_redact {
+        redact_debug_info(&mut debug_info);
+    }
+    debug_info_to_json_string(&debug_info)
+}
+
+fn redact_debug_info(debug_info: &mut kvrpcpb::DebugInfo) {
+    let redact_marker = vec![b'?'];
+    for mvcc_info in &mut debug_info.mvcc_info {
+        mvcc_info.key = redact_marker.clone();
+        if let Some(mvcc) = mvcc_info.mvcc.as_mut() {
+            if let Some(lock) = mvcc.lock.as_mut() {
+                lock.primary = redact_marker.clone();
+                lock.short_value = redact_marker.clone();
+                for secondary in &mut lock.secondaries {
+                    *secondary = redact_marker.clone();
+                }
+            }
+
+            for write in &mut mvcc.writes {
+                write.short_value = redact_marker.clone();
+            }
+
+            for value in &mut mvcc.values {
+                value.value = redact_marker.clone();
+            }
+        }
+    }
+}
+
+fn debug_info_to_json_string(debug_info: &kvrpcpb::DebugInfo) -> String {
+    fn write_field_name(out: &mut String, first: &mut bool, name: &str) {
+        if *first {
+            *first = false;
+        } else {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(name);
+        out.push_str("\":");
+    }
+
+    fn write_str(out: &mut String, value: &str) {
+        out.push('"');
+        out.push_str(value);
+        out.push('"');
+    }
+
+    fn write_bytes(out: &mut String, value: &[u8]) {
+        write_str(out, &BASE64_STANDARD.encode(value));
+    }
+
+    fn write_u64(out: &mut String, value: u64) {
+        use std::fmt::Write as _;
+        write!(out, "{value}").expect("writing to string should not fail");
+    }
+
+    fn write_i32(out: &mut String, value: i32) {
+        use std::fmt::Write as _;
+        write!(out, "{value}").expect("writing to string should not fail");
+    }
+
+    fn write_bool(out: &mut String, value: bool) {
+        out.push_str(if value { "true" } else { "false" });
+    }
+
+    fn write_u64_array(out: &mut String, values: &[u64]) {
+        out.push('[');
+        for (idx, value) in values.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            write_u64(out, *value);
+        }
+        out.push(']');
+    }
+
+    fn write_bytes_array(out: &mut String, values: &[Vec<u8>]) {
+        out.push('[');
+        for (idx, value) in values.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            write_bytes(out, value);
+        }
+        out.push(']');
+    }
+
+    fn write_mvcc_lock(out: &mut String, lock: &kvrpcpb::MvccLock) {
+        out.push('{');
+        let mut first = true;
+        if lock.r#type != 0 {
+            write_field_name(out, &mut first, "type");
+            write_i32(out, lock.r#type);
+        }
+        if lock.start_ts != 0 {
+            write_field_name(out, &mut first, "start_ts");
+            write_u64(out, lock.start_ts);
+        }
+        if !lock.primary.is_empty() {
+            write_field_name(out, &mut first, "primary");
+            write_bytes(out, &lock.primary);
+        }
+        if !lock.short_value.is_empty() {
+            write_field_name(out, &mut first, "short_value");
+            write_bytes(out, &lock.short_value);
+        }
+        if lock.ttl != 0 {
+            write_field_name(out, &mut first, "ttl");
+            write_u64(out, lock.ttl);
+        }
+        if lock.for_update_ts != 0 {
+            write_field_name(out, &mut first, "for_update_ts");
+            write_u64(out, lock.for_update_ts);
+        }
+        if lock.txn_size != 0 {
+            write_field_name(out, &mut first, "txn_size");
+            write_u64(out, lock.txn_size);
+        }
+        if lock.use_async_commit {
+            write_field_name(out, &mut first, "use_async_commit");
+            write_bool(out, lock.use_async_commit);
+        }
+        if !lock.secondaries.is_empty() {
+            write_field_name(out, &mut first, "secondaries");
+            write_bytes_array(out, &lock.secondaries);
+        }
+        if !lock.rollback_ts.is_empty() {
+            write_field_name(out, &mut first, "rollback_ts");
+            write_u64_array(out, &lock.rollback_ts);
+        }
+        if lock.last_change_ts != 0 {
+            write_field_name(out, &mut first, "last_change_ts");
+            write_u64(out, lock.last_change_ts);
+        }
+        if lock.versions_to_last_change != 0 {
+            write_field_name(out, &mut first, "versions_to_last_change");
+            write_u64(out, lock.versions_to_last_change);
+        }
+        out.push('}');
+    }
+
+    fn write_mvcc_write(out: &mut String, write: &kvrpcpb::MvccWrite) {
+        out.push('{');
+        let mut first = true;
+        if write.r#type != 0 {
+            write_field_name(out, &mut first, "type");
+            write_i32(out, write.r#type);
+        }
+        if write.start_ts != 0 {
+            write_field_name(out, &mut first, "start_ts");
+            write_u64(out, write.start_ts);
+        }
+        if write.commit_ts != 0 {
+            write_field_name(out, &mut first, "commit_ts");
+            write_u64(out, write.commit_ts);
+        }
+        if !write.short_value.is_empty() {
+            write_field_name(out, &mut first, "short_value");
+            write_bytes(out, &write.short_value);
+        }
+        if write.has_overlapped_rollback {
+            write_field_name(out, &mut first, "has_overlapped_rollback");
+            write_bool(out, write.has_overlapped_rollback);
+        }
+        if write.has_gc_fence {
+            write_field_name(out, &mut first, "has_gc_fence");
+            write_bool(out, write.has_gc_fence);
+        }
+        if write.gc_fence != 0 {
+            write_field_name(out, &mut first, "gc_fence");
+            write_u64(out, write.gc_fence);
+        }
+        if write.last_change_ts != 0 {
+            write_field_name(out, &mut first, "last_change_ts");
+            write_u64(out, write.last_change_ts);
+        }
+        if write.versions_to_last_change != 0 {
+            write_field_name(out, &mut first, "versions_to_last_change");
+            write_u64(out, write.versions_to_last_change);
+        }
+        out.push('}');
+    }
+
+    fn write_mvcc_value(out: &mut String, value: &kvrpcpb::MvccValue) {
+        out.push('{');
+        let mut first = true;
+        if value.start_ts != 0 {
+            write_field_name(out, &mut first, "start_ts");
+            write_u64(out, value.start_ts);
+        }
+        if !value.value.is_empty() {
+            write_field_name(out, &mut first, "value");
+            write_bytes(out, &value.value);
+        }
+        out.push('}');
+    }
+
+    fn write_mvcc_info(out: &mut String, info: &kvrpcpb::MvccInfo) {
+        out.push('{');
+        let mut first = true;
+        if let Some(lock) = info.lock.as_ref() {
+            write_field_name(out, &mut first, "lock");
+            write_mvcc_lock(out, lock);
+        }
+        if !info.writes.is_empty() {
+            write_field_name(out, &mut first, "writes");
+            out.push('[');
+            for (idx, write) in info.writes.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                write_mvcc_write(out, write);
+            }
+            out.push(']');
+        }
+        if !info.values.is_empty() {
+            write_field_name(out, &mut first, "values");
+            out.push('[');
+            for (idx, value) in info.values.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                write_mvcc_value(out, value);
+            }
+            out.push(']');
+        }
+        out.push('}');
+    }
+
+    fn write_mvcc_debug_info(out: &mut String, info: &kvrpcpb::MvccDebugInfo) {
+        out.push('{');
+        let mut first = true;
+        if !info.key.is_empty() {
+            write_field_name(out, &mut first, "key");
+            write_bytes(out, &info.key);
+        }
+        if let Some(mvcc) = info.mvcc.as_ref() {
+            write_field_name(out, &mut first, "mvcc");
+            write_mvcc_info(out, mvcc);
+        }
+        out.push('}');
+    }
+
+    let mut out = String::new();
+    out.push('{');
+    let mut first = true;
+    if !debug_info.mvcc_info.is_empty() {
+        write_field_name(&mut out, &mut first, "mvcc_info");
+        out.push('[');
+        for (idx, info) in debug_info.mvcc_info.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            write_mvcc_debug_info(&mut out, info);
+        }
+        out.push(']');
+    }
+    out.push('}');
+    out
+}
 
 /// Deadlock detected when acquiring pessimistic locks.
 #[derive(Clone, Debug)]
@@ -521,5 +804,63 @@ mod tests {
         };
         let err = DeadlockError::new(deadlock);
         assert_eq!(err.deadlock_key(), b"held-key");
+    }
+
+    #[test]
+    fn test_extract_debug_info_str_from_key_error() {
+        let empty = kvrpcpb::KeyError {
+            txn_lock_not_found: Some(kvrpcpb::TxnLockNotFound {
+                key: b"byte".to_vec(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!("", super::extract_debug_info_str_from_key_error_with_redaction(&empty, false));
+
+        let debug_info = kvrpcpb::DebugInfo {
+            mvcc_info: vec![kvrpcpb::MvccDebugInfo {
+                key: b"byte".to_vec(),
+                mvcc: Some(kvrpcpb::MvccInfo {
+                    lock: Some(kvrpcpb::MvccLock {
+                        r#type: kvrpcpb::Op::Del as i32,
+                        start_ts: 128,
+                        primary: b"k1".to_vec(),
+                        secondaries: vec![b"k1".to_vec(), b"k2".to_vec()],
+                        short_value: b"v1".to_vec(),
+                        ..Default::default()
+                    }),
+                    writes: vec![kvrpcpb::MvccWrite {
+                        r#type: kvrpcpb::Op::Insert as i32,
+                        start_ts: 64,
+                        commit_ts: 86,
+                        short_value: vec![0x1, 0x2, 0x3, 0x4, 0x5, 0x6],
+                        ..Default::default()
+                    }],
+                    values: vec![kvrpcpb::MvccValue {
+                        start_ts: 64,
+                        value: vec![0x11, 0x12],
+                    }],
+                }),
+            }],
+        };
+
+        let key_err = kvrpcpb::KeyError {
+            txn_lock_not_found: Some(kvrpcpb::TxnLockNotFound {
+                key: b"byte".to_vec(),
+            }),
+            debug_info: Some(debug_info),
+            ..Default::default()
+        };
+
+        let expected = r#"{"mvcc_info":[{"key":"Ynl0ZQ==","mvcc":{"lock":{"type":1,"start_ts":128,"primary":"azE=","short_value":"djE=","secondaries":["azE=","azI="]},"writes":[{"type":4,"start_ts":64,"commit_ts":86,"short_value":"AQIDBAUG"}],"values":[{"start_ts":64,"value":"ERI="}]}}]}"#;
+        assert_eq!(
+            expected,
+            super::extract_debug_info_str_from_key_error_with_redaction(&key_err, false)
+        );
+
+        let expected_redacted = r#"{"mvcc_info":[{"key":"Pw==","mvcc":{"lock":{"type":1,"start_ts":128,"primary":"Pw==","short_value":"Pw==","secondaries":["Pw==","Pw=="]},"writes":[{"type":4,"start_ts":64,"commit_ts":86,"short_value":"Pw=="}],"values":[{"start_ts":64,"value":"Pw=="}]}}]}"#;
+        assert_eq!(
+            expected_redacted,
+            super::extract_debug_info_str_from_key_error_with_redaction(&key_err, true)
+        );
     }
 }

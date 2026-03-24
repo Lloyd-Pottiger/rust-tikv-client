@@ -1763,6 +1763,7 @@ mod tests {
                 process_suspend_wall_time_ns: 4_000_000,
                 kv_read_wall_time_ns: 5_000_000,
                 total_rpc_wall_time_ns: 6_000_000,
+                ..Default::default()
             }),
             Some(&kvrpcpb::TimeDetail {
                 wait_wall_time_ms: 200,
@@ -1889,6 +1890,7 @@ mod tests {
                 process_suspend_wall_time_ns: 0,
                 kv_read_wall_time_ns: 0,
                 total_rpc_wall_time_ns: 0,
+                ..Default::default()
             }),
         };
 

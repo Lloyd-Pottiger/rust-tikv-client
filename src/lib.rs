@@ -159,6 +159,8 @@ pub use common::Result;
 #[doc(inline)]
 pub use common::WriteConflictError;
 #[doc(inline)]
+pub use common::extract_debug_info_str_from_key_error;
+#[doc(inline)]
 pub use config::Config;
 #[doc(inline)]
 pub use config::GrpcCompressionType;

@@ -5165,6 +5165,7 @@ mod test {
                 process_suspend_wall_time_ns: 3,
                 kv_read_wall_time_ns: 4,
                 total_rpc_wall_time_ns: 5,
+                ..Default::default()
             }),
         };
 
