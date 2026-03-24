@@ -307,6 +307,12 @@ impl<PdC: PdClient> Client<PdC> {
         self.pd.close().await;
     }
 
+    /// Returns whether this client has been explicitly closed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.pd.is_closed()
+    }
+
     /// Returns a handle to the underlying PD client.
     #[must_use]
     pub fn pd_client(&self) -> Arc<PdC> {
@@ -1508,8 +1514,14 @@ mod tests {
         };
         let clone = client.clone();
 
+        assert!(!client.is_closed());
+        assert!(!clone.is_closed());
+
         client.close().await;
         client.close().await;
+
+        assert!(client.is_closed());
+        assert!(clone.is_closed());
 
         let err = clone.current_timestamp().await.unwrap_err();
         assert!(matches!(err, Error::StringError(msg) if msg == "client is closed"));

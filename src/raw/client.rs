@@ -251,6 +251,12 @@ impl<PdC: PdClient> Client<PdC> {
         self.rpc.close().await;
     }
 
+    /// Returns whether this client has been explicitly closed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.rpc.is_closed()
+    }
+
     fn apply_request_context(&self, ctx: &mut crate::proto::kvrpcpb::Context) {
         if ctx.request_source.is_empty() {
             if let Some(request_source) = crate::request_context::request_source() {
@@ -1409,8 +1415,12 @@ mod tests {
             keyspace: Keyspace::Disable,
         };
 
+        assert!(!client.is_closed());
+
         client.close().await;
         client.close().await;
+
+        assert!(client.is_closed());
 
         let err = client.get(vec![1]).await.unwrap_err();
         assert!(matches!(err, Error::StringError(msg) if msg == "client is closed"));

@@ -130,6 +130,12 @@ impl SyncTransactionClient {
         self.client.pd_client()
     }
 
+    /// Returns whether this client has been explicitly closed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.client.is_closed()
+    }
+
     /// Returns a [`LockResolver`](crate::transaction::LockResolver) handle associated with this client.
     #[must_use]
     pub fn lock_resolver(&self) -> crate::transaction::LockResolver {
@@ -140,9 +146,7 @@ impl SyncTransactionClient {
     ///
     /// This is a synchronous version of [`TransactionClient::bound_lock_resolver`](crate::TransactionClient::bound_lock_resolver).
     #[must_use]
-    pub fn bound_lock_resolver(
-        &self,
-    ) -> crate::transaction::BoundLockResolver<crate::pd::PdRpcClient> {
+    pub fn bound_lock_resolver(&self) -> crate::transaction::BoundLockResolver<crate::PdRpcClient> {
         self.client.bound_lock_resolver()
     }
 
