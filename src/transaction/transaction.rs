@@ -5686,10 +5686,6 @@ const MAX_PIPELINED_TXN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 ///
 /// This matches client-go `KVTxn.commitWaitUntilTSOTimeout` default.
 const DEFAULT_COMMIT_WAIT_UNTIL_TSO_TIMEOUT: Duration = Duration::from_secs(1);
-/// Default safe window for async commit / 1PC max-commit-ts calculation.
-///
-/// This matches the default in client-go.
-const DEFAULT_ASYNC_COMMIT_SAFE_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug)]
 struct MaxTxnTtlExceeded {
@@ -7638,7 +7634,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 checker.check_by_schema_ver(Timestamp::from_version(current_ts), schema_ver)?;
             }
             let safe_window_ms =
-                u64::try_from(DEFAULT_ASYNC_COMMIT_SAFE_WINDOW.as_millis()).unwrap_or(u64::MAX);
+                u64::try_from(self.rpc.async_commit_safe_window().as_millis()).unwrap_or(u64::MAX);
             request.max_commit_ts =
                 current_ts.saturating_add(safe_window_ms.saturating_mul(1_u64 << 18));
         }
@@ -17771,6 +17767,67 @@ mod tests {
         assert!(result.is_err());
         assert!(!mode_info.has_tried_async_commit);
         assert!(!mode_info.is_async_commit);
+    }
+
+    #[tokio::test]
+    async fn test_prewrite_max_commit_ts_uses_async_commit_safe_window_from_config() {
+        async fn capture_max_commit_ts(safe_window: Duration) -> u64 {
+            let observed = Arc::new(AtomicU64::new(0));
+            let observed_captured = observed.clone();
+            let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    observed_captured.store(req.max_commit_ts, Ordering::SeqCst);
+                    return Err(Error::StringError("stop".to_owned()));
+                }
+
+                panic!("unexpected request type: {:?}", req.type_id());
+            });
+
+            let pd_client = Arc::new(MockPdClient::new(client));
+            pd_client.set_async_commit_safe_window(safe_window);
+
+            let start_ts = Timestamp {
+                physical: 1,
+                logical: 0,
+                ..Default::default()
+            };
+
+            let primary_key: Key = vec![1].into();
+            let mutations = vec![kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: vec![1],
+                value: vec![42],
+                ..Default::default()
+            }];
+
+            let options = TransactionOptions::new_optimistic().use_async_commit();
+            let committer = super::Committer::new(
+                Some(primary_key),
+                mutations,
+                start_ts,
+                pd_client,
+                options,
+                Keyspace::Disable,
+                0,
+                Instant::now(),
+            );
+
+            let (result, _mode_info) = committer.commit_with_mode_info().await;
+            assert!(result.is_err());
+
+            let max_commit_ts = observed.load(Ordering::SeqCst);
+            assert!(max_commit_ts > 0);
+            max_commit_ts
+        }
+
+        let short = capture_max_commit_ts(Duration::ZERO).await;
+        let long = capture_max_commit_ts(Duration::from_secs(10)).await;
+
+        let slack_delta = 9_000_u64.saturating_mul(1_u64 << 18);
+        assert!(
+            long > short.saturating_add(slack_delta),
+            "expected max_commit_ts delta to reflect safe window; short={short}, long={long}"
+        );
     }
 
     #[tokio::test]

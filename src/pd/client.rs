@@ -463,6 +463,20 @@ pub trait PdClient: Send + Sync + 'static {
         crate::config::DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT
     }
 
+    /// The duration within which it is safe for async commit or 1PC to commit with an old schema.
+    ///
+    /// This maps to client-go `TiKVClient.AsyncCommit.SafeWindow`.
+    fn async_commit_safe_window(&self) -> Duration {
+        crate::config::DEFAULT_ASYNC_COMMIT_SAFE_WINDOW
+    }
+
+    /// The duration in addition to the safe window to make DDL safe.
+    ///
+    /// This maps to client-go `TiKVClient.AsyncCommit.AllowedClockDrift`.
+    fn async_commit_allowed_clock_drift(&self) -> Duration {
+        crate::config::DEFAULT_ASYNC_COMMIT_ALLOWED_CLOCK_DRIFT
+    }
+
     /// Whether TiKV request forwarding is enabled (client-go `EnableForwarding`).
     ///
     /// The default implementation always returns false.
@@ -747,6 +761,8 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     commit_timeout: Duration,
     async_commit_keys_limit: usize,
     async_commit_total_key_size_limit: u64,
+    async_commit_safe_window: Duration,
+    async_commit_allowed_clock_drift: Duration,
     pd_http_client: Option<reqwest::Client>,
     pd_http_endpoints: Vec<String>,
     pd_http_use_https: bool,
@@ -914,6 +930,14 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     fn async_commit_total_key_size_limit(&self) -> u64 {
         self.async_commit_total_key_size_limit
+    }
+
+    fn async_commit_safe_window(&self) -> Duration {
+        self.async_commit_safe_window
+    }
+
+    fn async_commit_allowed_clock_drift(&self) -> Duration {
+        self.async_commit_allowed_clock_drift
     }
 
     fn enable_forwarding(&self) -> bool {
@@ -1386,6 +1410,8 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         let commit_timeout = config.commit_timeout;
         let async_commit_keys_limit = config.async_commit_keys_limit;
         let async_commit_total_key_size_limit = config.async_commit_total_key_size_limit;
+        let async_commit_safe_window = config.async_commit_safe_window;
+        let async_commit_allowed_clock_drift = config.async_commit_allowed_clock_drift;
         let (pd_http_client, pd_http_use_https) = build_pd_http_client(&config);
         let security_mgr = Arc::new(config.security_manager()?);
 
@@ -1417,6 +1443,8 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             commit_timeout,
             async_commit_keys_limit,
             async_commit_total_key_size_limit,
+            async_commit_safe_window,
+            async_commit_allowed_clock_drift,
             pd_http_client,
             pd_http_endpoints: Vec::new(),
             pd_http_use_https,
@@ -1676,7 +1704,9 @@ pub mod test {
     async fn test_async_commit_limits_are_plumbed_from_config() {
         let config = Config::default()
             .with_async_commit_keys_limit(7)
-            .with_async_commit_total_key_size_limit(123);
+            .with_async_commit_total_key_size_limit(123)
+            .with_async_commit_safe_window(Duration::from_secs(10))
+            .with_async_commit_allowed_clock_drift(Duration::from_millis(1234));
         let client = PdRpcClient::new(
             config.clone(),
             |_| MockKvConnect,
@@ -1694,6 +1724,11 @@ pub mod test {
         .unwrap();
         assert_eq!(client.async_commit_keys_limit, 7);
         assert_eq!(client.async_commit_total_key_size_limit, 123);
+        assert_eq!(client.async_commit_safe_window, Duration::from_secs(10));
+        assert_eq!(
+            client.async_commit_allowed_clock_drift,
+            Duration::from_millis(1234)
+        );
     }
 
     #[tokio::test]

@@ -278,6 +278,18 @@ pub struct Config {
     ///
     /// Defaults to 4KiB (client-go default).
     pub async_commit_total_key_size_limit: u64,
+    /// The duration within which it is safe for async commit or 1PC to commit with an old schema.
+    ///
+    /// This maps to client-go `TiKVClient.AsyncCommit.SafeWindow`.
+    ///
+    /// Defaults to 2 seconds (client-go default).
+    pub async_commit_safe_window: Duration,
+    /// The duration in addition to the safe window to make DDL safe.
+    ///
+    /// This maps to client-go `TiKVClient.AsyncCommit.AllowedClockDrift`.
+    ///
+    /// Defaults to 500ms (client-go default).
+    pub async_commit_allowed_clock_drift: Duration,
     pub timeout: Duration,
     /// Maximum number of in-flight requests allowed per TiKV store.
     ///
@@ -460,6 +472,8 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const DEFAULT_COMMIT_TIMEOUT: Duration = Duration::from_secs(41);
 pub(crate) const DEFAULT_ASYNC_COMMIT_KEYS_LIMIT: usize = 256;
 pub(crate) const DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT: u64 = 4 * 1024;
+pub(crate) const DEFAULT_ASYNC_COMMIT_SAFE_WINDOW: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_ASYNC_COMMIT_ALLOWED_CLOCK_DRIFT: Duration = Duration::from_millis(500);
 pub(crate) const DEFAULT_COMMITTER_CONCURRENCY: usize = 128;
 pub(crate) const DEFAULT_MAX_TXN_TTL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
@@ -487,6 +501,8 @@ impl Default for Config {
             commit_timeout: DEFAULT_COMMIT_TIMEOUT,
             async_commit_keys_limit: DEFAULT_ASYNC_COMMIT_KEYS_LIMIT,
             async_commit_total_key_size_limit: DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT,
+            async_commit_safe_window: DEFAULT_ASYNC_COMMIT_SAFE_WINDOW,
+            async_commit_allowed_clock_drift: DEFAULT_ASYNC_COMMIT_ALLOWED_CLOCK_DRIFT,
             timeout: DEFAULT_REQUEST_TIMEOUT,
             store_limit: 0,
             committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
@@ -675,6 +691,20 @@ impl Config {
     #[must_use]
     pub fn with_async_commit_total_key_size_limit(mut self, limit: u64) -> Self {
         self.async_commit_total_key_size_limit = limit;
+        self
+    }
+
+    /// Set the async commit safe window (client-go `TiKVClient.AsyncCommit.SafeWindow`).
+    #[must_use]
+    pub fn with_async_commit_safe_window(mut self, safe_window: Duration) -> Self {
+        self.async_commit_safe_window = safe_window;
+        self
+    }
+
+    /// Set the async commit allowed clock drift (client-go `TiKVClient.AsyncCommit.AllowedClockDrift`).
+    #[must_use]
+    pub fn with_async_commit_allowed_clock_drift(mut self, drift: Duration) -> Self {
+        self.async_commit_allowed_clock_drift = drift;
         self
     }
 
@@ -1121,6 +1151,14 @@ mod tests {
         assert_eq!(
             config.async_commit_total_key_size_limit,
             DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT
+        );
+        assert_eq!(
+            config.async_commit_safe_window,
+            DEFAULT_ASYNC_COMMIT_SAFE_WINDOW
+        );
+        assert_eq!(
+            config.async_commit_allowed_clock_drift,
+            DEFAULT_ASYNC_COMMIT_ALLOWED_CLOCK_DRIFT
         );
         assert_eq!(config.region_cache_ttl, Duration::from_secs(600));
         assert_eq!(config.region_cache_ttl_jitter, Duration::from_secs(60));

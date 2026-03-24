@@ -138,6 +138,14 @@ pub struct MockPdClient {
         value = "Arc::new(AtomicU64::new(crate::config::DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT))"
     )]
     async_commit_total_key_size_limit: Arc<AtomicU64>,
+    #[new(
+        value = "Arc::new(AtomicU64::new(u64::try_from(crate::config::DEFAULT_ASYNC_COMMIT_SAFE_WINDOW.as_millis()).unwrap_or(u64::MAX)))"
+    )]
+    async_commit_safe_window_ms: Arc<AtomicU64>,
+    #[new(
+        value = "Arc::new(AtomicU64::new(u64::try_from(crate::config::DEFAULT_ASYNC_COMMIT_ALLOWED_CLOCK_DRIFT.as_millis()).unwrap_or(u64::MAX)))"
+    )]
+    async_commit_allowed_clock_drift_ms: Arc<AtomicU64>,
     #[new(value = "42")]
     cluster_id: u64,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
@@ -258,6 +266,18 @@ impl MockPdClient {
     pub fn set_async_commit_total_key_size_limit(&self, limit: u64) {
         self.async_commit_total_key_size_limit
             .store(limit, Ordering::SeqCst);
+    }
+
+    pub fn set_async_commit_safe_window(&self, safe_window: Duration) {
+        let safe_window_ms = u64::try_from(safe_window.as_millis()).unwrap_or(u64::MAX);
+        self.async_commit_safe_window_ms
+            .store(safe_window_ms, Ordering::SeqCst);
+    }
+
+    pub fn set_async_commit_allowed_clock_drift(&self, drift: Duration) {
+        let drift_ms = u64::try_from(drift.as_millis()).unwrap_or(u64::MAX);
+        self.async_commit_allowed_clock_drift_ms
+            .store(drift_ms, Ordering::SeqCst);
     }
 
     pub fn set_all_stores_should_fail(&self, should_fail: bool) {
@@ -615,6 +635,17 @@ impl PdClient for MockPdClient {
     fn async_commit_total_key_size_limit(&self) -> u64 {
         self.async_commit_total_key_size_limit
             .load(Ordering::SeqCst)
+    }
+
+    fn async_commit_safe_window(&self) -> Duration {
+        Duration::from_millis(self.async_commit_safe_window_ms.load(Ordering::SeqCst))
+    }
+
+    fn async_commit_allowed_clock_drift(&self) -> Duration {
+        Duration::from_millis(
+            self.async_commit_allowed_clock_drift_ms
+                .load(Ordering::SeqCst),
+        )
     }
 
     fn enable_forwarding(&self) -> bool {
@@ -1117,11 +1148,26 @@ mod tests {
             client.async_commit_total_key_size_limit(),
             crate::config::DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT
         );
+        assert_eq!(
+            client.async_commit_safe_window(),
+            crate::config::DEFAULT_ASYNC_COMMIT_SAFE_WINDOW
+        );
+        assert_eq!(
+            client.async_commit_allowed_clock_drift(),
+            crate::config::DEFAULT_ASYNC_COMMIT_ALLOWED_CLOCK_DRIFT
+        );
 
         client.set_async_commit_keys_limit(7);
         client.set_async_commit_total_key_size_limit(123);
+        client.set_async_commit_safe_window(Duration::from_secs(10));
+        client.set_async_commit_allowed_clock_drift(Duration::from_millis(1234));
         assert_eq!(client.async_commit_keys_limit(), 7);
         assert_eq!(client.async_commit_total_key_size_limit(), 123);
+        assert_eq!(client.async_commit_safe_window(), Duration::from_secs(10));
+        assert_eq!(
+            client.async_commit_allowed_clock_drift(),
+            Duration::from_millis(1234)
+        );
     }
 
     #[tokio::test]
