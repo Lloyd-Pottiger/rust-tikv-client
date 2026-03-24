@@ -729,6 +729,11 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
 const REGION_CACHE_PRELOAD_LIMIT: i32 = 10_000;
 
 impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
+    /// Return the shared region cache used by this PD client.
+    pub fn region_cache(&self) -> &RegionCache<RetryClient<Cl>> {
+        &self.region_cache
+    }
+
     fn is_explicitly_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }

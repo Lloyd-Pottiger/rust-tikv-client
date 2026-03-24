@@ -287,6 +287,11 @@ impl Client {
         self.pd.cluster_id()
     }
 
+    /// Return the shared region cache used by this transactional client.
+    pub fn region_cache(&self) -> &crate::RegionCache {
+        self.pd.region_cache()
+    }
+
     /// Close cached gRPC connections to a TiKV store address.
     ///
     /// The client will reconnect the next time that address is used.

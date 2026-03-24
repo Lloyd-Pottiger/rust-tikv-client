@@ -132,6 +132,10 @@ impl RegionCacheMap {
     }
 }
 
+/// Cache of region and store metadata fetched from PD.
+///
+/// This is primarily useful for advanced callers who need to inspect or prewarm
+/// region placement information outside the higher-level Raw/Transaction APIs.
 pub struct RegionCache<Client = RetryClient<Cluster>> {
     region_cache: Arc<RwLock<RegionCacheMap>>,
     store_cache: Arc<RwLock<HashMap<StoreId, Store>>>,
