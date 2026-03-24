@@ -2,6 +2,7 @@
 
 mod batch;
 mod client;
+mod coprocessor_cache;
 mod errors;
 mod forwarding;
 mod request;
