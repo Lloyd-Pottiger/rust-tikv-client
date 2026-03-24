@@ -9,6 +9,155 @@ use lazy_static::lazy_static;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
 
+/// Parsed result of [`parse_path`].
+///
+/// This mirrors the output of client-go `config.ParsePath`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedTikvPath {
+    /// Comma-separated PD endpoints from the URI host part.
+    pub pd_addrs: Vec<String>,
+    /// Whether GC is disabled (parsed from `disableGC` query parameter).
+    pub disable_gc: bool,
+    /// Keyspace name parsed from `keyspaceName` query parameter.
+    ///
+    /// `None` means the parameter is absent or empty.
+    pub keyspace_name: Option<String>,
+}
+
+/// Parse a `tikv://...` connection URI.
+///
+/// This is a compatibility helper mirroring client-go `config.ParsePath`.
+///
+/// # Accepted format
+///
+/// - `tikv://<pd-addr>[,<pd-addr>...]?disableGC=<true|false>&keyspaceName=<name>`
+///
+/// The host part is treated as a comma-separated list of PD endpoints. The parser is intentionally
+/// permissive and does not validate each endpoint beyond being non-empty.
+pub fn parse_path(path: &str) -> crate::Result<ParsedTikvPath> {
+    let (scheme, rest) = path.split_once("://").ok_or_else(|| {
+        crate::Error::StringError("invalid tikv path: missing scheme delimiter".to_owned())
+    })?;
+
+    if !scheme.eq_ignore_ascii_case("tikv") {
+        return Err(crate::Error::StringError(format!(
+            "invalid tikv path scheme: {scheme}"
+        )));
+    }
+
+    // Split off query and fragment first; then ignore any path component and keep only authority.
+    let (authority_and_path, query_and_fragment) = rest.split_once('?').unwrap_or((rest, ""));
+    let authority = authority_and_path.split('/').next().unwrap_or_default();
+    if authority.is_empty() {
+        return Err(crate::Error::StringError(
+            "invalid tikv path: missing pd endpoints".to_owned(),
+        ));
+    }
+
+    let pd_addrs: Vec<String> = authority
+        .split(',')
+        .map(str::trim)
+        .map(|s| s.to_owned())
+        .collect();
+    if pd_addrs.iter().any(|s| s.is_empty()) {
+        return Err(crate::Error::StringError(
+            "invalid tikv path: empty pd endpoint".to_owned(),
+        ));
+    }
+
+    let mut disable_gc = false;
+    let mut disable_gc_seen = false;
+    let mut keyspace_name = None;
+    let mut keyspace_name_seen = false;
+
+    let query = query_and_fragment.split('#').next().unwrap_or_default();
+    if !query.is_empty() {
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+            let key = decode_query_component(raw_key)?;
+            let value = decode_query_component(raw_value)?;
+
+            match key.as_str() {
+                // Match client-go ParsePath parameter names.
+                "disableGC" => {
+                    // url.Values.Get returns first value; keep first seen.
+                    if disable_gc_seen {
+                        continue;
+                    }
+                    disable_gc_seen = true;
+                    match value.to_ascii_lowercase().as_str() {
+                        "true" => disable_gc = true,
+                        "false" | "" => disable_gc = false,
+                        _ => {
+                            return Err(crate::Error::StringError(
+                                "invalid tikv path: disableGC must be true/false".to_owned(),
+                            ))
+                        }
+                    }
+                }
+                "keyspaceName" => {
+                    if keyspace_name_seen {
+                        continue;
+                    }
+                    keyspace_name_seen = true;
+                    if !value.is_empty() {
+                        keyspace_name = Some(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(ParsedTikvPath {
+        pd_addrs,
+        disable_gc,
+        keyspace_name,
+    })
+}
+
+fn decode_query_component(component: &str) -> crate::Result<String> {
+    let mut bytes = Vec::with_capacity(component.len());
+    let mut iter = component.as_bytes().iter().copied();
+    while let Some(b) = iter.next() {
+        match b {
+            b'+' => bytes.push(b' '),
+            b'%' => {
+                let hi = iter.next().ok_or_else(|| {
+                    crate::Error::StringError(
+                        "invalid tikv path query: incomplete percent encoding".to_owned(),
+                    )
+                })?;
+                let lo = iter.next().ok_or_else(|| {
+                    crate::Error::StringError(
+                        "invalid tikv path query: incomplete percent encoding".to_owned(),
+                    )
+                })?;
+                let hi = from_hex_digit(hi)?;
+                let lo = from_hex_digit(lo)?;
+                bytes.push((hi << 4) | lo);
+            }
+            _ => bytes.push(b),
+        }
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| crate::Error::StringError("invalid tikv path query: invalid utf-8".to_owned()))
+}
+
+fn from_hex_digit(digit: u8) -> crate::Result<u8> {
+    match digit {
+        b'0'..=b'9' => Ok(digit - b'0'),
+        b'a'..=b'f' => Ok(digit - b'a' + 10),
+        b'A'..=b'F' => Ok(digit - b'A' + 10),
+        _ => Err(crate::Error::StringError(
+            "invalid tikv path query: invalid hex digit".to_owned(),
+        )),
+    }
+}
+
 /// gRPC compression type for TiKV channels.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -775,5 +924,45 @@ mod tests {
         assert_eq!(get_global_config(), config);
         update_global_config(|cfg| cfg.enable_batch_rpc = false);
         assert!(!get_global_config().enable_batch_rpc);
+    }
+
+    #[test]
+    fn test_parse_path_basic() {
+        let parsed = parse_path("tikv://127.0.0.1:2379").unwrap();
+        assert_eq!(parsed.pd_addrs, vec!["127.0.0.1:2379".to_owned()]);
+        assert!(!parsed.disable_gc);
+        assert_eq!(parsed.keyspace_name, None);
+    }
+
+    #[test]
+    fn test_parse_path_multi_endpoints_and_params() {
+        let parsed = parse_path("tikv://pd1:2379,pd2:2379?disableGC=true&keyspaceName=ks").unwrap();
+        assert_eq!(
+            parsed.pd_addrs,
+            vec!["pd1:2379".to_owned(), "pd2:2379".to_owned()]
+        );
+        assert!(parsed.disable_gc);
+        assert_eq!(parsed.keyspace_name.as_deref(), Some("ks"));
+    }
+
+    #[test]
+    fn test_parse_path_disable_gc_invalid_value() {
+        let err = parse_path("tikv://pd:2379?disableGC=maybe").unwrap_err();
+        assert!(matches!(err, crate::Error::StringError(_)));
+    }
+
+    #[test]
+    fn test_parse_path_invalid_scheme() {
+        let err = parse_path("http://pd:2379").unwrap_err();
+        assert!(matches!(err, crate::Error::StringError(_)));
+    }
+
+    #[test]
+    fn test_parse_path_decodes_keyspace_name() {
+        // '+' decodes to space, '%2B' decodes to '+' (x-www-form-urlencoded style, matching Go).
+        let parsed =
+            parse_path("tikv://pd:2379?keyspaceName=hello%2Bworld+space&disableGC=false").unwrap();
+        assert_eq!(parsed.keyspace_name.as_deref(), Some("hello+world space"));
+        assert!(!parsed.disable_gc);
     }
 }
