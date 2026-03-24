@@ -198,6 +198,21 @@ impl SnapshotRuntimeStats {
         inner.rpc.get(label).copied()
     }
 
+    /// Get the aggregated RPC count for a single command type.
+    ///
+    /// This mirrors client-go `SnapshotRuntimeStats::GetCmdRPCCount`, while keeping the Rust
+    /// implementation label-based internally.
+    #[must_use]
+    pub fn cmd_rpc_count(&self, cmd_type: crate::CmdType) -> u64 {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner
+            .rpc
+            .iter()
+            .filter(|(label, _)| crate::CmdType::from_label(label) == cmd_type)
+            .map(|(_, stats)| stats.count)
+            .sum()
+    }
+
     /// Get runtime stats for a single backoff label.
     #[must_use]
     pub fn backoff_stats(&self, label: &str) -> Option<BackoffRuntimeStats> {
@@ -209,6 +224,19 @@ impl SnapshotRuntimeStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_snapshot_runtime_stats_reports_rpc_count_by_cmd_type() {
+        let stats = SnapshotRuntimeStats::default();
+        stats.record_rpc("kv_get", Duration::from_millis(1));
+        stats.record_rpc("kv_get", Duration::from_millis(2));
+        stats.record_rpc("raw_get", Duration::from_millis(3));
+
+        assert_eq!(stats.cmd_rpc_count(crate::CmdType::Get), 2);
+        assert_eq!(stats.cmd_rpc_count(crate::CmdType::RawGet), 1);
+        assert_eq!(stats.cmd_rpc_count(crate::CmdType::Commit), 0);
+        assert_eq!(stats.cmd_rpc_count(crate::CmdType::Unknown), 0);
+    }
 
     #[test]
     fn test_snapshot_runtime_stats_reset_clears_all_stats() {
