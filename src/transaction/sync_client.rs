@@ -122,6 +122,16 @@ impl SyncTransactionClient {
         self.client.cluster_id()
     }
 
+    /// Closes this client and releases cached resources.
+    ///
+    /// This is a synchronous version of [`TransactionClient::close`](crate::TransactionClient::close).
+    pub fn close(&self) -> Result<()> {
+        safe_block_on(&self.runtime, async {
+            self.client.close().await;
+            Ok(())
+        })
+    }
+
     /// Returns a handle to the underlying PD RPC client.
     ///
     /// This is a synchronous version of [`TransactionClient::pd_client`](crate::TransactionClient::pd_client).
