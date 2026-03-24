@@ -4,6 +4,7 @@
 //!
 //! Some items in this module intentionally mirror client-go `util` APIs.
 
+pub mod r#async;
 pub mod bytes;
 mod exec_details;
 pub mod gc_time;
