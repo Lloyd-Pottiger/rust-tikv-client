@@ -203,7 +203,7 @@ pub(crate) struct StoreLimitKvClient {
     inner: Arc<dyn KvClient + Send + Sync>,
     store_id: u64,
     store_address: String,
-    store_limit: i64,
+    store_limit_override: i64,
     token_count: Arc<AtomicI64>,
 }
 
@@ -212,21 +212,32 @@ impl StoreLimitKvClient {
         inner: Arc<dyn KvClient + Send + Sync>,
         store_id: u64,
         store_address: String,
-        store_limit: i64,
+        store_limit_override: i64,
         token_count: Arc<AtomicI64>,
     ) -> StoreLimitKvClient {
         StoreLimitKvClient {
             inner,
             store_id,
             store_address,
-            store_limit,
+            store_limit_override,
             token_count,
         }
     }
 
-    fn try_acquire_token(&self) -> std::result::Result<StoreLimitTokenGuard, Error> {
+    fn effective_store_limit(&self) -> i64 {
+        if self.store_limit_override > 0 {
+            self.store_limit_override
+        } else {
+            crate::store_vars::store_limit()
+        }
+    }
+
+    fn try_acquire_token(
+        &self,
+        store_limit: i64,
+    ) -> std::result::Result<StoreLimitTokenGuard, Error> {
         let count = self.token_count.load(Ordering::Relaxed);
-        if count < self.store_limit {
+        if count < store_limit {
             self.token_count.fetch_add(1, Ordering::Relaxed);
             return Ok(StoreLimitTokenGuard {
                 token_count: self.token_count.clone(),
@@ -257,10 +268,11 @@ impl Drop for StoreLimitTokenGuard {
 #[async_trait]
 impl KvClient for StoreLimitKvClient {
     async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any>> {
-        if self.store_limit <= 0 {
+        let store_limit = self.effective_store_limit();
+        if store_limit <= 0 {
             return self.inner.dispatch(request).await;
         }
-        let _guard = self.try_acquire_token()?;
+        let _guard = self.try_acquire_token(store_limit)?;
         self.inner.dispatch(request).await
     }
 
@@ -3506,5 +3518,59 @@ mod tests {
         let (first_result, ()) = tokio::join!(first_dispatch, second_dispatch);
         first_result.expect("dispatch ok");
         assert_eq!(token_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_store_limit_kv_client_uses_task_local_store_limit_when_override_is_zero() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let proceed = Arc::new(tokio::sync::Notify::new());
+        let inner = Arc::new(BlockingKvClient {
+            started: started.clone(),
+            proceed: proceed.clone(),
+        });
+        let token_count = Arc::new(AtomicI64::new(0));
+        let client = Arc::new(StoreLimitKvClient::new(
+            inner,
+            42,
+            "127.0.0.1:20160".to_owned(),
+            0,
+            token_count.clone(),
+        ));
+
+        crate::store_vars::with_store_limit(1, async move {
+            let first_dispatch = {
+                let client = client.clone();
+                async move {
+                    let req = kvrpcpb::GetRequest::default();
+                    client.dispatch(&req).await
+                }
+            };
+
+            let second_dispatch = async {
+                started.notified().await;
+                assert_eq!(token_count.load(Ordering::Relaxed), 1);
+
+                let err = {
+                    let req = kvrpcpb::GetRequest::default();
+                    client.dispatch(&req).await.unwrap_err()
+                };
+
+                let Error::StringError(message) = err else {
+                    panic!("expected StringError, got {err:?}");
+                };
+                assert!(
+                    message.contains("Store token is up to the limit"),
+                    "unexpected store limit error message: {message}"
+                );
+
+                assert_eq!(token_count.load(Ordering::Relaxed), 1);
+                proceed.notify_one();
+            };
+
+            let (first_result, ()) = tokio::join!(first_dispatch, second_dispatch);
+            first_result.expect("dispatch ok");
+            assert_eq!(token_count.load(Ordering::Relaxed), 0);
+        })
+        .await;
     }
 }

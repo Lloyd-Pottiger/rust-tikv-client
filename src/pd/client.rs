@@ -893,7 +893,12 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         let metapb::Store { address, .. } = store;
         let kv_client = self.kv_client(&address).await?;
         let mut client: Arc<dyn KvClient + Send + Sync> = Arc::new(kv_client);
-        if self.store_limit > 0 {
+        let effective_store_limit = if self.store_limit > 0 {
+            self.store_limit
+        } else {
+            crate::store_vars::store_limit()
+        };
+        if effective_store_limit > 0 {
             let token_count = self.store_token_counter(store_id);
             client = Arc::new(StoreLimitKvClient::new(
                 client,
