@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::request_context::CommandPriority;
+use crate::request_context::{CommandPriority, DiskFullOpt};
 use crate::tikvrpc::CmdType;
 use crate::Error;
 
@@ -192,6 +192,104 @@ impl<'a> RpcRequest<'a> {
                 .resource_group_name = resource_group_name.into();
         }
     }
+
+    /// Returns the transaction source attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.txn_source`.
+    #[must_use]
+    pub fn txn_source(&self) -> u64 {
+        self.context.as_ref().map_or(0, |ctx| ctx.txn_source)
+    }
+
+    /// Set the transaction source attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.txn_source`.
+    pub fn set_txn_source(&mut self, txn_source: u64) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.txn_source = txn_source;
+        }
+    }
+
+    /// Returns the disk-full option attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.disk_full_opt`.
+    #[must_use]
+    pub fn disk_full_opt(&self) -> DiskFullOpt {
+        match self.context.as_ref().map(|ctx| ctx.disk_full_opt) {
+            Some(value) if value == DiskFullOpt::AllowedOnAlmostFull as i32 => {
+                DiskFullOpt::AllowedOnAlmostFull
+            }
+            Some(value) if value == DiskFullOpt::AllowedOnAlreadyFull as i32 => {
+                DiskFullOpt::AllowedOnAlreadyFull
+            }
+            _ => DiskFullOpt::NotAllowedOnFull,
+        }
+    }
+
+    /// Set the disk-full option attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.disk_full_opt`.
+    pub fn set_disk_full_opt(&mut self, disk_full_opt: DiskFullOpt) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.disk_full_opt = disk_full_opt as i32;
+        }
+    }
+
+    /// Returns whether synchronous log writing is enabled for this request.
+    ///
+    /// This maps to `kvrpcpb::Context.sync_log`.
+    #[must_use]
+    pub fn sync_log(&self) -> bool {
+        self.context.as_ref().is_some_and(|ctx| ctx.sync_log)
+    }
+
+    /// Set whether synchronous log writing is enabled for this request.
+    ///
+    /// This maps to `kvrpcpb::Context.sync_log`.
+    pub fn set_sync_log(&mut self, sync_log: bool) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.sync_log = sync_log;
+        }
+    }
+
+    /// Returns the max execution duration attached to this request, in milliseconds.
+    ///
+    /// This maps to `kvrpcpb::Context.max_execution_duration_ms`.
+    #[must_use]
+    pub fn max_execution_duration_ms(&self) -> u64 {
+        self.context
+            .as_ref()
+            .map_or(0, |ctx| ctx.max_execution_duration_ms)
+    }
+
+    /// Set the max execution duration attached to this request, in milliseconds.
+    ///
+    /// This maps to `kvrpcpb::Context.max_execution_duration_ms`.
+    pub fn set_max_execution_duration_ms(&mut self, max_execution_duration_ms: u64) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.max_execution_duration_ms = max_execution_duration_ms;
+        }
+    }
+
+    /// Returns the resource group tag attached to this request, if any.
+    ///
+    /// This maps to `kvrpcpb::Context.resource_group_tag`.
+    #[must_use]
+    pub fn resource_group_tag(&self) -> Option<&[u8]> {
+        self.context
+            .as_ref()
+            .map(|ctx| ctx.resource_group_tag.as_slice())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Set the resource group tag attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.resource_group_tag`.
+    pub fn set_resource_group_tag(&mut self, resource_group_tag: impl Into<Vec<u8>>) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.resource_group_tag = resource_group_tag.into();
+        }
+    }
 }
 
 type BeforeHook = dyn for<'a> Fn(&mut RpcRequest<'a>) + Send + Sync + 'static;
@@ -340,8 +438,8 @@ mod tests {
     use super::{FnRpcInterceptor, RpcCallResult, RpcInterceptor, RpcInterceptorChain, RpcRequest};
     use crate::proto::kvrpcpb;
     use crate::tikvrpc::CmdType;
-    use crate::CommandPriority;
     use crate::Error;
+    use crate::{CommandPriority, DiskFullOpt};
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -508,5 +606,50 @@ mod tests {
                 .map(|ctx| ctx.resource_group_name.as_str()),
             Some("rg-c")
         );
+    }
+
+    #[test]
+    fn test_rpc_request_exposes_write_context_scalars() {
+        let mut ctx = kvrpcpb::Context {
+            txn_source: 7,
+            disk_full_opt: DiskFullOpt::AllowedOnAlmostFull as i32,
+            sync_log: true,
+            max_execution_duration_ms: 99,
+            ..Default::default()
+        };
+        let mut req = RpcRequest::new("target", "kv_prewrite", Some(&mut ctx));
+
+        assert_eq!(req.txn_source(), 7);
+        assert_eq!(req.disk_full_opt(), DiskFullOpt::AllowedOnAlmostFull);
+        assert!(req.sync_log());
+        assert_eq!(req.max_execution_duration_ms(), 99);
+
+        req.set_txn_source(42);
+        req.set_disk_full_opt(DiskFullOpt::AllowedOnAlreadyFull);
+        req.set_sync_log(false);
+        req.set_max_execution_duration_ms(321);
+
+        assert_eq!(req.txn_source(), 42);
+        assert_eq!(req.disk_full_opt(), DiskFullOpt::AllowedOnAlreadyFull);
+        assert!(!req.sync_log());
+        assert_eq!(req.max_execution_duration_ms(), 321);
+        assert_eq!(ctx.txn_source, 42);
+        assert_eq!(ctx.disk_full_opt, DiskFullOpt::AllowedOnAlreadyFull as i32);
+        assert!(!ctx.sync_log);
+        assert_eq!(ctx.max_execution_duration_ms, 321);
+    }
+
+    #[test]
+    fn test_rpc_request_exposes_resource_group_tag() {
+        let mut ctx = kvrpcpb::Context {
+            resource_group_tag: b"tag-a".to_vec(),
+            ..Default::default()
+        };
+        let mut req = RpcRequest::new("target", "kv_prewrite", Some(&mut ctx));
+
+        assert_eq!(req.resource_group_tag(), Some(&b"tag-a"[..]));
+        req.set_resource_group_tag(b"tag-b".to_vec());
+        assert_eq!(req.resource_group_tag(), Some(&b"tag-b"[..]));
+        assert_eq!(ctx.resource_group_tag, b"tag-b".to_vec());
     }
 }
