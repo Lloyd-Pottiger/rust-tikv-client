@@ -929,18 +929,33 @@ impl<PdC: PdClient> Client<PdC> {
         // update safepoint to PD
         let requested = safepoint.version();
         let new_safe_point = match self.keyspace {
-            Keyspace::Enable { keyspace_id } => match self
-                .pd
-                .clone()
-                .update_gc_safe_point_v2(keyspace_id, requested)
-                .await
-            {
-                Ok(new_safe_point) => new_safe_point,
-                Err(crate::Error::Unimplemented) => {
+            Keyspace::Enable { keyspace_id } => {
+                // PD may reject keyspace-level GC APIs for the DEFAULT keyspace (id=0) when
+                // keyspace-level GC is not enabled.
+                if keyspace_id == 0 {
                     self.pd.clone().update_safepoint(requested).await?
+                } else {
+                    match self
+                        .pd
+                        .clone()
+                        .update_gc_safe_point_v2(keyspace_id, requested)
+                        .await
+                    {
+                        Ok(new_safe_point) => new_safe_point,
+                        Err(crate::Error::Unimplemented) => {
+                            self.pd.clone().update_safepoint(requested).await?
+                        }
+                        Err(err)
+                            if matches!(&err, crate::Error::GrpcAPI(status) if status
+                                .message()
+                                .contains("ErrGCOnInvalidKeyspace")) =>
+                        {
+                            self.pd.clone().update_safepoint(requested).await?
+                        }
+                        Err(err) => return Err(err),
+                    }
                 }
-                Err(err) => return Err(err),
-            },
+            }
             _ => self.pd.clone().update_safepoint(requested).await?,
         };
         self.gc_safe_point.observe_safe_point(new_safe_point).await;
