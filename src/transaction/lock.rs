@@ -7192,7 +7192,6 @@ mod tests {
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)
-                            && metric.has_counter()
                             && metric.get_counter().get_value() > 0.0
                     })
                 })

@@ -422,7 +422,6 @@ mod tests {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(task)
                             && label_value(metric, "result") == Some("completed-regions")
-                            && metric.has_gauge()
                     })
                 })
                 .map(|metric| metric.get_gauge().get_value())
@@ -434,9 +433,10 @@ mod tests {
                 .iter()
                 .find(|family| family.get_name() == "tikv_client_rust_range_task_push_duration")
                 .and_then(|family| {
-                    family.get_metric().iter().find(|metric| {
-                        label_value(metric, "type") == Some(task) && metric.has_histogram()
-                    })
+                    family
+                        .get_metric()
+                        .iter()
+                        .find(|metric| label_value(metric, "type") == Some(task))
                 })
                 .map(|metric| metric.get_histogram().get_sample_count())
                 .unwrap_or(0)

@@ -143,9 +143,10 @@ mod tests {
             .iter()
             .find(|family| family.get_name() == "tikv_client_rust_feedback_slow_score")
             .and_then(|family| {
-                family.get_metric().iter().find(|metric| {
-                    label_value(metric, "store") == Some(store) && metric.has_gauge()
-                })
+                family
+                    .get_metric()
+                    .iter()
+                    .find(|metric| label_value(metric, "store") == Some(store))
             })
             .map(|metric| metric.get_gauge().get_value())
     }
@@ -158,7 +159,6 @@ mod tests {
                 family.get_metric().iter().find(|metric| {
                     label_value(metric, "scope") == Some(scope)
                         && label_value(metric, "type") == Some(ty)
-                        && metric.has_counter()
                 })
             })
             .map(|metric| metric.get_counter().get_value())
