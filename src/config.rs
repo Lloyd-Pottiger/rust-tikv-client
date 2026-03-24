@@ -608,8 +608,12 @@ impl Config {
     /// Set the timeout for clients.
     ///
     /// The timeout is used for all requests when using or connecting to a TiKV cluster (including
-    /// PD nodes). If the request does not complete within timeout, the request is cancelled and
-    /// an error returned to the user.
+    /// PD nodes).
+    ///
+    /// Note: commit requests (`kv_commit`) can override this via [`Config::commit_timeout`].
+    ///
+    /// If the request does not complete within timeout, the request is cancelled and an error
+    /// returned to the user.
     ///
     /// The default timeout is two seconds.
     ///

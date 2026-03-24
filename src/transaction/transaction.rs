@@ -8557,15 +8557,40 @@ mod tests {
         );
         txn.gc_safe_point.observe_safe_point(0).await;
         txn.put(b"a".to_vec(), b"v1".to_vec()).await.unwrap();
+        txn.put(b"b".to_vec(), b"v2".to_vec()).await.unwrap();
         txn.commit().await.unwrap();
 
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let commit_count = seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(label, ..)| *label == "kv_commit")
+                    .count();
+                if commit_count >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("expected primary and secondary commit requests");
+
         let seen = seen.lock().unwrap();
-        let (_, commit_override, commit_effective) = seen
+        let commits: Vec<_> = seen
             .iter()
-            .find(|(label, ..)| *label == "kv_commit")
-            .expect("commit request");
-        assert_eq!(*commit_override, Some(Duration::from_secs(7)));
-        assert_eq!(*commit_effective, Duration::from_secs(7));
+            .filter(|(label, ..)| *label == "kv_commit")
+            .collect();
+        assert_eq!(
+            commits.len(),
+            2,
+            "expected primary and secondary commit requests"
+        );
+        for &(_, commit_override, commit_effective) in commits {
+            assert_eq!(commit_override, Some(Duration::from_secs(7)));
+            assert_eq!(commit_effective, Duration::from_secs(7));
+        }
 
         let (_, prewrite_override, prewrite_effective) = seen
             .iter()
