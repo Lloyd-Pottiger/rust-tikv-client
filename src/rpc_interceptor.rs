@@ -149,6 +149,49 @@ impl<'a> RpcRequest<'a> {
             ctx.priority = priority as i32;
         }
     }
+
+    /// Returns the request source label attached to this request, if any.
+    ///
+    /// This maps to `kvrpcpb::Context.request_source`.
+    #[must_use]
+    pub fn request_source(&self) -> Option<&str> {
+        self.context
+            .as_ref()
+            .map(|ctx| ctx.request_source.as_str())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Set the request source label attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.request_source`.
+    pub fn set_request_source(&mut self, request_source: impl Into<String>) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.request_source = request_source.into();
+        }
+    }
+
+    /// Returns the resource group name attached to this request, if any.
+    ///
+    /// This maps to `kvrpcpb::Context.resource_control_context.resource_group_name`.
+    #[must_use]
+    pub fn resource_group_name(&self) -> Option<&str> {
+        self.context
+            .as_ref()
+            .and_then(|ctx| ctx.resource_control_context.as_ref())
+            .map(|ctx| ctx.resource_group_name.as_str())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Set the resource group name attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.resource_control_context.resource_group_name`.
+    pub fn set_resource_group_name(&mut self, resource_group_name: impl Into<String>) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.resource_control_context
+                .get_or_insert_with(kvrpcpb::ResourceControlContext::default)
+                .resource_group_name = resource_group_name.into();
+        }
+    }
 }
 
 type BeforeHook = dyn for<'a> Fn(&mut RpcRequest<'a>) + Send + Sync + 'static;
@@ -413,5 +456,57 @@ mod tests {
         let mut ctx = kvrpcpb::Context::default();
         let req = RpcRequest::new("target", "raw_compare_and_swap", Some(&mut ctx));
         assert_eq!(req.cmd_type(), CmdType::RawCompareAndSwap);
+    }
+
+    #[test]
+    fn test_rpc_request_exposes_request_source() {
+        let mut ctx = kvrpcpb::Context {
+            request_source: "external_gc".to_owned(),
+            ..Default::default()
+        };
+        let mut req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+
+        assert_eq!(req.request_source(), Some("external_gc"));
+        req.set_request_source("internal_gc_stats");
+        assert_eq!(req.request_source(), Some("internal_gc_stats"));
+        assert_eq!(ctx.request_source, "internal_gc_stats");
+    }
+
+    #[test]
+    fn test_rpc_request_exposes_resource_group_name() {
+        let mut ctx = kvrpcpb::Context {
+            resource_control_context: Some(kvrpcpb::ResourceControlContext {
+                resource_group_name: "rg-a".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+
+        assert_eq!(req.resource_group_name(), Some("rg-a"));
+        req.set_resource_group_name("rg-b");
+        assert_eq!(req.resource_group_name(), Some("rg-b"));
+        assert_eq!(
+            ctx.resource_control_context
+                .as_ref()
+                .map(|ctx| ctx.resource_group_name.as_str()),
+            Some("rg-b")
+        );
+    }
+
+    #[test]
+    fn test_rpc_request_set_resource_group_name_initializes_context() {
+        let mut ctx = kvrpcpb::Context::default();
+        let mut req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+
+        assert_eq!(req.resource_group_name(), None);
+        req.set_resource_group_name("rg-c");
+        assert_eq!(req.resource_group_name(), Some("rg-c"));
+        assert_eq!(
+            ctx.resource_control_context
+                .as_ref()
+                .map(|ctx| ctx.resource_group_name.as_str()),
+            Some("rg-c")
+        );
     }
 }
