@@ -71,6 +71,10 @@ The batch RPC feature is best-effort and falls back to unary RPCs when batch RPC
 Use `Config::with_batch_rpc_max_batch_size` to tune how many requests are coalesced into each
 outbound `BatchCommandsRequest` (default: 128).
 
+Request forwarding is best-effort and is mainly useful when the target store is reachable from
+other TiKV nodes but unreachable from the client (for example due to a network partition). Enable
+it with `Config::with_enable_forwarding(true)` (disabled by default).
+
 You can also begin a transaction with an explicit start timestamp (no PD TSO fetch), or ask PD for
 TSO in a specific transaction scope (`txn_scope`/`dc_location`):
 
