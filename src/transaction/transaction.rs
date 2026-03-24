@@ -7140,6 +7140,26 @@ impl<PdC: PdClient> Committer<PdC> {
             self.options.async_commit = false;
         }
 
+        // Match client-go: only use async commit when the transaction is below the configured
+        // key-count and total-key-size limits.
+        if self.options.async_commit {
+            let keys_limit = self.rpc.async_commit_keys_limit();
+            if self.mutations.len() > keys_limit {
+                self.options.async_commit = false;
+            } else {
+                let total_key_size_limit = self.rpc.async_commit_total_key_size_limit();
+                let mut total_key_size = 0_u64;
+                for mutation in &self.mutations {
+                    let key_len = u64::try_from(mutation.key.len()).unwrap_or(u64::MAX);
+                    total_key_size = total_key_size.saturating_add(key_len);
+                    if total_key_size > total_key_size_limit {
+                        self.options.async_commit = false;
+                        break;
+                    }
+                }
+            }
+        }
+
         // Keep parity with client-go by reporting fallbacks only when we actually tried to use the
         // commit mode (not when it is disabled by configuration).
         let has_tried_async_commit = self.options.async_commit;
@@ -17653,6 +17673,104 @@ mod tests {
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);
         assert_eq!(commit_count.load(Ordering::SeqCst), 1);
         assert_eq!(timestamp_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_committer_async_commit_is_disabled_when_keys_exceed_limit() {
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert!(
+                    !req.use_async_commit,
+                    "async commit should be disabled when keys exceed the limit"
+                );
+                return Err(Error::StringError("stop".to_owned()));
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client));
+        let start_ts = Timestamp {
+            physical: 1,
+            logical: 0,
+            ..Default::default()
+        };
+
+        let mutation_count = 257;
+        let mutations: Vec<kvrpcpb::Mutation> = (0..mutation_count)
+            .map(|i| kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: vec![(i >> 8) as u8, (i & 0xff) as u8],
+                value: vec![42],
+                ..Default::default()
+            })
+            .collect();
+        let primary_key: Key = mutations[0].key.clone().into();
+
+        let options = TransactionOptions::new_optimistic().use_async_commit();
+        let committer = super::Committer::new(
+            Some(primary_key),
+            mutations,
+            start_ts,
+            pd_client,
+            options,
+            Keyspace::Disable,
+            0,
+            Instant::now(),
+        );
+
+        let (result, mode_info) = committer.commit_with_mode_info().await;
+        assert!(result.is_err());
+        assert!(!mode_info.has_tried_async_commit);
+        assert!(!mode_info.is_async_commit);
+    }
+
+    #[tokio::test]
+    async fn test_committer_async_commit_is_disabled_when_total_key_size_exceeds_limit() {
+        let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                assert!(
+                    !req.use_async_commit,
+                    "async commit should be disabled when total key size exceeds the limit"
+                );
+                return Err(Error::StringError("stop".to_owned()));
+            }
+
+            panic!("unexpected request type: {:?}", req.type_id());
+        });
+
+        let pd_client = Arc::new(MockPdClient::new(client));
+        let start_ts = Timestamp {
+            physical: 1,
+            logical: 0,
+            ..Default::default()
+        };
+
+        let big_key = vec![0_u8; 4 * 1024 + 1];
+        let mutations = vec![kvrpcpb::Mutation {
+            op: kvrpcpb::Op::Put.into(),
+            key: big_key.clone(),
+            value: vec![42],
+            ..Default::default()
+        }];
+        let primary_key: Key = big_key.into();
+
+        let options = TransactionOptions::new_optimistic().use_async_commit();
+        let committer = super::Committer::new(
+            Some(primary_key),
+            mutations,
+            start_ts,
+            pd_client,
+            options,
+            Keyspace::Disable,
+            0,
+            Instant::now(),
+        );
+
+        let (result, mode_info) = committer.commit_with_mode_info().await;
+        assert!(result.is_err());
+        assert!(!mode_info.has_tried_async_commit);
+        assert!(!mode_info.is_async_commit);
     }
 
     #[tokio::test]

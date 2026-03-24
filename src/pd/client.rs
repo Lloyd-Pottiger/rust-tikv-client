@@ -449,6 +449,20 @@ pub trait PdClient: Send + Sync + 'static {
         crate::config::DEFAULT_COMMIT_TIMEOUT
     }
 
+    /// Use async commit only if the number of keys does not exceed this limit.
+    ///
+    /// This maps to client-go `TiKVClient.AsyncCommit.KeysLimit`.
+    fn async_commit_keys_limit(&self) -> usize {
+        crate::config::DEFAULT_ASYNC_COMMIT_KEYS_LIMIT
+    }
+
+    /// Use async commit only if the total size of keys does not exceed this limit.
+    ///
+    /// This maps to client-go `TiKVClient.AsyncCommit.TotalKeySizeLimit`.
+    fn async_commit_total_key_size_limit(&self) -> u64 {
+        crate::config::DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT
+    }
+
     /// Whether TiKV request forwarding is enabled (client-go `EnableForwarding`).
     ///
     /// The default implementation always returns false.
@@ -731,6 +745,8 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     committer_concurrency: usize,
     max_txn_ttl: Duration,
     commit_timeout: Duration,
+    async_commit_keys_limit: usize,
+    async_commit_total_key_size_limit: u64,
     pd_http_client: Option<reqwest::Client>,
     pd_http_endpoints: Vec<String>,
     pd_http_use_https: bool,
@@ -890,6 +906,14 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     fn commit_timeout(&self) -> Duration {
         self.commit_timeout
+    }
+
+    fn async_commit_keys_limit(&self) -> usize {
+        self.async_commit_keys_limit
+    }
+
+    fn async_commit_total_key_size_limit(&self) -> u64 {
+        self.async_commit_total_key_size_limit
     }
 
     fn enable_forwarding(&self) -> bool {
@@ -1360,6 +1384,8 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         let committer_concurrency = config.committer_concurrency;
         let max_txn_ttl = config.max_txn_ttl;
         let commit_timeout = config.commit_timeout;
+        let async_commit_keys_limit = config.async_commit_keys_limit;
+        let async_commit_total_key_size_limit = config.async_commit_total_key_size_limit;
         let (pd_http_client, pd_http_use_https) = build_pd_http_client(&config);
         let security_mgr = Arc::new(config.security_manager()?);
 
@@ -1389,6 +1415,8 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             committer_concurrency,
             max_txn_ttl,
             commit_timeout,
+            async_commit_keys_limit,
+            async_commit_total_key_size_limit,
             pd_http_client,
             pd_http_endpoints: Vec::new(),
             pd_http_use_https,
@@ -1642,6 +1670,30 @@ pub mod test {
         .await
         .unwrap();
         assert_eq!(client.committer_concurrency, 7);
+    }
+
+    #[tokio::test]
+    async fn test_async_commit_limits_are_plumbed_from_config() {
+        let config = Config::default()
+            .with_async_commit_keys_limit(7)
+            .with_async_commit_total_key_size_limit(123);
+        let client = PdRpcClient::new(
+            config.clone(),
+            |_| MockKvConnect,
+            |sm| {
+                futures::future::ok(RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    0,
+                    MockCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(client.async_commit_keys_limit, 7);
+        assert_eq!(client.async_commit_total_key_size_limit, 123);
     }
 
     #[tokio::test]

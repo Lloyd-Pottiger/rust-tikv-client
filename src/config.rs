@@ -262,6 +262,22 @@ pub struct Config {
     ///
     /// Defaults to 41 seconds (client-go default).
     pub commit_timeout: Duration,
+    /// Use async commit only if the number of keys does not exceed this limit.
+    ///
+    /// When a transaction is created with async commit enabled (via
+    /// [`crate::TransactionOptions::use_async_commit`]), the client disables async commit at
+    /// commit time when the number of mutations exceeds this threshold, mirroring client-go
+    /// `TiKVClient.AsyncCommit.KeysLimit`.
+    ///
+    /// Defaults to 256 (client-go default).
+    pub async_commit_keys_limit: usize,
+    /// Use async commit only if the total size of keys does not exceed this limit.
+    ///
+    /// When the sum of all mutation key lengths exceeds this threshold, async commit is disabled
+    /// for the transaction, mirroring client-go `TiKVClient.AsyncCommit.TotalKeySizeLimit`.
+    ///
+    /// Defaults to 4KiB (client-go default).
+    pub async_commit_total_key_size_limit: u64,
     pub timeout: Duration,
     /// Maximum number of in-flight requests allowed per TiKV store.
     ///
@@ -442,6 +458,8 @@ pub struct Config {
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const DEFAULT_COMMIT_TIMEOUT: Duration = Duration::from_secs(41);
+pub(crate) const DEFAULT_ASYNC_COMMIT_KEYS_LIMIT: usize = 256;
+pub(crate) const DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT: u64 = 4 * 1024;
 pub(crate) const DEFAULT_COMMITTER_CONCURRENCY: usize = 128;
 pub(crate) const DEFAULT_MAX_TXN_TTL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
@@ -467,6 +485,8 @@ impl Default for Config {
             cert_path: None,
             key_path: None,
             commit_timeout: DEFAULT_COMMIT_TIMEOUT,
+            async_commit_keys_limit: DEFAULT_ASYNC_COMMIT_KEYS_LIMIT,
+            async_commit_total_key_size_limit: DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT,
             timeout: DEFAULT_REQUEST_TIMEOUT,
             store_limit: 0,
             committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
@@ -637,6 +657,24 @@ impl Config {
     #[must_use]
     pub fn with_commit_timeout(mut self, commit_timeout: Duration) -> Self {
         self.commit_timeout = commit_timeout;
+        self
+    }
+
+    /// Set the async commit key count limit (client-go `TiKVClient.AsyncCommit.KeysLimit`).
+    ///
+    /// Set to `0` to disable async commit for all non-empty transactions.
+    #[must_use]
+    pub fn with_async_commit_keys_limit(mut self, limit: usize) -> Self {
+        self.async_commit_keys_limit = limit;
+        self
+    }
+
+    /// Set the async commit total key size limit in bytes (client-go `TiKVClient.AsyncCommit.TotalKeySizeLimit`).
+    ///
+    /// Set to `0` to disable async commit for all non-empty transactions.
+    #[must_use]
+    pub fn with_async_commit_total_key_size_limit(mut self, limit: u64) -> Self {
+        self.async_commit_total_key_size_limit = limit;
         self
     }
 
@@ -1076,6 +1114,14 @@ mod tests {
             DEFAULT_TTL_REFRESHED_TXN_SIZE
         );
         assert_eq!(config.commit_timeout, DEFAULT_COMMIT_TIMEOUT);
+        assert_eq!(
+            config.async_commit_keys_limit,
+            DEFAULT_ASYNC_COMMIT_KEYS_LIMIT
+        );
+        assert_eq!(
+            config.async_commit_total_key_size_limit,
+            DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT
+        );
         assert_eq!(config.region_cache_ttl, Duration::from_secs(600));
         assert_eq!(config.region_cache_ttl_jitter, Duration::from_secs(60));
         config.validate().unwrap();

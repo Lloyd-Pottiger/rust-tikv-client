@@ -132,6 +132,12 @@ pub struct MockPdClient {
         value = "Arc::new(AtomicU64::new(u64::try_from(crate::config::DEFAULT_COMMIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX)))"
     )]
     commit_timeout_ms: Arc<AtomicU64>,
+    #[new(value = "Arc::new(AtomicUsize::new(crate::config::DEFAULT_ASYNC_COMMIT_KEYS_LIMIT))")]
+    async_commit_keys_limit: Arc<AtomicUsize>,
+    #[new(
+        value = "Arc::new(AtomicU64::new(crate::config::DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT))"
+    )]
+    async_commit_total_key_size_limit: Arc<AtomicU64>,
     #[new(value = "42")]
     cluster_id: u64,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
@@ -243,6 +249,15 @@ impl MockPdClient {
     pub fn set_commit_timeout(&self, timeout: Duration) {
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         self.commit_timeout_ms.store(timeout_ms, Ordering::SeqCst);
+    }
+
+    pub fn set_async_commit_keys_limit(&self, limit: usize) {
+        self.async_commit_keys_limit.store(limit, Ordering::SeqCst);
+    }
+
+    pub fn set_async_commit_total_key_size_limit(&self, limit: u64) {
+        self.async_commit_total_key_size_limit
+            .store(limit, Ordering::SeqCst);
     }
 
     pub fn set_all_stores_should_fail(&self, should_fail: bool) {
@@ -591,6 +606,15 @@ impl PdClient for MockPdClient {
 
     fn commit_timeout(&self) -> Duration {
         Duration::from_millis(self.commit_timeout_ms.load(Ordering::SeqCst))
+    }
+
+    fn async_commit_keys_limit(&self) -> usize {
+        self.async_commit_keys_limit.load(Ordering::SeqCst)
+    }
+
+    fn async_commit_total_key_size_limit(&self) -> u64 {
+        self.async_commit_total_key_size_limit
+            .load(Ordering::SeqCst)
     }
 
     fn enable_forwarding(&self) -> bool {
@@ -1080,6 +1104,24 @@ mod tests {
         );
         client.set_commit_timeout(Duration::from_secs(9));
         assert_eq!(client.commit_timeout(), Duration::from_secs(9));
+    }
+
+    #[test]
+    fn test_mock_pd_client_async_commit_limits_are_configurable() {
+        let client = MockPdClient::default();
+        assert_eq!(
+            client.async_commit_keys_limit(),
+            crate::config::DEFAULT_ASYNC_COMMIT_KEYS_LIMIT
+        );
+        assert_eq!(
+            client.async_commit_total_key_size_limit(),
+            crate::config::DEFAULT_ASYNC_COMMIT_TOTAL_KEY_SIZE_LIMIT
+        );
+
+        client.set_async_commit_keys_limit(7);
+        client.set_async_commit_total_key_size_limit(123);
+        assert_eq!(client.async_commit_keys_limit(), 7);
+        assert_eq!(client.async_commit_total_key_size_limit(), 123);
     }
 
     #[tokio::test]
