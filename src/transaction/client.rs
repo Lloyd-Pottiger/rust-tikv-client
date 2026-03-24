@@ -307,6 +307,16 @@ impl Client {
         self.pd.pd_http_uses_https()
     }
 
+    /// Returns whether this default client supports delete-range operations.
+    ///
+    /// This mirrors client-go `tikv.KVStore::SupportDeleteRange()`. The default Rust
+    /// [`TransactionClient`] always talks to real TiKV servers via [`PdRpcClient`], so
+    /// delete-range is available.
+    #[must_use]
+    pub fn supports_delete_range(&self) -> bool {
+        true
+    }
+
     /// Close cached gRPC connections to a TiKV store address.
     ///
     /// The client will reconnect the next time that address is used.

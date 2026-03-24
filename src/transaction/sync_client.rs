@@ -178,6 +178,15 @@ impl SyncTransactionClient {
         self.client.pd_http_uses_https()
     }
 
+    /// Returns whether this default client supports delete-range operations.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::supports_delete_range`](crate::TransactionClient::supports_delete_range).
+    #[must_use]
+    pub fn supports_delete_range(&self) -> bool {
+        self.client.supports_delete_range()
+    }
+
     /// Returns a [`LockResolver`](crate::transaction::LockResolver) handle associated with this client.
     #[must_use]
     pub fn lock_resolver(&self) -> crate::transaction::LockResolver {

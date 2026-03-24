@@ -34,3 +34,9 @@ fn crate_root_exports_pd_http_accessors() {
     let _: fn(&SyncTransactionClient) -> &[String] = SyncTransactionClient::pd_http_endpoints;
     let _: fn(&SyncTransactionClient) -> bool = SyncTransactionClient::pd_http_uses_https;
 }
+
+#[test]
+fn crate_root_exports_delete_range_capability_accessors() {
+    let _: fn(&TransactionClient) -> bool = TransactionClient::supports_delete_range;
+    let _: fn(&SyncTransactionClient) -> bool = SyncTransactionClient::supports_delete_range;
+}
