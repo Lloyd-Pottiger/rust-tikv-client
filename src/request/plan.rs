@@ -6705,8 +6705,7 @@ mod test {
 
         let err = crate::shutting_down::with_shutting_down(1, async move { plan.execute().await })
             .await
-            .err()
-            .expect("expected shutting down to short-circuit retries");
+            .expect_err("expected shutting down to short-circuit retries");
 
         match err {
             Error::StringError(message) => {

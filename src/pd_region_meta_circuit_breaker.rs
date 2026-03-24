@@ -118,17 +118,17 @@ impl SlidingWindow {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 enum CircuitState {
+    #[default]
     Closed,
-    Open { opened_at: Instant },
-    HalfOpen { successes: u64, in_flight: bool },
-}
-
-impl Default for CircuitState {
-    fn default() -> Self {
-        CircuitState::Closed
-    }
+    Open {
+        opened_at: Instant,
+    },
+    HalfOpen {
+        successes: u64,
+        in_flight: bool,
+    },
 }
 
 #[derive(Debug, Default)]
