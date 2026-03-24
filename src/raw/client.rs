@@ -262,7 +262,8 @@ impl<PdC: PdClient> Client<PdC> {
             .clone()
             .or_else(crate::trace::trace_id)
             .unwrap_or_default();
-        ctx.trace_control_flags = self.trace_control_flags.bits();
+        ctx.trace_control_flags =
+            crate::trace::effective_trace_control_flags(self.trace_control_flags).bits();
     }
 
     fn apply_request_context_to_request<R: StoreRequest>(&self, request: &mut R) {
@@ -2209,6 +2210,45 @@ mod tests {
         };
 
         crate::trace::with_trace_id(trace_id, async move {
+            let _ = client.get(vec![1]).await?;
+            Ok::<(), Error>(())
+        })
+        .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_raw_client_trace_control_flags_fall_back_to_task_local() -> Result<()> {
+        let flags = TraceControlFlags::IMMEDIATE_LOG
+            .with(TraceControlFlags::TIKV_CATEGORY_REQUEST)
+            .with(TraceControlFlags::TIKV_CATEGORY_READ_DETAILS);
+        let expected_flags = flags.bits();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::RawGetRequest>()
+                    .expect("expected raw get request");
+                let ctx = req.context.as_ref().expect("context");
+                assert_eq!(ctx.trace_control_flags, expected_flags);
+
+                Ok(Box::<kvrpcpb::RawGetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
+            keyspace: Keyspace::Disable,
+        };
+
+        crate::trace::with_trace_control_flags(flags, async move {
             let _ = client.get(vec![1]).await?;
             Ok::<(), Error>(())
         })

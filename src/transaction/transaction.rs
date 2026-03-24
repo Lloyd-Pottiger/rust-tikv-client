@@ -144,6 +144,7 @@ where
         post: hooks.post.clone(),
     };
     let parent_trace_id = crate::trace::trace_id();
+    let parent_trace_control_flags = crate::trace::trace_control_flags();
     let parent_exec_details = crate::util::exec_details();
     let parent_trace_exec_details = crate::util::trace_exec_details_enabled();
     let parent_request_source = crate::request_context::request_source();
@@ -162,8 +163,14 @@ where
             parent_resource_group_name,
             future,
         );
-        match parent_trace_id {
-            Some(trace_id) => crate::trace::with_trace_id(trace_id, future).await,
+        let future = match parent_trace_id {
+            Some(trace_id) => {
+                futures::future::Either::Left(crate::trace::with_trace_id(trace_id, future))
+            }
+            None => futures::future::Either::Right(future),
+        };
+        match parent_trace_control_flags {
+            Some(flags) => crate::trace::with_trace_control_flags(flags, future).await,
             None => future.await,
         }
     })
@@ -710,7 +717,8 @@ impl<PdC: PdClient> Transaction<PdC> {
             .take()
             .or_else(crate::trace::trace_id)
             .unwrap_or_default();
-        ctx.trace_control_flags = opts.trace_control_flags.bits();
+        ctx.trace_control_flags =
+            crate::trace::effective_trace_control_flags(opts.trace_control_flags).bits();
         ctx.resource_control_context = opts
             .resource_group_name
             .take()
@@ -6813,7 +6821,8 @@ impl TransactionOptions {
             .clone()
             .or_else(crate::trace::trace_id)
             .unwrap_or_default();
-        ctx.trace_control_flags = self.trace_control_flags.bits();
+        ctx.trace_control_flags =
+            crate::trace::effective_trace_control_flags(self.trace_control_flags).bits();
     }
 
     fn lock_resolver_rpc_context(
@@ -12806,6 +12815,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_trace_control_flags_fall_back_to_task_local() {
+        let seen_trace_control_flags = Arc::new(AtomicU64::new(0));
+        let flags = TraceControlFlags::IMMEDIATE_LOG
+            .with(TraceControlFlags::TIKV_CATEGORY_REQUEST)
+            .with(TraceControlFlags::TIKV_CATEGORY_READ_DETAILS);
+
+        let seen_trace_control_flags_cloned = seen_trace_control_flags.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                let ctx = req.context.as_ref().expect("context");
+                seen_trace_control_flags_cloned.store(ctx.trace_control_flags, Ordering::SeqCst);
+
+                Ok(Box::<kvrpcpb::GetResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        crate::trace::with_trace_control_flags(flags, async move {
+            let mut snapshot = Transaction::new(
+                Timestamp::default(),
+                pd_client,
+                TransactionOptions::new_optimistic()
+                    .read_only()
+                    .drop_check(CheckLevel::None),
+                Keyspace::Disable,
+            );
+            let key: Key = vec![0].into();
+            let _ = snapshot.get(key).await.unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            seen_trace_control_flags.load(Ordering::SeqCst),
+            flags.bits()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_context_trace_control_flags_fall_back_to_task_local() {
+        let flags = TraceControlFlags::IMMEDIATE_LOG
+            .with(TraceControlFlags::TIKV_CATEGORY_REQUEST)
+            .with(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS);
+
+        crate::trace::with_trace_control_flags(flags, async move {
+            let options = TransactionOptions::new_optimistic();
+            let mut ctx = None;
+            options.apply_write_context(&mut ctx);
+            let ctx = ctx.expect("context");
+            assert_eq!(ctx.trace_control_flags, flags.bits());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_snapshot_request_metadata_falls_back_to_task_local() {
         let expected_request_source = "internal_gc_stats".to_owned();
         let expected_resource_group_name = "rg-snapshot".to_owned();
@@ -13778,6 +13843,23 @@ mod tests {
 
         assert_eq!(details.backoff_count(), 1);
         assert_eq!(details.backoff_duration(), Duration::from_millis(2));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_with_lifecycle_hooks_inherits_task_local_trace_control_flags() {
+        let flags = TraceControlFlags::IMMEDIATE_LOG
+            .with(TraceControlFlags::TIKV_CATEGORY_REQUEST)
+            .with(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS);
+
+        crate::trace::with_trace_control_flags(flags, async move {
+            let handle =
+                super::spawn_with_lifecycle_hooks(super::LifecycleHooks::default(), async move {
+                    assert_eq!(crate::trace::trace_control_flags(), Some(flags));
+                });
+
+            handle.await.expect("spawned task should succeed");
+        })
+        .await;
     }
 
     #[tokio::test]

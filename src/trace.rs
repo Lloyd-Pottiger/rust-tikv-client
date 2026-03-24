@@ -13,6 +13,10 @@ tokio::task_local! {
     static TASK_TRACE_ID: Vec<u8>;
 }
 
+tokio::task_local! {
+    static TASK_TRACE_CONTROL_FLAGS: TraceControlFlags;
+}
+
 /// Runs `future` with a task-local trace id.
 ///
 /// This mirrors client-go `trace.ContextWithTraceID`, but uses Tokio task-local storage instead of
@@ -32,6 +36,37 @@ where
 /// This mirrors client-go `trace.TraceIDFromContext`.
 pub fn trace_id() -> Option<Vec<u8>> {
     TASK_TRACE_ID.try_with(|trace_id| trace_id.clone()).ok()
+}
+
+/// Runs `future` with task-local trace-control flags.
+///
+/// This mirrors client-go `trace.GetTraceControlFlags(ctx)` propagation, but uses Tokio
+/// task-local storage instead of Go's `context.Context`.
+pub fn with_trace_control_flags<T, F>(
+    flags: TraceControlFlags,
+    future: F,
+) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    TASK_TRACE_CONTROL_FLAGS.scope(flags, future)
+}
+
+/// Returns the task-local trace-control flags, if present.
+///
+/// Returns `None` when no trace-control flags are set for the current Tokio task (or when called
+/// outside a Tokio task).
+#[must_use]
+pub fn trace_control_flags() -> Option<TraceControlFlags> {
+    TASK_TRACE_CONTROL_FLAGS.try_with(|flags| *flags).ok()
+}
+
+pub(crate) fn effective_trace_control_flags(configured: TraceControlFlags) -> TraceControlFlags {
+    if configured.bits() != 0 {
+        configured
+    } else {
+        trace_control_flags().unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -328,5 +363,28 @@ mod tests {
         let flags = TraceControlFlags::default().with(TraceControlFlags::IMMEDIATE_LOG);
         assert!(immediate_logging_enabled(flags));
         assert!(!immediate_logging_enabled(TraceControlFlags::default()));
+    }
+
+    #[tokio::test]
+    async fn test_task_local_trace_control_flags_scopes_restore_outer_values() {
+        let outer_flags =
+            TraceControlFlags::IMMEDIATE_LOG.with(TraceControlFlags::TIKV_CATEGORY_REQUEST);
+        let inner_flags = outer_flags.with(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS);
+
+        assert_eq!(trace_control_flags(), None);
+
+        with_trace_control_flags(outer_flags, async {
+            assert_eq!(trace_control_flags(), Some(outer_flags));
+
+            with_trace_control_flags(inner_flags, async {
+                assert_eq!(trace_control_flags(), Some(inner_flags));
+            })
+            .await;
+
+            assert_eq!(trace_control_flags(), Some(outer_flags));
+        })
+        .await;
+
+        assert_eq!(trace_control_flags(), None);
     }
 }
