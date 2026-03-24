@@ -10,6 +10,7 @@ use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
 use log::warn;
+use serde_derive::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
@@ -71,6 +72,226 @@ struct OutboundRequestState {
     receiver: mpsc::Receiver<tikvpb::BatchCommandsRequest>,
     pending: Option<tikvpb::BatchCommandsRequest>,
     target: String,
+    transport_layer_load: Arc<AtomicU64>,
+    overload_threshold: u64,
+    max_requests: usize,
+    batch_wait_size: usize,
+    max_wait_time: Duration,
+    last_head_received_at: Option<tokio::time::Instant>,
+    avg_batch_wait_size: f64,
+    turbo_batch_trigger: TurboBatchTrigger,
+}
+
+const TURBO_BATCH_ALWAYS: u8 = 0;
+const TURBO_BATCH_TIME_BASED: u8 = 1;
+const TURBO_BATCH_PROB_BASED: u8 = 2;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+struct TurboBatchOptions {
+    #[serde(rename = "v")]
+    v: u8,
+    #[serde(rename = "n", default)]
+    n: u32,
+    #[serde(rename = "t", default)]
+    t: f64,
+    #[serde(rename = "w", default)]
+    w: f64,
+    #[serde(rename = "p", default)]
+    p: f64,
+    #[serde(rename = "q", default)]
+    q: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TurboBatchTrigger {
+    opts: TurboBatchOptions,
+    max_arrival_interval_secs: f64,
+    est_arrival_interval_secs: f64,
+    est_fetch_more_prob: f64,
+}
+
+impl TurboBatchTrigger {
+    fn new(opts: TurboBatchOptions) -> Self {
+        TurboBatchTrigger {
+            opts,
+            max_arrival_interval_secs: 0.0,
+            est_arrival_interval_secs: 0.0,
+            est_fetch_more_prob: 0.0,
+        }
+    }
+
+    fn turbo_wait_time(&self) -> Duration {
+        if self.opts.t <= 0.0 {
+            return Duration::ZERO;
+        }
+        Duration::from_secs_f64(self.opts.t)
+    }
+
+    fn need_fetch_more(&mut self, req_arrival_interval: Duration) -> bool {
+        match self.opts.v {
+            TURBO_BATCH_TIME_BASED => {
+                let turbo_wait_secs = self.opts.t;
+                if turbo_wait_secs <= 0.0 {
+                    return false;
+                }
+
+                let mut this_interval = req_arrival_interval.as_secs_f64();
+                if self.max_arrival_interval_secs == 0.0 {
+                    self.max_arrival_interval_secs = turbo_wait_secs * self.opts.n as f64;
+                }
+                if self.max_arrival_interval_secs > 0.0
+                    && this_interval > self.max_arrival_interval_secs
+                {
+                    this_interval = self.max_arrival_interval_secs;
+                }
+
+                if self.est_arrival_interval_secs == 0.0 {
+                    self.est_arrival_interval_secs = this_interval;
+                } else {
+                    self.est_arrival_interval_secs = self.opts.w * this_interval
+                        + (1.0 - self.opts.w) * self.est_arrival_interval_secs;
+                }
+
+                self.est_arrival_interval_secs < turbo_wait_secs * self.opts.p
+            }
+            TURBO_BATCH_PROB_BASED => {
+                let turbo_wait_secs = self.opts.t;
+                if turbo_wait_secs <= 0.0 {
+                    return false;
+                }
+
+                let this_prob = if req_arrival_interval.as_secs_f64() < turbo_wait_secs {
+                    1.0
+                } else {
+                    0.0
+                };
+                self.est_fetch_more_prob =
+                    self.opts.w * this_prob + (1.0 - self.opts.w) * self.est_fetch_more_prob;
+                self.est_fetch_more_prob > self.opts.p
+            }
+            _ => true,
+        }
+    }
+
+    fn preferred_batch_wait_size(
+        &self,
+        avg_batch_wait_size: f64,
+        def_batch_wait_size: usize,
+    ) -> usize {
+        if self.opts.v == TURBO_BATCH_ALWAYS {
+            return def_batch_wait_size;
+        }
+
+        let floored = avg_batch_wait_size.floor();
+        let mut batch_wait_size = floored.max(0.0) as usize;
+        let fraction = avg_batch_wait_size - floored;
+        if fraction >= self.opts.q {
+            batch_wait_size = batch_wait_size.saturating_add(1);
+        }
+        batch_wait_size
+    }
+}
+
+fn new_turbo_batch_trigger_from_policy(policy: &str) -> (TurboBatchTrigger, bool) {
+    let policy = policy.trim();
+    let opts = match policy {
+        "basic" => TurboBatchOptions::default(),
+        "standard" => TurboBatchOptions {
+            v: TURBO_BATCH_TIME_BASED,
+            t: 0.0001,
+            n: 5,
+            w: 0.2,
+            p: 0.8,
+            q: 0.8,
+        },
+        "positive" => TurboBatchOptions {
+            v: TURBO_BATCH_ALWAYS,
+            t: 0.0001,
+            ..TurboBatchOptions::default()
+        },
+        _ => {
+            let raw_opts = policy.strip_prefix("custom").unwrap_or(policy).trim();
+            match serde_json::from_str::<TurboBatchOptions>(raw_opts) {
+                Ok(opts) => return (TurboBatchTrigger::new(opts), true),
+                Err(_) => {
+                    return (
+                        TurboBatchTrigger::new(TurboBatchOptions {
+                            v: TURBO_BATCH_TIME_BASED,
+                            t: 0.0001,
+                            n: 5,
+                            w: 0.2,
+                            p: 0.8,
+                            q: 0.8,
+                        }),
+                        false,
+                    )
+                }
+            }
+        }
+    };
+    (TurboBatchTrigger::new(opts), true)
+}
+
+async fn fetch_more_pending_requests(
+    state: &mut OutboundRequestState,
+    head: &mut tikvpb::BatchCommandsRequest,
+    batch_wait_size: usize,
+    max_wait_time: Duration,
+) {
+    if max_wait_time.is_zero() || batch_wait_size == 0 {
+        return;
+    }
+
+    let deadline = tokio::time::Instant::now() + max_wait_time;
+    while head.requests.len() < batch_wait_size && head.requests.len() < state.max_requests {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline.duration_since(now);
+        if remaining.is_zero() {
+            break;
+        }
+
+        match tokio::time::timeout(remaining, state.receiver.recv()).await {
+            Ok(Some(mut next)) => {
+                if head.requests.len() + next.requests.len() <= state.max_requests {
+                    head.requests.append(&mut next.requests);
+                    head.request_ids.append(&mut next.request_ids);
+                } else {
+                    state.pending = Some(next);
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+
+    // Do an additional non-blocking try with a single yield, mirroring client-go's
+    // "try best to fetch more" behavior.
+    let mut yielded = false;
+    while head.requests.len() < state.max_requests {
+        match state.receiver.try_recv() {
+            Ok(mut next) => {
+                if head.requests.len() + next.requests.len() <= state.max_requests {
+                    head.requests.append(&mut next.requests);
+                    head.request_ids.append(&mut next.request_ids);
+                } else {
+                    state.pending = Some(next);
+                    break;
+                }
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                if yielded {
+                    break;
+                }
+                tokio::task::yield_now().await;
+                yielded = true;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        }
+    }
 }
 
 fn outbound_stream(
@@ -78,14 +299,26 @@ fn outbound_stream(
     max_requests: usize,
     batch_wait_size: usize,
     max_wait_time: Duration,
+    batch_policy: String,
+    overload_threshold: u64,
+    transport_layer_load: Arc<AtomicU64>,
     target: String,
 ) -> impl Stream<Item = tikvpb::BatchCommandsRequest> + Send {
     let max_requests = max_requests.max(1);
     let batch_wait_size = batch_wait_size.min(max_requests);
+    let (turbo_batch_trigger, _ok) = new_turbo_batch_trigger_from_policy(&batch_policy);
     let state = OutboundRequestState {
         receiver,
         pending: None,
         target,
+        transport_layer_load,
+        overload_threshold,
+        max_requests,
+        batch_wait_size,
+        max_wait_time,
+        last_head_received_at: None,
+        avg_batch_wait_size: batch_wait_size as f64,
+        turbo_batch_trigger,
     };
     stream::unfold(state, move |mut state| async move {
         let mut head = if let Some(request) = state.pending.take() {
@@ -93,6 +326,13 @@ fn outbound_stream(
         } else {
             state.receiver.recv().await?
         };
+
+        let head_received_at = tokio::time::Instant::now();
+        let head_arrival_interval = state
+            .last_head_received_at
+            .map(|prev| head_received_at.duration_since(prev))
+            .unwrap_or(Duration::ZERO);
+        state.last_head_received_at = Some(head_received_at);
 
         while head.requests.len() < max_requests {
             match state.receiver.try_recv() {
@@ -110,62 +350,39 @@ fn outbound_stream(
             }
         }
 
-        if max_wait_time > Duration::ZERO
-            && batch_wait_size > 0
-            && head.requests.len() < batch_wait_size
-            && head.requests.len() < max_requests
-        {
-            let deadline = tokio::time::Instant::now() + max_wait_time;
-            while head.requests.len() < batch_wait_size && head.requests.len() < max_requests {
-                let now = tokio::time::Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                let remaining = deadline.duration_since(now);
-                if remaining.is_zero() {
-                    break;
-                }
-
-                match tokio::time::timeout(remaining, state.receiver.recv()).await {
-                    Ok(Some(mut next)) => {
-                        if head.requests.len() + next.requests.len() <= max_requests {
-                            head.requests.append(&mut next.requests);
-                            head.request_ids.append(&mut next.request_ids);
-                        } else {
-                            state.pending = Some(next);
-                            break;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(_) => break,
-                }
-            }
-
-            // Do an additional non-blocking try with a single yield, mirroring client-go's
-            // "try best to fetch more" behavior.
-            let mut yielded = false;
-            while head.requests.len() < max_requests {
-                match state.receiver.try_recv() {
-                    Ok(mut next) => {
-                        if head.requests.len() + next.requests.len() <= max_requests {
-                            head.requests.append(&mut next.requests);
-                            head.request_ids.append(&mut next.request_ids);
-                        } else {
-                            state.pending = Some(next);
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                        if yielded {
-                            break;
-                        }
-                        tokio::task::yield_now().await;
-                        yielded = true;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        if head.requests.len() < state.max_requests {
+            let is_overload = state.max_wait_time > Duration::ZERO
+                && state.transport_layer_load.load(Ordering::Relaxed) > state.overload_threshold;
+            if is_overload {
+                let batch_wait_size = state.batch_wait_size;
+                let max_wait_time = state.max_wait_time;
+                fetch_more_pending_requests(&mut state, &mut head, batch_wait_size, max_wait_time)
+                    .await;
+            } else {
+                let turbo_wait_time = state.turbo_batch_trigger.turbo_wait_time();
+                if !turbo_wait_time.is_zero()
+                    && !head_arrival_interval.is_zero()
+                    && state
+                        .turbo_batch_trigger
+                        .need_fetch_more(head_arrival_interval)
+                {
+                    let preferred_wait_size = state
+                        .turbo_batch_trigger
+                        .preferred_batch_wait_size(state.avg_batch_wait_size, state.batch_wait_size)
+                        .min(state.max_requests);
+                    fetch_more_pending_requests(
+                        &mut state,
+                        &mut head,
+                        preferred_wait_size,
+                        turbo_wait_time,
+                    )
+                    .await;
                 }
             }
         }
+
+        let length = head.requests.len();
+        state.avg_batch_wait_size = 0.2 * length as f64 + 0.8 * state.avg_batch_wait_size;
 
         let batch_size = head.requests.len();
         observe_batch_requests(&state.target, batch_size);
@@ -190,22 +407,32 @@ impl BatchCommandsClient {
     pub(crate) async fn connect(
         client: TikvClient<Channel>,
         max_outbound_requests: usize,
+        batch_policy: String,
+        overload_threshold: u64,
         batch_wait_size: usize,
         max_wait_time: Duration,
         target: String,
     ) -> Result<Self> {
+        let transport_layer_load = Arc::new(AtomicU64::new(0));
         let connector: ReconnectFn = {
             let client = client.clone();
             let target = target.clone();
+            let batch_policy = batch_policy.clone();
+            let transport_layer_load = Arc::clone(&transport_layer_load);
             Arc::new(move |outbound_rx| {
                 let client = client.clone();
                 let target = target.clone();
+                let batch_policy = batch_policy.clone();
+                let transport_layer_load = Arc::clone(&transport_layer_load);
                 async move {
                     let outbound_stream = outbound_stream(
                         outbound_rx,
                         max_outbound_requests,
                         batch_wait_size,
                         max_wait_time,
+                        batch_policy,
+                        overload_threshold,
+                        transport_layer_load,
                         target,
                     );
                     let req = outbound_stream.into_streaming_request();
@@ -225,7 +452,13 @@ impl BatchCommandsClient {
         let inbound = connector(outbound_rx).await;
         observe_batch_client_wait_connection_establish(started_at.elapsed());
         let inbound = inbound?;
-        Self::new_with_inbound(outbound_tx, inbound, Some(connector), target)
+        Self::new_with_inbound(
+            outbound_tx,
+            inbound,
+            transport_layer_load,
+            Some(connector),
+            target,
+        )
     }
 
     #[cfg(test)]
@@ -235,7 +468,13 @@ impl BatchCommandsClient {
             + Send
             + 'static,
     ) -> Result<Self> {
-        Self::new_with_inbound(outbound, inbound.boxed(), None, "test".to_owned())
+        Self::new_with_inbound(
+            outbound,
+            inbound.boxed(),
+            Arc::new(AtomicU64::new(0)),
+            None,
+            "test".to_owned(),
+        )
     }
 
     #[cfg(test)]
@@ -249,6 +488,7 @@ impl BatchCommandsClient {
         Self::new_with_inbound(
             outbound,
             inbound.boxed(),
+            Arc::new(AtomicU64::new(0)),
             Some(reconnector),
             "unit_test".to_owned(),
         )
@@ -257,6 +497,7 @@ impl BatchCommandsClient {
     fn new_with_inbound(
         outbound: mpsc::Sender<tikvpb::BatchCommandsRequest>,
         inbound: BatchInboundStream,
+        transport_layer_load: Arc<AtomicU64>,
         reconnect: Option<ReconnectFn>,
         target: String,
     ) -> Result<Self> {
@@ -269,6 +510,7 @@ impl BatchCommandsClient {
         let reconnect_reader = reconnect.clone();
         let outbound_reader = outbound.clone();
         let target_reader = target.clone();
+        let transport_layer_load_reader = Arc::clone(&transport_layer_load);
 
         let reader = tokio::spawn(async move {
             let mut inbound = inbound;
@@ -284,11 +526,13 @@ impl BatchCommandsClient {
                         }
                         match next {
                             Some(Ok(message)) => {
-                            let request_ids_len = message.request_ids.len();
-                            let responses_len = message.responses.len();
-                            if request_ids_len != responses_len {
-                                warn!(
-                                    "batch_commands response mismatch: request_ids={}, responses={}",
+                                transport_layer_load_reader
+                                    .store(message.transport_layer_load, Ordering::Relaxed);
+                                let request_ids_len = message.request_ids.len();
+                                let responses_len = message.responses.len();
+                                if request_ids_len != responses_len {
+                                    warn!(
+                                        "batch_commands response mismatch: request_ids={}, responses={}",
                                     request_ids_len, responses_len
                                 );
                             }
@@ -619,11 +863,15 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_stream_batches_ready_requests() {
         let (out_tx, out_rx) = mpsc::channel(8);
+        let transport_layer_load = Arc::new(AtomicU64::new(0));
         let mut stream = Box::pin(outbound_stream(
             out_rx,
             8,
             0,
             Duration::ZERO,
+            "basic".to_owned(),
+            200,
+            transport_layer_load,
             "unit_test_ready".to_owned(),
         ));
 
@@ -654,11 +902,15 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_stream_respects_batch_limit() {
         let (out_tx, out_rx) = mpsc::channel(8);
+        let transport_layer_load = Arc::new(AtomicU64::new(0));
         let mut stream = Box::pin(outbound_stream(
             out_rx,
             2,
             0,
             Duration::ZERO,
+            "basic".to_owned(),
+            200,
+            transport_layer_load,
             "unit_test_limit".to_owned(),
         ));
 
@@ -685,11 +937,15 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_stream_waits_for_more_requests_when_configured() {
         let (out_tx, out_rx) = mpsc::channel(8);
+        let transport_layer_load = Arc::new(AtomicU64::new(201));
         let mut stream = Box::pin(outbound_stream(
             out_rx,
             8,
             2,
             Duration::from_millis(100),
+            "basic".to_owned(),
+            200,
+            transport_layer_load,
             "unit_test_wait".to_owned(),
         ));
 
@@ -722,15 +978,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_outbound_stream_does_not_wait_when_not_overloaded_and_policy_basic() {
+        let (out_tx, out_rx) = mpsc::channel(8);
+        let transport_layer_load = Arc::new(AtomicU64::new(0));
+        let mut stream = Box::pin(outbound_stream(
+            out_rx,
+            8,
+            2,
+            Duration::from_millis(100),
+            "basic".to_owned(),
+            200,
+            transport_layer_load,
+            "unit_test_no_wait".to_owned(),
+        ));
+
+        let mk_req = |request_id| tikvpb::BatchCommandsRequest {
+            requests: vec![tikvpb::batch_commands_request::Request {
+                cmd: Some(tikvpb::batch_commands_request::request::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyRequest::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+        };
+
+        out_tx.send(mk_req(1)).await.expect("send req 1");
+
+        let batch = tokio::time::timeout(Duration::from_millis(20), stream.next())
+            .await
+            .expect("expected stream to yield without waiting")
+            .expect("batch");
+        assert_eq!(batch.request_ids, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_outbound_stream_turbo_policy_waits_for_more_requests() {
+        let (out_tx, out_rx) = mpsc::channel(8);
+        let transport_layer_load = Arc::new(AtomicU64::new(0));
+        let mut stream = Box::pin(outbound_stream(
+            out_rx,
+            8,
+            2,
+            Duration::ZERO,
+            "custom {\"v\":0,\"t\":0.05}".to_owned(),
+            200,
+            transport_layer_load,
+            "unit_test_turbo_wait".to_owned(),
+        ));
+
+        let mk_req = |request_id| tikvpb::BatchCommandsRequest {
+            requests: vec![tikvpb::batch_commands_request::Request {
+                cmd: Some(tikvpb::batch_commands_request::request::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyRequest::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+        };
+
+        out_tx.send(mk_req(1)).await.expect("send req 1");
+        let first = stream.next().await.expect("first batch");
+        assert_eq!(first.request_ids, vec![1]);
+
+        tokio::time::sleep(Duration::from_millis(1)).await;
+
+        out_tx.send(mk_req(2)).await.expect("send req 2");
+        let next = stream.next();
+        tokio::pin!(next);
+
+        tokio::select! {
+            batch = &mut next => {
+                let ids = batch.map(|batch| batch.request_ids);
+                panic!("expected outbound stream to wait for more requests, but got {ids:?}");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+
+        out_tx.send(mk_req(3)).await.expect("send req 3");
+
+        let batch = next.await.expect("second batch");
+        assert_eq!(batch.request_ids, vec![2, 3]);
+    }
+
+    #[tokio::test]
     #[serial(metrics)]
     async fn test_outbound_stream_records_batch_metrics() {
         let target = "unit_test_target_batch_metrics_outbound_stream".to_owned();
         let (out_tx, out_rx) = mpsc::channel(8);
+        let transport_layer_load = Arc::new(AtomicU64::new(0));
         let mut stream = Box::pin(outbound_stream(
             out_rx,
             2,
             0,
             Duration::ZERO,
+            "basic".to_owned(),
+            200,
+            transport_layer_load,
             target.clone(),
         ));
 

@@ -47,6 +47,8 @@ pub struct TikvConnect {
     grpc_compression_type: GrpcCompressionType,
     enable_batch_rpc: bool,
     batch_rpc_max_batch_size: usize,
+    batch_rpc_policy: String,
+    batch_rpc_overload_threshold: u64,
     batch_rpc_wait_size: usize,
     batch_rpc_max_wait_time: Duration,
     max_concurrency_request_limit: i64,
@@ -73,11 +75,23 @@ impl TikvConnect {
             grpc_compression_type,
             enable_batch_rpc,
             batch_rpc_max_batch_size,
+            batch_rpc_policy: crate::config::DEFAULT_BATCH_RPC_POLICY.to_owned(),
+            batch_rpc_overload_threshold: crate::config::DEFAULT_BATCH_RPC_OVERLOAD_THRESHOLD,
             batch_rpc_wait_size,
             batch_rpc_max_wait_time,
             max_concurrency_request_limit: crate::config::DEFAULT_MAX_CONCURRENCY_REQUEST_LIMIT,
             health_feedback_observer: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn with_batch_rpc_policy(mut self, policy: impl Into<String>) -> Self {
+        self.batch_rpc_policy = policy.into();
+        self
+    }
+
+    pub fn with_batch_rpc_overload_threshold(mut self, threshold: u64) -> Self {
+        self.batch_rpc_overload_threshold = threshold;
+        self
     }
 
     pub fn with_max_concurrency_request_limit(mut self, limit: i64) -> Self {
@@ -125,6 +139,8 @@ impl KvConnect for TikvConnect {
         let grpc_compression_type = self.grpc_compression_type;
         let enable_batch_rpc = self.enable_batch_rpc;
         let batch_rpc_max_batch_size = self.batch_rpc_max_batch_size;
+        let batch_rpc_policy = self.batch_rpc_policy.clone();
+        let batch_rpc_overload_threshold = self.batch_rpc_overload_threshold;
         let batch_rpc_wait_size = self.batch_rpc_wait_size;
         let batch_rpc_max_wait_time = self.batch_rpc_max_wait_time;
         let max_concurrency_request_limit = self.max_concurrency_request_limit;
@@ -148,6 +164,8 @@ impl KvConnect for TikvConnect {
             address.to_owned(),
             enable_batch_rpc,
             batch_rpc_max_batch_size,
+            batch_rpc_policy,
+            batch_rpc_overload_threshold,
             batch_rpc_wait_size,
             batch_rpc_max_wait_time,
             max_concurrency_request_limit,
@@ -331,6 +349,8 @@ impl KvRpcClient {
         store_address: String,
         enable_batch_rpc: bool,
         batch_rpc_max_batch_size: usize,
+        batch_rpc_policy: String,
+        batch_rpc_overload_threshold: u64,
         batch_rpc_wait_size: usize,
         batch_rpc_max_wait_time: Duration,
         max_concurrency_request_limit: i64,
@@ -347,6 +367,8 @@ impl KvRpcClient {
             match BatchCommandsClient::connect(
                 rpc_client.clone(),
                 batch_rpc_max_batch_size,
+                batch_rpc_policy,
+                batch_rpc_overload_threshold,
                 batch_rpc_wait_size,
                 batch_rpc_max_wait_time,
                 store_address.clone(),

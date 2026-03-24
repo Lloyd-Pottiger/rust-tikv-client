@@ -408,18 +408,37 @@ pub struct Config {
     ///
     /// This maps to client-go `TiKVClient.MaxBatchSize` (default: 128).
     pub batch_rpc_max_batch_size: usize,
+    /// Batch policy for the `BatchCommands` outbound stream.
+    ///
+    /// This maps to client-go `TiKVClient.BatchPolicy` (default: `"standard"`).
+    ///
+    /// Supported values mirror client-go:
+    /// - `"basic"`: disable additional batching (behavior before v8.3.0)
+    /// - `"standard"`: dynamically batch based on recent request arrival intervals
+    /// - `"positive"`: always perform a small additional batch wait
+    /// - `"custom {json}"`: customize internal turbo-batch options via a JSON object (best-effort)
+    pub batch_rpc_policy: String,
+    /// Overload threshold for batch request wait behavior.
+    ///
+    /// When [`Config::batch_rpc_max_wait_time`] is non-zero and the batch RPC stream reports a
+    /// `transport_layer_load` greater than this threshold, the client waits up to the configured
+    /// max wait time to collect additional requests.
+    ///
+    /// This maps to client-go `TiKVClient.OverloadThreshold` (default: 200).
+    pub batch_rpc_overload_threshold: u64,
     /// Maximum number of requests to wait for before sending a batch RPC request.
     ///
-    /// When batch RPC is enabled and [`Config::batch_rpc_max_wait_time`] is non-zero, the outbound
-    /// stream waits until it collects at least this many requests (or the wait time expires)
-    /// before sending.
+    /// This is used as the baseline target batch size for both:
+    /// - overload-based batching (when the store reports high `transport_layer_load`), and
+    /// - turbo batch policy based batching (see [`Config::batch_rpc_policy`]).
     ///
     /// This maps to client-go `TiKVClient.BatchWaitSize` (default: 8).
     pub batch_rpc_wait_size: usize,
     /// Maximum time to wait for additional requests before sending a batch RPC request.
     ///
-    /// Set to `Duration::ZERO` to disable the wait and send immediately-available requests
-    /// (default).
+    /// Set to `Duration::ZERO` to disable overload-based batching wait (default).
+    ///
+    /// Note: Turbo batch policy uses its own (typically much smaller) wait time.
     ///
     /// This maps to client-go `TiKVClient.MaxBatchWaitTime` (default: 0).
     pub batch_rpc_max_wait_time: Duration,
@@ -557,6 +576,8 @@ pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
 pub(crate) const DEFAULT_BATCH_RPC_MAX_BATCH_SIZE: usize = 128;
 pub(crate) const DEFAULT_BATCH_RPC_WAIT_SIZE: usize = 8;
 pub(crate) const DEFAULT_BATCH_RPC_MAX_WAIT_TIME: Duration = Duration::ZERO;
+pub(crate) const DEFAULT_BATCH_RPC_POLICY: &str = "standard";
+pub(crate) const DEFAULT_BATCH_RPC_OVERLOAD_THRESHOLD: u64 = 200;
 pub(crate) const DEFAULT_MAX_CONCURRENCY_REQUEST_LIMIT: i64 = i64::MAX;
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB
 const DEFAULT_GRPC_CONNECTION_COUNT: usize = 4;
@@ -597,6 +618,8 @@ impl Default for Config {
             enable_batch_rpc: false,
             enable_forwarding: false,
             batch_rpc_max_batch_size: DEFAULT_BATCH_RPC_MAX_BATCH_SIZE,
+            batch_rpc_policy: DEFAULT_BATCH_RPC_POLICY.to_owned(),
+            batch_rpc_overload_threshold: DEFAULT_BATCH_RPC_OVERLOAD_THRESHOLD,
             batch_rpc_wait_size: DEFAULT_BATCH_RPC_WAIT_SIZE,
             batch_rpc_max_wait_time: DEFAULT_BATCH_RPC_MAX_WAIT_TIME,
             grpc_connect_timeout: DEFAULT_GRPC_CONNECT_TIMEOUT,
@@ -915,6 +938,22 @@ impl Config {
     #[must_use]
     pub fn with_batch_rpc_max_batch_size(mut self, max_batch_size: usize) -> Self {
         self.batch_rpc_max_batch_size = max_batch_size.max(1);
+        self
+    }
+
+    /// Set the batch RPC policy (`BatchCommands`) (client-go `TiKVClient.BatchPolicy`).
+    ///
+    /// This is a best-effort compatibility layer. Invalid values fall back to the default policy.
+    #[must_use]
+    pub fn with_batch_rpc_policy(mut self, policy: impl Into<String>) -> Self {
+        self.batch_rpc_policy = policy.into();
+        self
+    }
+
+    /// Set the overload threshold used for batch wait behavior (client-go `TiKVClient.OverloadThreshold`).
+    #[must_use]
+    pub fn with_batch_rpc_overload_threshold(mut self, threshold: u64) -> Self {
+        self.batch_rpc_overload_threshold = threshold;
         self
     }
 
@@ -1282,6 +1321,11 @@ mod tests {
             config.batch_rpc_max_wait_time,
             DEFAULT_BATCH_RPC_MAX_WAIT_TIME
         );
+        assert_eq!(config.batch_rpc_policy, DEFAULT_BATCH_RPC_POLICY);
+        assert_eq!(
+            config.batch_rpc_overload_threshold,
+            DEFAULT_BATCH_RPC_OVERLOAD_THRESHOLD
+        );
         assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
         assert!(config.zone_label.is_none());
         assert_eq!(config.committer_concurrency, DEFAULT_COMMITTER_CONCURRENCY);
@@ -1322,6 +1366,15 @@ mod tests {
     fn test_with_max_concurrency_request_limit() {
         let config = Config::default().with_max_concurrency_request_limit(32);
         assert_eq!(config.max_concurrency_request_limit, 32);
+    }
+
+    #[test]
+    fn test_with_batch_rpc_policy_and_overload_threshold() {
+        let config = Config::default()
+            .with_batch_rpc_policy("basic")
+            .with_batch_rpc_overload_threshold(123);
+        assert_eq!(config.batch_rpc_policy, "basic");
+        assert_eq!(config.batch_rpc_overload_threshold, 123);
     }
 
     #[test]
