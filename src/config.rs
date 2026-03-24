@@ -175,6 +175,40 @@ pub enum GrpcCompressionType {
     Gzip,
 }
 
+/// Coprocessor cache configuration.
+///
+/// This mirrors client-go `config.TiKVClient.CoprCache`.
+///
+/// Note: The Rust client currently does not implement coprocessor response caching. This struct is
+/// preserved for API parity, and the configuration will become effective once coprocessor caching
+/// is implemented.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct CoprocessorCacheConfig {
+    /// Cache capacity in MiB.
+    ///
+    /// Set to `0` to disable coprocessor caching.
+    pub capacity_mb: u64,
+    /// Only cache requests containing a small number of ranges.
+    pub admission_max_ranges: u64,
+    /// Only cache requests whose result set is small (in MiB).
+    pub admission_max_result_mb: u64,
+    /// Only cache requests taking notable time to process (in milliseconds).
+    pub admission_min_process_ms: u64,
+}
+
+impl Default for CoprocessorCacheConfig {
+    fn default() -> Self {
+        CoprocessorCacheConfig {
+            capacity_mb: 1000,
+            admission_max_ranges: 500,
+            admission_max_result_mb: 10,
+            admission_min_process_ms: 5,
+        }
+    }
+}
+
 /// Standalone TLS/security settings.
 ///
 /// This mirrors client-go `config.Security`, but integrates with the Rust client through
@@ -301,6 +335,11 @@ pub struct Config {
     ///
     /// Defaults to 60 seconds (client-go default).
     pub copr_req_timeout: Duration,
+    /// Coprocessor cache settings (client-go `TiKVClient.CoprCache`).
+    ///
+    /// Note: This field is preserved for API parity. The Rust client does not yet implement
+    /// coprocessor response caching.
+    pub copr_cache: CoprocessorCacheConfig,
     /// Maximum number of in-flight requests allowed per TiKV store.
     ///
     /// When set to a value greater than 0, the client applies a best-effort per-store token limit
@@ -533,6 +572,7 @@ impl Default for Config {
             async_commit_allowed_clock_drift: DEFAULT_ASYNC_COMMIT_ALLOWED_CLOCK_DRIFT,
             timeout: DEFAULT_REQUEST_TIMEOUT,
             copr_req_timeout: DEFAULT_COPR_REQ_TIMEOUT,
+            copr_cache: CoprocessorCacheConfig::default(),
             store_limit: 0,
             committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
             max_txn_ttl: DEFAULT_MAX_TXN_TTL,
@@ -704,6 +744,16 @@ impl Config {
     #[must_use]
     pub fn with_copr_req_timeout(mut self, timeout: Duration) -> Self {
         self.copr_req_timeout = timeout;
+        self
+    }
+
+    /// Set the coprocessor cache config (client-go `TiKVClient.CoprCache`).
+    ///
+    /// Note: This field is currently preserved for API parity. The Rust client does not yet
+    /// implement coprocessor response caching.
+    #[must_use]
+    pub fn with_copr_cache(mut self, copr_cache: CoprocessorCacheConfig) -> Self {
+        self.copr_cache = copr_cache;
         self
     }
 
@@ -1210,6 +1260,7 @@ mod tests {
         );
         assert_eq!(config.commit_timeout, DEFAULT_COMMIT_TIMEOUT);
         assert_eq!(config.copr_req_timeout, DEFAULT_COPR_REQ_TIMEOUT);
+        assert_eq!(config.copr_cache, CoprocessorCacheConfig::default());
         assert_eq!(
             config.async_commit_keys_limit,
             DEFAULT_ASYNC_COMMIT_KEYS_LIMIT
@@ -1235,6 +1286,16 @@ mod tests {
     fn test_config_copr_req_timeout_is_configurable() {
         let config = Config::default().with_copr_req_timeout(Duration::from_secs(123));
         assert_eq!(config.copr_req_timeout, Duration::from_secs(123));
+    }
+
+    #[test]
+    fn test_config_copr_cache_is_configurable() {
+        let cache = CoprocessorCacheConfig {
+            capacity_mb: 0,
+            ..CoprocessorCacheConfig::default()
+        };
+        let config = Config::default().with_copr_cache(cache.clone());
+        assert_eq!(config.copr_cache, cache);
     }
 
     #[test]
