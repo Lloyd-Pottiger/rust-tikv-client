@@ -103,6 +103,11 @@ pub fn redact_key_error_if_necessary(err: &mut kvrpcpb::KeyError) {
             not_found.primary_key = marker.clone();
         }
     }
+    if let Some(lock_not_found) = err.txn_lock_not_found.as_mut() {
+        if !lock_not_found.key.is_empty() {
+            lock_not_found.key = marker.clone();
+        }
+    }
     if let Some(assertion_failed) = err.assertion_failed.as_mut() {
         if !assertion_failed.key.is_empty() {
             assertion_failed.key = marker.clone();
@@ -111,6 +116,36 @@ pub fn redact_key_error_if_necessary(err: &mut kvrpcpb::KeyError) {
     if let Some(primary_mismatch) = err.primary_mismatch.as_mut() {
         if let Some(info) = primary_mismatch.lock_info.as_mut() {
             redact_lock_info(info, &marker);
+        }
+    }
+    if let Some(debug_info) = err.debug_info.as_mut() {
+        for mvcc_info in &mut debug_info.mvcc_info {
+            if !mvcc_info.key.is_empty() {
+                mvcc_info.key = marker.clone();
+            }
+            if let Some(mvcc) = mvcc_info.mvcc.as_mut() {
+                if let Some(lock) = mvcc.lock.as_mut() {
+                    if !lock.primary.is_empty() {
+                        lock.primary = marker.clone();
+                    }
+                    if !lock.short_value.is_empty() {
+                        lock.short_value = marker.clone();
+                    }
+                    for secondary in &mut lock.secondaries {
+                        *secondary = marker.clone();
+                    }
+                }
+                for write in &mut mvcc.writes {
+                    if !write.short_value.is_empty() {
+                        write.short_value = marker.clone();
+                    }
+                }
+                for value in &mut mvcc.values {
+                    if !value.value.is_empty() {
+                        value.value = marker.clone();
+                    }
+                }
+            }
         }
     }
 }
@@ -209,6 +244,30 @@ mod tests {
                 primary_key: b"npk".to_vec(),
                 ..Default::default()
             }),
+            txn_lock_not_found: Some(kvrpcpb::TxnLockNotFound {
+                key: b"tlk".to_vec(),
+            }),
+            debug_info: Some(kvrpcpb::DebugInfo {
+                mvcc_info: vec![kvrpcpb::MvccDebugInfo {
+                    key: b"di_k".to_vec(),
+                    mvcc: Some(kvrpcpb::MvccInfo {
+                        lock: Some(kvrpcpb::MvccLock {
+                            primary: b"di_p".to_vec(),
+                            short_value: b"di_sv".to_vec(),
+                            secondaries: vec![b"di_s".to_vec()],
+                            ..Default::default()
+                        }),
+                        writes: vec![kvrpcpb::MvccWrite {
+                            short_value: b"di_wsv".to_vec(),
+                            ..Default::default()
+                        }],
+                        values: vec![kvrpcpb::MvccValue {
+                            value: b"di_v".to_vec(),
+                            ..Default::default()
+                        }],
+                    }),
+                }],
+            }),
             assertion_failed: Some(kvrpcpb::AssertionFailed {
                 key: b"ak".to_vec(),
                 ..Default::default()
@@ -250,6 +309,7 @@ mod tests {
 
         assert_eq!(err.commit_ts_expired.unwrap().key, vec![b'?']);
         assert_eq!(err.txn_not_found.unwrap().primary_key, vec![b'?']);
+        assert_eq!(err.txn_lock_not_found.unwrap().key, vec![b'?']);
         assert_eq!(err.assertion_failed.unwrap().key, vec![b'?']);
 
         let mismatch = err.primary_mismatch.unwrap();
@@ -257,5 +317,19 @@ mod tests {
         assert_eq!(mismatch_lock.primary_lock, vec![b'?']);
         assert_eq!(mismatch_lock.key, vec![b'?']);
         assert_eq!(mismatch_lock.secondaries, vec![vec![b'?']]);
+
+        let debug_info = err.debug_info.unwrap();
+        assert_eq!(debug_info.mvcc_info.len(), 1);
+        let debug_mvcc = &debug_info.mvcc_info[0];
+        assert_eq!(debug_mvcc.key, vec![b'?']);
+        let mvcc = debug_mvcc.mvcc.as_ref().expect("expected mvcc info");
+        let lock = mvcc.lock.as_ref().expect("expected mvcc lock");
+        assert_eq!(lock.primary, vec![b'?']);
+        assert_eq!(lock.short_value, vec![b'?']);
+        assert_eq!(lock.secondaries, vec![vec![b'?']]);
+        assert_eq!(mvcc.writes.len(), 1);
+        assert_eq!(mvcc.writes[0].short_value, vec![b'?']);
+        assert_eq!(mvcc.values.len(), 1);
+        assert_eq!(mvcc.values[0].value, vec![b'?']);
     }
 }
