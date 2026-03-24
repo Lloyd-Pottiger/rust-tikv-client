@@ -52,13 +52,20 @@ where
     TASK_TRACE_CONTROL_FLAGS.scope(flags, future)
 }
 
-/// Returns the task-local trace-control flags, if present.
+/// The function signature for providing fallback trace-control flags.
 ///
-/// Returns `None` when no trace-control flags are set for the current Tokio task (or when called
-/// outside a Tokio task).
+/// This mirrors client-go `trace.SetTraceControlExtractor`, but omits the Go `context.Context`
+/// parameter and is only consulted when the current Tokio task does not have explicit task-local
+/// flags.
+pub type TraceControlFlagsProvider = Arc<dyn Fn() -> Option<TraceControlFlags> + Send + Sync>;
+
+/// Returns the current trace-control flags, if present.
+///
+/// This first checks Tokio task-local flags. When none are set, it falls back to the registered
+/// [`TraceControlFlagsProvider`], if any.
 #[must_use]
 pub fn trace_control_flags() -> Option<TraceControlFlags> {
-    TASK_TRACE_CONTROL_FLAGS.try_with(|flags| *flags).ok()
+    task_local_trace_control_flags().or_else(trace_control_flags_from_provider)
 }
 
 pub(crate) fn effective_trace_control_flags(configured: TraceControlFlags) -> TraceControlFlags {
@@ -155,11 +162,28 @@ fn noop_trace_event(_category: Category, _name: &str, _fields: &[TraceField]) {}
 fn noop_is_category_enabled(_category: Category) -> bool {
     false
 }
+fn noop_trace_control_flags_provider() -> Option<TraceControlFlags> {
+    None
+}
+
+fn task_local_trace_control_flags() -> Option<TraceControlFlags> {
+    TASK_TRACE_CONTROL_FLAGS.try_with(|flags| *flags).ok()
+}
+
+fn trace_control_flags_from_provider() -> Option<TraceControlFlags> {
+    let provider = TRACE_CONTROL_FLAGS_PROVIDER
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    provider()
+}
 
 lazy_static! {
     static ref TRACE_EVENT_FUNC: RwLock<TraceEventFunc> = RwLock::new(Arc::new(noop_trace_event));
     static ref IS_CATEGORY_ENABLED_FUNC: RwLock<IsCategoryEnabledFunc> =
         RwLock::new(Arc::new(noop_is_category_enabled));
+    static ref TRACE_CONTROL_FLAGS_PROVIDER: RwLock<TraceControlFlagsProvider> =
+        RwLock::new(Arc::new(noop_trace_control_flags_provider));
     static ref KV_REQUEST_REGION_RANGES: RwLock<KvRequestRegionRanges> =
         RwLock::new(HashMap::new());
 }
@@ -185,6 +209,17 @@ pub fn set_is_category_enabled_func(func: Option<IsCategoryEnabledFunc>) {
         .write()
         .unwrap_or_else(|e| e.into_inner());
     *guard = func;
+}
+
+/// Register the global trace-control flags provider.
+///
+/// Passing `None` resets to a no-op provider that returns `None`.
+pub fn set_trace_control_flags_provider(provider: Option<TraceControlFlagsProvider>) {
+    let provider = provider.unwrap_or_else(|| Arc::new(noop_trace_control_flags_provider));
+    let mut guard = TRACE_CONTROL_FLAGS_PROVIDER
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = provider;
 }
 
 /// Record a trace event (does not check `is_category_enabled`).
@@ -271,16 +306,22 @@ mod tests {
     struct HookGuard {
         prev_event: TraceEventFunc,
         prev_enabled: IsCategoryEnabledFunc,
+        prev_flags_provider: TraceControlFlagsProvider,
     }
 
     impl Drop for HookGuard {
         fn drop(&mut self) {
             set_trace_event_func(Some(self.prev_event.clone()));
             set_is_category_enabled_func(Some(self.prev_enabled.clone()));
+            set_trace_control_flags_provider(Some(self.prev_flags_provider.clone()));
         }
     }
 
-    fn set_hooks_scoped(event: TraceEventFunc, enabled: IsCategoryEnabledFunc) -> HookGuard {
+    fn set_hooks_scoped(
+        event: TraceEventFunc,
+        enabled: IsCategoryEnabledFunc,
+        flags_provider: TraceControlFlagsProvider,
+    ) -> HookGuard {
         let prev_event = TRACE_EVENT_FUNC
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -289,13 +330,19 @@ mod tests {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let prev_flags_provider = TRACE_CONTROL_FLAGS_PROVIDER
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         set_trace_event_func(Some(event));
         set_is_category_enabled_func(Some(enabled));
+        set_trace_control_flags_provider(Some(flags_provider));
 
         HookGuard {
             prev_event,
             prev_enabled,
+            prev_flags_provider,
         }
     }
 
@@ -341,7 +388,7 @@ mod tests {
         });
         let enabled: IsCategoryEnabledFunc = Arc::new(|category| category == Category::KvRequest);
 
-        let _guard = set_hooks_scoped(event, enabled);
+        let _guard = set_hooks_scoped(event, enabled, Arc::new(noop_trace_control_flags_provider));
 
         trace_if_enabled(Category::KvRequest, "send", || {
             vec![TraceField::u64("id", 42)]
@@ -367,6 +414,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_task_local_trace_control_flags_scopes_restore_outer_values() {
+        let _lock = TRACE_HOOK_TEST_LOCK.lock().await;
+        let _guard = set_hooks_scoped(
+            Arc::new(noop_trace_event),
+            Arc::new(noop_is_category_enabled),
+            Arc::new(noop_trace_control_flags_provider),
+        );
         let outer_flags =
             TraceControlFlags::IMMEDIATE_LOG.with(TraceControlFlags::TIKV_CATEGORY_REQUEST);
         let inner_flags = outer_flags.with(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS);
@@ -386,5 +439,46 @@ mod tests {
         .await;
 
         assert_eq!(trace_control_flags(), None);
+    }
+
+    #[test]
+    fn test_trace_control_flags_uses_provider_when_task_local_missing() {
+        let _lock = TRACE_HOOK_TEST_LOCK.blocking_lock();
+        let provided_flags =
+            TraceControlFlags::IMMEDIATE_LOG.with(TraceControlFlags::TIKV_CATEGORY_REQUEST);
+        let _guard = set_hooks_scoped(
+            Arc::new(noop_trace_event),
+            Arc::new(noop_is_category_enabled),
+            Arc::new(move || Some(provided_flags)),
+        );
+
+        assert_eq!(trace_control_flags(), Some(provided_flags));
+        assert_eq!(
+            effective_trace_control_flags(TraceControlFlags::default()),
+            provided_flags
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_local_trace_control_flags_override_provider() {
+        let _lock = TRACE_HOOK_TEST_LOCK.lock().await;
+        let provided_flags = TraceControlFlags::TIKV_CATEGORY_REQUEST;
+        let task_local_flags = provided_flags.with(TraceControlFlags::IMMEDIATE_LOG);
+        let _guard = set_hooks_scoped(
+            Arc::new(noop_trace_event),
+            Arc::new(noop_is_category_enabled),
+            Arc::new(move || Some(provided_flags)),
+        );
+
+        with_trace_control_flags(task_local_flags, async {
+            assert_eq!(trace_control_flags(), Some(task_local_flags));
+            assert_eq!(
+                effective_trace_control_flags(TraceControlFlags::default()),
+                task_local_flags
+            );
+        })
+        .await;
+
+        assert_eq!(trace_control_flags(), Some(provided_flags));
     }
 }
