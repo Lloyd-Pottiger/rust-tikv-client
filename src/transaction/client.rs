@@ -292,6 +292,21 @@ impl Client {
         self.pd.region_cache()
     }
 
+    /// Return the shared PD HTTP client, if this client was configured with one.
+    pub fn pd_http_client(&self) -> Option<&reqwest::Client> {
+        self.pd.pd_http_client()
+    }
+
+    /// Return the configured PD HTTP endpoints for this client.
+    pub fn pd_http_endpoints(&self) -> &[String] {
+        self.pd.pd_http_endpoints()
+    }
+
+    /// Return whether the configured PD HTTP endpoints should be contacted over HTTPS.
+    pub fn pd_http_uses_https(&self) -> bool {
+        self.pd.pd_http_uses_https()
+    }
+
     /// Close cached gRPC connections to a TiKV store address.
     ///
     /// The client will reconnect the next time that address is used.

@@ -729,6 +729,21 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
 const REGION_CACHE_PRELOAD_LIMIT: i32 = 10_000;
 
 impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
+    /// Return the shared PD HTTP client, if this client was configured with one.
+    pub fn pd_http_client(&self) -> Option<&reqwest::Client> {
+        self.pd_http_client.as_ref()
+    }
+
+    /// Return the configured PD HTTP endpoints for this client.
+    pub fn pd_http_endpoints(&self) -> &[String] {
+        &self.pd_http_endpoints
+    }
+
+    /// Return whether the configured PD HTTP endpoints should be contacted over HTTPS.
+    pub fn pd_http_uses_https(&self) -> bool {
+        self.pd_http_use_https
+    }
+
     /// Return the shared region cache used by this PD client.
     pub fn region_cache(&self) -> &RegionCache<RetryClient<Cl>> {
         &self.region_cache
