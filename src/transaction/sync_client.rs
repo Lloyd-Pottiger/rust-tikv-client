@@ -146,6 +146,38 @@ impl SyncTransactionClient {
         self.client.is_closed()
     }
 
+    /// Returns the shared region cache used by this client.
+    ///
+    /// This is a synchronous version of [`TransactionClient::region_cache`](crate::TransactionClient::region_cache).
+    #[must_use]
+    pub fn region_cache(&self) -> &crate::RegionCache {
+        self.client.region_cache()
+    }
+
+    /// Returns the shared PD HTTP client, if this client was configured with one.
+    ///
+    /// This is a synchronous version of [`TransactionClient::pd_http_client`](crate::TransactionClient::pd_http_client).
+    #[must_use]
+    pub fn pd_http_client(&self) -> Option<&reqwest::Client> {
+        self.client.pd_http_client()
+    }
+
+    /// Returns the configured PD HTTP endpoints for this client.
+    ///
+    /// This is a synchronous version of [`TransactionClient::pd_http_endpoints`](crate::TransactionClient::pd_http_endpoints).
+    #[must_use]
+    pub fn pd_http_endpoints(&self) -> &[String] {
+        self.client.pd_http_endpoints()
+    }
+
+    /// Returns whether the configured PD HTTP endpoints should be contacted over HTTPS.
+    ///
+    /// This is a synchronous version of [`TransactionClient::pd_http_uses_https`](crate::TransactionClient::pd_http_uses_https).
+    #[must_use]
+    pub fn pd_http_uses_https(&self) -> bool {
+        self.client.pd_http_uses_https()
+    }
+
     /// Returns a [`LockResolver`](crate::transaction::LockResolver) handle associated with this client.
     #[must_use]
     pub fn lock_resolver(&self) -> crate::transaction::LockResolver {

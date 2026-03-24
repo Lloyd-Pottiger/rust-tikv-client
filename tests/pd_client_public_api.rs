@@ -18,6 +18,7 @@ fn crate_root_exports_pd_client_types() {
 fn crate_root_exports_region_cache_accessors() {
     let _: fn(&PdRpcClient) -> &RegionCache = PdRpcClient::region_cache;
     let _: fn(&TransactionClient) -> &RegionCache = TransactionClient::region_cache;
+    let _: fn(&SyncTransactionClient) -> &RegionCache = SyncTransactionClient::region_cache;
 }
 
 #[test]
@@ -28,4 +29,8 @@ fn crate_root_exports_pd_http_accessors() {
     let _: fn(&TransactionClient) -> Option<&reqwest::Client> = TransactionClient::pd_http_client;
     let _: fn(&TransactionClient) -> &[String] = TransactionClient::pd_http_endpoints;
     let _: fn(&TransactionClient) -> bool = TransactionClient::pd_http_uses_https;
+    let _: fn(&SyncTransactionClient) -> Option<&reqwest::Client> =
+        SyncTransactionClient::pd_http_client;
+    let _: fn(&SyncTransactionClient) -> &[String] = SyncTransactionClient::pd_http_endpoints;
+    let _: fn(&SyncTransactionClient) -> bool = SyncTransactionClient::pd_http_uses_https;
 }
