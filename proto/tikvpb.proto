@@ -13,6 +13,9 @@ import "rustproto.proto";
 option (gogoproto.sizer_all) = true;
 option (gogoproto.marshaler_all) = true;
 option (gogoproto.unmarshaler_all) = true;
+option (gogoproto.goproto_unkeyed_all) = false;
+option (gogoproto.goproto_unrecognized_all) = false;
+option (gogoproto.goproto_sizecache_all) = false;
 option (rustproto.lite_runtime_all) = true;
 
 option java_package = "org.tikv.kvproto";
@@ -21,8 +24,6 @@ option java_package = "org.tikv.kvproto";
 service Tikv {
     // Commands using a transactional interface.
     rpc KvGet(kvrpcpb.GetRequest) returns (kvrpcpb.GetResponse) {}
-    rpc KvFlush(kvrpcpb.FlushRequest) returns (kvrpcpb.FlushResponse) {}
-    rpc KvBufferBatchGet(kvrpcpb.BufferBatchGetRequest) returns (kvrpcpb.BufferBatchGetResponse) {}
     rpc KvScan(kvrpcpb.ScanRequest) returns (kvrpcpb.ScanResponse) {}
     rpc KvPrewrite(kvrpcpb.PrewriteRequest) returns (kvrpcpb.PrewriteResponse) {}
     rpc KvPessimisticLock(kvrpcpb.PessimisticLockRequest) returns (kvrpcpb.PessimisticLockResponse) {}
@@ -41,6 +42,8 @@ service Tikv {
     rpc KvDeleteRange(kvrpcpb.DeleteRangeRequest) returns (kvrpcpb.DeleteRangeResponse) {}
     rpc KvPrepareFlashbackToVersion(kvrpcpb.PrepareFlashbackToVersionRequest) returns (kvrpcpb.PrepareFlashbackToVersionResponse) {}
     rpc KvFlashbackToVersion(kvrpcpb.FlashbackToVersionRequest) returns (kvrpcpb.FlashbackToVersionResponse) {}
+    rpc KvFlush(kvrpcpb.FlushRequest) returns (kvrpcpb.FlushResponse) {}
+    rpc KvBufferBatchGet(kvrpcpb.BufferBatchGetRequest) returns (kvrpcpb.BufferBatchGetResponse) {}
 
     // Raw commands; no transaction support.
     rpc RawGet(kvrpcpb.RawGetRequest) returns (kvrpcpb.RawGetResponse) {}
@@ -70,6 +73,9 @@ service Tikv {
     rpc Coprocessor(coprocessor.Request) returns (coprocessor.Response) {}
     rpc CoprocessorStream(coprocessor.Request) returns (stream coprocessor.Response) {}
     rpc BatchCoprocessor(coprocessor.BatchRequest) returns (stream coprocessor.BatchResponse) {}
+
+    // Command send by remote coprocessor to TiKV for executing coprocessor request.
+    rpc DelegateCoprocessor(coprocessor.DelegateRequest) returns (coprocessor.DelegateResponse) {}
 
     // Command for executing custom user requests in TiKV coprocessor_v2.
     rpc RawCoprocessor(kvrpcpb.RawCoprocessorRequest) returns (kvrpcpb.RawCoprocessorResponse) {}
@@ -185,13 +191,12 @@ message BatchCommandsRequest {
 
             kvrpcpb.FlashbackToVersionRequest FlashbackToVersion = 35;
             kvrpcpb.PrepareFlashbackToVersionRequest PrepareFlashbackToVersion = 36;
-
             kvrpcpb.FlushRequest Flush = 37;
             kvrpcpb.BufferBatchGetRequest BufferBatchGet = 38;
 
             kvrpcpb.GetHealthFeedbackRequest GetHealthFeedback = 39;
-            kvrpcpb.BroadcastTxnStatusRequest BroadcastTxnStatus = 40;
 
+            kvrpcpb.BroadcastTxnStatusRequest BroadcastTxnStatus = 40;
             // For some test cases.
             BatchCommandsEmptyRequest Empty = 255;
         }
@@ -246,11 +251,12 @@ message BatchCommandsResponse {
 
             kvrpcpb.FlashbackToVersionResponse FlashbackToVersion = 35;
             kvrpcpb.PrepareFlashbackToVersionResponse PrepareFlashbackToVersion = 36;
-
+            
             kvrpcpb.FlushResponse Flush = 37;
             kvrpcpb.BufferBatchGetResponse BufferBatchGet = 38;
 
             kvrpcpb.GetHealthFeedbackResponse GetHealthFeedback = 39;
+            
             kvrpcpb.BroadcastTxnStatusResponse BroadcastTxnStatus = 40;
 
             // For some test cases.
@@ -264,6 +270,8 @@ message BatchCommandsResponse {
 
 message BatchRaftMessage {
     repeated raft_serverpb.RaftMessage msgs = 1;
+    // Used for measure the send duration.
+    uint64 last_observed_time = 13;
 }
 
 message BatchCommandsEmptyRequest {

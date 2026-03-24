@@ -2,12 +2,16 @@ syntax = "proto3";
 package metapb;
 
 import "encryptionpb.proto";
+
 import "gogoproto/gogo.proto";
 import "rustproto.proto";
 
-option (gogoproto.marshaler_all) = true;
 option (gogoproto.sizer_all) = true;
+option (gogoproto.marshaler_all) = true;
 option (gogoproto.unmarshaler_all) = true;
+option (gogoproto.goproto_unkeyed_all) = false;
+option (gogoproto.goproto_unrecognized_all) = false;
+option (gogoproto.goproto_sizecache_all) = false;
 option (rustproto.lite_runtime_all) = true;
 
 option java_package = "org.tikv.kvproto";
@@ -108,6 +112,13 @@ message Buckets {
 
     // The period in milliseconds that stats are collected with in
     uint64 period_in_ms = 5;
+}
+
+message BucketMeta {
+    // A hint indicate if keys have changed.
+    uint64 version = 1;
+    // keys of buckets, include start/end key of region
+    repeated bytes keys = 2;
 }
 
 message Region {
