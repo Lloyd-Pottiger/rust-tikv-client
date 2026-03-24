@@ -146,6 +146,59 @@ pub trait KvClient {
 }
 
 #[derive(Clone)]
+pub(crate) struct ForwardedHostKvClient {
+    inner: Arc<dyn KvClient + Send + Sync>,
+    from_store_id: u64,
+    to_store_id: u64,
+    forwarded_host: String,
+}
+
+impl ForwardedHostKvClient {
+    pub(crate) fn new(
+        inner: Arc<dyn KvClient + Send + Sync>,
+        from_store_id: u64,
+        to_store_id: u64,
+        forwarded_host: String,
+    ) -> ForwardedHostKvClient {
+        ForwardedHostKvClient {
+            inner,
+            from_store_id,
+            to_store_id,
+            forwarded_host,
+        }
+    }
+}
+
+#[async_trait]
+impl KvClient for ForwardedHostKvClient {
+    async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any>> {
+        let req_type = crate::request::plan::kv_cmd_from_label(request.label());
+        let result = crate::store::scope_forwarded_host(
+            self.forwarded_host.clone(),
+            self.inner.dispatch(request),
+        )
+        .await;
+
+        let label = if result.is_ok() { "ok" } else { "fail" };
+        crate::stats::inc_forward_request_counter(
+            self.from_store_id,
+            self.to_store_id,
+            &req_type,
+            label,
+        );
+        result
+    }
+
+    fn timeout(&self) -> Duration {
+        self.inner.timeout()
+    }
+
+    fn store_address(&self) -> Option<&str> {
+        self.inner.store_address()
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct StoreLimitKvClient {
     inner: Arc<dyn KvClient + Send + Sync>,
     store_id: u64,
@@ -965,6 +1018,9 @@ impl KvRpcClient {
 #[async_trait]
 impl KvClient for KvRpcClient {
     async fn dispatch(&self, request: &dyn Request) -> Result<Box<dyn Any>> {
+        if crate::store::has_forwarded_host() {
+            return request.dispatch(&self.rpc_client, self.timeout).await;
+        }
         if let Some(resp) = self.try_dispatch_batch(request).await? {
             return Ok(resp);
         }

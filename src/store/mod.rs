@@ -3,6 +3,7 @@
 mod batch;
 mod client;
 mod errors;
+mod forwarding;
 mod request;
 
 use std::cmp::max;
@@ -13,6 +14,7 @@ use derive_new::new;
 use futures::prelude::*;
 use futures::stream::BoxStream;
 
+pub(crate) use self::client::ForwardedHostKvClient;
 pub use self::client::KvClient;
 pub use self::client::KvConnect;
 pub(crate) use self::client::StoreLimitKvClient;
@@ -20,6 +22,11 @@ pub use self::client::TikvConnect;
 pub use self::errors::HasKeyErrors;
 pub use self::errors::HasRegionError;
 pub use self::errors::HasRegionErrors;
+pub(crate) use self::forwarding::apply_forwarded_host_metadata;
+#[cfg(test)]
+pub(crate) use self::forwarding::current_forwarded_host;
+pub(crate) use self::forwarding::has_forwarded_host;
+pub(crate) use self::forwarding::scope_forwarded_host;
 pub use self::request::Request;
 use crate::pd::PdClient;
 use crate::proto::kvrpcpb;

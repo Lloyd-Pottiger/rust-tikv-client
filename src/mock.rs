@@ -89,6 +89,8 @@ pub struct MockCluster;
 pub struct MockPdClient {
     client: MockKvClient,
     #[new(value = "RwLock::new(HashMap::new())")]
+    store_clients: RwLock<HashMap<StoreId, MockKvClient>>,
+    #[new(value = "RwLock::new(HashMap::new())")]
     store_metas: RwLock<HashMap<StoreId, metapb::Store>>,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
     store_meta_by_id_calls: Arc<AtomicUsize>,
@@ -138,6 +140,8 @@ pub struct MockPdClient {
     get_timestamp_should_fail: bool,
     #[new(value = "AtomicBool::new(false)")]
     all_stores_should_fail: AtomicBool,
+    #[new(value = "AtomicBool::new(false)")]
+    enable_forwarding: AtomicBool,
     #[new(value = "Mutex::new(Vec::new())")]
     scatter_regions_calls: Mutex<Vec<(Vec<RegionId>, Option<String>)>>,
     #[new(value = "Mutex::new(Vec::new())")]
@@ -199,6 +203,14 @@ impl KvConnect for MockKvConnect {
 impl MockPdClient {
     pub fn default() -> MockPdClient {
         MockPdClient::new(MockKvClient::default())
+    }
+
+    pub fn set_enable_forwarding(&self, enable: bool) {
+        self.enable_forwarding.store(enable, Ordering::SeqCst);
+    }
+
+    pub async fn insert_store_client(&self, store_id: StoreId, client: MockKvClient) {
+        self.store_clients.write().await.insert(store_id, client);
     }
 
     pub fn set_ttl_refreshed_txn_size(&self, size: u64) {
@@ -551,15 +563,26 @@ impl PdClient for MockPdClient {
         Duration::from_millis(self.max_txn_ttl_ms.load(Ordering::SeqCst))
     }
 
+    fn enable_forwarding(&self) -> bool {
+        self.enable_forwarding.load(Ordering::SeqCst)
+    }
+
     fn cluster_id(&self) -> u64 {
         self.cluster_id
     }
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
         let store_id = region.get_store_id()?;
+        let client = self
+            .store_clients
+            .read()
+            .await
+            .get(&store_id)
+            .cloned()
+            .unwrap_or_else(|| self.client.clone());
         Ok(RegionStore::new(
             region,
-            Arc::new(self.client.clone()),
+            Arc::new(client),
             format!("mock://{store_id}"),
         ))
     }

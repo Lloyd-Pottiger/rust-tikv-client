@@ -25,6 +25,7 @@ use crate::proto::metapb;
 use crate::proto::pdpb::Timestamp;
 use crate::region::StoreId;
 use crate::region::{RegionVerId, RegionWithLeader};
+use crate::region_cache::is_tiflash_related_store;
 use crate::request::shard::HasNextBatch;
 use crate::request::NextBatch;
 use crate::request::Shardable;
@@ -48,7 +49,7 @@ use crate::store::HasRegionError;
 use crate::store::HasRegionErrors;
 use crate::store::KvClient;
 use crate::store::RegionStore;
-use crate::store::{HasKeyErrors, Store};
+use crate::store::{ForwardedHostKvClient, HasKeyErrors, Store};
 use crate::timestamp::TimestampExt;
 use crate::trace::{self, Category, TraceField};
 use crate::transaction::resolve_locks_for_read;
@@ -98,7 +99,7 @@ fn duration_to_ms_saturating(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn kv_cmd_from_label(label: &'static str) -> String {
+pub(crate) fn kv_cmd_from_label(label: &'static str) -> String {
     let label =
         if (label.starts_with("kv_") || label.starts_with("raw_") || label == "batch_coprocessor")
             && label.ends_with("_request")
@@ -1942,8 +1943,7 @@ where
         if let Some((label, internal)) = txn_regions_num_observer {
             if shards.iter().all(|shard| shard.is_ok()) {
                 let mut unique_region_ids = std::collections::HashSet::new();
-                for shard in &shards {
-                    let (_shard, region) = shard.as_ref().expect("checked shard ok");
+                for (_, region) in shards.iter().flatten() {
                     unique_region_ids.insert(region.id());
                 }
                 crate::stats::observe_txn_regions_num(label, internal, unique_region_ids.len());
@@ -2027,6 +2027,9 @@ where
         debug!("single_shard_handler");
         let self_zone_label = crate::config::get_global_config().zone_label;
         let mut replica_read = replica_read;
+        if !stale_read && replica_read.is_none() && pd_client.enable_forwarding() {
+            replica_read = Some(ReplicaReadState::new(ReplicaReadType::Leader, false));
+        }
         let region_leader = region.leader.clone();
         let leader_store_id = region_leader.as_ref().map(|peer| peer.store_id);
         let busy_threshold_ms = plan
@@ -2303,20 +2306,88 @@ where
                 .map(|state| state.switch_to(ReplicaReadType::Leader, backoff.current_attempts()));
         }
         let replica_read_type = replica_read.as_ref().map(|state| state.read_type);
-        let region_store = match pd_client
-            .clone()
-            .map_region_to_store(region)
-            .await
-            .and_then(|region_store| {
-                plan.apply_store(&region_store)?;
-                if let Some(replica_read_type) = replica_read_type {
-                    if let Some(ctx) = plan.kv_context_mut() {
-                        adjust_replica_read_flag(ctx, leader_store_id, replica_read_type);
+        let should_forward = pd_client.enable_forwarding()
+            && !stale_read
+            && leader_store_id.is_some()
+            && region.leader.as_ref().map(|peer| peer.store_id) == leader_store_id
+            && unreachable_store_ids.contains(&leader_store_id.unwrap_or_default());
+        let (region_store, send_store_id) = match (async {
+            if should_forward {
+                let leader_store_id = leader_store_id.unwrap_or_default();
+                let leader_address = match pd_client.store_meta_by_id_cached(leader_store_id) {
+                    Some(store) => store.address,
+                    None => pd_client
+                        .store_meta_by_id(leader_store_id)
+                        .await
+                        .map(|store| store.address)
+                        .unwrap_or_default(),
+                };
+
+                if !leader_address.is_empty() {
+                    let mut proxy_peer = None;
+                    for peer in region.region.peers.iter() {
+                        if peer.store_id == leader_store_id
+                            || unreachable_store_ids.contains(&peer.store_id)
+                        {
+                            continue;
+                        }
+
+                        let store_meta = match pd_client.store_meta_by_id_cached(peer.store_id) {
+                            Some(store) => store,
+                            None => match pd_client.store_meta_by_id(peer.store_id).await {
+                                Ok(store) => store,
+                                Err(_) => continue,
+                            },
+                        };
+                        if is_tiflash_related_store(&store_meta) {
+                            continue;
+                        }
+                        proxy_peer = Some(peer.clone());
+                        break;
+                    }
+
+                    if let Some(proxy_peer) = proxy_peer {
+                        let proxy_store_id = proxy_peer.store_id;
+                        let mut proxy_region = region.clone();
+                        proxy_region.leader = Some(proxy_peer);
+                        let proxy_store =
+                            pd_client.clone().map_region_to_store(proxy_region).await?;
+                        let client: Arc<dyn KvClient + Send + Sync> =
+                            Arc::new(ForwardedHostKvClient::new(
+                                proxy_store.client.clone(),
+                                proxy_store_id,
+                                leader_store_id,
+                                leader_address,
+                            ));
+
+                        return Ok((
+                            RegionStore::new(region, client, proxy_store.store_address),
+                            Some(proxy_store_id),
+                        ));
                     }
                 }
-                Ok(region_store)
-            }) {
-            Ok(region_store) => region_store,
+            }
+
+            pd_client
+                .clone()
+                .map_region_to_store(region)
+                .await
+                .map(|region_store| {
+                    let store_id = region_store.region_with_leader.get_store_id().ok();
+                    (region_store, store_id)
+                })
+        })
+        .await
+        .and_then(|(region_store, send_store_id)| {
+            plan.apply_store(&region_store)?;
+            if let Some(replica_read_type) = replica_read_type {
+                if let Some(ctx) = plan.kv_context_mut() {
+                    adjust_replica_read_flag(ctx, leader_store_id, replica_read_type);
+                }
+            }
+            Ok((region_store, send_store_id))
+        }) {
+            Ok(result) => result,
             Err(Error::LeaderNotFound { region }) => {
                 debug!(
                     "single_shard_handler::sharding: leader not found: {:?}",
@@ -2414,7 +2485,9 @@ where
                     _ => false,
                 };
                 if is_transient_failure {
-                    if let Ok(store_id) = region_store.region_with_leader.get_store_id() {
+                    let store_id = send_store_id
+                        .or_else(|| region_store.region_with_leader.get_store_id().ok());
+                    if let Some(store_id) = store_id {
                         inc_connection_transient_failure_count(
                             &region_store.store_address,
                             store_id,
@@ -2426,7 +2499,7 @@ where
                     pd_client,
                     plan,
                     region_store.region_with_leader.ver_id(),
-                    region_store.region_with_leader.get_store_id().ok(),
+                    send_store_id.or_else(|| region_store.region_with_leader.get_store_id().ok()),
                     backoff,
                     killed.clone(),
                     permits,
@@ -3986,6 +4059,21 @@ mod test {
         }
     }
 
+    fn set_trace_categories_enabled_for_trace_id(
+        trace_id: Vec<u8>,
+        categories: Vec<crate::trace::Category>,
+    ) -> Vec<u8> {
+        let expected_trace_id = trace_id.clone();
+        let enabled: crate::trace::IsCategoryEnabledFunc = std::sync::Arc::new(move |category| {
+            if crate::trace::trace_id().as_deref() != Some(expected_trace_id.as_slice()) {
+                return false;
+            }
+            categories.contains(&category)
+        });
+        crate::trace::set_is_category_enabled_func(Some(enabled));
+        trace_id
+    }
+
     fn trace_field_str<'a>(fields: &'a [crate::trace::TraceField], key: &str) -> Option<&'a str> {
         fields
             .iter()
@@ -4330,6 +4418,134 @@ mod test {
 
     #[tokio::test]
     #[serial(metrics)]
+    async fn test_single_shard_handler_forwards_leader_requests_through_proxy_store() {
+        fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+            metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.get_name() == name)
+                .map(|pair| pair.get_value())
+        }
+
+        fn counter_value(from_store: &str, to_store: &str, ty: &str, result: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_forward_request_counter")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "from_store") == Some(from_store)
+                            && label_value(metric, "to_store") == Some(to_store)
+                            && label_value(metric, "type") == Some(ty)
+                            && label_value(metric, "result") == Some(result)
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        const LEADER_STORE_ID: u64 = 41;
+        const PROXY_STORE_ID: u64 = 51;
+        let leader_address = "unit_test_forward_leader:20160".to_owned();
+
+        let leader_calls = Arc::new(AtomicUsize::new(0));
+        let proxy_calls = Arc::new(AtomicUsize::new(0));
+
+        let leader_client = {
+            let leader_calls = Arc::clone(&leader_calls);
+            MockKvClient::with_dispatch_hook(move |req| {
+                leader_calls.fetch_add(1, Ordering::SeqCst);
+                req.downcast_ref::<kvrpcpb::RawPutRequest>()
+                    .expect("expected RawPutRequest");
+                Err(Error::GrpcAPI(tonic::Status::unavailable(
+                    "simulated leader unreachable",
+                )))
+            })
+        };
+
+        let proxy_client = {
+            let proxy_calls = Arc::clone(&proxy_calls);
+            let leader_address = leader_address.clone();
+            MockKvClient::with_dispatch_hook(move |req| {
+                proxy_calls.fetch_add(1, Ordering::SeqCst);
+                req.downcast_ref::<kvrpcpb::RawPutRequest>()
+                    .expect("expected RawPutRequest");
+
+                let forwarded_host =
+                    crate::store::current_forwarded_host().expect("expected forwarded host set");
+                assert_eq!(forwarded_host, leader_address);
+
+                Ok(Box::new(kvrpcpb::RawPutResponse::default()) as Box<dyn Any>)
+            })
+        };
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::default()));
+        pd_client.set_enable_forwarding(true);
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: LEADER_STORE_ID,
+                address: leader_address.clone(),
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_meta(metapb::Store {
+                id: PROXY_STORE_ID,
+                address: "unit_test_forward_proxy:20160".to_owned(),
+                ..Default::default()
+            })
+            .await;
+        pd_client
+            .insert_store_client(LEADER_STORE_ID, leader_client)
+            .await;
+        pd_client
+            .insert_store_client(PROXY_STORE_ID, proxy_client)
+            .await;
+
+        let mut request = kvrpcpb::RawPutRequest::default();
+        request.key = vec![1];
+        request.value = vec![2];
+        request.context = Some(kvrpcpb::Context::default());
+
+        let plan = Dispatch {
+            request,
+            kv_client: None,
+        };
+        let permits = Arc::new(Semaphore::new(1));
+        let match_store_ids = Arc::new(Vec::new());
+        let match_store_labels = Arc::new(Vec::new());
+
+        let before = counter_value("51", "41", "RawPut", "ok");
+        let results = RetryableMultiRegion::<Dispatch<kvrpcpb::RawPutRequest>, MockPdClient>::single_shard_handler(
+            pd_client,
+            plan,
+            MockPdClient::region1(),
+            Backoff::no_jitter_backoff(0, 0, 2),
+            None,
+            permits,
+            false,
+            false,
+            None,
+            match_store_ids,
+            match_store_labels,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let after = counter_value("51", "41", "RawPut", "ok");
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        assert_eq!(leader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(proxy_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            after >= before + 1.0,
+            "expected forward_request_counter to increase"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
     async fn test_single_shard_handler_prefer_leader_records_prefer_leader_flows_gauge_to_leader() {
         const STORE_ID: u64 = 4_242_424_244;
 
@@ -4662,22 +4878,26 @@ mod test {
             });
         crate::trace::set_trace_event_func(Some(event));
 
-        let enabled: crate::trace::IsCategoryEnabledFunc =
-            std::sync::Arc::new(|category| category == crate::trace::Category::KvRequest);
-        crate::trace::set_is_category_enabled_func(Some(enabled));
+        let trace_id = set_trace_categories_enabled_for_trace_id(
+            b"trace_test_request_send_result".to_vec(),
+            vec![crate::trace::Category::KvRequest],
+        );
 
-        let kv = MockKvClient::with_dispatch_hook(|req| {
-            req.downcast_ref::<TraceTestRequest>()
-                .expect("expected trace test request");
-            Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()) as Box<dyn Any>)
-        });
+        crate::trace::with_trace_id(trace_id, async {
+            let kv = MockKvClient::with_dispatch_hook(|req| {
+                req.downcast_ref::<TraceTestRequest>()
+                    .expect("expected trace test request");
+                Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            });
 
-        let plan = Dispatch {
-            request: TraceTestRequest,
-            kv_client: Some(std::sync::Arc::new(kv)),
-        };
+            let plan = Dispatch {
+                request: TraceTestRequest,
+                kv_client: Some(std::sync::Arc::new(kv)),
+            };
 
-        let _ = plan.execute().await.unwrap();
+            let _ = plan.execute().await.unwrap();
+        })
+        .await;
 
         let events = seen.lock().unwrap().clone();
         assert_eq!(events.len(), 2);
@@ -4755,9 +4975,10 @@ mod test {
             });
         crate::trace::set_trace_event_func(Some(event));
 
-        let enabled: crate::trace::IsCategoryEnabledFunc =
-            std::sync::Arc::new(|category| category == crate::trace::Category::KvRequest);
-        crate::trace::set_is_category_enabled_func(Some(enabled));
+        let trace_id = set_trace_categories_enabled_for_trace_id(
+            b"trace_kv_request_region_store".to_vec(),
+            vec![crate::trace::Category::KvRequest],
+        );
 
         let mut region = crate::proto::metapb::Region::default();
         region.id = 42;
@@ -4776,26 +4997,29 @@ mod test {
         let expected_start = crate::redact::key(&region.region.start_key);
         let expected_end = crate::redact::key(&region.region.end_key);
 
-        let mut get = crate::proto::kvrpcpb::GetRequest::default();
-        get.key = vec![1];
-        let mut request =
-            crate::request::RequestWithTimeout::new(get, std::time::Duration::from_secs(5));
-        crate::store::Request::set_leader(&mut request, &region)
-            .expect("set_leader should succeed");
+        crate::trace::with_trace_id(trace_id, async {
+            let mut get = crate::proto::kvrpcpb::GetRequest::default();
+            get.key = vec![1];
+            let mut request =
+                crate::request::RequestWithTimeout::new(get, std::time::Duration::from_secs(5));
+            crate::store::Request::set_leader(&mut request, &region)
+                .expect("set_leader should succeed");
 
-        let mut kv = MockKvClient::with_dispatch_hook(|req| {
-            req.downcast_ref::<crate::proto::kvrpcpb::GetRequest>()
-                .expect("expected get request");
-            Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()) as Box<dyn Any>)
-        });
-        kv.addr = "test-store".to_owned();
+            let mut kv = MockKvClient::with_dispatch_hook(|req| {
+                req.downcast_ref::<crate::proto::kvrpcpb::GetRequest>()
+                    .expect("expected get request");
+                Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()) as Box<dyn Any>)
+            });
+            kv.addr = "test-store".to_owned();
 
-        let plan = Dispatch {
-            request,
-            kv_client: Some(std::sync::Arc::new(kv)),
-        };
+            let plan = Dispatch {
+                request,
+                kv_client: Some(std::sync::Arc::new(kv)),
+            };
 
-        let _ = plan.execute().await.unwrap();
+            let _ = plan.execute().await.unwrap();
+        })
+        .await;
 
         let events = seen.lock().unwrap().clone();
         assert_eq!(events.len(), 2);
@@ -4843,42 +5067,46 @@ mod test {
             });
         crate::trace::set_trace_event_func(Some(event));
 
-        let enabled: crate::trace::IsCategoryEnabledFunc =
-            std::sync::Arc::new(|category| category == crate::trace::Category::KvRequest);
-        crate::trace::set_is_category_enabled_func(Some(enabled));
+        let trace_id = set_trace_categories_enabled_for_trace_id(
+            b"trace_cop_other_error".to_vec(),
+            vec![crate::trace::Category::KvRequest],
+        );
 
-        let mut region = crate::proto::metapb::Region::default();
-        region.id = 7;
-        region.region_epoch = Some(crate::proto::metapb::RegionEpoch {
-            conf_ver: 8,
-            version: 9,
-        });
-        let mut peer = crate::proto::metapb::Peer::default();
-        peer.store_id = 41;
-        let region = crate::region::RegionWithLeader {
-            region,
-            leader: Some(peer),
-        };
+        crate::trace::with_trace_id(trace_id, async {
+            let mut region = crate::proto::metapb::Region::default();
+            region.id = 7;
+            region.region_epoch = Some(crate::proto::metapb::RegionEpoch {
+                conf_ver: 8,
+                version: 9,
+            });
+            let mut peer = crate::proto::metapb::Peer::default();
+            peer.store_id = 41;
+            let region = crate::region::RegionWithLeader {
+                region,
+                leader: Some(peer),
+            };
 
-        let mut request = crate::proto::coprocessor::Request::default();
-        crate::store::Request::set_leader(&mut request, &region)
-            .expect("set_leader should succeed");
+            let mut request = crate::proto::coprocessor::Request::default();
+            crate::store::Request::set_leader(&mut request, &region)
+                .expect("set_leader should succeed");
 
-        let mut kv = MockKvClient::with_dispatch_hook(|req| {
-            req.downcast_ref::<crate::proto::coprocessor::Request>()
-                .expect("expected coprocessor request");
-            let mut resp = crate::proto::coprocessor::Response::default();
-            resp.other_error = "boom".to_owned();
-            Ok(Box::new(resp) as Box<dyn Any>)
-        });
-        kv.addr = "test-store".to_owned();
+            let mut kv = MockKvClient::with_dispatch_hook(|req| {
+                req.downcast_ref::<crate::proto::coprocessor::Request>()
+                    .expect("expected coprocessor request");
+                let mut resp = crate::proto::coprocessor::Response::default();
+                resp.other_error = "boom".to_owned();
+                Ok(Box::new(resp) as Box<dyn Any>)
+            });
+            kv.addr = "test-store".to_owned();
 
-        let plan = Dispatch {
-            request,
-            kv_client: Some(std::sync::Arc::new(kv)),
-        };
+            let plan = Dispatch {
+                request,
+                kv_client: Some(std::sync::Arc::new(kv)),
+            };
 
-        let _ = plan.execute().await.unwrap();
+            let _ = plan.execute().await.unwrap();
+        })
+        .await;
 
         let events = seen.lock().unwrap().clone();
         assert_eq!(events.len(), 1);
@@ -4913,9 +5141,10 @@ mod test {
             });
         crate::trace::set_trace_event_func(Some(event));
 
-        let enabled: crate::trace::IsCategoryEnabledFunc =
-            std::sync::Arc::new(|category| category == crate::trace::Category::KvRequest);
-        crate::trace::set_is_category_enabled_func(Some(enabled));
+        let trace_id = set_trace_categories_enabled_for_trace_id(
+            b"trace_kv_request_exec_details".to_vec(),
+            vec![crate::trace::Category::KvRequest],
+        );
 
         let exec_details = crate::proto::kvrpcpb::ExecDetailsV2 {
             time_detail: None,
@@ -4949,8 +5178,11 @@ mod test {
             kv_client: Some(std::sync::Arc::new(kv)),
         };
 
-        crate::util::with_trace_exec_details(async {
-            let _ = plan.execute().await.unwrap();
+        crate::trace::with_trace_id(trace_id, async {
+            crate::util::with_trace_exec_details(async {
+                let _ = plan.execute().await.unwrap();
+            })
+            .await;
         })
         .await;
 
@@ -5018,9 +5250,10 @@ mod test {
             });
         crate::trace::set_trace_event_func(Some(event));
 
-        let enabled: crate::trace::IsCategoryEnabledFunc =
-            std::sync::Arc::new(|category| category == crate::trace::Category::KvRequest);
-        crate::trace::set_is_category_enabled_func(Some(enabled));
+        let trace_id = set_trace_categories_enabled_for_trace_id(
+            b"trace_kv_request_interceptor_target".to_vec(),
+            vec![crate::trace::Category::KvRequest],
+        );
 
         let kv = MockKvClient::with_dispatch_hook(|req| {
             req.downcast_ref::<crate::proto::kvrpcpb::GetRequest>()
@@ -5040,7 +5273,10 @@ mod test {
             rpc_interceptors,
         };
 
-        let _ = plan.execute().await.unwrap();
+        crate::trace::with_trace_id(trace_id, async {
+            let _ = plan.execute().await.unwrap();
+        })
+        .await;
 
         let events = seen.lock().unwrap().clone();
         assert_eq!(events.len(), 2);
@@ -5111,9 +5347,10 @@ mod test {
             });
         crate::trace::set_trace_event_func(Some(event));
 
-        let enabled: crate::trace::IsCategoryEnabledFunc =
-            std::sync::Arc::new(|category| category == crate::trace::Category::Txn2Pc);
-        crate::trace::set_is_category_enabled_func(Some(enabled));
+        let trace_id = set_trace_categories_enabled_for_trace_id(
+            b"trace_2pc_prewrite".to_vec(),
+            vec![crate::trace::Category::Txn2Pc],
+        );
 
         let kv = MockKvClient::with_dispatch_hook(|req| {
             req.downcast_ref::<crate::proto::kvrpcpb::PrewriteRequest>()
@@ -5145,7 +5382,10 @@ mod test {
             request: req,
             kv_client: Some(std::sync::Arc::new(kv)),
         };
-        let _ = plan.execute().await.unwrap();
+        crate::trace::with_trace_id(trace_id, async {
+            let _ = plan.execute().await.unwrap();
+        })
+        .await;
 
         let events = seen.lock().unwrap().clone();
         assert_eq!(events.len(), 2);
@@ -5199,9 +5439,10 @@ mod test {
             });
         crate::trace::set_trace_event_func(Some(event));
 
-        let enabled: crate::trace::IsCategoryEnabledFunc =
-            std::sync::Arc::new(|category| category == crate::trace::Category::Txn2Pc);
-        crate::trace::set_is_category_enabled_func(Some(enabled));
+        let trace_id = set_trace_categories_enabled_for_trace_id(
+            b"trace_2pc_commit".to_vec(),
+            vec![crate::trace::Category::Txn2Pc],
+        );
 
         let kv = MockKvClient::with_dispatch_hook(|req| {
             req.downcast_ref::<crate::proto::kvrpcpb::CommitRequest>()
@@ -5222,7 +5463,10 @@ mod test {
             request: req,
             kv_client: Some(std::sync::Arc::new(kv)),
         };
-        let _ = plan.execute().await.unwrap();
+        crate::trace::with_trace_id(trace_id, async {
+            let _ = plan.execute().await.unwrap();
+        })
+        .await;
 
         let events = seen.lock().unwrap().clone();
         assert_eq!(events.len(), 2);

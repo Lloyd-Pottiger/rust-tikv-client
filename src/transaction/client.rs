@@ -1455,7 +1455,7 @@ mod tests {
             .and_then(|family| {
                 family
                     .get_metric()
-                    .get(0)
+                    .first()
                     .map(|metric| metric.get_counter().get_value())
             })
             .unwrap_or(0.0)
@@ -1470,7 +1470,7 @@ mod tests {
             .and_then(|family| {
                 family
                     .get_metric()
-                    .get(0)
+                    .first()
                     .map(|metric| metric.get_gauge().get_value())
             })
     }

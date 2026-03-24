@@ -8444,15 +8444,15 @@ mod tests {
         let after_duration = sample_count(metric_duration);
 
         assert!(
-            after_len >= before_len + 1,
+            after_len > before_len,
             "expected pipelined_flush_len histogram to record a sample"
         );
         assert!(
-            after_size >= before_size + 1,
+            after_size > before_size,
             "expected pipelined_flush_size histogram to record a sample"
         );
         assert!(
-            after_duration >= before_duration + 1,
+            after_duration > before_duration,
             "expected pipelined_flush_duration histogram to record a sample"
         );
     }
@@ -13963,7 +13963,7 @@ mod tests {
             "expected ttl_lifetime_reach_total to increase"
         );
         assert!(
-            txn_ttl_manager_samples() >= samples_before + 1,
+            txn_ttl_manager_samples() > samples_before,
             "expected txn_ttl_manager to record a lifetime observation"
         );
     }
@@ -14855,11 +14855,11 @@ mod tests {
         let after_ok_attempt = histogram_samples(metric_attempt, "ok");
 
         assert!(
-            after_ok_wait >= before_ok_wait + 1,
+            after_ok_wait > before_ok_wait,
             "expected lag commit ts wait histogram to record ok label"
         );
         assert!(
-            after_ok_attempt >= before_ok_attempt + 1,
+            after_ok_attempt > before_ok_attempt,
             "expected lag commit ts attempt histogram to record ok label"
         );
 
@@ -14887,11 +14887,11 @@ mod tests {
         let after_err_attempt = histogram_samples(metric_attempt, "err");
 
         assert!(
-            after_err_wait >= before_err_wait + 1,
+            after_err_wait > before_err_wait,
             "expected lag commit ts wait histogram to record err label"
         );
         assert!(
-            after_err_attempt >= before_err_attempt + 1,
+            after_err_attempt > before_err_attempt,
             "expected lag commit ts attempt histogram to record err label"
         );
     }
@@ -14959,11 +14959,11 @@ mod tests {
         let after_size = histogram_samples(metric_size, "false");
 
         assert!(
-            after_kv >= before_kv + 1,
+            after_kv > before_kv,
             "expected txn_write_kv_num histogram to record a sample"
         );
         assert!(
-            after_size >= before_size + 1,
+            after_size > before_size,
             "expected txn_write_size_bytes histogram to record a sample"
         );
     }
@@ -16193,7 +16193,7 @@ mod tests {
             histogram_sample("tikv_client_rust_txn_commit_backoff_count");
 
         assert!(
-            seconds_count_after >= seconds_count_before + 1,
+            seconds_count_after > seconds_count_before,
             "expected txn_commit_backoff_seconds histogram to record observations"
         );
         assert!(
@@ -16201,7 +16201,7 @@ mod tests {
             "expected txn_commit_backoff_seconds histogram sum to increase"
         );
         assert!(
-            count_count_after >= count_count_before + 1,
+            count_count_after > count_count_before,
             "expected txn_commit_backoff_count histogram to record observations"
         );
         assert!(
@@ -16349,7 +16349,7 @@ mod tests {
 
         let after = histogram_sample_count("tikv_client_rust_batch_executor_token_wait_duration");
         assert!(
-            after >= before + 1,
+            after > before,
             "expected batch_executor_token_wait_duration histogram to record observations"
         );
     }
@@ -16673,7 +16673,7 @@ mod tests {
 
         let after = sample_count("batch_get", "true");
         assert!(
-            after >= before + 1,
+            after > before,
             "expected txn_cmd_duration_seconds batch_get to record once"
         );
         assert!(
@@ -16751,19 +16751,19 @@ mod tests {
         txn.rollback().await.unwrap();
 
         assert!(
-            sample_count("commit", "true") >= before_commit + 1,
+            sample_count("commit", "true") > before_commit,
             "expected txn_cmd_duration_seconds commit to increase"
         );
         assert!(
-            sample_count("rollback", "true") >= before_rollback + 1,
+            sample_count("rollback", "true") > before_rollback,
             "expected txn_cmd_duration_seconds rollback to increase"
         );
         assert!(
-            sample_count("lock_keys", "true") >= before_lock_keys + 1,
+            sample_count("lock_keys", "true") > before_lock_keys,
             "expected txn_cmd_duration_seconds lock_keys to increase"
         );
         assert!(
-            sample_count("shared_lock_keys", "true") >= before_shared_lock_keys + 1,
+            sample_count("shared_lock_keys", "true") > before_shared_lock_keys,
             "expected txn_cmd_duration_seconds shared_lock_keys to increase"
         );
     }
@@ -16837,11 +16837,11 @@ mod tests {
         let ok_after = sample_count("ok");
         let err_after = sample_count("err");
         assert!(
-            ok_after >= ok_before + 1,
+            ok_after > ok_before,
             "expected txn_heart_beat ok to increase"
         );
         assert!(
-            err_after >= err_before + 1,
+            err_after > err_before,
             "expected txn_heart_beat err to increase"
         );
     }
@@ -16905,7 +16905,7 @@ mod tests {
 
         let ok_after = sample_count("ok");
         assert!(
-            ok_after >= ok_before + 1,
+            ok_after > ok_before,
             "expected txn_heart_beat ok to increase"
         );
     }

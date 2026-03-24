@@ -431,6 +431,13 @@ pub trait PdClient: Send + Sync + 'static {
         crate::config::DEFAULT_MAX_TXN_TTL
     }
 
+    /// Whether TiKV request forwarding is enabled (client-go `EnableForwarding`).
+    ///
+    /// The default implementation always returns false.
+    fn enable_forwarding(&self) -> bool {
+        false
+    }
+
     /// Returns the TiKV cluster ID.
     ///
     /// When non-zero, this is attached to KV requests via `kvrpcpb::Context.cluster_id`.
@@ -697,6 +704,7 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     store_estimated_wait_until: Mutex<HashMap<StoreId, Instant>>,
     store_limit: i64,
     store_token_count: Mutex<HashMap<StoreId, Arc<AtomicI64>>>,
+    enable_forwarding: bool,
     enable_codec: bool,
     region_cache: RegionCache<RetryClient<Cl>>,
     resolve_lock_lite_threshold: u64,
@@ -783,6 +791,10 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     fn max_txn_ttl(&self) -> Duration {
         self.max_txn_ttl
+    }
+
+    fn enable_forwarding(&self) -> bool {
+        self.enable_forwarding
     }
 
     fn cluster_id(&self) -> u64 {
@@ -1206,6 +1218,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
 
         let grpc_connection_count = config.grpc_connection_count;
         let store_limit = config.store_limit;
+        let enable_forwarding = config.enable_forwarding;
         let resolve_lock_lite_threshold = config.resolve_lock_lite_threshold;
         let ttl_refreshed_txn_size = config.ttl_refreshed_txn_size;
         let committer_concurrency = config.committer_concurrency;
@@ -1244,6 +1257,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             store_estimated_wait_until: Mutex::new(HashMap::new()),
             store_limit,
             store_token_count: Mutex::new(HashMap::new()),
+            enable_forwarding,
             enable_codec,
             region_cache: RegionCache::new_with_ttl(
                 pd,

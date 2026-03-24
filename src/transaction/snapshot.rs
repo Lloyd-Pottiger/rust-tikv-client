@@ -1155,7 +1155,7 @@ mod tests {
 
         let after = sample_count("batch_get", "true");
         assert!(
-            after >= before + 1,
+            after > before,
             "expected txn_cmd_duration_seconds batch_get to record when snapshot fetches"
         );
     }

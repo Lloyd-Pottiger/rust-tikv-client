@@ -456,6 +456,27 @@ pub(crate) fn inc_get_store_limit_token_error(address: &str, store_id: u64) {
     counter.with_label_values(&[address, store]).inc();
 }
 
+pub(crate) fn inc_forward_request_counter(
+    from_store_id: u64,
+    to_store_id: u64,
+    request_type: &str,
+    result: &str,
+) {
+    if from_store_id == 0 || to_store_id == 0 {
+        return;
+    }
+    let Some(counter) = TIKV_CLIENT_RUST_FORWARD_REQUEST_COUNTER_VEC.as_ref() else {
+        return;
+    };
+    let mut from_buf = [0u8; 20];
+    let from_store = u64_label_value(from_store_id, &mut from_buf);
+    let mut to_buf = [0u8; 20];
+    let to_store = u64_label_value(to_store_id, &mut to_buf);
+    counter
+        .with_label_values(&[from_store, to_store, request_type, result])
+        .inc();
+}
+
 pub(crate) fn observe_batch_pending_requests(target: &str, pending_requests: usize) {
     let Some(histogram) = TIKV_CLIENT_RUST_BATCH_PENDING_REQUESTS_HISTOGRAM_VEC.as_ref() else {
         return;
@@ -1177,7 +1198,7 @@ fn exec_details_v2_from_response(response: &dyn Any) -> Option<&kvrpcpb::ExecDet
 }
 
 const SMALL_TXN_READ_KEYS_THRESHOLD: u64 = 20;
-const SMALL_TXN_READ_SIZE_THRESHOLD_BYTES: u64 = 1 * 1024 * 1024;
+const SMALL_TXN_READ_SIZE_THRESHOLD_BYTES: u64 = 1024 * 1024;
 
 fn observe_read_sli_from_response(response: &dyn Any, details: &kvrpcpb::ExecDetailsV2) {
     if TIKV_SLI_TIKV_SMALL_READ_DURATION_HISTOGRAM.is_none()
@@ -1602,6 +1623,7 @@ impl PreferLeaderFlowsState {
     }
 }
 
+#[derive(Default)]
 struct CountSlidingWindow {
     avg: u64,
     sum: u64,
@@ -1632,28 +1654,10 @@ impl CountSlidingWindow {
     }
 }
 
-impl Default for CountSlidingWindow {
-    fn default() -> Self {
-        CountSlidingWindow {
-            avg: 0,
-            sum: 0,
-            history: Vec::new(),
-        }
-    }
-}
-
+#[derive(Default)]
 struct SlowScoreWindows {
     ts_cnt_sliding_window: CountSlidingWindow,
     upd_cnt_sliding_window: CountSlidingWindow,
-}
-
-impl Default for SlowScoreWindows {
-    fn default() -> Self {
-        SlowScoreWindows {
-            ts_cnt_sliding_window: CountSlidingWindow::default(),
-            upd_cnt_sliding_window: CountSlidingWindow::default(),
-        }
-    }
 }
 
 struct SlowScoreStat {
@@ -2009,6 +2013,13 @@ lazy_static::lazy_static! {
             "tikv_client_rust_get_store_limit_token_error",
             "store token is up to the limit, probably because one of the stores is the hotspot or unavailable",
             &["address", "store"],
+        );
+
+    static ref TIKV_CLIENT_RUST_FORWARD_REQUEST_COUNTER_VEC: Option<IntCounterVec> =
+        register_int_counter_vec(
+            "tikv_client_rust_forward_request_counter",
+            "Counter of tikv request being forwarded through another node",
+            &["from_store", "to_store", "type", "result"],
         );
 
     static ref TIKV_CLIENT_RUST_BATCH_EXECUTOR_TOKEN_WAIT_DURATION_HISTOGRAM: Option<Histogram> = {
@@ -2751,7 +2762,7 @@ mod tests {
             histogram_sample("tikv_client_rust_batch_executor_token_wait_duration");
 
         assert!(
-            count_after >= count_before + 1,
+            count_after > count_before,
             "expected batch_executor_token_wait_duration histogram to record observations"
         );
         assert!(
@@ -3323,6 +3334,35 @@ mod tests {
 
     #[test]
     #[serial(metrics)]
+    fn test_forward_request_counter_increments() {
+        fn counter_value(from_store: &str, to_store: &str, ty: &str, result: &str) -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_rust_forward_request_counter")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "from_store") == Some(from_store)
+                            && label_value(metric, "to_store") == Some(to_store)
+                            && label_value(metric, "type") == Some(ty)
+                            && label_value(metric, "result") == Some(result)
+                            && metric.get_counter().get_value() > 0.0
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value())
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value("61", "43", "RawPut", "ok");
+        super::inc_forward_request_counter(61, 43, "RawPut", "ok");
+        let after = counter_value("61", "43", "RawPut", "ok");
+        assert!(
+            after >= before + 1.0,
+            "expected forward_request_counter to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
     fn test_lock_cleanup_task_total_counter_increments() {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
@@ -3457,7 +3497,7 @@ mod tests {
             histogram_sample("tikv_client_rust_txn_commit_backoff_count");
 
         assert!(
-            seconds_count_after >= seconds_count_before + 1,
+            seconds_count_after > seconds_count_before,
             "expected txn_commit_backoff_seconds histogram to record observations"
         );
         assert!(
@@ -3465,7 +3505,7 @@ mod tests {
             "expected txn_commit_backoff_seconds histogram sum to increase"
         );
         assert!(
-            count_count_after >= count_count_before + 1,
+            count_count_after > count_count_before,
             "expected txn_commit_backoff_count histogram to record observations"
         );
         assert!(
@@ -3525,7 +3565,7 @@ mod tests {
             .unwrap_or(0);
 
         assert!(
-            after >= before + 1,
+            after > before,
             "expected txn_ttl_manager histogram to record observations"
         );
     }
@@ -3788,7 +3828,7 @@ mod tests {
                 .and_then(|family| {
                     family
                         .get_metric()
-                        .get(0)
+                        .first()
                         .map(|metric| metric.get_counter().get_value())
                 })
                 .unwrap_or(0.0)
@@ -3820,7 +3860,7 @@ mod tests {
         observe_ts_future_wait_seconds(Duration::from_micros(10));
         let after = sample_count();
         assert!(
-            after >= before + 1,
+            after > before,
             "expected ts_future_wait_seconds histogram to record observations"
         );
     }
@@ -3863,7 +3903,7 @@ mod tests {
         let after = sample_count();
 
         assert!(
-            after >= before + 1,
+            after > before,
             "expected tikv_small_read_duration histogram to record observations"
         );
     }
@@ -3910,7 +3950,7 @@ mod tests {
         let after = sample_count();
 
         assert!(
-            after >= before + 1,
+            after > before,
             "expected tikv_read_throughput histogram to record observations"
         );
     }
@@ -3925,7 +3965,7 @@ mod tests {
                 .and_then(|family| {
                     family
                         .get_metric()
-                        .get(0)
+                        .first()
                         .map(|metric| metric.get_counter().get_value())
                 })
                 .unwrap_or(0.0)
@@ -4340,7 +4380,7 @@ mod tests {
 
         let value = family
             .get_metric()
-            .get(0)
+            .first()
             .map(|metric| metric.get_gauge().get_value())
             .unwrap_or(0.0);
         assert!(

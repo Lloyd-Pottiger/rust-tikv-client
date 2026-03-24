@@ -512,7 +512,7 @@ mod tests {
 
         let after = sample_count();
         assert!(
-            after >= before + 1,
+            after > before,
             "expected local_latch_wait_seconds to observe samples"
         );
     }

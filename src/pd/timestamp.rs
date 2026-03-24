@@ -490,7 +490,7 @@ mod tests {
 
         let after = sample_count();
         assert!(
-            after >= before + 1,
+            after > before,
             "expected ts_future_wait_seconds histogram to record observations"
         );
     }

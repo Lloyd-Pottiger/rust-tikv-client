@@ -215,10 +215,7 @@ impl<PdC: PdClient> RangeTaskRunner<PdC> {
         let failed_regions = &self.failed_regions;
 
         let consumer_stream = stream_fn(rx, |mut rx| async move {
-            Ok::<_, crate::Error>(match rx.recv().await {
-                Some(range) => Some((rx, range)),
-                None => None,
-            })
+            Ok::<_, crate::Error>(rx.recv().await.map(|range| (rx, range)))
         });
 
         let consumer = consumer_stream.try_for_each_concurrent(self.concurrency, move |range| {

@@ -125,9 +125,12 @@ lazy_static! {
     static ref TRACE_EVENT_FUNC: RwLock<TraceEventFunc> = RwLock::new(Arc::new(noop_trace_event));
     static ref IS_CATEGORY_ENABLED_FUNC: RwLock<IsCategoryEnabledFunc> =
         RwLock::new(Arc::new(noop_is_category_enabled));
-    static ref KV_REQUEST_REGION_RANGES: RwLock<HashMap<RegionVerId, (Vec<u8>, Vec<u8>)>> =
+    static ref KV_REQUEST_REGION_RANGES: RwLock<KvRequestRegionRanges> =
         RwLock::new(HashMap::new());
 }
+
+type KvRequestRegionRange = (Vec<u8>, Vec<u8>);
+type KvRequestRegionRanges = HashMap<RegionVerId, KvRequestRegionRange>;
 
 /// Register the global trace event callback.
 ///

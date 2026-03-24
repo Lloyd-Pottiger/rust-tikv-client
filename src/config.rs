@@ -75,6 +75,15 @@ pub struct Config {
     /// When enabled, the client attempts to dispatch supported requests over a persistent
     /// `BatchCommands` stream and falls back to unary RPCs when batch RPC is unavailable.
     pub enable_batch_rpc: bool,
+    /// Enable TiKV request forwarding through a proxy store (client-go `EnableForwarding`).
+    ///
+    /// When enabled, the client may send a request to a proxy TiKV store and ask it to forward the
+    /// request to the intended store. This is mainly useful when the target store is reachable
+    /// from other TiKV nodes but unreachable from the client (for example due to network
+    /// partition).
+    ///
+    /// Defaults to disabled (`false`).
+    pub enable_forwarding: bool,
     /// Maximum number of requests coalesced into a single outbound `BatchCommandsRequest`.
     ///
     /// When batch RPC is enabled, the client merges immediately-available queued requests into a
@@ -228,6 +237,7 @@ impl Default for Config {
             grpc_connection_count: DEFAULT_GRPC_CONNECTION_COUNT,
             grpc_compression_type: GrpcCompressionType::None,
             enable_batch_rpc: false,
+            enable_forwarding: false,
             batch_rpc_max_batch_size: DEFAULT_BATCH_RPC_MAX_BATCH_SIZE,
             grpc_connect_timeout: DEFAULT_GRPC_CONNECT_TIMEOUT,
             grpc_custom_dns_server: None,
@@ -410,6 +420,15 @@ impl Config {
     #[must_use]
     pub fn with_enable_batch_rpc(mut self, enable: bool) -> Self {
         self.enable_batch_rpc = enable;
+        self
+    }
+
+    /// Enable forwarding/proxy request routing (client-go `EnableForwarding`).
+    ///
+    /// Defaults to disabled.
+    #[must_use]
+    pub fn with_enable_forwarding(mut self, enable: bool) -> Self {
+        self.enable_forwarding = enable;
         self
     }
 
@@ -682,6 +701,7 @@ mod tests {
         assert_eq!(config.grpc_connection_count, 4);
         assert_eq!(config.grpc_compression_type, GrpcCompressionType::None);
         assert!(!config.enable_batch_rpc);
+        assert!(!config.enable_forwarding);
         assert_eq!(
             config.batch_rpc_max_batch_size,
             DEFAULT_BATCH_RPC_MAX_BATCH_SIZE

@@ -59,6 +59,7 @@ macro_rules! impl_request {
                 timeout: Duration,
             ) -> Result<Box<dyn Any>> {
                 let mut req = self.clone().into_request();
+                crate::store::apply_forwarded_host_metadata(&mut req)?;
                 req.set_timeout(timeout);
                 client
                     .clone()
@@ -156,6 +157,7 @@ impl Request for kvrpcpb::ResolveLockRequest {
         });
 
         let mut req = self.clone().into_request();
+        crate::store::apply_forwarded_host_metadata(&mut req)?;
         req.set_timeout(timeout);
         client
             .clone()
@@ -286,6 +288,7 @@ impl Request for coprocessor::Request {
         timeout: Duration,
     ) -> Result<Box<dyn Any>> {
         let mut req = self.clone().into_request();
+        crate::store::apply_forwarded_host_metadata(&mut req)?;
         req.set_timeout(timeout);
         client
             .clone()
@@ -346,6 +349,7 @@ impl Request for coprocessor::BatchRequest {
         timeout: Duration,
     ) -> Result<Box<dyn Any>> {
         let mut req = self.clone().into_request();
+        crate::store::apply_forwarded_host_metadata(&mut req)?;
         req.set_timeout(timeout);
         client
             .clone()
@@ -398,6 +402,7 @@ impl Request for kvrpcpb::CompactRequest {
         timeout: Duration,
     ) -> Result<Box<dyn Any>> {
         let mut req = self.clone().into_request();
+        crate::store::apply_forwarded_host_metadata(&mut req)?;
         req.set_timeout(timeout);
         client
             .clone()
@@ -438,6 +443,7 @@ impl Request for kvrpcpb::TiFlashSystemTableRequest {
         timeout: Duration,
     ) -> Result<Box<dyn Any>> {
         let mut req = self.clone().into_request();
+        crate::store::apply_forwarded_host_metadata(&mut req)?;
         req.set_timeout(timeout);
         client
             .clone()
@@ -476,6 +482,7 @@ impl Request for kvrpcpb::StoreSafeTsRequest {
         timeout: Duration,
     ) -> Result<Box<dyn Any>> {
         let mut req = self.clone().into_request();
+        crate::store::apply_forwarded_host_metadata(&mut req)?;
         req.set_timeout(timeout);
         client
             .clone()
@@ -526,6 +533,7 @@ impl Request for kvrpcpb::GetHealthFeedbackRequest {
             };
             let request_stream = stream::iter(vec![batch_request]);
             let mut req = request_stream.into_streaming_request();
+            crate::store::apply_forwarded_host_metadata(&mut req)?;
             req.set_timeout(timeout);
             let mut resp_stream = client
                 .clone()
@@ -563,6 +571,7 @@ impl Request for kvrpcpb::GetHealthFeedbackRequest {
             Ok(feedback) => feedback,
             Err(Error::GrpcAPI(status)) if status.code() == tonic::Code::Unimplemented => {
                 let mut req = self.clone().into_request();
+                crate::store::apply_forwarded_host_metadata(&mut req)?;
                 req.set_timeout(timeout);
                 return client
                     .clone()
@@ -624,6 +633,7 @@ impl Request for kvrpcpb::BroadcastTxnStatusRequest {
         timeout: Duration,
     ) -> Result<Box<dyn Any>> {
         let mut req = self.clone().into_request();
+        crate::store::apply_forwarded_host_metadata(&mut req)?;
         req.set_timeout(timeout);
         client
             .clone()
