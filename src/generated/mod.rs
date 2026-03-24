@@ -94,6 +94,9 @@ pub mod resource_manager {
 pub mod resource_usage_agent {
     include!("resource_usage_agent.rs");
 }
+pub mod routerpb {
+    include!("routerpb.rs");
+}
 pub mod schedulingpb {
     include!("schedulingpb.rs");
 }

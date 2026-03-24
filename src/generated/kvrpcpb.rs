@@ -173,10 +173,13 @@ pub mod prewrite_request {
     #[repr(i32)]
     pub enum PessimisticAction {
         /// The key needn't be locked and no extra write conflict checks are needed.
+        /// Deprecated in next-gen (cloud-storage-engine).
         SkipPessimisticCheck = 0,
-        /// The key should have been locked at the time of prewrite.
+        /// The key should have been locked at the time of prewrite. If the lock is missing,
+        /// the lock will be amended. This is the normal case for pessimistic transactions.
         DoPessimisticCheck = 1,
-        /// The key doesn't need a pessimistic lock. But we need to do data constraint checks.
+        /// The key does not acquire a pessimistic lock for performance optimization.
+        /// Constraint checking (write conflicts + data constraints) is deferred to prewrite.
         DoConstraintCheck = 2,
     }
     impl PessimisticAction {
@@ -373,6 +376,11 @@ pub struct TxnHeartBeatRequest {
     /// The new TTL the sender would like.
     #[prost(uint64, tag = "4")]
     pub advise_lock_ttl: u64,
+    /// Optionally update PK's min_commit_ts.
+    /// Only for non-async-commmit and non-1PC transactions.
+    /// If it is 0, ignore this field.
+    #[prost(uint64, tag = "5")]
+    pub min_commit_ts: u64,
     /// Reserved for file based transaction.
     #[prost(bool, tag = "100")]
     pub is_txn_file: bool,
@@ -513,6 +521,17 @@ pub struct CommitRequest {
     /// Timestamp for the end of the transaction. Must be greater than `start_version`.
     #[prost(uint64, tag = "4")]
     pub commit_version: u64,
+    /// commit_role indicates the current commit request is a primary commit or a secondary commit.
+    /// It's value maybe `Unknown` when using a client with an old version.
+    #[prost(enumeration = "CommitRole", tag = "6")]
+    pub commit_role: i32,
+    /// primary_key indicates the primary key of the transaction.
+    /// Its value may be empty when using an old version client.
+    #[prost(bytes = "vec", tag = "7")]
+    pub primary_key: ::prost::alloc::vec::Vec<u8>,
+    /// Whether committing an `use_async_commit` (i.e. should be treated as committed) prewrite.
+    #[prost(bool, tag = "8")]
+    pub use_async_commit: bool,
     /// Reserved for file based transaction.
     #[prost(bool, tag = "100")]
     pub is_txn_file: bool,
@@ -1122,6 +1141,9 @@ pub struct SplitRegionResponse {
     /// include all result regions.
     #[prost(message, repeated, tag = "4")]
     pub regions: ::prost::alloc::vec::Vec<super::metapb::Region>,
+    /// Reserved for file based transaction.
+    #[prost(message, repeated, tag = "100")]
+    pub errors: ::prost::alloc::vec::Vec<KeyError>,
 }
 /// Sent from TiFlash to a TiKV node.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -1358,6 +1380,9 @@ pub struct LockInfo {
     /// When lock_type is SharedLock, this describes transactions holding the shared lock.
     /// Important: when lock_type is SharedLock, all shared locks must use shared_lock_infos;
     /// DO NOT read from the wrapper LockInfo.
+    /// TODO(slock): tidb should send requests with a feature flag to indicate whether it
+    /// supports shared locks, so that tikv can fail the requests from old tidb versions
+    /// when needed.
     #[prost(message, repeated, tag = "12")]
     pub shared_lock_infos: ::prost::alloc::vec::Vec<LockInfo>,
     /// Reserved for file based transaction.
@@ -1400,6 +1425,12 @@ pub struct KeyError {
     /// CheckTxnStatus is sent to a lock that's not the primary.
     #[prost(message, optional, tag = "11")]
     pub primary_mismatch: ::core::option::Option<PrimaryMismatch>,
+    /// TxnLockNotFound indicates the txn lock is not found.
+    #[prost(message, optional, tag = "12")]
+    pub txn_lock_not_found: ::core::option::Option<TxnLockNotFound>,
+    /// Extra information for error debugging
+    #[prost(message, optional, tag = "100")]
+    pub debug_info: ::core::option::Option<DebugInfo>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1441,8 +1472,10 @@ pub mod write_conflict {
         SelfRolledBack = 3,
         /// RcCheckTs failure by meeting a newer version, let TiDB retry.
         RcCheckTs = 4,
-        /// write conflict found in lazy uniqueness check in pessimistic transactions.
+        /// write conflict found when deferring constraint checks in pessimistic transactions. Deprecated in next-gen (cloud-storage-engine).
         LazyUniquenessCheck = 5,
+        /// write conflict found on keys that do not acquire pessimistic locks in pessimistic transactions.
+        NotLockedKeyConflict = 6,
     }
     impl Reason {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -1457,6 +1490,7 @@ pub mod write_conflict {
                 Reason::SelfRolledBack => "SelfRolledBack",
                 Reason::RcCheckTs => "RcCheckTs",
                 Reason::LazyUniquenessCheck => "LazyUniquenessCheck",
+                Reason::NotLockedKeyConflict => "NotLockedKeyConflict",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1468,6 +1502,7 @@ pub mod write_conflict {
                 "SelfRolledBack" => Some(Self::SelfRolledBack),
                 "RcCheckTs" => Some(Self::RcCheckTs),
                 "LazyUniquenessCheck" => Some(Self::LazyUniquenessCheck),
+                "NotLockedKeyConflict" => Some(Self::NotLockedKeyConflict),
                 _ => None,
             }
         }
@@ -1486,6 +1521,7 @@ pub struct Deadlock {
     pub lock_ts: u64,
     #[prost(bytes = "vec", tag = "2")]
     pub lock_key: ::prost::alloc::vec::Vec<u8>,
+    /// The hash of `deadlock_key` field.
     #[prost(uint64, tag = "3")]
     pub deadlock_key_hash: u64,
     #[prost(message, repeated, tag = "4")]
@@ -1543,6 +1579,26 @@ pub struct PrimaryMismatch {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TxnLockNotFound {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: ::prost::alloc::vec::Vec<u8>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MvccDebugInfo {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "2")]
+    pub mvcc: ::core::option::Option<MvccInfo>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DebugInfo {
+    #[prost(message, repeated, tag = "1")]
+    pub mvcc_info: ::prost::alloc::vec::Vec<MvccDebugInfo>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TimeDetail {
     /// Off-cpu wall time elapsed in TiKV side. Usually this includes queue waiting time and
     /// other kind of waitings in series. (Wait time in the raftstore is not included.)
@@ -1585,6 +1641,12 @@ pub struct TimeDetailV2 {
     /// Total wall clock time spent on this RPC in TiKV .
     #[prost(uint64, tag = "5")]
     pub total_rpc_wall_time_ns: u64,
+    /// Time spent on the gRPC layer.
+    #[prost(uint64, tag = "6")]
+    pub kv_grpc_process_time_ns: u64,
+    /// Time spent on waiting for run again in grpc pool from other executor pool.
+    #[prost(uint64, tag = "7")]
+    pub kv_grpc_wait_time_ns: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2196,12 +2258,9 @@ pub struct BufferBatchGetResponse {
     #[prost(message, optional, tag = "4")]
     pub exec_details_v2: ::core::option::Option<ExecDetailsV2>,
 }
-/// Actively request TiKV to report health feedback information. TiKV won't omit the health feedback
-/// information when sending the `BatchCommandsResponse` that contains this response.
-///
-/// The health feedback information won't be replied in the response, but will be attached to
-/// `BatchCommandsResponse.health_feedback` field as usual.
-///
+/// Actively request TiKV to report health feedback information. TiKV won't omit the health feedback information when sending the
+/// `BatchCommandsResponse` that contains this response.
+/// The health feedback information won't be replied in the response, but will be attached to `BatchCommandsResponse.health_feedback` field as usual.
 /// Only works when batch RPC is enabled.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2212,8 +2271,7 @@ pub struct GetHealthFeedbackRequest {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetHealthFeedbackResponse {
-    /// The error field is added for keeping consistent. This request won't meet any region error as
-    /// it's store level rather than region level.
+    /// The error field is added for keeping consistent. This request won't meet any region error as it's store level rather than region level.
     #[prost(message, optional, tag = "1")]
     pub region_error: ::core::option::Option<super::errorpb::Error>,
     #[prost(message, optional, tag = "2")]
@@ -2232,8 +2290,8 @@ pub struct HealthFeedback {
     /// uniqueness and monotonic if the TiKV node is restarted.
     #[prost(uint64, tag = "2")]
     pub feedback_seq_no: u64,
-    /// The slow_score calculated in raftstore module. Due to some limitations of slow score, this
-    /// would be replaced by `SlowTrend` in the future.
+    /// The slow_score calculated in raftstore module. Due to some limitations of slow score, this would
+    /// be replaced by `SlowTrend` in the future.
     #[prost(int32, tag = "3")]
     pub slow_score: i32,
 }
@@ -2327,6 +2385,39 @@ impl PessimisticLockKeyResultType {
             "LockResultNormal" => Some(Self::LockResultNormal),
             "LockResultLockedWithConflict" => Some(Self::LockResultLockedWithConflict),
             "LockResultFailed" => Some(Self::LockResultFailed),
+            _ => None,
+        }
+    }
+}
+/// CommitRole indicates the current commit request is a primary commit or a secondary commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CommitRole {
+    /// Unknown about the current request is a primary commit or a secondary commit;
+    Unknown = 0,
+    /// Current request is a primary commit;
+    Primary = 1,
+    /// Current request is a secondary commit;
+    Secondary = 2,
+}
+impl CommitRole {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            CommitRole::Unknown => "Unknown",
+            CommitRole::Primary => "Primary",
+            CommitRole::Secondary => "Secondary",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "Unknown" => Some(Self::Unknown),
+            "Primary" => Some(Self::Primary),
+            "Secondary" => Some(Self::Secondary),
             _ => None,
         }
     }

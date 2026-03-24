@@ -240,6 +240,8 @@ impl Stream for TsoRequestStream {
                 header: Some(RequestHeader {
                     cluster_id: *this.cluster_id,
                     sender_id: 0,
+                    caller_id: String::new(),
+                    caller_component: String::new(),
                 }),
                 count: requests.len() as u32,
                 dc_location,
@@ -425,6 +427,8 @@ mod tests {
                 header: Some(RequestHeader {
                     cluster_id: 1,
                     sender_id: 0,
+                    caller_id: String::new(),
+                    caller_component: String::new(),
                 }),
                 count: 3,
                 dc_location: "dc1".to_owned(),

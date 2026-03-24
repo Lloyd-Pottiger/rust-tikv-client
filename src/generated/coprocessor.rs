@@ -44,6 +44,9 @@ pub struct Request {
     /// This is the session alias between a client and tidb
     #[prost(string, tag = "13")]
     pub connection_alias: ::prost::alloc::string::String,
+    /// Shard infos for FTS index, used by TiFlash reading TiCI.
+    #[prost(message, repeated, tag = "14")]
+    pub table_shard_infos: ::prost::alloc::vec::Vec<TableShardInfos>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -92,6 +95,26 @@ pub struct RegionInfo {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ShardInfo {
+    #[prost(uint64, tag = "1")]
+    pub shard_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub shard_epoch: u64,
+    #[prost(message, repeated, tag = "3")]
+    pub ranges: ::prost::alloc::vec::Vec<KeyRange>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TableShardInfos {
+    /// The executor ID is used to identify the tici executor.
+    #[prost(string, tag = "1")]
+    pub executor_id: ::prost::alloc::string::String,
+    /// The shard_infos contains the shard information for each tici executor.
+    #[prost(message, repeated, tag = "2")]
+    pub shard_infos: ::prost::alloc::vec::Vec<ShardInfo>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TableRegions {
     #[prost(int64, tag = "1")]
     pub physical_table_id: i64,
@@ -125,6 +148,9 @@ pub struct BatchRequest {
     /// This is the session alias between a client and tidb
     #[prost(string, tag = "10")]
     pub connection_alias: ::prost::alloc::string::String,
+    /// Shard infos for FTS index, used by TiFlash reading TiCI.
+    #[prost(message, repeated, tag = "11")]
+    pub table_shard_infos: ::prost::alloc::vec::Vec<TableShardInfos>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -137,6 +163,8 @@ pub struct BatchResponse {
     pub exec_details: ::core::option::Option<super::kvrpcpb::ExecDetails>,
     #[prost(message, repeated, tag = "4")]
     pub retry_regions: ::prost::alloc::vec::Vec<super::metapb::Region>,
+    #[prost(message, repeated, tag = "5")]
+    pub retry_shards: ::prost::alloc::vec::Vec<ShardInfo>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -167,4 +195,39 @@ pub struct StoreBatchTaskResponse {
     pub task_id: u64,
     #[prost(message, optional, tag = "6")]
     pub exec_details_v2: ::core::option::Option<super::kvrpcpb::ExecDetailsV2>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DelegateRequest {
+    #[prost(message, optional, tag = "1")]
+    pub context: ::core::option::Option<super::kvrpcpb::Context>,
+    #[prost(uint64, tag = "2")]
+    pub start_ts: u64,
+    #[prost(message, repeated, tag = "3")]
+    pub ranges: ::prost::alloc::vec::Vec<KeyRange>,
+    /// Used for avoid redundant mem-table copying.
+    /// If the sequence is the same, tikv-server will not return the mem-table.
+    #[prost(uint64, tag = "4")]
+    pub mem_table_sequence: u64,
+    /// Used for avoid redundant snapshot copying.
+    /// If the sequence is the same, tikv-server will not return the snapshot.
+    #[prost(uint64, tag = "5")]
+    pub snapshot_sequence: u64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DelegateResponse {
+    #[prost(bytes = "vec", tag = "1")]
+    pub mem_table_data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub snapshot: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    pub region_error: ::core::option::Option<super::errorpb::Error>,
+    #[prost(message, optional, tag = "4")]
+    pub locked: ::core::option::Option<super::kvrpcpb::LockInfo>,
+    #[prost(string, tag = "5")]
+    pub other_error: ::prost::alloc::string::String,
+    /// Used for avoid redundant mem-table copying.
+    #[prost(uint64, tag = "6")]
+    pub mem_table_sequence: u64,
 }

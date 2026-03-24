@@ -217,6 +217,9 @@ pub mod batch_commands_response {
 pub struct BatchRaftMessage {
     #[prost(message, repeated, tag = "1")]
     pub msgs: ::prost::alloc::vec::Vec<super::raft_serverpb::RaftMessage>,
+    /// Used for measure the send duration.
+    #[prost(uint64, tag = "13")]
+    pub last_observed_time: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -342,55 +345,6 @@ pub mod tikv_client {
             let path = http::uri::PathAndQuery::from_static("/tikvpb.Tikv/KvGet");
             let mut req = request.into_request();
             req.extensions_mut().insert(GrpcMethod::new("tikvpb.Tikv", "KvGet"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn kv_flush(
-            &mut self,
-            request: impl tonic::IntoRequest<super::super::kvrpcpb::FlushRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::super::kvrpcpb::FlushResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static("/tikvpb.Tikv/KvFlush");
-            let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("tikvpb.Tikv", "KvFlush"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn kv_buffer_batch_get(
-            &mut self,
-            request: impl tonic::IntoRequest<
-                super::super::kvrpcpb::BufferBatchGetRequest,
-            >,
-        ) -> std::result::Result<
-            tonic::Response<super::super::kvrpcpb::BufferBatchGetResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/tikvpb.Tikv/KvBufferBatchGet",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("tikvpb.Tikv", "KvBufferBatchGet"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn kv_scan(
@@ -827,6 +781,55 @@ pub mod tikv_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("tikvpb.Tikv", "KvFlashbackToVersion"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn kv_flush(
+            &mut self,
+            request: impl tonic::IntoRequest<super::super::kvrpcpb::FlushRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::super::kvrpcpb::FlushResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/tikvpb.Tikv/KvFlush");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("tikvpb.Tikv", "KvFlush"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn kv_buffer_batch_get(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                super::super::kvrpcpb::BufferBatchGetRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::super::kvrpcpb::BufferBatchGetResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/tikvpb.Tikv/KvBufferBatchGet",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("tikvpb.Tikv", "KvBufferBatchGet"));
             self.inner.unary(req, path, codec).await
         }
         /// Raw commands; no transaction support.
@@ -1322,6 +1325,32 @@ pub mod tikv_client {
             req.extensions_mut()
                 .insert(GrpcMethod::new("tikvpb.Tikv", "BatchCoprocessor"));
             self.inner.server_streaming(req, path, codec).await
+        }
+        /// Command send by remote coprocessor to TiKV for executing coprocessor request.
+        pub async fn delegate_coprocessor(
+            &mut self,
+            request: impl tonic::IntoRequest<super::super::coprocessor::DelegateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::super::coprocessor::DelegateResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/tikvpb.Tikv/DelegateCoprocessor",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("tikvpb.Tikv", "DelegateCoprocessor"));
+            self.inner.unary(req, path, codec).await
         }
         /// Command for executing custom user requests in TiKV coprocessor_v2.
         pub async fn raw_coprocessor(
