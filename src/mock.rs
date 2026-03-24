@@ -128,6 +128,10 @@ pub struct MockPdClient {
         value = "Arc::new(AtomicU64::new(u64::try_from(crate::config::DEFAULT_MAX_TXN_TTL.as_millis()).unwrap_or(u64::MAX)))"
     )]
     max_txn_ttl_ms: Arc<AtomicU64>,
+    #[new(
+        value = "Arc::new(AtomicU64::new(u64::try_from(crate::config::DEFAULT_COMMIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX)))"
+    )]
+    commit_timeout_ms: Arc<AtomicU64>,
     #[new(value = "42")]
     cluster_id: u64,
     #[new(value = "Arc::new(AtomicUsize::new(0))")]
@@ -234,6 +238,11 @@ impl MockPdClient {
     pub fn set_max_txn_ttl(&self, ttl: Duration) {
         let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
         self.max_txn_ttl_ms.store(ttl_ms, Ordering::SeqCst);
+    }
+
+    pub fn set_commit_timeout(&self, timeout: Duration) {
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        self.commit_timeout_ms.store(timeout_ms, Ordering::SeqCst);
     }
 
     pub fn set_all_stores_should_fail(&self, should_fail: bool) {
@@ -578,6 +587,10 @@ impl PdClient for MockPdClient {
 
     fn max_txn_ttl(&self) -> Duration {
         Duration::from_millis(self.max_txn_ttl_ms.load(Ordering::SeqCst))
+    }
+
+    fn commit_timeout(&self) -> Duration {
+        Duration::from_millis(self.commit_timeout_ms.load(Ordering::SeqCst))
     }
 
     fn enable_forwarding(&self) -> bool {
@@ -1056,6 +1069,17 @@ mod tests {
         assert_eq!(client.max_txn_ttl(), crate::config::DEFAULT_MAX_TXN_TTL);
         client.set_max_txn_ttl(Duration::from_secs(2));
         assert_eq!(client.max_txn_ttl(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_mock_pd_client_commit_timeout_is_configurable() {
+        let client = MockPdClient::default();
+        assert_eq!(
+            client.commit_timeout(),
+            crate::config::DEFAULT_COMMIT_TIMEOUT
+        );
+        client.set_commit_timeout(Duration::from_secs(9));
+        assert_eq!(client.commit_timeout(), Duration::from_secs(9));
     }
 
     #[tokio::test]

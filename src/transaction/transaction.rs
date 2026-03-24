@@ -7857,6 +7857,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
+        let req = crate::request::RequestWithTimeout::new(req, self.rpc.commit_timeout());
         let lock_resolver_rpc_context = self.lock_resolver_rpc_context();
         let lock_backoff = self.lock_backoff();
         let region_backoff = self.region_backoff();
@@ -8042,6 +8043,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 ctx.resource_group_tag = tag;
             }
         }
+        let req = crate::request::RequestWithTimeout::new(req, self.rpc.commit_timeout());
         let plan = PlanBuilder::new_with_rpc_interceptors(
             self.rpc,
             self.keyspace,
@@ -8394,6 +8396,183 @@ mod tests {
                 safe_point: 50
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn test_commit_requests_use_commit_timeout_override() {
+        #[derive(Clone)]
+        struct TimeoutRecordingKvClient {
+            timeout: Duration,
+            seen: Arc<Mutex<Vec<(&'static str, Option<Duration>, Duration)>>>,
+        }
+
+        #[async_trait]
+        impl crate::store::KvClient for TimeoutRecordingKvClient {
+            async fn dispatch(
+                &self,
+                request: &dyn crate::store::Request,
+            ) -> crate::Result<Box<dyn Any>> {
+                let override_timeout = request.timeout_override();
+                let effective_timeout = override_timeout.unwrap_or(self.timeout);
+                self.seen.lock().unwrap().push((
+                    request.label(),
+                    override_timeout,
+                    effective_timeout,
+                ));
+
+                if request.as_any().is::<kvrpcpb::PrewriteRequest>() {
+                    return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+                }
+                if request.as_any().is::<kvrpcpb::CommitRequest>() {
+                    return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+                }
+
+                Err(Error::StringError(format!(
+                    "unexpected request: {}",
+                    request.label()
+                )))
+            }
+
+            fn timeout(&self) -> Duration {
+                self.timeout
+            }
+
+            fn store_address(&self) -> Option<&str> {
+                Some("mock://1")
+            }
+        }
+
+        #[derive(Clone)]
+        struct StaticCommitTimeoutPdClient {
+            kv_client: Arc<TimeoutRecordingKvClient>,
+            region: crate::region::RegionWithLeader,
+            commit_timeout: Duration,
+        }
+
+        #[async_trait]
+        impl PdClient for StaticCommitTimeoutPdClient {
+            type KvClient = TimeoutRecordingKvClient;
+
+            async fn map_region_to_store(
+                self: Arc<Self>,
+                region: crate::region::RegionWithLeader,
+            ) -> crate::Result<crate::store::RegionStore> {
+                Ok(crate::store::RegionStore::new(
+                    region,
+                    self.kv_client.clone() as Arc<dyn crate::store::KvClient + Send + Sync>,
+                    "mock://1".to_owned(),
+                ))
+            }
+
+            async fn region_for_key(
+                &self,
+                _key: &crate::Key,
+            ) -> crate::Result<crate::region::RegionWithLeader> {
+                Ok(self.region.clone())
+            }
+
+            async fn region_for_id(
+                &self,
+                _id: crate::region::RegionId,
+            ) -> crate::Result<crate::region::RegionWithLeader> {
+                Ok(self.region.clone())
+            }
+
+            async fn get_timestamp(self: Arc<Self>) -> crate::Result<Timestamp> {
+                Ok(Timestamp::from_version(20))
+            }
+
+            async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> crate::Result<u64> {
+                Ok(safepoint)
+            }
+
+            async fn load_keyspace(
+                &self,
+                _keyspace: &str,
+            ) -> crate::Result<crate::proto::keyspacepb::KeyspaceMeta> {
+                Err(Error::Unimplemented)
+            }
+
+            async fn all_stores(&self) -> crate::Result<Vec<crate::store::Store>> {
+                let mut meta = metapb::Store::default();
+                meta.id = 1;
+                meta.address = "mock://1".to_owned();
+                Ok(vec![crate::store::Store::new(
+                    meta,
+                    self.kv_client.clone() as Arc<dyn crate::store::KvClient + Send + Sync>,
+                )])
+            }
+
+            fn commit_timeout(&self) -> Duration {
+                self.commit_timeout
+            }
+
+            async fn update_leader(
+                &self,
+                _ver_id: crate::region::RegionVerId,
+                _leader: metapb::Peer,
+            ) -> crate::Result<()> {
+                Ok(())
+            }
+
+            async fn invalidate_region_cache(&self, _ver_id: crate::region::RegionVerId) {}
+
+            async fn invalidate_store_cache(&self, _store_id: crate::region::StoreId) {}
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let kv_client = Arc::new(TimeoutRecordingKvClient {
+            timeout: Duration::from_secs(2),
+            seen: seen.clone(),
+        });
+
+        let mut region = metapb::Region::default();
+        region.id = 1;
+        region.region_epoch = Some(metapb::RegionEpoch {
+            conf_ver: 1,
+            version: 1,
+        });
+        region.peers = vec![metapb::Peer {
+            id: 10,
+            store_id: 1,
+            role: metapb::PeerRole::Voter as i32,
+            ..Default::default()
+        }];
+        let leader = Some(region.peers[0].clone());
+        let region = crate::region::RegionWithLeader::new(region, leader);
+
+        let pd_client = Arc::new(StaticCommitTimeoutPdClient {
+            kv_client,
+            region,
+            commit_timeout: Duration::from_secs(7),
+        });
+
+        let mut txn = Transaction::new(
+            Timestamp::from_version(5),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+        txn.gc_safe_point.observe_safe_point(0).await;
+        txn.put(b"a".to_vec(), b"v1".to_vec()).await.unwrap();
+        txn.commit().await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        let (_, commit_override, commit_effective) = seen
+            .iter()
+            .find(|(label, ..)| *label == "kv_commit")
+            .expect("commit request");
+        assert_eq!(*commit_override, Some(Duration::from_secs(7)));
+        assert_eq!(*commit_effective, Duration::from_secs(7));
+
+        let (_, prewrite_override, prewrite_effective) = seen
+            .iter()
+            .find(|(label, ..)| *label == "kv_prewrite")
+            .expect("prewrite request");
+        assert_eq!(*prewrite_override, None);
+        assert_eq!(*prewrite_effective, Duration::from_secs(2));
     }
 
     #[tokio::test]

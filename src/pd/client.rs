@@ -440,6 +440,15 @@ pub trait PdClient: Send + Sync + 'static {
         crate::config::DEFAULT_MAX_TXN_TTL
     }
 
+    /// Timeout applied to commit RPC requests.
+    ///
+    /// When non-zero, `kv_commit` requests use this timeout instead of the global client timeout.
+    ///
+    /// This maps to client-go `CommitTimeout`.
+    fn commit_timeout(&self) -> Duration {
+        crate::config::DEFAULT_COMMIT_TIMEOUT
+    }
+
     /// Whether TiKV request forwarding is enabled (client-go `EnableForwarding`).
     ///
     /// The default implementation always returns false.
@@ -721,6 +730,7 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
     ttl_refreshed_txn_size: u64,
     committer_concurrency: usize,
     max_txn_ttl: Duration,
+    commit_timeout: Duration,
     pd_http_client: Option<reqwest::Client>,
     pd_http_endpoints: Vec<String>,
     pd_http_use_https: bool,
@@ -876,6 +886,10 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     fn max_txn_ttl(&self) -> Duration {
         self.max_txn_ttl
+    }
+
+    fn commit_timeout(&self) -> Duration {
+        self.commit_timeout
     }
 
     fn enable_forwarding(&self) -> bool {
@@ -1345,6 +1359,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         let ttl_refreshed_txn_size = config.ttl_refreshed_txn_size;
         let committer_concurrency = config.committer_concurrency;
         let max_txn_ttl = config.max_txn_ttl;
+        let commit_timeout = config.commit_timeout;
         let (pd_http_client, pd_http_use_https) = build_pd_http_client(&config);
         let security_mgr = Arc::new(config.security_manager()?);
 
@@ -1373,6 +1388,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             ttl_refreshed_txn_size,
             committer_concurrency,
             max_txn_ttl,
+            commit_timeout,
             pd_http_client,
             pd_http_endpoints: Vec::new(),
             pd_http_use_https,

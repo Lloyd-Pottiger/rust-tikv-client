@@ -255,6 +255,13 @@ pub struct Config {
     pub ca_path: Option<PathBuf>,
     pub cert_path: Option<PathBuf>,
     pub key_path: Option<PathBuf>,
+    /// Timeout applied to commit RPC requests.
+    ///
+    /// When set to a non-zero duration, `kv_commit` requests use this timeout instead of
+    /// [`Config::timeout`], mirroring client-go `CommitTimeout`.
+    ///
+    /// Defaults to 41 seconds (client-go default).
+    pub commit_timeout: Duration,
     pub timeout: Duration,
     /// Maximum number of in-flight requests allowed per TiKV store.
     ///
@@ -434,6 +441,7 @@ pub struct Config {
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_COMMIT_TIMEOUT: Duration = Duration::from_secs(41);
 pub(crate) const DEFAULT_COMMITTER_CONCURRENCY: usize = 128;
 pub(crate) const DEFAULT_MAX_TXN_TTL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const DEFAULT_TSO_MAX_PENDING_COUNT: usize = 1 << 16;
@@ -458,6 +466,7 @@ impl Default for Config {
             ca_path: None,
             cert_path: None,
             key_path: None,
+            commit_timeout: DEFAULT_COMMIT_TIMEOUT,
             timeout: DEFAULT_REQUEST_TIMEOUT,
             store_limit: 0,
             committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
@@ -613,6 +622,17 @@ impl Config {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the timeout applied to commit requests (client-go `CommitTimeout`).
+    ///
+    /// When non-zero, `kv_commit` requests use this timeout instead of [`Config::timeout`].
+    ///
+    /// Set to `Duration::ZERO` to disable the override and use the global timeout.
+    #[must_use]
+    pub fn with_commit_timeout(mut self, commit_timeout: Duration) -> Self {
+        self.commit_timeout = commit_timeout;
         self
     }
 
@@ -1051,6 +1071,7 @@ mod tests {
             config.ttl_refreshed_txn_size,
             DEFAULT_TTL_REFRESHED_TXN_SIZE
         );
+        assert_eq!(config.commit_timeout, DEFAULT_COMMIT_TIMEOUT);
         assert_eq!(config.region_cache_ttl, Duration::from_secs(600));
         assert_eq!(config.region_cache_ttl_jitter, Duration::from_secs(60));
         config.validate().unwrap();
