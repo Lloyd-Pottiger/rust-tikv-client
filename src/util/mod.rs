@@ -89,6 +89,7 @@ where
     let parent_trace_exec_details = trace_exec_details_enabled();
     let parent_request_source = crate::request_context::request_source();
     let parent_resource_group_name = crate::request_context::resource_group_name();
+    let parent_shutting_down = crate::shutting_down::task_shutting_down();
     let parent_session_id = session_id();
     tokio::spawn(async move {
         let future = scope_task_session_id(parent_session_id, future);
@@ -103,6 +104,12 @@ where
             Some(trace_id) => {
                 futures::future::Either::Left(crate::trace::with_trace_id(trace_id, future))
             }
+            None => futures::future::Either::Right(future),
+        };
+        let future = match parent_shutting_down {
+            Some(flag) => futures::future::Either::Left(crate::shutting_down::with_shutting_down(
+                flag, future,
+            )),
             None => futures::future::Either::Right(future),
         };
         match parent_trace_control_flags {

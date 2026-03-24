@@ -129,6 +129,7 @@ mod replica_read;
 mod request_context;
 mod rpc_interceptor;
 mod safe_ts;
+mod shutting_down;
 mod stats;
 mod store;
 mod timestamp;
@@ -143,6 +144,10 @@ mod proptests;
 pub use crate::pd::PdClient;
 #[doc(inline)]
 pub use crate::pd::PdRpcClient;
+#[doc(inline)]
+pub use crate::shutting_down::load_shutting_down;
+#[doc(inline)]
+pub use crate::shutting_down::store_shutting_down;
 #[doc(inline)]
 pub use common::extract_debug_info_str_from_key_error;
 #[doc(inline)]

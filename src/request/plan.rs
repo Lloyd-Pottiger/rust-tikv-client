@@ -2675,6 +2675,9 @@ where
         let is_grpc_error = is_grpc_error(&e);
         let mut replica_read = replica_read;
         replica_read = replica_read.map(ReplicaReadState::clear_retry_same_replica);
+        if is_grpc_error && crate::load_shutting_down() > 0 {
+            return Err(Error::StringError("tidb is shutting down".to_owned()));
+        }
         if is_grpc_error {
             if let (Some(store_id), true) = (store, is_grpc_deadline_exceeded(&e)) {
                 pd_client.mark_store_slow(store_id, SLOW_STORE_TTL_ON_GRPC_DEADLINE_EXCEEDED);
@@ -3054,18 +3057,23 @@ where
                         return Ok(resp);
                     }
                 }
-                Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
-                    Some(duration) => {
-                        observe_backoff_seconds("grpc", duration);
-                        crate::util::record_task_local_backoff(duration);
-                        if let Some(stats) = plan.runtime_stats() {
-                            stats.record_backoff("grpc", duration);
-                        }
-                        sleep(duration).await;
-                        continue;
+                Err(e) if is_grpc_error(&e) => {
+                    if crate::load_shutting_down() > 0 {
+                        return Err(Error::StringError("tidb is shutting down".to_owned()));
                     }
-                    None => return Err(e),
-                },
+                    match backoff.next_delay_duration() {
+                        Some(duration) => {
+                            observe_backoff_seconds("grpc", duration);
+                            crate::util::record_task_local_backoff(duration);
+                            if let Some(stats) = plan.runtime_stats() {
+                                stats.record_backoff("grpc", duration);
+                            }
+                            sleep(duration).await;
+                            continue;
+                        }
+                        None => return Err(e),
+                    }
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -3152,18 +3160,23 @@ where
                         return Ok(resp);
                     }
                 }
-                Err(e) if is_grpc_error(&e) => match backoff.next_delay_duration() {
-                    Some(duration) => {
-                        observe_backoff_seconds("grpc", duration);
-                        crate::util::record_task_local_backoff(duration);
-                        if let Some(stats) = plan.runtime_stats() {
-                            stats.record_backoff("grpc", duration);
-                        }
-                        sleep(duration).await;
-                        continue;
+                Err(e) if is_grpc_error(&e) => {
+                    if crate::load_shutting_down() > 0 {
+                        return Err(Error::StringError("tidb is shutting down".to_owned()));
                     }
-                    None => return Err(e),
-                },
+                    match backoff.next_delay_duration() {
+                        Some(duration) => {
+                            observe_backoff_seconds("grpc", duration);
+                            crate::util::record_task_local_backoff(duration);
+                            if let Some(stats) = plan.runtime_stats() {
+                                stats.record_backoff("grpc", duration);
+                            }
+                            sleep(duration).await;
+                            continue;
+                        }
+                        None => return Err(e),
+                    }
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -6664,6 +6677,51 @@ mod test {
         assert!(
             after >= before + 1.0,
             "expected connection_transient_failure_count to increase"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grpc_retry_short_circuits_when_shutting_down() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_captured = call_count.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |_req: &dyn Any| {
+                call_count_captured.fetch_add(1, Ordering::SeqCst);
+                Err(Error::GrpcAPI(tonic::Status::unavailable(
+                    "unit_test_shutting_down",
+                )))
+            },
+        )));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context::default());
+
+        let plan = crate::request::PlanBuilder::new(pd_client, Keyspace::Disable, request)
+            .retry_multi_region(Backoff::no_jitter_backoff(0, 0, 10))
+            .plan();
+
+        let err = crate::shutting_down::with_shutting_down(1, async move { plan.execute().await })
+            .await
+            .err()
+            .expect("expected shutting down to short-circuit retries");
+
+        match err {
+            Error::StringError(message) => {
+                assert!(
+                    message.contains("shutting down"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "expected shutting down to skip retries"
         );
     }
 
