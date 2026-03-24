@@ -173,6 +173,24 @@ impl<PdC: PdClient> GcSafePointCache<PdC> {
         let pd = self.inner.pd.clone();
         match self.inner.keyspace {
             Keyspace::Enable { keyspace_id } => {
+                // Some clusters enable API-V2 keyspaces, but do not enable keyspace-level GC for
+                // the DEFAULT keyspace (id=0). In that case PD rejects `GetGCSafePointV2`.
+                //
+                // Fall back to the legacy global GC safe point API to keep lock resolution and
+                // stale read working in the default keyspace.
+                if keyspace_id == 0 {
+                    return match pd.get_gc_safe_point().await {
+                        Ok(safe_point) => {
+                            inc_load_safepoint_total("ok_compatible");
+                            Ok(safe_point)
+                        }
+                        Err(err) => {
+                            inc_load_safepoint_total("fail_compatible");
+                            Err(err)
+                        }
+                    };
+                }
+
                 if self
                     .inner
                     .gc_safe_point_v2_unimplemented
@@ -210,6 +228,21 @@ impl<PdC: PdClient> GcSafePointCache<PdC> {
                             }
                         }
                     }
+                    Err(err) if gc_safe_point_v2_rejected_by_pd(&err) => {
+                        self.inner
+                            .gc_safe_point_v2_unimplemented
+                            .store(true, Ordering::Release);
+                        match pd.get_gc_safe_point().await {
+                            Ok(safe_point) => {
+                                inc_load_safepoint_total("ok_compatible");
+                                Ok(safe_point)
+                            }
+                            Err(err) => {
+                                inc_load_safepoint_total("fail_compatible");
+                                Err(err)
+                            }
+                        }
+                    }
                     Err(err) => {
                         inc_load_safepoint_total("fail");
                         Err(err)
@@ -230,6 +263,13 @@ impl<PdC: PdClient> GcSafePointCache<PdC> {
     }
 }
 
+fn gc_safe_point_v2_rejected_by_pd(err: &Error) -> bool {
+    match err {
+        Error::GrpcAPI(status) => status.message().contains("ErrGCOnInvalidKeyspace"),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -239,6 +279,7 @@ mod tests {
     use async_trait::async_trait;
     use serial_test::serial;
     use tokio::sync::Notify;
+    use tonic::Status;
 
     use super::GcSafePointCache;
     use crate::mock::MockKvClient;
@@ -337,6 +378,80 @@ mod tests {
         v2: SafePointOutcome,
     }
 
+    #[derive(Clone, Copy)]
+    enum SafePointV2Outcome {
+        Ok(u64),
+        RejectedByPd,
+    }
+
+    #[derive(Clone)]
+    struct CountingGcSafePointPdClient {
+        v1_safe_point: u64,
+        v1_calls: Arc<AtomicUsize>,
+        v2: SafePointV2Outcome,
+        v2_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl PdClient for CountingGcSafePointPdClient {
+        type KvClient = MockKvClient;
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            _region: RegionWithLeader,
+        ) -> Result<RegionStore> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_key(&self, _key: &Key) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn region_for_id(&self, _id: RegionId) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
+            self.v1_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.v1_safe_point)
+        }
+
+        async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
+            let _ = keyspace_id;
+            self.v2_calls.fetch_add(1, Ordering::SeqCst);
+            match self.v2 {
+                SafePointV2Outcome::Ok(safe_point) => Ok(safe_point),
+                SafePointV2Outcome::RejectedByPd => Err(Error::GrpcAPI(Status::unknown(
+                    "[PD:gc:ErrGCOnInvalidKeyspace]injected",
+                ))),
+            }
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn all_stores(&self) -> Result<Vec<Store>> {
+            Ok(Vec::new())
+        }
+
+        async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {}
+
+        async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+    }
+
     #[async_trait]
     impl PdClient for MetricGcSafePointPdClient {
         type KvClient = MockKvClient;
@@ -431,6 +546,61 @@ mod tests {
 
         ready.notify_one();
         assert_eq!(handle.await.unwrap().unwrap(), 42);
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_gc_safe_point_fetch_default_keyspace_uses_legacy_api() -> Result<()> {
+        let v1_calls = Arc::new(AtomicUsize::new(0));
+        let v2_calls = Arc::new(AtomicUsize::new(0));
+        let pd_client = Arc::new(CountingGcSafePointPdClient {
+            v1_safe_point: 42,
+            v1_calls: v1_calls.clone(),
+            v2: SafePointV2Outcome::Ok(7),
+            v2_calls: v2_calls.clone(),
+        });
+        let cache = GcSafePointCache::new(pd_client, Keyspace::Enable { keyspace_id: 0 });
+
+        assert_eq!(cache.safe_point().await?, 42);
+        assert_eq!(v1_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            v2_calls.load(Ordering::SeqCst),
+            0,
+            "default keyspace must not call get_gc_safe_point_v2"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_gc_safe_point_fetch_rejected_v2_falls_back_to_legacy_api() -> Result<()> {
+        let v1_calls = Arc::new(AtomicUsize::new(0));
+        let v2_calls = Arc::new(AtomicUsize::new(0));
+        let pd_client = Arc::new(CountingGcSafePointPdClient {
+            v1_safe_point: 42,
+            v1_calls: v1_calls.clone(),
+            v2: SafePointV2Outcome::RejectedByPd,
+            v2_calls: v2_calls.clone(),
+        });
+        let cache = GcSafePointCache::new(pd_client, Keyspace::Enable { keyspace_id: 1 });
+
+        assert_eq!(cache.safe_point().await?, 42);
+        assert_eq!(v2_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(v1_calls.load(Ordering::SeqCst), 1);
+
+        {
+            let mut state = cache.inner.state.write().await;
+            state.last_updated = None;
+        }
+
+        assert_eq!(cache.safe_point().await?, 42);
+        assert_eq!(
+            v2_calls.load(Ordering::SeqCst),
+            1,
+            "v2 must be disabled after rejection"
+        );
+        assert_eq!(v1_calls.load(Ordering::SeqCst), 2);
+        Ok(())
     }
 
     #[tokio::test]
