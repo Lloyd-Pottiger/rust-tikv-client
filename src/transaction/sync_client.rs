@@ -126,7 +126,7 @@ impl SyncTransactionClient {
     ///
     /// This is a synchronous version of [`TransactionClient::pd_client`](crate::TransactionClient::pd_client).
     #[must_use]
-    pub fn pd_client(&self) -> Arc<crate::pd::PdRpcClient> {
+    pub fn pd_client(&self) -> Arc<crate::PdRpcClient> {
         self.client.pd_client()
     }
 

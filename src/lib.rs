@@ -138,6 +138,10 @@ mod mock;
 mod proptests;
 
 #[doc(inline)]
+pub use crate::pd::PdClient;
+#[doc(inline)]
+pub use crate::pd::PdRpcClient;
+#[doc(inline)]
 pub use common::extract_debug_info_str_from_key_error;
 #[doc(inline)]
 pub use common::security::SecurityManager;

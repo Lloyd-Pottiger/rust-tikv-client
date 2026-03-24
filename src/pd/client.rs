@@ -759,10 +759,6 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         }
     }
 
-    pub(crate) async fn close(&self) {
-        self.close_inner().await;
-    }
-
     fn ensure_open(&self) -> Result<()> {
         if self.is_explicitly_closed() {
             return Err(Error::StringError("client is closed".to_owned()));
