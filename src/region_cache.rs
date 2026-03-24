@@ -730,9 +730,9 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     }
 }
 
-const ENGINE_LABEL_KEY: &str = "engine";
-const ENGINE_LABEL_TIFLASH: &str = "tiflash";
-const ENGINE_LABEL_TIFLASH_COMPUTE: &str = "tiflash_compute";
+const ENGINE_LABEL_KEY: &str = crate::tikvrpc::ENGINE_LABEL_KEY;
+const ENGINE_LABEL_TIFLASH: &str = crate::tikvrpc::ENGINE_LABEL_TIFLASH;
+const ENGINE_LABEL_TIFLASH_COMPUTE: &str = crate::tikvrpc::ENGINE_LABEL_TIFLASH_COMPUTE;
 const ENGINE_LABEL_TIFLASH_MPP: &str = "tiflash_mpp";
 
 fn is_valid_store(store: &metapb::Store) -> bool {

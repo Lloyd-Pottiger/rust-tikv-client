@@ -235,6 +235,8 @@ pub use crate::rpc_interceptor::RpcRequest;
 #[doc(inline)]
 pub use crate::tikvrpc::CmdType;
 #[doc(inline)]
+pub use crate::tikvrpc::EndpointType;
+#[doc(inline)]
 pub use crate::timestamp::Timestamp;
 #[doc(inline)]
 pub use crate::timestamp::TimestampExt;

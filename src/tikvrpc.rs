@@ -1,8 +1,8 @@
-//! Lightweight command typing helpers mirroring client-go `tikvrpc::CmdType`.
+//! Lightweight TiKV RPC typing helpers mirroring client-go `tikvrpc`.
 //!
-//! This module intentionally exposes only the command enum and label mapping used by the Rust
-//! client's existing typed request pipeline. It does not attempt to recreate client-go's
-//! full `tikvrpc::Request` / `Response` wrappers.
+//! This module intentionally exposes only small stable enums and label mappings used by the Rust
+//! client's existing typed request pipeline. It does not attempt to recreate client-go's full
+//! `tikvrpc::Request` / `Response` wrappers.
 
 use std::fmt;
 
@@ -99,5 +99,131 @@ cmd_type_table! {
 impl fmt::Display for CmdType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Types of remote endpoints.
+///
+/// This mirrors client-go `tikvrpc::EndpointType`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum EndpointType {
+    /// A TiKV server.
+    TiKv,
+    /// A TiFlash server.
+    TiFlash,
+    /// A TiDB server.
+    TiDb,
+    /// A TiFlash compute node.
+    TiFlashCompute,
+}
+
+impl EndpointType {
+    /// Returns the name of this endpoint type.
+    ///
+    /// This mirrors client-go `EndpointType.Name()`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            EndpointType::TiKv => "tikv",
+            EndpointType::TiFlash => "tiflash",
+            EndpointType::TiDb => "tidb",
+            EndpointType::TiFlashCompute => "tiflash_compute",
+        }
+    }
+
+    /// Returns true if this endpoint is TiFlash-related.
+    ///
+    /// This mirrors client-go `EndpointType.IsTiFlashRelatedType()`.
+    #[must_use]
+    pub const fn is_tiflash_related_type(self) -> bool {
+        matches!(self, EndpointType::TiFlash | EndpointType::TiFlashCompute)
+    }
+
+    /// Determine the endpoint type from store labels.
+    ///
+    /// This maps to client-go `GetStoreTypeByMeta`, but operates on the store's label list to
+    /// avoid exposing the full `metapb::Store` protobuf message.
+    #[must_use]
+    pub fn from_store_labels(labels: &[crate::StoreLabel]) -> EndpointType {
+        for label in labels {
+            if label.key == ENGINE_LABEL_KEY && label.value == ENGINE_LABEL_TIFLASH {
+                return EndpointType::TiFlash;
+            }
+            if label.key == ENGINE_LABEL_KEY && label.value == ENGINE_LABEL_TIFLASH_COMPUTE {
+                return EndpointType::TiFlashCompute;
+            }
+        }
+        EndpointType::TiKv
+    }
+}
+
+impl fmt::Display for EndpointType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Constants to determine engine type.
+///
+/// They should be kept in sync with PD and client-go.
+pub const ENGINE_LABEL_KEY: &str = "engine";
+pub const ENGINE_LABEL_TIFLASH: &str = "tiflash";
+pub const ENGINE_LABEL_TIFLASH_COMPUTE: &str = "tiflash_compute";
+
+/// Constants to determine engine role.
+///
+/// They should be kept in sync with PD and client-go.
+pub const ENGINE_ROLE_LABEL_KEY: &str = "engine_role";
+pub const ENGINE_ROLE_WRITE: &str = "write";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn label(key: &str, value: &str) -> crate::StoreLabel {
+        crate::StoreLabel {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    #[test]
+    fn test_endpoint_type_name_and_tiflash_related() {
+        assert_eq!(EndpointType::TiKv.name(), "tikv");
+        assert_eq!(EndpointType::TiFlash.name(), "tiflash");
+        assert_eq!(EndpointType::TiDb.name(), "tidb");
+        assert_eq!(EndpointType::TiFlashCompute.name(), "tiflash_compute");
+
+        assert!(!EndpointType::TiKv.is_tiflash_related_type());
+        assert!(EndpointType::TiFlash.is_tiflash_related_type());
+        assert!(!EndpointType::TiDb.is_tiflash_related_type());
+        assert!(EndpointType::TiFlashCompute.is_tiflash_related_type());
+    }
+
+    #[test]
+    fn test_endpoint_type_from_store_labels() {
+        assert_eq!(EndpointType::from_store_labels(&[]), EndpointType::TiKv);
+
+        let tiflash_labels = [label(ENGINE_LABEL_KEY, ENGINE_LABEL_TIFLASH)];
+        assert_eq!(
+            EndpointType::from_store_labels(&tiflash_labels),
+            EndpointType::TiFlash
+        );
+
+        let compute_labels = [label(ENGINE_LABEL_KEY, ENGINE_LABEL_TIFLASH_COMPUTE)];
+        assert_eq!(
+            EndpointType::from_store_labels(&compute_labels),
+            EndpointType::TiFlashCompute
+        );
+
+        let unrelated = [
+            label("zone", "z1"),
+            label(ENGINE_LABEL_KEY, "not-a-store-type"),
+        ];
+        assert_eq!(
+            EndpointType::from_store_labels(&unrelated),
+            EndpointType::TiKv
+        );
     }
 }
