@@ -793,8 +793,7 @@ impl Config {
 
     /// Set the coprocessor cache config (client-go `TiKVClient.CoprCache`).
     ///
-    /// Note: This field is currently preserved for API parity. The Rust client does not yet
-    /// implement coprocessor response caching.
+    /// Set `capacity_mb` to `0` to disable caching.
     #[must_use]
     pub fn with_copr_cache(mut self, copr_cache: CoprocessorCacheConfig) -> Self {
         self.copr_cache = copr_cache;
