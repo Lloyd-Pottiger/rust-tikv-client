@@ -13661,6 +13661,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_transaction_rpc_interceptor_can_read_and_mutate_context_fields() {
+        let original_txn_source = 7_u64;
+        let original_disk_full_opt = DiskFullOpt::AllowedOnAlmostFull;
+        let original_sync_log = true;
+        let original_max_execution_duration_ms = 99_u64;
+        let original_resource_group_tag = b"tag-before".to_vec();
+        let original_resource_group_name = "rg-before".to_owned();
+        let original_request_source = "source-before".to_owned();
+
+        let mutated_txn_source = 42_u64;
+        let mutated_disk_full_opt = DiskFullOpt::AllowedOnAlreadyFull;
+        let mutated_sync_log = false;
+        let mutated_max_execution_duration_ms = 321_u64;
+        let mutated_resource_group_tag = b"tag-after".to_vec();
+        let mutated_resource_group_name = "rg-after".to_owned();
+        let mutated_request_source = "source-after".to_owned();
+
+        let prewrite_requests = Arc::new(AtomicUsize::new(0));
+        let commit_requests = Arc::new(AtomicUsize::new(0));
+        let prewrite_requests_cloned = prewrite_requests.clone();
+        let commit_requests_cloned = commit_requests.clone();
+        let expected_resource_group_tag = mutated_resource_group_tag.clone();
+        let expected_resource_group_name = mutated_resource_group_name.clone();
+        let expected_request_source = mutated_request_source.clone();
+
+        let pd_client = Arc::new(
+            MockPdClient::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    prewrite_requests_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(ctx.txn_source, mutated_txn_source);
+                    assert_eq!(ctx.disk_full_opt, mutated_disk_full_opt as i32);
+                    assert_eq!(ctx.sync_log, mutated_sync_log);
+                    assert_eq!(
+                        ctx.max_execution_duration_ms,
+                        mutated_max_execution_duration_ms
+                    );
+                    assert_eq!(ctx.resource_group_tag, expected_resource_group_tag);
+                    assert_eq!(ctx.request_source, expected_request_source);
+                    assert_eq!(
+                        ctx.resource_control_context
+                            .as_ref()
+                            .expect("resource control context")
+                            .resource_group_name,
+                        expected_resource_group_name
+                    );
+                    return Ok(Box::<kvrpcpb::PrewriteResponse>::default() as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::CommitRequest>() {
+                    let ctx = req.context.as_ref().expect("context");
+                    commit_requests_cloned.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(ctx.txn_source, mutated_txn_source);
+                    assert_eq!(ctx.disk_full_opt, mutated_disk_full_opt as i32);
+                    assert_eq!(ctx.sync_log, mutated_sync_log);
+                    assert_eq!(
+                        ctx.max_execution_duration_ms,
+                        mutated_max_execution_duration_ms
+                    );
+                    assert_eq!(ctx.resource_group_tag, expected_resource_group_tag);
+                    assert_eq!(ctx.request_source, expected_request_source);
+                    assert_eq!(
+                        ctx.resource_control_context
+                            .as_ref()
+                            .expect("resource control context")
+                            .resource_group_name,
+                        expected_resource_group_name
+                    );
+                    return Ok(Box::<kvrpcpb::CommitResponse>::default() as Box<dyn Any>);
+                }
+
+                Err(Error::StringError("unexpected request".to_owned()))
+            }))
+            .with_tso_sequence(100),
+        );
+
+        let mut txn = Transaction::new(
+            Timestamp::default(),
+            pd_client,
+            TransactionOptions::new_optimistic()
+                .txn_source(original_txn_source)
+                .disk_full_opt(original_disk_full_opt)
+                .sync_log(original_sync_log)
+                .max_write_execution_duration(Duration::from_millis(
+                    original_max_execution_duration_ms,
+                ))
+                .resource_group_tag(original_resource_group_tag.clone())
+                .resource_group_name(original_resource_group_name.clone())
+                .request_source(original_request_source.clone())
+                .heartbeat_option(HeartbeatOption::NoHeartbeat)
+                .drop_check(CheckLevel::None),
+            Keyspace::Disable,
+        );
+
+        let original_resource_group_tag_hook = original_resource_group_tag.clone();
+        let original_resource_group_name_hook = original_resource_group_name.clone();
+        let original_request_source_hook = original_request_source.clone();
+        let mutated_resource_group_tag_hook = mutated_resource_group_tag.clone();
+        let mutated_resource_group_name_hook = mutated_resource_group_name.clone();
+        let mutated_request_source_hook = mutated_request_source.clone();
+
+        txn.set_rpc_interceptor(crate::FnRpcInterceptor::new("context-mutator").on_before(
+            move |req| {
+                if !matches!(req.label(), "kv_prewrite" | "kv_commit") {
+                    return;
+                }
+
+                assert_eq!(req.txn_source(), original_txn_source);
+                assert_eq!(req.disk_full_opt(), original_disk_full_opt);
+                assert_eq!(req.sync_log(), original_sync_log);
+                assert_eq!(
+                    req.max_execution_duration_ms(),
+                    original_max_execution_duration_ms
+                );
+                assert_eq!(
+                    req.resource_group_tag(),
+                    Some(original_resource_group_tag_hook.as_slice())
+                );
+                assert_eq!(
+                    req.resource_group_name(),
+                    Some(original_resource_group_name_hook.as_str())
+                );
+                assert_eq!(
+                    req.request_source(),
+                    Some(original_request_source_hook.as_str())
+                );
+
+                req.set_txn_source(mutated_txn_source);
+                req.set_disk_full_opt(mutated_disk_full_opt);
+                req.set_sync_log(mutated_sync_log);
+                req.set_max_execution_duration_ms(mutated_max_execution_duration_ms);
+                req.set_resource_group_tag(mutated_resource_group_tag_hook.clone());
+                req.set_resource_group_name(mutated_resource_group_name_hook.clone());
+                req.set_request_source(mutated_request_source_hook.clone());
+            },
+        ));
+
+        txn.put("key".to_owned(), b"value".to_vec()).await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert_eq!(prewrite_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(commit_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn test_txn_resource_group_tagger_applies_to_txn_heart_beat_requests() {
         let heart_beat_txn_source = Arc::new(AtomicU64::new(0));
         let heart_beat_priority = Arc::new(std::sync::atomic::AtomicI32::new(0));
