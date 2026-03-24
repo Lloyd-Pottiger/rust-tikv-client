@@ -19,6 +19,8 @@ use crate::common::Error;
 use crate::pd::Cluster;
 use crate::pd::RetryClient;
 use crate::pd::RetryClientTrait;
+use crate::pd_region_meta_circuit_breaker::default_pd_region_meta_circuit_breaker;
+use crate::pd_region_meta_circuit_breaker::PdRegionMetaCircuitBreaker;
 use crate::proto::metapb::Store;
 use crate::proto::metapb::{self};
 use crate::region::RegionId;
@@ -142,6 +144,7 @@ pub struct RegionCache<Client = RetryClient<Cluster>> {
     inner_client: Arc<Client>,
     region_cache_ttl_ms: u64,
     region_cache_ttl_jitter_ms: u64,
+    pd_region_meta_circuit_breaker: Arc<PdRegionMetaCircuitBreaker>,
 }
 
 struct OnMyWayIdGuard {
@@ -204,7 +207,12 @@ impl<Client> RegionCache<Client> {
             inner_client,
             region_cache_ttl_ms: duration_to_millis_saturating(region_cache_ttl),
             region_cache_ttl_jitter_ms: duration_to_millis_saturating(region_cache_ttl_jitter),
+            pd_region_meta_circuit_breaker: default_pd_region_meta_circuit_breaker(),
         }
+    }
+
+    pub(crate) fn pd_region_meta_circuit_breaker(&self) -> Arc<PdRegionMetaCircuitBreaker> {
+        self.pd_region_meta_circuit_breaker.clone()
     }
 
     pub async fn clear(&self) {
@@ -429,7 +437,11 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 &[TraceField::u64("keyLen", key_len)],
             );
         }
-        let region = match self.inner_client.clone().get_region(key.into()).await {
+        let region = match self
+            .pd_region_meta_circuit_breaker
+            .execute(|| self.inner_client.clone().get_region(key.into()))
+            .await
+        {
             Ok(region) => {
                 stats::region_cache_operation("get_region_when_miss", true);
                 stats::observe_load_region_cache("get_region_when_miss", started_at.elapsed());
@@ -478,9 +490,14 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         loop {
             let scan_started_at = Instant::now();
             let regions = self
-                .inner_client
-                .clone()
-                .scan_regions(start_key.clone().into(), end_key_bytes.clone(), limit)
+                .pd_region_meta_circuit_breaker
+                .execute(|| {
+                    self.inner_client.clone().scan_regions(
+                        start_key.clone().into(),
+                        end_key_bytes.clone(),
+                        limit,
+                    )
+                })
                 .await;
             stats::region_cache_operation("scan_regions", regions.is_ok());
             stats::observe_load_region_cache("scan_regions", scan_started_at.elapsed());
@@ -534,7 +551,11 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
         let cleanup_guard = OnMyWayIdGuard::new(id, notify.clone(), self.region_cache.clone());
 
-        let result = match self.inner_client.clone().get_region_by_id(id).await {
+        let result = match self
+            .pd_region_meta_circuit_breaker
+            .execute(|| self.inner_client.clone().get_region_by_id(id))
+            .await
+        {
             Ok(region) => {
                 if trace_enabled {
                     trace::trace(
@@ -783,6 +804,7 @@ mod test {
     use super::RegionCache;
     use crate::common::Error;
     use crate::pd::RetryClientTrait;
+    use crate::pd_region_meta_circuit_breaker::PdRegionMetaCircuitBreaker;
     use crate::proto::keyspacepb;
     use crate::proto::metapb::RegionEpoch;
     use crate::proto::metapb::{self};
@@ -1641,6 +1663,44 @@ mod test {
         let refreshed = cache.get_store_by_id(store_id).await?;
         assert_eq!(refreshed.address, "new");
         assert_eq!(retry_client.get_store_count.load(SeqCst), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pd_region_meta_circuit_breaker_short_circuits_region_loads() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+
+        let mut cache = RegionCache::new_with_ttl(
+            retry_client.clone(),
+            Duration::from_secs(1),
+            Duration::from_secs(0),
+        );
+        cache.pd_region_meta_circuit_breaker = Arc::new(PdRegionMetaCircuitBreaker::new(
+            crate::PdRegionMetaCircuitBreakerSettings {
+                error_rate_window: Duration::from_millis(50),
+                min_qps_for_open: 1,
+                cool_down_interval: Duration::from_secs(3600),
+                half_open_success_count: 1,
+            },
+        ));
+
+        let _ = cache
+            .read_through_region_by_key(Key::from(vec![1]))
+            .await
+            .expect_err("expected mock PD failure");
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 1);
+
+        let err = cache
+            .read_through_region_by_key(Key::from(vec![2]))
+            .await
+            .expect_err("expected circuit breaker to reject call");
+        assert!(matches!(err, Error::InternalError { .. }));
+        assert_eq!(
+            retry_client.get_region_count.load(SeqCst),
+            1,
+            "circuit breaker must short-circuit PD get_region calls"
+        );
 
         Ok(())
     }

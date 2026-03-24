@@ -121,6 +121,7 @@ pub mod config;
 mod gc_safe_point;
 mod kv;
 mod pd;
+mod pd_region_meta_circuit_breaker;
 mod proto;
 mod region;
 mod region_cache;
@@ -195,6 +196,10 @@ pub use crate::kv::Key;
 pub use crate::kv::KvPair;
 #[doc(inline)]
 pub use crate::kv::Value;
+#[doc(inline)]
+pub use crate::pd_region_meta_circuit_breaker::change_pd_region_meta_circuit_breaker_settings;
+#[doc(inline)]
+pub use crate::pd_region_meta_circuit_breaker::PdRegionMetaCircuitBreakerSettings;
 #[doc(inline)]
 pub use crate::raw::lowering as raw_lowering;
 #[doc(inline)]

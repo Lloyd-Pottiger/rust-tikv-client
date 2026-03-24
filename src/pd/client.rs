@@ -938,7 +938,11 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
             return Self::decode_region(region, enable_codec);
         }
 
-        let prev_region = self.pd.clone().get_prev_region(key.into()).await?;
+        let prev_region = self
+            .region_cache
+            .pd_region_meta_circuit_breaker()
+            .execute(|| self.pd.clone().get_prev_region(key.into()))
+            .await?;
         self.region_cache.add_region(prev_region.clone()).await;
         Self::decode_region(prev_region, enable_codec)
     }
@@ -966,9 +970,13 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         let end_key = end_key.unwrap_or(Key::EMPTY);
 
         let regions = self
-            .pd
-            .clone()
-            .scan_regions(start_key.into(), end_key.into(), limit)
+            .region_cache
+            .pd_region_meta_circuit_breaker()
+            .execute(|| {
+                self.pd
+                    .clone()
+                    .scan_regions(start_key.into(), end_key.into(), limit)
+            })
             .await?;
         regions
             .into_iter()
