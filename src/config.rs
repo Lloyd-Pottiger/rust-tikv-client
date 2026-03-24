@@ -989,6 +989,16 @@ pub fn set_region_cache_ttl_with_jitter(base: Duration, jitter: Duration) {
     });
 }
 
+/// Set the global region cache TTL base value.
+///
+/// This mirrors client-go deprecated `tikv.SetRegionCacheTTLSec`.
+#[deprecated(note = "Use `set_region_cache_ttl_with_jitter` instead.")]
+pub fn set_region_cache_ttl(base: Duration) {
+    update_global_config(|cfg| {
+        cfg.region_cache_ttl = base;
+    });
+}
+
 /// Set the global timeout used for store liveness checks.
 ///
 /// This mirrors client-go `tikv.SetStoreLivenessTimeout`.
@@ -1146,6 +1156,34 @@ mod tests {
         let updated = get_global_config();
         assert_eq!(updated.region_cache_ttl, Duration::from_secs(9));
         assert_eq!(updated.region_cache_ttl_jitter, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_set_region_cache_ttl_updates_base_but_keeps_jitter() {
+        let _lock = super::GLOBAL_CONFIG_TEST_LOCK.blocking_lock();
+
+        let prev = get_global_config();
+        struct RestoreGuard {
+            prev: Config,
+        }
+        impl Drop for RestoreGuard {
+            fn drop(&mut self) {
+                set_global_config(self.prev.clone());
+            }
+        }
+        let _guard = RestoreGuard { prev: prev.clone() };
+
+        set_global_config(
+            prev.with_region_cache_ttl(Duration::from_secs(11))
+                .with_region_cache_ttl_jitter(Duration::from_secs(4)),
+        );
+
+        #[allow(deprecated)]
+        set_region_cache_ttl(Duration::from_secs(9));
+
+        let updated = get_global_config();
+        assert_eq!(updated.region_cache_ttl, Duration::from_secs(9));
+        assert_eq!(updated.region_cache_ttl_jitter, Duration::from_secs(4));
     }
 
     #[test]
