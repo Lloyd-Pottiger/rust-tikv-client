@@ -1139,7 +1139,6 @@ pub(crate) fn is_grpc_error(e: &Error) -> bool {
 
 const SLOW_STORE_TTL_ON_SERVER_IS_BUSY: Duration = Duration::from_secs(10);
 const SLOW_STORE_TTL_ON_GRPC_DEADLINE_EXCEEDED: Duration = Duration::from_secs(10);
-const ZONE_LABEL_KEY: &str = "zone";
 
 fn is_grpc_deadline_exceeded(e: &Error) -> bool {
     matches!(
@@ -1307,28 +1306,9 @@ fn store_labels_match(store: &metapb::Store, labels: &[StoreLabel]) -> bool {
     })
 }
 
-fn store_zone_label(store: &metapb::Store) -> Option<&str> {
-    store
-        .labels
-        .iter()
-        .find(|label| label.key == ZONE_LABEL_KEY)
-        .map(|label| label.value.as_str())
-}
-
 fn is_cross_zone(self_zone_label: Option<&str>, store: &metapb::Store) -> bool {
-    let Some(self_zone_label) = self_zone_label else {
-        return false;
-    };
-    if self_zone_label.is_empty() {
-        return false;
-    }
-    let Some(target_zone_label) = store_zone_label(store) else {
-        return false;
-    };
-    if target_zone_label.is_empty() {
-        return false;
-    }
-    self_zone_label != target_zone_label
+    crate::store_vars::access_location_type(self_zone_label, &store.labels)
+        == crate::AccessLocationType::CrossZone
 }
 
 #[allow(clippy::too_many_arguments)]
