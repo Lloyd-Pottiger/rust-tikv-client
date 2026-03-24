@@ -18,7 +18,9 @@ use tonic::codegen::StdError;
 use tonic::transport::Channel;
 
 use super::batch::BatchCommandsClient;
+use super::coprocessor_cache::CoprocessorCache;
 use super::Request;
+use crate::config::CoprocessorCacheConfig;
 use crate::pd::HealthFeedbackObserver;
 use crate::proto::coprocessor;
 use crate::proto::kvrpcpb;
@@ -43,6 +45,7 @@ pub struct TikvConnect {
     security_mgr: Arc<SecurityManager>,
     timeout: Duration,
     copr_req_timeout: Duration,
+    copr_cache: Option<Arc<CoprocessorCache>>,
     grpc_max_decoding_message_size: usize,
     grpc_compression_type: GrpcCompressionType,
     enable_batch_rpc: bool,
@@ -71,6 +74,7 @@ impl TikvConnect {
             security_mgr,
             timeout,
             copr_req_timeout,
+            copr_cache: None,
             grpc_max_decoding_message_size,
             grpc_compression_type,
             enable_batch_rpc,
@@ -96,6 +100,17 @@ impl TikvConnect {
 
     pub fn with_max_concurrency_request_limit(mut self, limit: i64) -> Self {
         self.max_concurrency_request_limit = limit;
+        self
+    }
+
+    pub fn with_copr_cache_config(mut self, config: CoprocessorCacheConfig) -> Self {
+        if config.capacity_mb > 0 && config.admission_max_result_mb == 0 {
+            warn!("invalid coprocessor cache config: admission_max_result_mb=0, disabling cache");
+            self.copr_cache = None;
+            return self;
+        }
+
+        self.copr_cache = CoprocessorCache::from_config(&config).map(Arc::new);
         self
     }
 
@@ -135,6 +150,7 @@ impl KvConnect for TikvConnect {
     async fn connect(&self, address: &str) -> Result<KvRpcClient> {
         let timeout = self.timeout;
         let copr_req_timeout = self.copr_req_timeout;
+        let copr_cache = self.copr_cache.clone();
         let grpc_max_decoding_message_size = self.grpc_max_decoding_message_size;
         let grpc_compression_type = self.grpc_compression_type;
         let enable_batch_rpc = self.enable_batch_rpc;
@@ -169,6 +185,7 @@ impl KvConnect for TikvConnect {
             batch_rpc_wait_size,
             batch_rpc_max_wait_time,
             max_concurrency_request_limit,
+            copr_cache,
             health_feedback_observer,
         )
         .await)
@@ -335,6 +352,7 @@ pub struct KvRpcClient {
     rpc_client: TikvClient<Channel>,
     timeout: Duration,
     copr_req_timeout: Duration,
+    copr_cache: Option<Arc<CoprocessorCache>>,
     store_address: String,
     batch: Option<BatchCommandsClient>,
     max_concurrency_request_limit: Option<RateLimit>,
@@ -354,6 +372,7 @@ impl KvRpcClient {
         batch_rpc_wait_size: usize,
         batch_rpc_max_wait_time: Duration,
         max_concurrency_request_limit: i64,
+        copr_cache: Option<Arc<CoprocessorCache>>,
         health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
     ) -> KvRpcClient {
         let max_concurrency_request_limit =
@@ -390,6 +409,7 @@ impl KvRpcClient {
             rpc_client,
             timeout,
             copr_req_timeout,
+            copr_cache,
             store_address,
             batch,
             max_concurrency_request_limit,
@@ -437,6 +457,35 @@ impl KvRpcClient {
             }
             err => Err(err),
         }
+    }
+
+    async fn dispatch_coprocessor_unary_with_cache(
+        &self,
+        cache: &CoprocessorCache,
+        request: &coprocessor::Request,
+        timeout: Duration,
+    ) -> Result<Box<dyn Any>> {
+        let mut request = request.clone();
+        let region_id = request
+            .context
+            .as_ref()
+            .map(|ctx| ctx.region_id)
+            .filter(|region_id| *region_id != 0);
+        let lookup = region_id.and_then(|region_id| cache.prepare_request(&mut request, region_id));
+
+        let response = request.dispatch(&self.rpc_client, timeout).await?;
+        let mut response =
+            *response
+                .downcast::<coprocessor::Response>()
+                .map_err(|_| Error::InternalError {
+                    message: "expected coprocessor response".to_owned(),
+                })?;
+
+        if let (Some(region_id), Some(lookup)) = (region_id, lookup) {
+            cache.handle_response(&request, region_id, Some(lookup), &mut response)?;
+        }
+
+        Ok(Box::new(response) as Box<dyn Any>)
     }
 
     async fn try_dispatch_batch(&self, request: &dyn Request) -> Result<Option<Box<dyn Any>>> {
@@ -575,12 +624,29 @@ impl KvRpcClient {
         }
 
         if let Some(req) = request.as_any().downcast_ref::<coprocessor::Request>() {
+            let mut req = req.clone();
+            let cache = self.copr_cache.as_ref();
+            let region_id = req
+                .context
+                .as_ref()
+                .map(|ctx| ctx.region_id)
+                .filter(|region_id| *region_id != 0);
+            let lookup = match (cache, region_id) {
+                (Some(cache), Some(region_id)) => cache.prepare_request(&mut req, region_id),
+                _ => None,
+            };
+
             let cmd = tikvpb::batch_commands_request::request::Cmd::Coprocessor(req.clone());
             return match batch.dispatch(cmd, timeout).await {
                 Ok(result) => {
                     self.observe_health_feedback(result.health_feedback.as_ref());
                     match result.cmd {
-                        tikvpb::batch_commands_response::response::Cmd::Coprocessor(resp) => {
+                        tikvpb::batch_commands_response::response::Cmd::Coprocessor(mut resp) => {
+                            if let (Some(cache), Some(region_id), Some(lookup)) =
+                                (cache, region_id, lookup)
+                            {
+                                cache.handle_response(&req, region_id, Some(lookup), &mut resp)?;
+                            }
                             Ok(Some(Box::new(resp) as Box<dyn Any>))
                         }
                         other => Err(Error::StringError(format!(
@@ -1117,14 +1183,30 @@ impl KvClient for KvRpcClient {
             None => None,
         };
 
+        let timeout = self.timeout_for_request(request);
+
         if crate::store::has_forwarded_host() {
-            let timeout = self.timeout_for_request(request);
+            if let (Some(cache), Some(cop_req)) = (
+                self.copr_cache.as_ref(),
+                request.as_any().downcast_ref::<coprocessor::Request>(),
+            ) {
+                return self
+                    .dispatch_coprocessor_unary_with_cache(cache, cop_req, timeout)
+                    .await;
+            }
             return request.dispatch(&self.rpc_client, timeout).await;
         }
         if let Some(resp) = self.try_dispatch_batch(request).await? {
             return Ok(resp);
         }
-        let timeout = self.timeout_for_request(request);
+        if let (Some(cache), Some(cop_req)) = (
+            self.copr_cache.as_ref(),
+            request.as_any().downcast_ref::<coprocessor::Request>(),
+        ) {
+            return self
+                .dispatch_coprocessor_unary_with_cache(cache, cop_req, timeout)
+                .await;
+        }
         request.dispatch(&self.rpc_client, timeout).await
     }
 
@@ -1264,6 +1346,7 @@ mod tests {
             rpc_client,
             timeout: Duration::from_secs(1),
             copr_req_timeout: Duration::ZERO,
+            copr_cache: None,
             store_address: "127.0.0.1:1".to_owned(),
             batch: Some(batch),
             max_concurrency_request_limit: None,
@@ -1372,6 +1455,142 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_coprocessor_cache_applies_on_batch_dispatch() -> Result<()> {
+        let (mut client, mut out_rx, in_tx) = new_kv_rpc_client_with_batch_for_test()?;
+        let cache = CoprocessorCache::from_config(&CoprocessorCacheConfig {
+            capacity_mb: 1,
+            admission_max_ranges: 500,
+            admission_max_result_mb: 1,
+            admission_min_process_ms: 5,
+        })
+        .expect("expected enabled cache");
+        client.copr_cache = Some(Arc::new(cache));
+
+        let region_id = 7;
+        let mut request = coprocessor::Request::default();
+        request.tp = 1;
+        request.start_ts = 10;
+        request.data = vec![1, 2, 3];
+        request.ranges = vec![coprocessor::KeyRange {
+            start: vec![1],
+            end: vec![2],
+        }];
+        request.context = Some(kvrpcpb::Context {
+            region_id,
+            ..Default::default()
+        });
+
+        let dispatch_one = {
+            let client = client.clone();
+            let request = request.clone();
+            tokio::spawn(async move {
+                let resp_any = client.dispatch(&request).await?;
+                let resp = *resp_any.downcast::<coprocessor::Response>().map_err(|_| {
+                    Error::InternalError {
+                        message: "expected coprocessor response".to_owned(),
+                    }
+                })?;
+                Ok::<_, Error>(resp)
+            })
+        };
+
+        let outbound = out_rx.recv().await.expect("expected outbound request");
+        assert_eq!(outbound.request_ids.len(), 1);
+        assert_eq!(outbound.requests.len(), 1);
+        let request_id = outbound.request_ids[0];
+
+        let sent_request = match outbound.requests[0]
+            .cmd
+            .as_ref()
+            .expect("expected outbound request cmd")
+        {
+            tikvpb::batch_commands_request::request::Cmd::Coprocessor(req) => req,
+            other => panic!("unexpected batch cmd for coprocessor request: {other:?}"),
+        };
+        assert!(sent_request.is_cache_enabled);
+        assert_eq!(sent_request.cache_if_match_version, 0);
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Coprocessor(
+                    coprocessor::Response {
+                        data: vec![9],
+                        can_be_cached: true,
+                        cache_last_version: 123,
+                        exec_details: Some(kvrpcpb::ExecDetails {
+                            time_detail: Some(kvrpcpb::TimeDetail {
+                                process_wall_time_ms: 5,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("expected send ok");
+
+        let resp = dispatch_one.await.expect("expected join ok")?;
+        assert_eq!(resp.data, vec![9]);
+        assert!(!resp.is_cache_hit);
+
+        // Second request should carry cache_if_match_version=123, and a cache hit should fill data.
+        let mut request2 = request.clone();
+        request2.start_ts = 11;
+
+        let dispatch_two = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                let resp_any = client.dispatch(&request2).await?;
+                let resp = *resp_any.downcast::<coprocessor::Response>().map_err(|_| {
+                    Error::InternalError {
+                        message: "expected coprocessor response".to_owned(),
+                    }
+                })?;
+                Ok::<_, Error>(resp)
+            })
+        };
+
+        let outbound = out_rx.recv().await.expect("expected outbound request");
+        let request_id = outbound.request_ids[0];
+        let sent_request = match outbound.requests[0]
+            .cmd
+            .as_ref()
+            .expect("expected outbound request cmd")
+        {
+            tikvpb::batch_commands_request::request::Cmd::Coprocessor(req) => req,
+            other => panic!("unexpected batch cmd for coprocessor request: {other:?}"),
+        };
+        assert!(sent_request.is_cache_enabled);
+        assert_eq!(sent_request.cache_if_match_version, 123);
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Coprocessor(
+                    coprocessor::Response {
+                        is_cache_hit: true,
+                        cache_last_version: 123,
+                        ..Default::default()
+                    },
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("expected send ok");
+
+        let resp = dispatch_two.await.expect("expected join ok")?;
+        assert!(resp.is_cache_hit);
+        assert_eq!(resp.data, vec![9]);
+        Ok(())
+    }
+
     #[derive(Clone, Debug)]
     struct TimeoutEchoRequest {
         label: &'static str,
@@ -1412,6 +1631,7 @@ mod tests {
             rpc_client,
             timeout: Duration::from_secs(1),
             copr_req_timeout: Duration::from_secs(9),
+            copr_cache: None,
             store_address: "127.0.0.1:1".to_owned(),
             batch: None,
             max_concurrency_request_limit: None,
@@ -3701,6 +3921,7 @@ mod tests {
             rpc_client,
             timeout: Duration::from_secs(1),
             copr_req_timeout: Duration::from_secs(1),
+            copr_cache: None,
             store_address: "test".to_owned(),
             batch: None,
             health_feedback_observer: Arc::new(Mutex::new(None)),

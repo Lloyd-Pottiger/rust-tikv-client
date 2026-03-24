@@ -1350,6 +1350,7 @@ impl PdRpcClient<TikvConnect, Cluster> {
                 .with_batch_rpc_policy(config.batch_rpc_policy.clone())
                 .with_batch_rpc_overload_threshold(config.batch_rpc_overload_threshold)
                 .with_max_concurrency_request_limit(config.max_concurrency_request_limit)
+                .with_copr_cache_config(config.copr_cache.clone())
             },
             |security_mgr| {
                 RetryClient::connect(
