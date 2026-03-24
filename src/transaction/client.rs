@@ -11,7 +11,7 @@ use log::info;
 use tokio::sync::RwLock;
 
 use super::latches::TxnLocalLatches;
-use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF};
+use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF, OPTIMISTIC_BACKOFF};
 use crate::config::Config;
 use crate::gc_safe_point::GcSafePointCache;
 use crate::pd::PdClient;
@@ -1064,14 +1064,24 @@ impl<PdC: PdClient> Client<PdC> {
     ) -> Result<ResolveLocksForReadResult> {
         use crate::request::TruncateKeyspace;
 
-        let lock_resolver = self.bound_lock_resolver();
-        let mut resolve_result = lock_resolver
-            .resolve_locks_for_read(
-                locks.encode_keyspace(self.keyspace, KeyMode::Txn),
-                timestamp,
-                force_resolve_lock_lite,
-            )
-            .await?;
+        // `resolve_locks_for_read` spawns background cleanup tasks. If we go through
+        // `BoundLockResolver` here, it would abort those tasks on drop because the bound resolver
+        // is a temporary handle (created per call). For this public API we want the best-effort
+        // cleanup to keep running after the call returns, so we detach the cleanup tasks by not
+        // tracking their join handles.
+        let mut resolve_result = crate::transaction::resolve_locks_for_read(
+            self.resolve_locks_ctx.clone(),
+            locks.encode_keyspace(self.keyspace, KeyMode::Txn),
+            timestamp,
+            self.pd.clone(),
+            self.keyspace,
+            OPTIMISTIC_BACKOFF,
+            None,
+            force_resolve_lock_lite,
+            None,
+            crate::transaction::LockResolverRpcContext::default(),
+        )
+        .await?;
         resolve_result.live_locks = resolve_result.live_locks.truncate_keyspace(self.keyspace);
         Ok(resolve_result)
     }
