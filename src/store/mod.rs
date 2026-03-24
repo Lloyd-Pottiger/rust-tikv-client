@@ -24,9 +24,8 @@ pub use self::errors::HasKeyErrors;
 pub use self::errors::HasRegionError;
 pub use self::errors::HasRegionErrors;
 pub(crate) use self::forwarding::apply_forwarded_host_metadata;
-#[cfg(test)]
-pub(crate) use self::forwarding::current_forwarded_host;
-pub(crate) use self::forwarding::has_forwarded_host;
+pub(crate) use self::forwarding::apply_forwarded_host_metadata_value;
+pub(crate) use self::forwarding::forwarded_host;
 pub(crate) use self::forwarding::scope_forwarded_host;
 pub use self::request::Request;
 use crate::pd::PdClient;

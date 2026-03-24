@@ -413,17 +413,65 @@ impl BatchCommandsClient {
         max_wait_time: Duration,
         target: String,
     ) -> Result<Self> {
+        Self::connect_inner(
+            client,
+            max_outbound_requests,
+            batch_policy,
+            overload_threshold,
+            batch_wait_size,
+            max_wait_time,
+            target,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_with_forwarded_host(
+        client: TikvClient<Channel>,
+        max_outbound_requests: usize,
+        batch_policy: String,
+        overload_threshold: u64,
+        batch_wait_size: usize,
+        max_wait_time: Duration,
+        target: String,
+        forwarded_host: String,
+    ) -> Result<Self> {
+        Self::connect_inner(
+            client,
+            max_outbound_requests,
+            batch_policy,
+            overload_threshold,
+            batch_wait_size,
+            max_wait_time,
+            target,
+            Some(forwarded_host),
+        )
+        .await
+    }
+
+    async fn connect_inner(
+        client: TikvClient<Channel>,
+        max_outbound_requests: usize,
+        batch_policy: String,
+        overload_threshold: u64,
+        batch_wait_size: usize,
+        max_wait_time: Duration,
+        target: String,
+        forwarded_host: Option<String>,
+    ) -> Result<Self> {
         let transport_layer_load = Arc::new(AtomicU64::new(0));
         let connector: ReconnectFn = {
             let client = client.clone();
             let target = target.clone();
             let batch_policy = batch_policy.clone();
             let transport_layer_load = Arc::clone(&transport_layer_load);
+            let forwarded_host = forwarded_host.clone();
             Arc::new(move |outbound_rx| {
                 let client = client.clone();
                 let target = target.clone();
                 let batch_policy = batch_policy.clone();
                 let transport_layer_load = Arc::clone(&transport_layer_load);
+                let forwarded_host = forwarded_host.clone();
                 async move {
                     let outbound_stream = outbound_stream(
                         outbound_rx,
@@ -435,7 +483,13 @@ impl BatchCommandsClient {
                         transport_layer_load,
                         target,
                     );
-                    let req = outbound_stream.into_streaming_request();
+                    let mut req = outbound_stream.into_streaming_request();
+                    match forwarded_host.as_deref() {
+                        Some(host) => {
+                            crate::store::apply_forwarded_host_metadata_value(&mut req, host)?
+                        }
+                        None => crate::store::apply_forwarded_host_metadata(&mut req)?,
+                    }
                     let response = client
                         .clone()
                         .batch_commands(req)

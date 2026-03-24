@@ -4464,7 +4464,7 @@ mod test {
                     .expect("expected RawPutRequest");
 
                 let forwarded_host =
-                    crate::store::current_forwarded_host().expect("expected forwarded host set");
+                    crate::store::forwarded_host().expect("expected forwarded host set");
                 assert_eq!(forwarded_host, leader_address);
 
                 Ok(Box::new(kvrpcpb::RawPutResponse::default()) as Box<dyn Any>)

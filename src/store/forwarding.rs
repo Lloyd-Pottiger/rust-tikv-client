@@ -11,13 +11,11 @@ tokio::task_local! {
     static TASK_FORWARDED_HOST: String;
 }
 
-#[cfg(test)]
-pub(crate) fn current_forwarded_host() -> Option<String> {
-    TASK_FORWARDED_HOST.try_with(|host| host.clone()).ok()
-}
-
-pub(crate) fn has_forwarded_host() -> bool {
-    TASK_FORWARDED_HOST.try_with(|_| ()).is_ok()
+pub(crate) fn forwarded_host() -> Option<String> {
+    TASK_FORWARDED_HOST
+        .try_with(|host| host.clone())
+        .ok()
+        .filter(|host| !host.is_empty())
 }
 
 pub(crate) async fn scope_forwarded_host<T>(
@@ -27,10 +25,10 @@ pub(crate) async fn scope_forwarded_host<T>(
     TASK_FORWARDED_HOST.scope(forwarded_host, fut).await
 }
 
-pub(crate) fn apply_forwarded_host_metadata<T>(req: &mut tonic::Request<T>) -> Result<()> {
-    let Ok(forwarded_host) = TASK_FORWARDED_HOST.try_with(|host| host.clone()) else {
-        return Ok(());
-    };
+pub(crate) fn apply_forwarded_host_metadata_value<T>(
+    req: &mut tonic::Request<T>,
+    forwarded_host: &str,
+) -> Result<()> {
     if forwarded_host.is_empty() {
         return Ok(());
     }
@@ -39,6 +37,13 @@ pub(crate) fn apply_forwarded_host_metadata<T>(req: &mut tonic::Request<T>) -> R
     })?;
     req.metadata_mut().insert(FORWARD_METADATA_KEY, value);
     Ok(())
+}
+
+pub(crate) fn apply_forwarded_host_metadata<T>(req: &mut tonic::Request<T>) -> Result<()> {
+    let Ok(forwarded_host) = TASK_FORWARDED_HOST.try_with(|host| host.clone()) else {
+        return Ok(());
+    };
+    apply_forwarded_host_metadata_value(req, &forwarded_host)
 }
 
 #[cfg(test)]
