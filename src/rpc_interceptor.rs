@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use crate::request_context::CommandPriority;
+use crate::tikvrpc::CmdType;
 use crate::Error;
 
 use crate::proto::kvrpcpb;
@@ -69,6 +70,12 @@ impl<'a> RpcRequest<'a> {
     #[must_use]
     pub fn label(&self) -> &'static str {
         self.label
+    }
+
+    /// The stable command type derived from [`Self::label`].
+    #[must_use]
+    pub fn cmd_type(&self) -> CmdType {
+        CmdType::from_label(self.label)
     }
 
     /// Returns whether TiKV should treat this request as a replica-read request.
@@ -289,6 +296,7 @@ pub fn chain_rpc_interceptors(
 mod tests {
     use super::{FnRpcInterceptor, RpcCallResult, RpcInterceptor, RpcInterceptorChain, RpcRequest};
     use crate::proto::kvrpcpb;
+    use crate::tikvrpc::CmdType;
     use crate::CommandPriority;
     use crate::Error;
     use std::sync::Arc;
@@ -383,5 +391,27 @@ mod tests {
                 "after:b".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn test_cmd_type_from_label_and_as_str() {
+        assert_eq!(CmdType::from_label("kv_get"), CmdType::Get);
+        assert_eq!(CmdType::Get.as_str(), "Get");
+
+        assert_eq!(
+            CmdType::from_label("kv_check_secondary_locks_request"),
+            CmdType::CheckSecondaryLocks
+        );
+        assert_eq!(CmdType::CheckSecondaryLocks.as_str(), "CheckSecondaryLocks");
+
+        assert_eq!(CmdType::from_label("not_a_real_command"), CmdType::Unknown);
+        assert_eq!(CmdType::Unknown.as_str(), "Unknown");
+    }
+
+    #[test]
+    fn test_rpc_request_exposes_cmd_type() {
+        let mut ctx = kvrpcpb::Context::default();
+        let req = RpcRequest::new("target", "raw_compare_and_swap", Some(&mut ctx));
+        assert_eq!(req.cmd_type(), CmdType::RawCompareAndSwap);
     }
 }

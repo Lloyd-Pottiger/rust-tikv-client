@@ -109,6 +109,7 @@ pub mod oracle;
 pub mod raw;
 pub mod redact;
 pub mod request;
+pub mod tikvrpc;
 pub mod trace;
 #[doc(hidden)]
 pub mod transaction;
@@ -225,6 +226,8 @@ pub use crate::rpc_interceptor::RpcInterceptor;
 pub use crate::rpc_interceptor::RpcInterceptorChain;
 #[doc(inline)]
 pub use crate::rpc_interceptor::RpcRequest;
+#[doc(inline)]
+pub use crate::tikvrpc::CmdType;
 #[doc(inline)]
 pub use crate::timestamp::Timestamp;
 #[doc(inline)]
