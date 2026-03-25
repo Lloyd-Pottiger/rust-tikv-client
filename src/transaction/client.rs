@@ -1591,7 +1591,7 @@ mod tests {
     fn validate_read_ts_from_pd_counter_value() -> f64 {
         prometheus::gather()
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_validate_read_ts_from_pd_count")
+            .find(|family| family.get_name() == "tikv_client_validate_read_ts_from_pd_count")
             .and_then(|family| {
                 family
                     .get_metric()
@@ -1605,7 +1605,7 @@ mod tests {
         prometheus::gather()
             .iter()
             .find(|family| {
-                family.get_name() == "tikv_client_rust_low_resolution_tso_update_interval_seconds"
+                family.get_name() == "tikv_client_low_resolution_tso_update_interval_seconds"
             })
             .and_then(|family| {
                 family
@@ -1626,7 +1626,7 @@ mod tests {
 
         prometheus::gather()
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_gc_unsafe_destroy_range_failures")
+            .find(|family| family.get_name() == "tikv_client_gc_unsafe_destroy_range_failures")
             .and_then(|family| {
                 family.get_metric().iter().find(|metric| {
                     label_value(metric, "type") == Some(label)

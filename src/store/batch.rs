@@ -1296,7 +1296,7 @@ mod tests {
 
         let requests_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_batch_requests")
+            .find(|family| family.get_name() == "tikv_client_batch_requests")
             .expect("batch_requests histogram not registered");
         let requests_found = requests_family.get_metric().iter().any(|metric| {
             label_value(metric, "target") == Some(target.as_str())
@@ -1309,7 +1309,7 @@ mod tests {
 
         let pending_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_batch_pending_requests")
+            .find(|family| family.get_name() == "tikv_client_batch_pending_requests")
             .expect("batch_pending_requests histogram not registered");
         let pending_found = pending_family.get_metric().iter().any(|metric| {
             label_value(metric, "target") == Some(target.as_str())
@@ -1390,7 +1390,7 @@ mod tests {
         fn counter_value(families: &[prometheus::proto::MetricFamily], label: &str) -> f64 {
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_panic_total")
+                .find(|family| family.get_name() == "tikv_client_panic_total")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)
@@ -1764,7 +1764,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_batch_recv_tail_latency_seconds")
+            .find(|family| family.get_name() == "tikv_client_batch_recv_tail_latency_seconds")
             .expect("batch_recv_tail_latency_seconds histogram not registered");
         let found = family.get_metric().iter().any(|metric| {
             label_value(metric, "target") == Some("test")
@@ -1830,7 +1830,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_batch_send_tail_latency_seconds")
+            .find(|family| family.get_name() == "tikv_client_batch_send_tail_latency_seconds")
             .expect("batch_send_tail_latency_seconds histogram not registered");
         let found = family.get_metric().iter().any(|metric| {
             label_value(metric, "target") == Some("test")

@@ -972,7 +972,7 @@ mod tests {
         let families = prometheus::gather();
         let counter = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_safets_update_counter")
+            .find(|family| family.get_name() == "tikv_client_safets_update_counter")
             .expect("safets_update_counter not registered");
 
         let store_111_ok = counter.get_metric().iter().any(|metric| {
@@ -991,7 +991,7 @@ mod tests {
 
         let gap = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_min_safets_gap_seconds")
+            .find(|family| family.get_name() == "tikv_client_min_safets_gap_seconds")
             .expect("min_safets_gap_seconds gauge not registered");
         let store_111_gap = gap.get_metric().iter().any(|metric| {
             label_value(metric, "store") == Some("111")
@@ -1031,7 +1031,7 @@ mod tests {
         let families = prometheus::gather();
         let counter = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_safets_update_counter")
+            .find(|family| family.get_name() == "tikv_client_safets_update_counter")
             .expect("safets_update_counter not registered");
 
         let store_333_skip = counter.get_metric().iter().any(|metric| {
@@ -1064,7 +1064,7 @@ mod tests {
         let families = prometheus::gather();
         let counter = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_safets_update_counter")
+            .find(|family| family.get_name() == "tikv_client_safets_update_counter")
             .expect("safets_update_counter not registered");
 
         let store_444_fail = counter.get_metric().iter().any(|metric| {

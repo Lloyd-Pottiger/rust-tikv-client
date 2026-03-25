@@ -7198,7 +7198,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_lock_resolver_actions_total")
+                .find(|family| family.get_name() == "tikv_client_lock_resolver_actions_total")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)

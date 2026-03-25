@@ -144,7 +144,7 @@ mod tests {
     fn feedback_slow_score(store: &str) -> Option<f64> {
         prometheus::gather()
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_feedback_slow_score")
+            .find(|family| family.get_name() == "tikv_client_feedback_slow_score")
             .and_then(|family| {
                 family
                     .get_metric()
@@ -157,7 +157,7 @@ mod tests {
     fn health_feedback_counter(scope: &str, ty: &str) -> f64 {
         prometheus::gather()
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_health_feedback_ops_counter")
+            .find(|family| family.get_name() == "tikv_client_health_feedback_ops_counter")
             .and_then(|family| {
                 family.get_metric().iter().find(|metric| {
                     label_value(metric, "scope") == Some(scope)

@@ -467,7 +467,7 @@ mod tests {
         fn sample_count() -> u64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_ts_future_wait_seconds")
+                .find(|family| family.get_name() == "tikv_client_ts_future_wait_seconds")
                 .and_then(|family| family.get_metric().first())
                 .map(|metric| metric.get_histogram().get_sample_count())
                 .unwrap_or(0)

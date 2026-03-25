@@ -1517,7 +1517,7 @@ mod tests {
                 .iter()
                 .find(|family| {
                     family.get_name()
-                        == "tikv_client_rust_batch_client_no_available_connection_total"
+                        == "tikv_client_batch_client_no_available_connection_total"
                 })
                 .and_then(|family| family.get_metric().first())
                 .map(|metric| metric.get_counter().get_value())
@@ -1543,7 +1543,7 @@ mod tests {
                 .iter()
                 .find(|family| {
                     family.get_name()
-                        == "tikv_client_rust_batch_client_no_available_connection_total"
+                        == "tikv_client_batch_client_no_available_connection_total"
                 })
                 .expect("batch client no-available-connection counter not registered");
             family
@@ -4238,7 +4238,7 @@ mod tests {
         fn counter_value(address: &str, store: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_get_store_limit_token_error")
+                .find(|family| family.get_name() == "tikv_client_get_store_limit_token_error")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "address") == Some(address)
@@ -4343,12 +4343,15 @@ mod tests {
                     client.dispatch(&req).await.unwrap_err()
                 };
 
-                let Error::StringError(message) = err else {
-                    panic!("expected StringError, got {err:?}");
+                let Error::TokenLimit(token_err) = err else {
+                    panic!("expected TokenLimit error, got {err:?}");
                 };
+                assert_eq!(token_err.store_id(), 42);
                 assert!(
-                    message.contains("Store token is up to the limit"),
-                    "unexpected store limit error message: {message}"
+                    token_err
+                        .to_string()
+                        .contains("Store token is up to the limit"),
+                    "unexpected store limit error: {token_err}"
                 );
 
                 assert_eq!(token_count.load(Ordering::Relaxed), 1);

@@ -841,7 +841,7 @@ mod test {
     fn stale_region_from_pd_counter_value() -> f64 {
         prometheus::gather()
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_stale_region_from_pd")
+            .find(|family| family.get_name() == "tikv_client_stale_region_from_pd")
             .and_then(|family| {
                 family
                     .get_metric()
@@ -854,7 +854,7 @@ mod test {
     fn load_region_total_counter_value(tag: &str, reason: &str) -> f64 {
         prometheus::gather()
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_load_region_total")
+            .find(|family| family.get_name() == "tikv_client_load_region_total")
             .and_then(|family| {
                 family.get_metric().iter().find(|metric| {
                     metric

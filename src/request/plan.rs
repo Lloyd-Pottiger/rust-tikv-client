@@ -4465,7 +4465,7 @@ mod test {
         fn store_slow_score(store: &str) -> Option<f64> {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_store_slow_score")
+                .find(|family| family.get_name() == "tikv_client_store_slow_score")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -4556,7 +4556,7 @@ mod test {
         fn counter_value(from_store: &str, to_store: &str, ty: &str, result: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_forward_request_counter")
+                .find(|family| family.get_name() == "tikv_client_forward_request_counter")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "from_store") == Some(from_store)
@@ -4678,7 +4678,7 @@ mod test {
         fn prefer_leader_flows(ty: &str, store: &str) -> Option<f64> {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_prefer_leader_flows_gauge")
+                .find(|family| family.get_name() == "tikv_client_prefer_leader_flows_gauge")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -4771,7 +4771,7 @@ mod test {
         fn prefer_leader_flows(ty: &str, store: &str) -> Option<f64> {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_prefer_leader_flows_gauge")
+                .find(|family| family.get_name() == "tikv_client_prefer_leader_flows_gauge")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -5643,7 +5643,7 @@ mod test {
             prometheus::gather()
                 .iter()
                 .find(|family| {
-                    family.get_name() == "tikv_client_rust_replica_selector_failure_counter"
+                    family.get_name() == "tikv_client_replica_selector_failure_counter"
                 })
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
@@ -6599,7 +6599,7 @@ mod test {
         fn stale_read_counter_value(result: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_stale_read_counter")
+                .find(|family| family.get_name() == "tikv_client_stale_read_counter")
                 .and_then(|family| {
                     family
                         .get_metric()
@@ -6610,7 +6610,7 @@ mod test {
                 .unwrap_or(0.0)
         }
 
-        let before_retry_sum = histogram_sample_sum("tikv_client_rust_request_retry_times");
+        let before_retry_sum = histogram_sample_sum("tikv_client_request_retry_times");
         let before_miss = stale_read_counter_value("miss");
 
         // Execute a stale-read request that retries twice (2 region errors, then success) to get
@@ -6662,7 +6662,7 @@ mod test {
             assert!(results[0].is_ok());
         }
 
-        let after_retry_sum = histogram_sample_sum("tikv_client_rust_request_retry_times");
+        let after_retry_sum = histogram_sample_sum("tikv_client_request_retry_times");
         let after_miss = stale_read_counter_value("miss");
 
         assert!(
@@ -6692,7 +6692,7 @@ mod test {
         fn async_send_req_counter_value(result: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_async_send_req_total")
+                .find(|family| family.get_name() == "tikv_client_async_send_req_total")
                 .and_then(|family| {
                     family
                         .get_metric()
@@ -6765,7 +6765,7 @@ mod test {
             families
                 .iter()
                 .find(|family| {
-                    family.get_name() == "tikv_client_rust_connection_transient_failure_count"
+                    family.get_name() == "tikv_client_connection_transient_failure_count"
                 })
                 .map(|family| {
                     family

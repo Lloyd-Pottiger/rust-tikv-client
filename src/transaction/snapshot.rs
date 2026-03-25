@@ -1026,7 +1026,7 @@ mod tests {
                 let families = prometheus::gather();
                 families
                     .iter()
-                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .find(|family| family.get_name() == "tikv_client_txn_cmd_duration_seconds")
                     .and_then(|family| {
                         family.get_metric().iter().find(|metric| {
                             metric.get_label().iter().any(|pair| {
@@ -1098,7 +1098,7 @@ mod tests {
                 let families = prometheus::gather();
                 families
                     .iter()
-                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .find(|family| family.get_name() == "tikv_client_txn_cmd_duration_seconds")
                     .and_then(|family| {
                         family.get_metric().iter().find(|metric| {
                             metric.get_label().iter().any(|pair| {
@@ -1166,7 +1166,7 @@ mod tests {
         fn counter_value(families: &[prometheus::proto::MetricFamily], result: &str) -> f64 {
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_async_batch_get_total")
+                .find(|family| family.get_name() == "tikv_client_async_batch_get_total")
                 .and_then(|family| {
                     family
                         .get_metric()
@@ -1224,7 +1224,7 @@ mod tests {
         let after_ok = {
             let family = families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_async_batch_get_total")
+                .find(|family| family.get_name() == "tikv_client_async_batch_get_total")
                 .expect("async_batch_get_total counter not registered");
             family
                 .get_metric()

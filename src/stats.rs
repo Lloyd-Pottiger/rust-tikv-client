@@ -1860,7 +1860,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_REQUEST_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_request_seconds";
+        let name = "tikv_client_request_seconds";
         let help = "Bucketed histogram of sending request duration.";
         let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 24) {
             Ok(buckets) => buckets,
@@ -1878,7 +1878,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_RPC_NET_LATENCY_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_rpc_net_latency_seconds";
+        let name = "tikv_client_rpc_net_latency_seconds";
         let help = "Bucketed histogram of estimated network latency between the client and TiKV.";
         let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 24) {
             Ok(buckets) => buckets,
@@ -1891,25 +1891,25 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_RPC_ERROR_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_rpc_err_total",
+        "tikv_client_rpc_err_total",
         "Counter of rpc errors.",
         &["type", "store"],
     );
 
     static ref TIKV_CLIENT_RUST_LOCK_RESOLVER_ACTIONS_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_lock_resolver_actions_total",
+        "tikv_client_lock_resolver_actions_total",
         "Counter of lock resolver actions.",
         &["type"],
     );
 
     static ref TIKV_CLIENT_RUST_PREWRITE_ASSERTION_COUNT_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_prewrite_assertion_count",
+        "tikv_client_prewrite_assertion_count",
         "Counter of assertions used in prewrite requests.",
         &["type"],
     );
 
     static ref TIKV_CLIENT_RUST_KV_STATUS_API_DURATION_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_kv_status_api_duration";
+        let name = "tikv_client_kv_status_api_duration";
         let help = "duration for kv status api.";
         let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 20) {
             Ok(buckets) => buckets,
@@ -1923,49 +1923,49 @@ lazy_static::lazy_static! {
 
     static ref TIKV_CLIENT_RUST_KV_STATUS_API_COUNT_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_kv_status_api_count",
+            "tikv_client_kv_status_api_count",
             "Counter of access kv status api.",
             &["result"],
         );
 
     static ref TIKV_CLIENT_RUST_STORE_LIVENESS_STATE_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
-        "tikv_client_rust_store_liveness_state",
+        "tikv_client_store_liveness_state",
         "Liveness state of each tikv.",
         &["store"],
     );
 
     static ref TIKV_CLIENT_RUST_FEEDBACK_SLOW_SCORE_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
-        "tikv_client_rust_feedback_slow_score",
+        "tikv_client_feedback_slow_score",
         "Slow scores of each tikv node that is calculated by TiKV and sent to the client by health feedback.",
         &["store"],
     );
 
     static ref TIKV_CLIENT_RUST_STORE_SLOW_SCORE_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
-        "tikv_client_rust_store_slow_score",
+        "tikv_client_store_slow_score",
         "Slow scores of each tikv node based on RPC timecosts.",
         &["store"],
     );
 
     static ref TIKV_CLIENT_RUST_PREFER_LEADER_FLOWS_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
-        "tikv_client_rust_prefer_leader_flows_gauge",
+        "tikv_client_prefer_leader_flows_gauge",
         "Counter of flows under PreferLeader mode.",
         &["type", "store"],
     );
 
     static ref TIKV_CLIENT_RUST_HEALTH_FEEDBACK_OPS_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_health_feedback_ops_counter",
+        "tikv_client_health_feedback_ops_counter",
         "Counter of operations about TiKV health feedback.",
         &["scope", "type"],
     );
 
     static ref TIKV_CLIENT_RUST_REGION_ERROR_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_region_err_total",
+        "tikv_client_region_err_total",
         "Counter of region errors.",
         &["type", "store"],
     );
 
     static ref TIKV_CLIENT_RUST_BACKOFF_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_backoff_seconds";
+        let name = "tikv_client_backoff_seconds";
         let help = "Total backoff seconds for a single request backoff loop.";
         let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 29) {
             Ok(buckets) => buckets,
@@ -1978,7 +1978,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_REQUEST_RETRY_TIMES_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_request_retry_times";
+        let name = "tikv_client_request_retry_times";
         let help = "Bucketed histogram of how many times a request retries.";
         let buckets = vec![1.0, 2.0, 3.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
         register_histogram_with_buckets(name, help, buckets)
@@ -1986,44 +1986,44 @@ lazy_static::lazy_static! {
 
     static ref TIKV_CLIENT_RUST_ASYNC_SEND_REQ_TOTAL_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_async_send_req_total",
+            "tikv_client_async_send_req_total",
             "Counter of async send req by request plan.",
             &["result"],
         );
 
     static ref TIKV_CLIENT_RUST_ASYNC_BATCH_GET_TOTAL_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_async_batch_get_total",
+            "tikv_client_async_batch_get_total",
             "Counter of async batch get by txn snapshot.",
             &["result"],
         );
 
     static ref TIKV_CLIENT_RUST_PANIC_TOTAL_COUNTER_VEC: Option<IntCounterVec> =
-        register_int_counter_vec("tikv_client_rust_panic_total", "Counter of panic.", &["type"]);
+        register_int_counter_vec("tikv_client_panic_total", "Counter of panic.", &["type"]);
 
     static ref TIKV_CLIENT_RUST_CONNECTION_TRANSIENT_FAILURE_COUNT_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_connection_transient_failure_count",
+            "tikv_client_connection_transient_failure_count",
             "Counter of gRPC connection transient failure",
             &["address", "store"],
         );
 
     static ref TIKV_CLIENT_RUST_GET_STORE_LIMIT_TOKEN_ERROR_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_get_store_limit_token_error",
+            "tikv_client_get_store_limit_token_error",
             "store token is up to the limit, probably because one of the stores is the hotspot or unavailable",
             &["address", "store"],
         );
 
     static ref TIKV_CLIENT_RUST_FORWARD_REQUEST_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_forward_request_counter",
+            "tikv_client_forward_request_counter",
             "Counter of tikv request being forwarded through another node",
             &["from_store", "to_store", "type", "result"],
         );
 
     static ref TIKV_CLIENT_RUST_BATCH_EXECUTOR_TOKEN_WAIT_DURATION_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_batch_executor_token_wait_duration";
+        let name = "tikv_client_batch_executor_token_wait_duration";
         let help = "tidb txn token wait duration to process batches";
         let buckets = match prometheus::exponential_buckets(1.0, 2.0, 34) {
             Ok(buckets) => buckets,
@@ -2037,13 +2037,13 @@ lazy_static::lazy_static! {
 
     static ref TIKV_CLIENT_RUST_REPLICA_SELECTOR_FAILURE_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_replica_selector_failure_counter",
+            "tikv_client_replica_selector_failure_counter",
             "Counter of the reason why the replica selector cannot yield a potential leader.",
             &["type"],
         );
 
     static ref TIKV_CLIENT_RUST_BATCH_PENDING_REQUESTS_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_batch_pending_requests";
+        let name = "tikv_client_batch_pending_requests";
         let help = "Number of requests pending in the batch channel.";
         let buckets = match prometheus::exponential_buckets(1.0, 2.0, 11) {
             Ok(buckets) => buckets,
@@ -2056,7 +2056,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_BATCH_REQUESTS_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_batch_requests";
+        let name = "tikv_client_batch_requests";
         let help = "Number of requests in one batch.";
         let buckets = match prometheus::exponential_buckets(1.0, 2.0, 11) {
             Ok(buckets) => buckets,
@@ -2070,7 +2070,7 @@ lazy_static::lazy_static! {
 
     static ref TIKV_CLIENT_RUST_BATCH_SEND_TAIL_LATENCY_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> =
     {
-        let name = "tikv_client_rust_batch_send_tail_latency_seconds";
+        let name = "tikv_client_batch_send_tail_latency_seconds";
         let help = "Batch send tail latency.";
         let buckets = match prometheus::exponential_buckets(0.02, 2.0, 8) {
             Ok(buckets) => buckets,
@@ -2084,7 +2084,7 @@ lazy_static::lazy_static! {
 
     static ref TIKV_CLIENT_RUST_BATCH_RECV_TAIL_LATENCY_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> =
     {
-        let name = "tikv_client_rust_batch_recv_tail_latency_seconds";
+        let name = "tikv_client_batch_recv_tail_latency_seconds";
         let help = "Batch recv tail latency.";
         let buckets = match prometheus::exponential_buckets(0.02, 2.0, 8) {
             Ok(buckets) => buckets,
@@ -2097,7 +2097,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_BATCH_CLIENT_WAIT_ESTABLISH_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_batch_client_wait_connection_establish";
+        let name = "tikv_client_batch_client_wait_connection_establish";
         let help = "Batch client wait new connection establish.";
         let buckets = match prometheus::exponential_buckets(0.001, 2.0, 28) {
             Ok(buckets) => buckets,
@@ -2110,7 +2110,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_BATCH_CLIENT_UNAVAILABLE_SECONDS_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_batch_client_unavailable_seconds";
+        let name = "tikv_client_batch_client_unavailable_seconds";
         let help = "Batch client unavailable.";
         let buckets = match prometheus::exponential_buckets(0.001, 2.0, 28) {
             Ok(buckets) => buckets,
@@ -2123,7 +2123,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_BATCH_CLIENT_RESET_SECONDS_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_batch_client_reset";
+        let name = "tikv_client_batch_client_reset";
         let help = "Batch client recycle connection and reconnect duration.";
         let buckets = match prometheus::exponential_buckets(0.001, 2.0, 28) {
             Ok(buckets) => buckets,
@@ -2136,18 +2136,18 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_BATCH_CLIENT_NO_AVAILABLE_CONNECTION_COUNTER: Option<IntCounter> = register_int_counter(
-        "tikv_client_rust_batch_client_no_available_connection_total",
+        "tikv_client_batch_client_no_available_connection_total",
         "Counter of no available batch client.",
     );
 
     static ref TIKV_CLIENT_RUST_RANGE_TASK_STATS_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
-        "tikv_client_rust_range_task_stats",
+        "tikv_client_range_task_stats",
         "Stat of range tasks.",
         &["type", "result"],
     );
 
     static ref TIKV_CLIENT_RUST_RANGE_TASK_PUSH_DURATION_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_range_task_push_duration";
+        let name = "tikv_client_range_task_push_duration";
         let help = "Duration to push sub tasks to range task workers.";
         let buckets = match prometheus::exponential_buckets(0.001, 2.0, 20) {
             Ok(buckets) => buckets,
@@ -2161,25 +2161,25 @@ lazy_static::lazy_static! {
 
     static ref TIKV_CLIENT_RUST_LOAD_SAFEPOINT_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_load_safepoint_total",
+            "tikv_client_load_safepoint_total",
             "Counter of load safepoint.",
             &["type"],
         );
 
     static ref TIKV_CLIENT_RUST_VALIDATE_READ_TS_FROM_PD_COUNT: Option<IntCounter> =
         register_int_counter(
-            "tikv_client_rust_validate_read_ts_from_pd_count",
+            "tikv_client_validate_read_ts_from_pd_count",
             "Counter of validating read ts by getting a timestamp from PD",
         );
 
     static ref TIKV_CLIENT_RUST_LOW_RESOLUTION_TSO_UPDATE_INTERVAL_SECONDS_GAUGE: Option<Gauge> =
         register_gauge(
-            "tikv_client_rust_low_resolution_tso_update_interval_seconds",
+            "tikv_client_low_resolution_tso_update_interval_seconds",
             "The actual working update interval for the low resolution TSO. As there are adaptive mechanism internally, this value may differ from the config.",
         );
 
     static ref TIKV_CLIENT_RUST_TS_FUTURE_WAIT_SECONDS_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_ts_future_wait_seconds";
+        let name = "tikv_client_ts_future_wait_seconds";
         let help = "Bucketed histogram of seconds cost for waiting timestamp future.";
         let buckets = match prometheus::exponential_buckets(0.000005, 2.0, 30) {
             Ok(buckets) => buckets,
@@ -2192,44 +2192,44 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_TXN_WRITE_CONFLICT_COUNTER: Option<IntCounter> = register_int_counter(
-        "tikv_client_rust_txn_write_conflict_counter",
+        "tikv_client_txn_write_conflict_counter",
         "Counter of txn write conflict",
     );
 
     static ref TIKV_CLIENT_RUST_AGGRESSIVE_LOCKING_COUNT_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_aggressive_locking_count",
+            "tikv_client_aggressive_locking_count",
             "Counter of keys locked in aggressive locking mode",
             &["type"],
         );
 
     static ref TIKV_CLIENT_RUST_LOCK_CLEANUP_TASK_TOTAL_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_lock_cleanup_task_total",
+            "tikv_client_lock_cleanup_task_total",
             "Failure statistic of secondary lock cleanup task.",
             &["type"],
         );
 
     static ref TIKV_CLIENT_RUST_COMMIT_TXN_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_commit_txn_counter",
+        "tikv_client_commit_txn_counter",
         "Counter of 2PC transactions.",
         &["type"],
     );
 
     static ref TIKV_CLIENT_RUST_ASYNC_COMMIT_TXN_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_async_commit_txn_counter",
+        "tikv_client_async_commit_txn_counter",
         "Counter of async commit transactions.",
         &["type"],
     );
 
     static ref TIKV_CLIENT_RUST_ONE_PC_TXN_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_one_pc_txn_counter",
+        "tikv_client_one_pc_txn_counter",
         "Counter of 1PC transactions.",
         &["type"],
     );
 
     static ref TIKV_CLIENT_RUST_TXN_CMD_DURATION_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_txn_cmd_duration_seconds";
+        let name = "tikv_client_txn_cmd_duration_seconds";
         let help = "Bucketed histogram of processing time of txn cmds.";
         let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 29) {
             Ok(buckets) => buckets,
@@ -2242,7 +2242,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_TXN_COMMIT_BACKOFF_SECONDS_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_txn_commit_backoff_seconds";
+        let name = "tikv_client_txn_commit_backoff_seconds";
         let help = "Bucketed histogram of the total backoff duration in committing a transaction.";
         let buckets = match prometheus::exponential_buckets(0.001, 2.0, 22) {
             Ok(buckets) => buckets,
@@ -2255,7 +2255,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_TXN_COMMIT_BACKOFF_COUNT_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_txn_commit_backoff_count";
+        let name = "tikv_client_txn_commit_backoff_count";
         let help = "Bucketed histogram of the backoff count in committing a transaction.";
         let buckets = match prometheus::exponential_buckets(1.0, 2.0, 12) {
             Ok(buckets) => buckets,
@@ -2268,7 +2268,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_TXN_REGIONS_NUM_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_txn_regions_num";
+        let name = "tikv_client_txn_regions_num";
         let help = "Number of regions in a transaction.";
         let buckets = match prometheus::exponential_buckets(1.0, 2.0, 25) {
             Ok(buckets) => buckets,
@@ -2281,7 +2281,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_TXN_WRITE_KV_NUM_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_txn_write_kv_num";
+        let name = "tikv_client_txn_write_kv_num";
         let help = "Count of kv pairs to write in a transaction.";
         let buckets = match prometheus::exponential_buckets(1.0, 4.0, 17) {
             Ok(buckets) => buckets,
@@ -2294,7 +2294,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_TXN_WRITE_SIZE_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_txn_write_size_bytes";
+        let name = "tikv_client_txn_write_size_bytes";
         let help = "Size of kv pairs to write in a transaction.";
         let buckets = match prometheus::exponential_buckets(16.0, 4.0, 17) {
             Ok(buckets) => buckets,
@@ -2307,7 +2307,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_LOCAL_LATCH_WAIT_SECONDS_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_local_latch_wait_seconds";
+        let name = "tikv_client_local_latch_wait_seconds";
         let help = "Wait time of a get local latch.";
         let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 20) {
             Ok(buckets) => buckets,
@@ -2320,7 +2320,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_PIPELINED_FLUSH_LEN_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_pipelined_flush_len";
+        let name = "tikv_client_pipelined_flush_len";
         let help = "Bucketed histogram of length of pipelined flushed memdb";
         let buckets = match prometheus::exponential_buckets(1000.0, 2.0, 16) {
             Ok(buckets) => buckets,
@@ -2333,7 +2333,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_PIPELINED_FLUSH_SIZE_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_pipelined_flush_size";
+        let name = "tikv_client_pipelined_flush_size";
         let help = "Bucketed histogram of size of pipelined flushed memdb";
         let buckets = match prometheus::exponential_buckets(16.0 * 1024.0 * 1024.0, 1.2, 13) {
             Ok(buckets) => buckets,
@@ -2346,7 +2346,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_PIPELINED_FLUSH_DURATION_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_pipelined_flush_duration";
+        let name = "tikv_client_pipelined_flush_duration";
         let help = "Flush time of pipelined memdb.";
         let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 28) {
             Ok(buckets) => buckets,
@@ -2359,7 +2359,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_PIPELINED_FLUSH_THROTTLE_SECONDS_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_pipelined_flush_throttle_seconds";
+        let name = "tikv_client_pipelined_flush_throttle_seconds";
         let help = "Throttle durations of pipelined flushes.";
         let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 28) {
             Ok(buckets) => buckets,
@@ -2372,7 +2372,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_TXN_HEART_BEAT_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_txn_heart_beat";
+        let name = "tikv_client_txn_heart_beat";
         let help = "Bucketed histogram of the txn_heartbeat request duration.";
         let buckets = match prometheus::exponential_buckets(0.001, 2.0, 20) {
             Ok(buckets) => buckets,
@@ -2385,7 +2385,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_TXN_TTL_MANAGER_HISTOGRAM: Option<Histogram> = {
-        let name = "tikv_client_rust_txn_ttl_manager";
+        let name = "tikv_client_txn_ttl_manager";
         let help = "Bucketed histogram of the txn ttl manager lifetime duration.";
         let buckets = match prometheus::exponential_buckets(1.0, 2.0, 20) {
             Ok(buckets) => buckets,
@@ -2398,12 +2398,12 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_TTL_LIFETIME_REACH_COUNTER: Option<IntCounter> = register_int_counter(
-        "tikv_client_rust_ttl_lifetime_reach_total",
+        "tikv_client_ttl_lifetime_reach_total",
         "Counter of ttlManager live too long.",
     );
 
     static ref TIKV_CLIENT_RUST_TXN_LAG_COMMIT_TS_WAIT_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_txn_lag_commit_ts_wait_seconds";
+        let name = "tikv_client_txn_lag_commit_ts_wait_seconds";
         let help = "Bucketed histogram of seconds waiting commit TSO lag.";
         let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 16) {
             Ok(buckets) => buckets,
@@ -2416,7 +2416,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_TXN_LAG_COMMIT_TS_ATTEMPT_COUNT_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_txn_lag_commit_ts_attempt_count";
+        let name = "tikv_client_txn_lag_commit_ts_attempt_count";
         let help = "Bucketed histogram of attempts to get the lagging TSO in one commit.";
         let buckets = match prometheus::exponential_buckets(1.0, 2.0, 6) {
             Ok(buckets) => buckets,
@@ -2429,7 +2429,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_RAWKV_CMD_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_rawkv_cmd_seconds";
+        let name = "tikv_client_rawkv_cmd_seconds";
         let help = "Bucketed histogram of processing time of rawkv cmds.";
         let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 29) {
             Ok(buckets) => buckets,
@@ -2442,7 +2442,7 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_RAWKV_KV_SIZE_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_rawkv_kv_size_bytes";
+        let name = "tikv_client_rawkv_kv_size_bytes";
         let help = "Size of key/value to put, in bytes.";
         let buckets = match prometheus::exponential_buckets(1.0, 2.0, 30) {
             Ok(buckets) => buckets,
@@ -2456,20 +2456,20 @@ lazy_static::lazy_static! {
 
     static ref TIKV_CLIENT_RUST_SAFE_TS_UPDATE_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_safets_update_counter",
+            "tikv_client_safets_update_counter",
             "Counter of tikv safe_ts being updated.",
             &["result", "store"],
         );
 
     static ref TIKV_CLIENT_RUST_MIN_SAFE_TS_GAP_SECONDS_GAUGE_VEC: Option<GaugeVec> =
         register_gauge_vec(
-            "tikv_client_rust_min_safets_gap_seconds",
+            "tikv_client_min_safets_gap_seconds",
             "The minimal (non-zero) SafeTS gap for each store.",
             &["store"],
         );
 
     static ref TIKV_CLIENT_RUST_READ_REQUEST_BYTES_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_read_request_bytes";
+        let name = "tikv_client_read_request_bytes";
         let help = "Bucketed histogram of total bytes sent/received for read requests.";
         let buckets = match prometheus::exponential_buckets(256.0, 2.0, 22) {
             Ok(buckets) => buckets,
@@ -2482,50 +2482,50 @@ lazy_static::lazy_static! {
     };
 
     static ref TIKV_CLIENT_RUST_STALE_READ_REQ_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_stale_read_req_counter",
+        "tikv_client_stale_read_req_counter",
         "Total number of stale read requests.",
         &["type"],
     );
 
     static ref TIKV_CLIENT_RUST_STALE_READ_BYTES_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_stale_read_bytes",
+        "tikv_client_stale_read_bytes",
         "Bytes sent/received for stale read requests.",
         &["result", "direction"],
     );
 
     static ref TIKV_CLIENT_RUST_STALE_READ_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_stale_read_counter",
+        "tikv_client_stale_read_counter",
         "Counter of stale read hit/miss.",
         &["result"],
     );
 
     static ref TIKV_CLIENT_RUST_STALE_REGION_FROM_PD_COUNTER: Option<IntCounter> = register_int_counter(
-        "tikv_client_rust_stale_region_from_pd",
+        "tikv_client_stale_region_from_pd",
         "Counter of stale region from PD",
     );
 
     static ref TIKV_CLIENT_RUST_GC_UNSAFE_DESTROY_RANGE_FAILURES_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_gc_unsafe_destroy_range_failures",
+            "tikv_client_gc_unsafe_destroy_range_failures",
             "Counter of unsafe destroy range failures.",
             &["type"],
         );
 
     static ref TIKV_CLIENT_RUST_REGION_CACHE_COUNTER_VEC: Option<IntCounterVec> = register_int_counter_vec(
-        "tikv_client_rust_region_cache_operations_total",
+        "tikv_client_region_cache_operations_total",
         "Counter of region cache operations.",
         &["type", "result"],
     );
 
     static ref TIKV_CLIENT_RUST_LOAD_REGION_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
-            "tikv_client_rust_load_region_total",
+            "tikv_client_load_region_total",
             "Counter of loading region.",
             &["type", "reason"],
         );
 
     static ref TIKV_CLIENT_RUST_LOAD_REGION_CACHE_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
-        let name = "tikv_client_rust_load_region_cache_seconds";
+        let name = "tikv_client_load_region_cache_seconds";
         let help = "Load region information duration.";
         let buckets = match prometheus::exponential_buckets(0.0001, 2.0, 20) {
             Ok(buckets) => buckets,
@@ -2638,7 +2638,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_request_seconds")
+            .find(|family| family.get_name() == "tikv_client_request_seconds")
             .expect("request_seconds histogram not registered");
 
         let found = family.get_metric().iter().any(|metric| {
@@ -2667,7 +2667,7 @@ mod tests {
 
         let req_counter_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_stale_read_req_counter")
+            .find(|family| family.get_name() == "tikv_client_stale_read_req_counter")
             .expect("stale read req counter not registered");
         let req_counter_found = req_counter_family.get_metric().iter().any(|metric| {
             label_value(metric, "type") == Some("cross-zone")
@@ -2680,7 +2680,7 @@ mod tests {
 
         let bytes_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_stale_read_bytes")
+            .find(|family| family.get_name() == "tikv_client_stale_read_bytes")
             .expect("stale read bytes counter not registered");
         let bytes_out_found = bytes_family.get_metric().iter().any(|metric| {
             label_value(metric, "result") == Some("cross-zone")
@@ -2705,7 +2705,7 @@ mod tests {
             let families = prometheus::gather();
             let family = families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_request_retry_times")
+                .find(|family| family.get_name() == "tikv_client_request_retry_times")
                 .map(|family| {
                     family
                         .get_metric()
@@ -2723,7 +2723,7 @@ mod tests {
             let families = prometheus::gather();
             let family = families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_request_retry_times")
+                .find(|family| family.get_name() == "tikv_client_request_retry_times")
                 .expect("request retry times histogram not registered");
             family
                 .get_metric()
@@ -2754,12 +2754,12 @@ mod tests {
         }
 
         let (count_before, sum_before) =
-            histogram_sample("tikv_client_rust_batch_executor_token_wait_duration");
+            histogram_sample("tikv_client_batch_executor_token_wait_duration");
 
         observe_batch_executor_token_wait_duration(7);
 
         let (count_after, sum_after) =
-            histogram_sample("tikv_client_rust_batch_executor_token_wait_duration");
+            histogram_sample("tikv_client_batch_executor_token_wait_duration");
 
         assert!(
             count_after > count_before,
@@ -2777,7 +2777,7 @@ mod tests {
         fn counter_value(families: &[prometheus::proto::MetricFamily], result: &str) -> f64 {
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_stale_read_counter")
+                .find(|family| family.get_name() == "tikv_client_stale_read_counter")
                 .and_then(|family| {
                     family
                         .get_metric()
@@ -2826,7 +2826,7 @@ mod tests {
 
         let pending_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_batch_pending_requests")
+            .find(|family| family.get_name() == "tikv_client_batch_pending_requests")
             .expect("batch_pending_requests histogram not registered");
         let pending_found = pending_family.get_metric().iter().any(|metric| {
             label_value(metric, "target") == Some(target)
@@ -2839,7 +2839,7 @@ mod tests {
 
         let requests_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_batch_requests")
+            .find(|family| family.get_name() == "tikv_client_batch_requests")
             .expect("batch_requests histogram not registered");
         let requests_found = requests_family.get_metric().iter().any(|metric| {
             label_value(metric, "target") == Some(target)
@@ -2862,7 +2862,7 @@ mod tests {
 
         let send_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_batch_send_tail_latency_seconds")
+            .find(|family| family.get_name() == "tikv_client_batch_send_tail_latency_seconds")
             .expect("batch_send_tail_latency_seconds histogram not registered");
         let send_found = send_family.get_metric().iter().any(|metric| {
             label_value(metric, "target") == Some(target)
@@ -2875,7 +2875,7 @@ mod tests {
 
         let recv_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_batch_recv_tail_latency_seconds")
+            .find(|family| family.get_name() == "tikv_client_batch_recv_tail_latency_seconds")
             .expect("batch_recv_tail_latency_seconds histogram not registered");
         let recv_found = recv_family.get_metric().iter().any(|metric| {
             label_value(metric, "target") == Some(target)
@@ -2895,7 +2895,7 @@ mod tests {
             families
                 .iter()
                 .find(|family| {
-                    family.get_name() == "tikv_client_rust_batch_client_wait_connection_establish"
+                    family.get_name() == "tikv_client_batch_client_wait_connection_establish"
                 })
                 .map(|family| {
                     family
@@ -2914,7 +2914,7 @@ mod tests {
             let family = families
                 .iter()
                 .find(|family| {
-                    family.get_name() == "tikv_client_rust_batch_client_wait_connection_establish"
+                    family.get_name() == "tikv_client_batch_client_wait_connection_establish"
                 })
                 .expect("batch_client_wait_connection_establish histogram not registered");
             family
@@ -2938,7 +2938,7 @@ mod tests {
             families
                 .iter()
                 .find(|family| {
-                    family.get_name() == "tikv_client_rust_batch_client_unavailable_seconds"
+                    family.get_name() == "tikv_client_batch_client_unavailable_seconds"
                 })
                 .map(|family| {
                     family
@@ -2957,7 +2957,7 @@ mod tests {
             let family = families
                 .iter()
                 .find(|family| {
-                    family.get_name() == "tikv_client_rust_batch_client_unavailable_seconds"
+                    family.get_name() == "tikv_client_batch_client_unavailable_seconds"
                 })
                 .expect("batch_client_unavailable_seconds histogram not registered");
             family
@@ -2980,7 +2980,7 @@ mod tests {
             let families = prometheus::gather();
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_batch_client_reset")
+                .find(|family| family.get_name() == "tikv_client_batch_client_reset")
                 .map(|family| {
                     family
                         .get_metric()
@@ -2997,7 +2997,7 @@ mod tests {
             let families = prometheus::gather();
             let family = families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_batch_client_reset")
+                .find(|family| family.get_name() == "tikv_client_batch_client_reset")
                 .expect("batch_client_reset histogram not registered");
             family
                 .get_metric()
@@ -3021,7 +3021,7 @@ mod tests {
                 .iter()
                 .find(|family| {
                     family.get_name()
-                        == "tikv_client_rust_batch_client_no_available_connection_total"
+                        == "tikv_client_batch_client_no_available_connection_total"
                 })
                 .and_then(|family| family.get_metric().first())
                 .map(|metric| metric.get_counter().get_value())
@@ -3038,7 +3038,7 @@ mod tests {
                 .iter()
                 .find(|family| {
                     family.get_name()
-                        == "tikv_client_rust_batch_client_no_available_connection_total"
+                        == "tikv_client_batch_client_no_available_connection_total"
                 })
                 .expect("batch client no-available-connection counter not registered");
             family
@@ -3061,7 +3061,7 @@ mod tests {
             let families = prometheus::gather();
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_txn_write_conflict_counter")
+                .find(|family| family.get_name() == "tikv_client_txn_write_conflict_counter")
                 .and_then(|family| family.get_metric().first())
                 .map(|metric| metric.get_counter().get_value())
                 .unwrap_or(0.0)
@@ -3079,7 +3079,7 @@ mod tests {
             let families = prometheus::gather();
             let family = families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_txn_write_conflict_counter")
+                .find(|family| family.get_name() == "tikv_client_txn_write_conflict_counter")
                 .expect("txn_write_conflict_counter not registered");
             family
                 .get_metric()
@@ -3109,7 +3109,7 @@ mod tests {
 
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_commit_txn_counter")
+            .find(|family| family.get_name() == "tikv_client_commit_txn_counter")
             .expect("commit_txn_counter not registered");
         assert!(
             family
@@ -3128,7 +3128,7 @@ mod tests {
 
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_async_commit_txn_counter")
+            .find(|family| family.get_name() == "tikv_client_async_commit_txn_counter")
             .expect("async_commit_txn_counter not registered");
         assert!(
             family
@@ -3147,7 +3147,7 @@ mod tests {
 
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_one_pc_txn_counter")
+            .find(|family| family.get_name() == "tikv_client_one_pc_txn_counter")
             .expect("one_pc_txn_counter not registered");
         assert!(
             family
@@ -3178,7 +3178,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_aggressive_locking_count")
+                .find(|family| family.get_name() == "tikv_client_aggressive_locking_count")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)
@@ -3204,7 +3204,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_async_send_req_total")
+                .find(|family| family.get_name() == "tikv_client_async_send_req_total")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "result") == Some(label)
@@ -3230,7 +3230,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_async_batch_get_total")
+                .find(|family| family.get_name() == "tikv_client_async_batch_get_total")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "result") == Some(label)
@@ -3256,7 +3256,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_panic_total")
+                .find(|family| family.get_name() == "tikv_client_panic_total")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)
@@ -3283,7 +3283,7 @@ mod tests {
             prometheus::gather()
                 .iter()
                 .find(|family| {
-                    family.get_name() == "tikv_client_rust_connection_transient_failure_count"
+                    family.get_name() == "tikv_client_connection_transient_failure_count"
                 })
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
@@ -3311,7 +3311,7 @@ mod tests {
         fn counter_value(address: &str, store: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_get_store_limit_token_error")
+                .find(|family| family.get_name() == "tikv_client_get_store_limit_token_error")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "address") == Some(address)
@@ -3338,7 +3338,7 @@ mod tests {
         fn counter_value(from_store: &str, to_store: &str, ty: &str, result: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_forward_request_counter")
+                .find(|family| family.get_name() == "tikv_client_forward_request_counter")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "from_store") == Some(from_store)
@@ -3367,7 +3367,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_lock_cleanup_task_total")
+                .find(|family| family.get_name() == "tikv_client_lock_cleanup_task_total")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)
@@ -3396,7 +3396,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_rawkv_cmd_seconds")
+            .find(|family| family.get_name() == "tikv_client_rawkv_cmd_seconds")
             .expect("rawkv_cmd_seconds histogram not registered");
 
         let get_found = family.get_metric().iter().any(|metric| {
@@ -3427,7 +3427,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_rawkv_kv_size_bytes")
+            .find(|family| family.get_name() == "tikv_client_rawkv_kv_size_bytes")
             .expect("rawkv_kv_size_bytes histogram not registered");
 
         let key_found = family.get_metric().iter().any(|metric| {
@@ -3457,7 +3457,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+            .find(|family| family.get_name() == "tikv_client_txn_cmd_duration_seconds")
             .expect("txn_cmd_duration_seconds histogram not registered");
 
         let found = family.get_metric().iter().any(|metric| {
@@ -3484,17 +3484,17 @@ mod tests {
         }
 
         let (seconds_count_before, seconds_sum_before) =
-            histogram_sample("tikv_client_rust_txn_commit_backoff_seconds");
+            histogram_sample("tikv_client_txn_commit_backoff_seconds");
         let (count_count_before, count_sum_before) =
-            histogram_sample("tikv_client_rust_txn_commit_backoff_count");
+            histogram_sample("tikv_client_txn_commit_backoff_count");
 
         observe_txn_commit_backoff_seconds(Duration::from_millis(3));
         observe_txn_commit_backoff_count(4);
 
         let (seconds_count_after, seconds_sum_after) =
-            histogram_sample("tikv_client_rust_txn_commit_backoff_seconds");
+            histogram_sample("tikv_client_txn_commit_backoff_seconds");
         let (count_count_after, count_sum_after) =
-            histogram_sample("tikv_client_rust_txn_commit_backoff_count");
+            histogram_sample("tikv_client_txn_commit_backoff_count");
 
         assert!(
             seconds_count_after > seconds_count_before,
@@ -3523,7 +3523,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_txn_heart_beat")
+            .find(|family| family.get_name() == "tikv_client_txn_heart_beat")
             .expect("txn_heart_beat histogram not registered");
 
         let ok_found = family.get_metric().iter().any(|metric| {
@@ -3550,7 +3550,7 @@ mod tests {
     fn test_txn_ttl_manager_histogram_records_observations() {
         let before = prometheus::gather()
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_txn_ttl_manager")
+            .find(|family| family.get_name() == "tikv_client_txn_ttl_manager")
             .and_then(|family| family.get_metric().first())
             .map(|metric| metric.get_histogram().get_sample_count())
             .unwrap_or(0);
@@ -3559,7 +3559,7 @@ mod tests {
 
         let after = prometheus::gather()
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_txn_ttl_manager")
+            .find(|family| family.get_name() == "tikv_client_txn_ttl_manager")
             .and_then(|family| family.get_metric().first())
             .map(|metric| metric.get_histogram().get_sample_count())
             .unwrap_or(0);
@@ -3576,7 +3576,7 @@ mod tests {
         fn counter_value() -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_ttl_lifetime_reach_total")
+                .find(|family| family.get_name() == "tikv_client_ttl_lifetime_reach_total")
                 .and_then(|family| family.get_metric().first())
                 .map(|metric| metric.get_counter().get_value())
                 .unwrap_or(0.0)
@@ -3602,7 +3602,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_txn_lag_commit_ts_wait_seconds")
+            .find(|family| family.get_name() == "tikv_client_txn_lag_commit_ts_wait_seconds")
             .expect("txn_lag_commit_ts_wait_seconds histogram not registered");
 
         let ok_found = family.get_metric().iter().any(|metric| {
@@ -3625,7 +3625,7 @@ mod tests {
 
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_txn_lag_commit_ts_attempt_count")
+            .find(|family| family.get_name() == "tikv_client_txn_lag_commit_ts_attempt_count")
             .expect("txn_lag_commit_ts_attempt_count histogram not registered");
 
         let ok_found = family.get_metric().iter().any(|metric| {
@@ -3658,7 +3658,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_txn_write_kv_num")
+            .find(|family| family.get_name() == "tikv_client_txn_write_kv_num")
             .expect("txn_write_kv_num histogram not registered");
 
         let internal_found = family.get_metric().iter().any(|metric| {
@@ -3681,7 +3681,7 @@ mod tests {
 
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_txn_write_size_bytes")
+            .find(|family| family.get_name() == "tikv_client_txn_write_size_bytes")
             .expect("txn_write_size_bytes histogram not registered");
 
         let internal_found = family.get_metric().iter().any(|metric| {
@@ -3711,7 +3711,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_local_latch_wait_seconds")
+            .find(|family| family.get_name() == "tikv_client_local_latch_wait_seconds")
             .expect("local_latch_wait_seconds histogram not registered");
 
         let observed = family
@@ -3741,10 +3741,10 @@ mod tests {
 
         let families = prometheus::gather();
         for name in [
-            "tikv_client_rust_pipelined_flush_len",
-            "tikv_client_rust_pipelined_flush_size",
-            "tikv_client_rust_pipelined_flush_duration",
-            "tikv_client_rust_pipelined_flush_throttle_seconds",
+            "tikv_client_pipelined_flush_len",
+            "tikv_client_pipelined_flush_size",
+            "tikv_client_pipelined_flush_duration",
+            "tikv_client_pipelined_flush_throttle_seconds",
         ] {
             assert!(sample_count(&families, name) >= 1, "expected {name} sample");
         }
@@ -3760,7 +3760,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_safets_update_counter")
+            .find(|family| family.get_name() == "tikv_client_safets_update_counter")
             .expect("safets_update_counter not registered");
 
         let ok_found = family.get_metric().iter().any(|metric| {
@@ -3802,7 +3802,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_load_safepoint_total")
+            .find(|family| family.get_name() == "tikv_client_load_safepoint_total")
             .expect("load_safepoint_total not registered");
 
         for label in ["ok", "fail", "ok_compatible", "fail_compatible"] {
@@ -3823,7 +3823,7 @@ mod tests {
             prometheus::gather()
                 .iter()
                 .find(|family| {
-                    family.get_name() == "tikv_client_rust_validate_read_ts_from_pd_count"
+                    family.get_name() == "tikv_client_validate_read_ts_from_pd_count"
                 })
                 .and_then(|family| {
                     family
@@ -3850,7 +3850,7 @@ mod tests {
         fn sample_count() -> u64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_ts_future_wait_seconds")
+                .find(|family| family.get_name() == "tikv_client_ts_future_wait_seconds")
                 .and_then(|family| family.get_metric().first())
                 .map(|metric| metric.get_histogram().get_sample_count())
                 .unwrap_or(0)
@@ -3961,7 +3961,7 @@ mod tests {
         fn counter_value() -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_stale_region_from_pd")
+                .find(|family| family.get_name() == "tikv_client_stale_region_from_pd")
                 .and_then(|family| {
                     family
                         .get_metric()
@@ -3988,7 +3988,7 @@ mod tests {
             prometheus::gather()
                 .iter()
                 .find(|family| {
-                    family.get_name() == "tikv_client_rust_gc_unsafe_destroy_range_failures"
+                    family.get_name() == "tikv_client_gc_unsafe_destroy_range_failures"
                 })
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
@@ -4023,7 +4023,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_lock_resolver_actions_total")
+                .find(|family| family.get_name() == "tikv_client_lock_resolver_actions_total")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)
@@ -4057,7 +4057,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_prewrite_assertion_count")
+                .find(|family| family.get_name() == "tikv_client_prewrite_assertion_count")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)
@@ -4125,7 +4125,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_feedback_slow_score")
+            .find(|family| family.get_name() == "tikv_client_feedback_slow_score")
             .expect("feedback_slow_score gauge not registered");
 
         let found = family.get_metric().iter().any(|metric| {
@@ -4174,7 +4174,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_store_slow_score")
+            .find(|family| family.get_name() == "tikv_client_store_slow_score")
             .expect("store_slow_score gauge not registered");
 
         let found = family.get_metric().iter().any(|metric| {
@@ -4192,7 +4192,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_store_liveness_state")
+            .find(|family| family.get_name() == "tikv_client_store_liveness_state")
             .expect("store_liveness_state gauge not registered");
 
         let found = family.get_metric().iter().any(|metric| {
@@ -4210,7 +4210,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_kv_status_api_duration")
+            .find(|family| family.get_name() == "tikv_client_kv_status_api_duration")
             .expect("kv_status_api_duration histogram not registered");
 
         let found = family.get_metric().iter().any(|metric| {
@@ -4229,7 +4229,7 @@ mod tests {
         fn counter_value(families: &[prometheus::proto::MetricFamily], result: &str) -> f64 {
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_kv_status_api_count")
+                .find(|family| family.get_name() == "tikv_client_kv_status_api_count")
                 .and_then(|family| {
                     family.get_metric().iter().find_map(|metric| {
                         if label_value(metric, "result") == Some(result) {
@@ -4263,7 +4263,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_prefer_leader_flows_gauge")
+            .find(|family| family.get_name() == "tikv_client_prefer_leader_flows_gauge")
             .expect("prefer_leader_flows_gauge not registered");
 
         let to_leader_found = family.get_metric().iter().any(|metric| {
@@ -4293,7 +4293,7 @@ mod tests {
         fn counter_value(scope: &str, ty: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_health_feedback_ops_counter")
+                .find(|family| family.get_name() == "tikv_client_health_feedback_ops_counter")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "scope") == Some(scope)
@@ -4322,7 +4322,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_range_task_stats")
+            .find(|family| family.get_name() == "tikv_client_range_task_stats")
             .expect("range_task_stats gauge not registered");
 
         let completed_found = family.get_metric().iter().any(|metric| {
@@ -4350,7 +4350,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_range_task_push_duration")
+            .find(|family| family.get_name() == "tikv_client_range_task_push_duration")
             .expect("range_task_push_duration histogram not registered");
 
         let found = family.get_metric().iter().any(|metric| {
@@ -4372,7 +4372,7 @@ mod tests {
         let family = families
             .iter()
             .find(|family| {
-                family.get_name() == "tikv_client_rust_low_resolution_tso_update_interval_seconds"
+                family.get_name() == "tikv_client_low_resolution_tso_update_interval_seconds"
             })
             .expect("low_resolution_tso_update_interval_seconds gauge not registered");
 
@@ -4395,7 +4395,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_min_safets_gap_seconds")
+            .find(|family| family.get_name() == "tikv_client_min_safets_gap_seconds")
             .expect("min_safets_gap_seconds gauge not registered");
 
         let found = family.get_metric().iter().any(|metric| {
@@ -4423,7 +4423,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_read_request_bytes")
+            .find(|family| family.get_name() == "tikv_client_read_request_bytes")
             .expect("read request bytes histogram not registered");
         let found = family.get_metric().iter().any(|metric| {
             label_value(metric, "type") == Some("follower")
@@ -4463,7 +4463,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_rpc_net_latency_seconds")
+            .find(|family| family.get_name() == "tikv_client_rpc_net_latency_seconds")
             .expect("rpc net latency histogram not registered");
         let found = family.get_metric().iter().any(|metric| {
             label_value(metric, "store") == Some("11223344556")
@@ -4484,7 +4484,7 @@ mod tests {
 
         let counter_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_region_cache_operations_total")
+            .find(|family| family.get_name() == "tikv_client_region_cache_operations_total")
             .expect("region cache counter not registered");
         let counter_found = counter_family.get_metric().iter().any(|metric| {
             label_value(metric, "type") == Some(op)
@@ -4498,7 +4498,7 @@ mod tests {
 
         let histogram_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_load_region_cache_seconds")
+            .find(|family| family.get_name() == "tikv_client_load_region_cache_seconds")
             .expect("load_region_cache histogram not registered");
         let hist_found = histogram_family.get_metric().iter().any(|metric| {
             label_value(metric, "type") == Some(op)
@@ -4516,7 +4516,7 @@ mod tests {
         fn counter_value(tag: &str, reason: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_load_region_total")
+                .find(|family| family.get_name() == "tikv_client_load_region_total")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(tag)
@@ -4544,7 +4544,7 @@ mod tests {
             prometheus::gather()
                 .iter()
                 .find(|family| {
-                    family.get_name() == "tikv_client_rust_replica_selector_failure_counter"
+                    family.get_name() == "tikv_client_replica_selector_failure_counter"
                 })
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
@@ -4581,7 +4581,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_rpc_err_total")
+            .find(|family| family.get_name() == "tikv_client_rpc_err_total")
             .expect("rpc error counter not registered");
         let found = family.get_metric().iter().any(|metric| {
             label_value(metric, "type") == Some("grpc-unavailable")
@@ -4615,7 +4615,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_region_err_total")
+            .find(|family| family.get_name() == "tikv_client_region_err_total")
             .expect("region error counter not registered");
         let found = family.get_metric().iter().any(|metric| {
             label_value(metric, "type") == Some("not_leader")
@@ -4633,7 +4633,7 @@ mod tests {
         let families = prometheus::gather();
         let family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_backoff_seconds")
+            .find(|family| family.get_name() == "tikv_client_backoff_seconds")
             .expect("backoff histogram not registered");
         let found = family.get_metric().iter().any(|metric| {
             label_value(metric, "type") == Some("tikvRPC")

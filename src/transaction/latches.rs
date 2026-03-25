@@ -480,7 +480,7 @@ mod tests {
     #[tokio::test]
     #[serial(metrics)]
     async fn test_lock_records_local_latch_wait_metrics() {
-        let metric = "tikv_client_rust_local_latch_wait_seconds";
+        let metric = "tikv_client_local_latch_wait_seconds";
         let sample_count = || {
             let families = prometheus::gather();
             families

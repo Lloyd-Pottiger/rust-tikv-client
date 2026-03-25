@@ -719,7 +719,7 @@ mod tests {
     ) -> f64 {
         families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_load_safepoint_total")
+            .find(|family| family.get_name() == "tikv_client_load_safepoint_total")
             .and_then(|family| {
                 family
                     .get_metric()

@@ -8695,9 +8695,9 @@ mod tests {
     #[tokio::test]
     #[serial(metrics)]
     async fn test_pipelined_flush_records_metrics() {
-        let metric_len = "tikv_client_rust_pipelined_flush_len";
-        let metric_size = "tikv_client_rust_pipelined_flush_size";
-        let metric_duration = "tikv_client_rust_pipelined_flush_duration";
+        let metric_len = "tikv_client_pipelined_flush_len";
+        let metric_size = "tikv_client_pipelined_flush_size";
+        let metric_duration = "tikv_client_pipelined_flush_duration";
 
         let sample_count = |name: &str| -> u64 {
             let families = prometheus::gather();
@@ -14418,7 +14418,7 @@ mod tests {
         fn ttl_lifetime_reach_total() -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_ttl_lifetime_reach_total")
+                .find(|family| family.get_name() == "tikv_client_ttl_lifetime_reach_total")
                 .and_then(|family| family.get_metric().first())
                 .map(|metric| metric.get_counter().get_value())
                 .unwrap_or(0.0)
@@ -14427,7 +14427,7 @@ mod tests {
         fn txn_ttl_manager_samples() -> u64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_txn_ttl_manager")
+                .find(|family| family.get_name() == "tikv_client_txn_ttl_manager")
                 .and_then(|family| family.get_metric().first())
                 .map(|metric| metric.get_histogram().get_sample_count())
                 .unwrap_or(0)
@@ -15320,8 +15320,8 @@ mod tests {
     #[tokio::test]
     #[serial(metrics)]
     async fn test_get_timestamp_for_commit_records_lag_commit_ts_metrics() {
-        let metric_wait = "tikv_client_rust_txn_lag_commit_ts_wait_seconds";
-        let metric_attempt = "tikv_client_rust_txn_lag_commit_ts_attempt_count";
+        let metric_wait = "tikv_client_txn_lag_commit_ts_wait_seconds";
+        let metric_attempt = "tikv_client_txn_lag_commit_ts_attempt_count";
 
         let histogram_samples = |name: &str, result: &str| -> u64 {
             let families = prometheus::gather();
@@ -15414,8 +15414,8 @@ mod tests {
     #[tokio::test]
     #[serial(metrics)]
     async fn test_commit_records_txn_write_metrics() {
-        let metric_kv = "tikv_client_rust_txn_write_kv_num";
-        let metric_size = "tikv_client_rust_txn_write_size_bytes";
+        let metric_kv = "tikv_client_txn_write_kv_num";
+        let metric_size = "tikv_client_txn_write_size_bytes";
 
         let histogram_samples = |name: &str, scope: &str| -> u64 {
             let families = prometheus::gather();
@@ -16439,7 +16439,7 @@ mod tests {
             let families = prometheus::gather();
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_one_pc_txn_counter")
+                .find(|family| family.get_name() == "tikv_client_one_pc_txn_counter")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -16508,7 +16508,7 @@ mod tests {
             let families = prometheus::gather();
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_async_commit_txn_counter")
+                .find(|family| family.get_name() == "tikv_client_async_commit_txn_counter")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -16602,8 +16602,8 @@ mod tests {
         };
 
         let one_pc_fallback_before =
-            counter_value("tikv_client_rust_one_pc_txn_counter", "fallback");
-        let two_pc_ok_before = counter_value("tikv_client_rust_commit_txn_counter", "ok");
+            counter_value("tikv_client_one_pc_txn_counter", "fallback");
+        let two_pc_ok_before = counter_value("tikv_client_commit_txn_counter", "ok");
 
         let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
             if let Some(req) = req.downcast_ref::<kvrpcpb::PrewriteRequest>() {
@@ -16648,8 +16648,8 @@ mod tests {
         assert_eq!(commit_ts.version(), commit_version);
 
         let one_pc_fallback_after =
-            counter_value("tikv_client_rust_one_pc_txn_counter", "fallback");
-        let two_pc_ok_after = counter_value("tikv_client_rust_commit_txn_counter", "ok");
+            counter_value("tikv_client_one_pc_txn_counter", "fallback");
+        let two_pc_ok_after = counter_value("tikv_client_commit_txn_counter", "ok");
 
         assert!(
             one_pc_fallback_after >= one_pc_fallback_before + 1.0,
@@ -16677,9 +16677,9 @@ mod tests {
         }
 
         let (seconds_count_before, seconds_sum_before) =
-            histogram_sample("tikv_client_rust_txn_commit_backoff_seconds");
+            histogram_sample("tikv_client_txn_commit_backoff_seconds");
         let (count_count_before, count_sum_before) =
-            histogram_sample("tikv_client_rust_txn_commit_backoff_count");
+            histogram_sample("tikv_client_txn_commit_backoff_count");
 
         let start_version = 7;
         let commit_version = 8;
@@ -16712,9 +16712,9 @@ mod tests {
         assert_eq!(commit_ts.version(), commit_version);
 
         let (seconds_count_after, seconds_sum_after) =
-            histogram_sample("tikv_client_rust_txn_commit_backoff_seconds");
+            histogram_sample("tikv_client_txn_commit_backoff_seconds");
         let (count_count_after, count_sum_after) =
-            histogram_sample("tikv_client_rust_txn_commit_backoff_count");
+            histogram_sample("tikv_client_txn_commit_backoff_count");
 
         assert!(
             seconds_count_after > seconds_count_before,
@@ -16742,7 +16742,7 @@ mod tests {
         fn histogram_sample(type_label: &str, scope: &str) -> (u64, f64) {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_txn_regions_num")
+                .find(|family| family.get_name() == "tikv_client_txn_regions_num")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -16841,7 +16841,7 @@ mod tests {
                 .unwrap_or(0)
         }
 
-        let before = histogram_sample_count("tikv_client_rust_batch_executor_token_wait_duration");
+        let before = histogram_sample_count("tikv_client_batch_executor_token_wait_duration");
 
         let start_version = 7;
         let commit_version = 8;
@@ -16871,7 +16871,7 @@ mod tests {
         let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
         assert_eq!(commit_ts.version(), commit_version);
 
-        let after = histogram_sample_count("tikv_client_rust_batch_executor_token_wait_duration");
+        let after = histogram_sample_count("tikv_client_batch_executor_token_wait_duration");
         assert!(
             after > before,
             "expected batch_executor_token_wait_duration histogram to record observations"
@@ -16884,7 +16884,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_lock_cleanup_task_total")
+                .find(|family| family.get_name() == "tikv_client_lock_cleanup_task_total")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -16966,7 +16966,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_lock_cleanup_task_total")
+                .find(|family| family.get_name() == "tikv_client_lock_cleanup_task_total")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -17024,7 +17024,7 @@ mod tests {
                 let families = prometheus::gather();
                 families
                     .iter()
-                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .find(|family| family.get_name() == "tikv_client_txn_cmd_duration_seconds")
                     .and_then(|family| {
                         family.get_metric().iter().find(|metric| {
                             metric.get_label().iter().any(|pair| {
@@ -17088,7 +17088,7 @@ mod tests {
                 let families = prometheus::gather();
                 families
                     .iter()
-                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .find(|family| family.get_name() == "tikv_client_txn_cmd_duration_seconds")
                     .and_then(|family| {
                         family.get_metric().iter().find(|metric| {
                             metric.get_label().iter().any(|pair| {
@@ -17138,7 +17138,7 @@ mod tests {
                 let families = prometheus::gather();
                 families
                     .iter()
-                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .find(|family| family.get_name() == "tikv_client_txn_cmd_duration_seconds")
                     .and_then(|family| {
                         family.get_metric().iter().find(|metric| {
                             metric.get_label().iter().any(|pair| {
@@ -17216,7 +17216,7 @@ mod tests {
                 let families = prometheus::gather();
                 families
                     .iter()
-                    .find(|family| family.get_name() == "tikv_client_rust_txn_cmd_duration_seconds")
+                    .find(|family| family.get_name() == "tikv_client_txn_cmd_duration_seconds")
                     .and_then(|family| {
                         family.get_metric().iter().find(|metric| {
                             metric.get_label().iter().any(|pair| {
@@ -17301,7 +17301,7 @@ mod tests {
             let families = prometheus::gather();
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_txn_heart_beat")
+                .find(|family| family.get_name() == "tikv_client_txn_heart_beat")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -17381,7 +17381,7 @@ mod tests {
             let families = prometheus::gather();
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_txn_heart_beat")
+                .find(|family| family.get_name() == "tikv_client_txn_heart_beat")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -19784,7 +19784,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_aggressive_locking_count")
+                .find(|family| family.get_name() == "tikv_client_aggressive_locking_count")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric
@@ -20400,7 +20400,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_prewrite_assertion_count")
+                .find(|family| family.get_name() == "tikv_client_prewrite_assertion_count")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)
@@ -20499,7 +20499,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_prewrite_assertion_count")
+                .find(|family| family.get_name() == "tikv_client_prewrite_assertion_count")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)

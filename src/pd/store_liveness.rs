@@ -220,7 +220,7 @@ mod tests {
         fn counter_value(families: &[prometheus::proto::MetricFamily], result: &str) -> f64 {
             families
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_kv_status_api_count")
+                .find(|family| family.get_name() == "tikv_client_kv_status_api_count")
                 .and_then(|family| {
                     family.get_metric().iter().find_map(|metric| {
                         if label_value(metric, "result") == Some(result) {
@@ -274,7 +274,7 @@ mod tests {
 
         let gauge_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_store_liveness_state")
+            .find(|family| family.get_name() == "tikv_client_store_liveness_state")
             .expect("store_liveness_state gauge not registered");
 
         let reachable_found = gauge_family.get_metric().iter().any(|metric| {
@@ -316,7 +316,7 @@ mod tests {
 
         let duration_family = families
             .iter()
-            .find(|family| family.get_name() == "tikv_client_rust_kv_status_api_duration")
+            .find(|family| family.get_name() == "tikv_client_kv_status_api_duration")
             .expect("kv_status_api_duration histogram not registered");
 
         let s1_found = duration_family.get_metric().iter().any(|metric| {

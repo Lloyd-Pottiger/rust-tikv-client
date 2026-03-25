@@ -417,7 +417,7 @@ mod tests {
         fn range_task_completed_gauge_value(task: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_range_task_stats")
+                .find(|family| family.get_name() == "tikv_client_range_task_stats")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(task)
@@ -431,7 +431,7 @@ mod tests {
         fn range_task_push_duration_sample_count(task: &str) -> u64 {
             prometheus::gather()
                 .iter()
-                .find(|family| family.get_name() == "tikv_client_rust_range_task_push_duration")
+                .find(|family| family.get_name() == "tikv_client_range_task_push_duration")
                 .and_then(|family| {
                     family
                         .get_metric()
