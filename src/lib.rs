@@ -122,7 +122,7 @@ mod common;
 mod compat;
 pub mod config;
 mod gc_safe_point;
-mod kv;
+pub mod kv;
 mod pd;
 mod pd_region_meta_circuit_breaker;
 #[doc(hidden)]
