@@ -52,3 +52,23 @@ fn kv_module_exposes_getter_traits_for_snapshot_and_transaction() {
     assert_impl::<tikv_client::Snapshot>();
     assert_impl::<tikv_client::Transaction>();
 }
+
+#[test]
+fn kv_module_exports_key_helpers_and_key_range() {
+    let next = kv::next_key(b"k".to_vec());
+    assert_eq!(Into::<Vec<u8>>::into(next), b"k\0".to_vec());
+
+    let prefix_next = kv::prefix_next_key(vec![0x12, 0xFF]);
+    assert_eq!(Into::<Vec<u8>>::into(prefix_next), vec![0x13, 0x00]);
+
+    let prefix_overflow = kv::prefix_next_key(vec![0xFF]);
+    assert!(prefix_overflow.is_empty());
+
+    assert_eq!(kv::cmp_key(b"a", b"b"), std::cmp::Ordering::Less);
+
+    let range = kv::KeyRange::new(b"a".to_vec(), b"b".to_vec());
+    let _: kv::BoundRange = range.into();
+
+    let _ = kv::Key::from(b"k".to_vec()).next_key();
+    let _ = kv::Key::from(b"k".to_vec()).prefix_next_key();
+}

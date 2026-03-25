@@ -20,6 +20,33 @@ use crate::proto::kvrpcpb::KvPair;
 
 const _PROPTEST_KEY_MAX: usize = 1024 * 2; // 2 KB
 
+/// Compare two keys using byte-wise lexicographic ordering.
+///
+/// This maps to client-go `kv.CmpKey` (which returns `-1/0/1`).
+#[doc(alias = "CmpKey")]
+#[must_use]
+pub fn cmp_key(key: &[u8], another: &[u8]) -> std::cmp::Ordering {
+    key.cmp(another)
+}
+
+/// Returns the next key in byte-order.
+///
+/// This maps to client-go `kv.NextKey`.
+#[doc(alias = "NextKey")]
+#[must_use]
+pub fn next_key(key: impl Into<Key>) -> Key {
+    key.into().next_key()
+}
+
+/// Returns the next prefix key.
+///
+/// This maps to client-go `kv.PrefixNextKey`.
+#[doc(alias = "PrefixNextKey")]
+#[must_use]
+pub fn prefix_next_key(key: impl Into<Key>) -> Key {
+    key.into().prefix_next_key()
+}
+
 /// The key part of a key/value pair.
 ///
 /// In TiKV, keys are an ordered sequence of bytes. This has an advantage over choosing `String` as
@@ -113,9 +140,29 @@ impl Key {
     /// Push a zero to the end of the key.
     ///
     /// Extending a zero makes the new key the smallest key that is greater than than the original one.
+    ///
+    /// This maps to client-go `kv.NextKey` (as an in-place, consuming operation).
+    #[doc(alias = "NextKey")]
     #[inline]
-    pub(crate) fn next_key(mut self) -> Self {
+    pub fn next_key(mut self) -> Self {
         self.0.push(0);
+        self
+    }
+
+    /// Return the next prefix key.
+    ///
+    /// This maps to client-go `kv.PrefixNextKey` (as an in-place, consuming operation).
+    #[doc(alias = "PrefixNextKey")]
+    #[inline]
+    #[must_use]
+    pub fn prefix_next_key(mut self) -> Self {
+        for i in (0..self.0.len()).rev() {
+            self.0[i] = self.0[i].wrapping_add(1);
+            if self.0[i] != 0 {
+                return self;
+            }
+        }
+        self.0.clear();
         self
     }
 
@@ -158,6 +205,38 @@ impl Key {
 
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+}
+
+/// A range where `start_key <= key < end_key`.
+///
+/// This maps to client-go `kv.KeyRange`.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct KeyRange {
+    pub start_key: Key,
+    pub end_key: Key,
+}
+
+impl KeyRange {
+    #[must_use]
+    pub fn new(start_key: impl Into<Key>, end_key: impl Into<Key>) -> Self {
+        Self {
+            start_key: start_key.into(),
+            end_key: end_key.into(),
+        }
+    }
+}
+
+impl From<KeyRange> for super::BoundRange {
+    fn from(range: KeyRange) -> Self {
+        (range.start_key..range.end_key).into()
+    }
+}
+
+impl From<KeyRange> for kvrpcpb::KeyRange {
+    fn from(range: KeyRange) -> Self {
+        let bound: super::BoundRange = range.into();
+        bound.into()
     }
 }
 
