@@ -72,3 +72,26 @@ fn kv_module_exports_key_helpers_and_key_range() {
     let _ = kv::Key::from(b"k".to_vec()).next_key();
     let _ = kv::Key::from(b"k".to_vec()).prefix_next_key();
 }
+
+#[test]
+fn kv_module_exports_key_flags() {
+    let _ = kv::FLAG_BYTES;
+
+    let flags = kv::apply_flags_ops(
+        kv::KeyFlags::default(),
+        [kv::FlagsOp::SetPresumeKeyNotExists],
+    );
+    assert!(flags.has_presume_key_not_exists());
+    assert!(flags.has_need_check_exists());
+
+    let flags = kv::apply_flags_ops(flags, [kv::FlagsOp::SetAssertExist]);
+    assert!(flags.has_assert_exist());
+    assert!(!flags.has_assert_not_exist());
+    assert!(flags.has_assertion_flags());
+
+    let flags = kv::apply_flags_ops(flags, [kv::FlagsOp::SetAssertNone]);
+    assert!(!flags.has_assertion_flags());
+
+    let flags = kv::apply_flags_ops(flags, [kv::FlagsOp::DelPresumeKeyNotExists]);
+    assert!(!flags.has_presume_key_not_exists());
+}

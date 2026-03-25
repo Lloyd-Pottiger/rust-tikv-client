@@ -5,6 +5,7 @@ mod bound_range;
 pub mod codec;
 mod get;
 mod key;
+mod key_flags;
 mod kvpair;
 mod value;
 
@@ -25,6 +26,10 @@ pub use key::prefix_next_key;
 pub use key::Key;
 pub use key::KeyRange;
 pub use key::KvPairTTL;
+pub use key_flags::apply_flags_ops;
+pub use key_flags::FlagsOp;
+pub use key_flags::KeyFlags;
+pub use key_flags::FLAG_BYTES;
 pub use kvpair::KvPair;
 pub use value::Value;
 
