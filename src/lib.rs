@@ -114,6 +114,7 @@ pub mod rawkv;
 pub mod redact;
 pub mod request;
 pub mod store_vars;
+pub mod tikv;
 pub mod tikvrpc;
 pub mod trace;
 #[doc(hidden)]
