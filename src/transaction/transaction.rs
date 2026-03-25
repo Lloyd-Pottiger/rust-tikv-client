@@ -8416,10 +8416,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_commit_requests_use_commit_timeout_override() {
+        type SeenEntry = (&'static str, Option<Duration>, Duration);
+
         #[derive(Clone)]
         struct TimeoutRecordingKvClient {
             timeout: Duration,
-            seen: Arc<Mutex<Vec<(&'static str, Option<Duration>, Duration)>>>,
+            seen: Arc<Mutex<Vec<SeenEntry>>>,
         }
 
         #[async_trait]

@@ -296,6 +296,7 @@ async fn fetch_more_pending_requests(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn outbound_stream(
     receiver: mpsc::Receiver<tikvpb::BatchCommandsRequest>,
     max_requests: usize,
@@ -435,6 +436,7 @@ impl BatchCommandsClient {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn connect_with_forwarded_host<T>(
         client: TikvClient<T>,
         max_outbound_requests: usize,
@@ -465,6 +467,7 @@ impl BatchCommandsClient {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn connect_inner<T>(
         client: TikvClient<T>,
         max_outbound_requests: usize,

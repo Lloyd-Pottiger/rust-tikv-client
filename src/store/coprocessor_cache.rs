@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use crate::config::CoprocessorCacheConfig;
 use crate::proto::coprocessor;
-use crate::proto::kvrpcpb;
 use crate::Error;
 use crate::Result;
 
@@ -97,7 +96,9 @@ impl CoprocessorCacheInner {
             if entry.access_id != access_id {
                 continue;
             }
-            let removed = self.entries.remove(&hash).expect("entry must exist");
+            let Some(removed) = self.entries.remove(&hash) else {
+                continue;
+            };
             self.total_estimated_cost = self
                 .total_estimated_cost
                 .saturating_sub(removed.value.estimated_cost);
@@ -203,11 +204,11 @@ impl CoprocessorCache {
         inner.next_access_id = inner.next_access_id.wrapping_add(1);
         let access_id = inner.next_access_id;
 
-        let value = {
-            let entry = inner.entries.get_mut(&hash.0).expect("entry must exist");
-            entry.access_id = access_id;
-            Arc::clone(&entry.value)
+        let Some(entry) = inner.entries.get_mut(&hash.0) else {
+            return (hash, None);
         };
+        entry.access_id = access_id;
+        let value = Arc::clone(&entry.value);
         inner.lru.push_back((hash.0, access_id));
         (hash, Some(value))
     }
@@ -443,6 +444,7 @@ fn warn_invalid_copr_cache_config(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::kvrpcpb;
 
     #[test]
     fn test_build_key_matches_tidb() {

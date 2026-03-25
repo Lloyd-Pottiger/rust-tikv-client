@@ -60,6 +60,7 @@ pub struct TikvConnect {
 }
 
 impl TikvConnect {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         security_mgr: Arc<SecurityManager>,
         timeout: Duration,
@@ -427,6 +428,7 @@ impl ForwardedBatchCommandsClientPool {
 }
 
 impl KvRpcClient {
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         rpc_client: TikvClient<Channel>,
         timeout: Duration,
@@ -1415,6 +1417,13 @@ mod tests {
     }
 
     type BatchInbound = std::result::Result<tikvpb::BatchCommandsResponse, tonic::Status>;
+    type ForwardedBatchClientForTest = (
+        KvRpcClient,
+        mpsc::Receiver<tikvpb::BatchCommandsRequest>,
+        mpsc::Sender<BatchInbound>,
+        mpsc::Receiver<tikvpb::BatchCommandsRequest>,
+        mpsc::Sender<BatchInbound>,
+    );
 
     fn new_kv_rpc_client_with_batch_for_test() -> Result<(
         KvRpcClient,
@@ -1447,13 +1456,7 @@ mod tests {
 
     fn new_kv_rpc_client_with_forwarded_batch_for_test(
         forwarded_host: String,
-    ) -> Result<(
-        KvRpcClient,
-        mpsc::Receiver<tikvpb::BatchCommandsRequest>,
-        mpsc::Sender<BatchInbound>,
-        mpsc::Receiver<tikvpb::BatchCommandsRequest>,
-        mpsc::Sender<BatchInbound>,
-    )> {
+    ) -> Result<ForwardedBatchClientForTest> {
         let (base_out_tx, base_out_rx) = mpsc::channel(8);
         let (base_in_tx, base_in_rx) = mpsc::channel(8);
         let base_inbound_stream = stream::unfold(base_in_rx, |mut rx| async move {
