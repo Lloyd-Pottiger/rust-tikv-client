@@ -55,6 +55,9 @@ pub use transaction::SchemaLeaseChecker;
 pub use transaction::Transaction;
 pub use transaction::TransactionOptions;
 pub use vars::Variables;
+pub use vars::DEFAULT_VARS;
+pub use vars::DEF_BACKOFF_LOCK_FAST_MS;
+pub use vars::DEF_BACKOFF_WEIGHT;
 
 mod buffer;
 mod client;

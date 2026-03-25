@@ -1,8 +1,22 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use lazy_static::lazy_static;
+
 use crate::Error;
 use crate::Result;
+
+/// Default `Variables.backoff_lock_fast_ms` value (milliseconds).
+///
+/// This maps to client-go `kv.DefBackoffLockFast`.
+#[doc(alias = "DefBackoffLockFast")]
+pub const DEF_BACKOFF_LOCK_FAST_MS: u64 = 10;
+
+/// Default `Variables.backoff_weight` value.
+///
+/// This maps to client-go `kv.DefBackOffWeight`.
+#[doc(alias = "DefBackOffWeight")]
+pub const DEF_BACKOFF_WEIGHT: u32 = 2;
 
 /// Per-session variables used by the TiKV client.
 ///
@@ -29,14 +43,32 @@ pub struct Variables {
     pub killed: Option<Arc<AtomicU32>>,
 }
 
+lazy_static! {
+    /// Default variables instance.
+    ///
+    /// This maps to client-go `kv.DefaultVars`.
+    #[doc(alias = "DefaultVars")]
+    pub static ref DEFAULT_VARS: Variables = Variables::default();
+}
+
 impl Variables {
+    /// Create variables with the provided killed flag (or none).
+    ///
+    /// This maps to client-go `kv.NewVariables`.
+    #[doc(alias = "NewVariables")]
+    #[must_use]
+    pub fn new(killed: Option<Arc<AtomicU32>>) -> Variables {
+        Variables {
+            backoff_lock_fast_ms: DEF_BACKOFF_LOCK_FAST_MS,
+            backoff_weight: DEF_BACKOFF_WEIGHT,
+            killed,
+        }
+    }
+
     /// Create variables with the provided killed flag.
     #[must_use]
     pub fn with_killed_flag(killed: Arc<AtomicU32>) -> Variables {
-        Variables {
-            killed: Some(killed),
-            ..Variables::default()
-        }
+        Variables::new(Some(killed))
     }
 
     pub(crate) fn lock_fast_base_delay_ms(&self) -> u64 {
@@ -65,11 +97,7 @@ impl Variables {
 
 impl Default for Variables {
     fn default() -> Self {
-        Variables {
-            backoff_lock_fast_ms: 10,
-            backoff_weight: 2,
-            killed: None,
-        }
+        Variables::new(None)
     }
 }
 
@@ -86,6 +114,19 @@ mod tests {
             ..Variables::default()
         };
         assert_eq!(vars.lock_fast_base_delay_ms(), 2);
+    }
+
+    #[test]
+    fn default_values_match_client_go_constants() {
+        assert_eq!(DEF_BACKOFF_LOCK_FAST_MS, 10);
+        assert_eq!(DEF_BACKOFF_WEIGHT, 2);
+
+        let vars = Variables::default();
+        assert_eq!(vars.backoff_lock_fast_ms, DEF_BACKOFF_LOCK_FAST_MS);
+        assert_eq!(vars.backoff_weight, DEF_BACKOFF_WEIGHT);
+
+        assert_eq!(DEFAULT_VARS.backoff_lock_fast_ms, DEF_BACKOFF_LOCK_FAST_MS);
+        assert_eq!(DEFAULT_VARS.backoff_weight, DEF_BACKOFF_WEIGHT);
     }
 
     #[test]

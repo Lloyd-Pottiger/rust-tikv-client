@@ -6,6 +6,9 @@ fn kv_module_exports_basic_types() {
     let _: kv::Value = b"v".to_vec();
     let _: kv::KvPair = kv::KvPair::new(b"k".to_vec(), b"v".to_vec());
     let _ = kv::Variables::default();
+    let _: kv::Variables = kv::DEFAULT_VARS.clone();
+    let _: u64 = kv::DEF_BACKOFF_LOCK_FAST_MS;
+    let _: u32 = kv::DEF_BACKOFF_WEIGHT;
 }
 
 #[test]

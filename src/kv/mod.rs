@@ -30,6 +30,9 @@ pub use crate::store_vars::set_store_limit;
 pub use crate::store_vars::store_limit;
 pub use crate::store_vars::with_store_limit;
 pub use crate::store_vars::AccessLocationType;
+pub use crate::transaction::DEFAULT_VARS;
+pub use crate::transaction::DEF_BACKOFF_LOCK_FAST_MS;
+pub use crate::transaction::DEF_BACKOFF_WEIGHT;
 pub use crate::ReplicaReadType;
 pub use crate::Variables;
 
