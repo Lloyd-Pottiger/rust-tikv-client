@@ -13,6 +13,12 @@ use async_trait::async_trait;
 use super::Oracle;
 use super::OracleOption;
 
+/// PD-backed oracle implementation.
+///
+/// In the Rust client, this is [`crate::TransactionClient`], which implements [`crate::oracle::Oracle`].
+#[doc(inline)]
+pub use crate::TransactionClient as PdOracle;
+
 #[derive(Debug, Default)]
 struct LocalOracleState {
     last_timestamp_ts: u64,
@@ -73,6 +79,25 @@ impl LocalOracle {
 #[must_use]
 pub fn new_local_oracle() -> LocalOracle {
     LocalOracle::new()
+}
+
+/// Create a PD-backed oracle client by connecting to the given PD endpoints.
+///
+/// This mirrors client-go `oracle/oracles.NewPdOracle` as a convenience constructor.
+#[doc(alias = "NewPdOracle")]
+pub async fn new_pd_oracle<S: Into<String>>(pd_endpoints: Vec<S>) -> crate::Result<PdOracle> {
+    crate::TransactionClient::new(pd_endpoints).await
+}
+
+/// Create a PD-backed oracle client by connecting to the given PD endpoints with the provided config.
+///
+/// This mirrors client-go `oracle/oracles.NewPdOracle` options as a convenience constructor.
+#[doc(alias = "NewPdOracle")]
+pub async fn new_pd_oracle_with_config<S: Into<String>>(
+    pd_endpoints: Vec<S>,
+    config: crate::Config,
+) -> crate::Result<PdOracle> {
+    crate::TransactionClient::new_with_config(pd_endpoints, config).await
 }
 
 #[async_trait]

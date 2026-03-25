@@ -5,6 +5,13 @@ use tikv_client::oracle::Oracle as _;
 fn oracle_oracles_module_exports_local_oracle() {
     let _: Option<oracle::oracles::LocalOracle> = None;
     let _ = oracle::oracles::new_local_oracle();
+
+    let _: Option<oracle::oracles::PdOracle> = None;
+    let _pd_oracle_future = oracle::oracles::new_pd_oracle(vec!["127.0.0.1:2379"]);
+    let _pd_oracle_future = oracle::oracles::new_pd_oracle_with_config(
+        vec!["127.0.0.1:2379"],
+        tikv_client::Config::default(),
+    );
 }
 
 #[tokio::test]
