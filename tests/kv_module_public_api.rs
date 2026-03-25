@@ -27,3 +27,24 @@ fn kv_module_exports_store_vars_and_replica_read_type() {
     let _: fn(Option<&str>, &[tikv_client::StoreLabel]) -> kv::AccessLocationType =
         kv::access_location_type;
 }
+
+#[test]
+fn kv_module_exports_get_and_batch_get_option_types() {
+    let mut opts = kv::GetOptions::default();
+    opts.apply(&[kv::with_return_commit_ts()]);
+    assert!(opts.return_commit_ts());
+
+    let mut opts = kv::BatchGetOptions::default();
+    opts.apply(&[kv::with_return_commit_ts()]);
+    assert!(opts.return_commit_ts());
+
+    let _ = kv::ValueEntry::new(Some(b"v".to_vec()), 42);
+}
+
+#[test]
+fn kv_module_exposes_getter_traits_for_snapshot_and_transaction() {
+    fn assert_impl<T: kv::Getter + kv::BatchGetter>() {}
+
+    assert_impl::<tikv_client::Snapshot>();
+    assert_impl::<tikv_client::Transaction>();
+}

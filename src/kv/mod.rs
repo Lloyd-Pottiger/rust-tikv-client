@@ -3,12 +3,22 @@ use std::fmt;
 
 mod bound_range;
 pub mod codec;
+mod get;
 mod key;
 mod kvpair;
 mod value;
 
 pub use bound_range::BoundRange;
 pub use bound_range::IntoOwnedRange;
+pub use get::with_return_commit_ts;
+pub use get::BatchGetOption;
+pub use get::BatchGetOptions;
+pub use get::BatchGetter;
+pub use get::GetOption;
+pub use get::GetOptions;
+pub use get::GetOrBatchGetOption;
+pub use get::Getter;
+pub use get::ValueEntry;
 pub use key::Key;
 pub use key::KvPairTTL;
 pub use kvpair::KvPair;
