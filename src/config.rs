@@ -1286,11 +1286,11 @@ pub fn get_global_config() -> Config {
 ///
 /// Returns `"global"` when the global config does not specify a local transaction scope.
 pub fn get_txn_scope_from_global_config() -> String {
-    get_global_config()
-        .txn_scope
-        .as_deref()
-        .and_then(normalize_txn_scope)
-        .unwrap_or_else(|| "global".to_owned())
+    let mut txn_scope = get_global_config().txn_scope.unwrap_or_default();
+    if let Ok(Some(injected)) = crate::util::eval_failpoint("injectTxnScope") {
+        txn_scope = injected;
+    }
+    normalize_txn_scope(&txn_scope).unwrap_or_else(|| "global".to_owned())
 }
 
 /// Set the global client configuration.
@@ -1718,6 +1718,28 @@ mod tests {
         let _guard = set_global_config_scoped(Config::default().with_txn_scope("dc1"));
         assert_eq!(get_global_config().txn_scope.as_deref(), Some("dc1"));
         assert_eq!(get_txn_scope_from_global_config(), "dc1");
+    }
+
+    #[test]
+    fn test_get_txn_scope_from_global_config_respects_failpoint_override() {
+        let _lock = super::GLOBAL_CONFIG_TEST_LOCK.blocking_lock();
+
+        let _scenario = fail::FailScenario::setup();
+        crate::util::enable_failpoints();
+
+        let _global_config_guard =
+            set_global_config_scoped(Config::default().with_txn_scope("dc1"));
+
+        fail::cfg("injectTxnScope", "return(dc2)").unwrap();
+        struct FailpointGuard;
+        impl Drop for FailpointGuard {
+            fn drop(&mut self) {
+                let _ = fail::cfg("injectTxnScope", "off");
+            }
+        }
+        let _failpoint_guard = FailpointGuard;
+
+        assert_eq!(get_txn_scope_from_global_config(), "dc2");
     }
 
     #[test]
