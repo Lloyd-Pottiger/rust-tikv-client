@@ -31,6 +31,7 @@ pub use crate::store_vars::store_limit;
 pub use crate::store_vars::with_store_limit;
 pub use crate::store_vars::AccessLocationType;
 pub use crate::ReplicaReadType;
+pub use crate::Variables;
 
 pub struct HexRepr<'a>(pub &'a [u8]);
 
