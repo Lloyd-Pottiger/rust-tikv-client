@@ -8,6 +8,7 @@ pub mod r#async;
 pub mod bytes;
 pub mod codec;
 mod exec_details;
+mod failpoint;
 pub mod gc_time;
 #[doc(hidden)]
 pub mod iter;
@@ -60,6 +61,9 @@ pub use exec_details::TiKVExecDetails;
 pub use exec_details::TimeDetail;
 pub use exec_details::TrafficDetails;
 pub use exec_details::WriteDetail;
+pub use failpoint::enable_failpoints;
+pub use failpoint::eval_failpoint;
+pub use failpoint::FailpointsDisabledError;
 pub use gc_time::compatible_parse_gc_time;
 pub use gc_time::GcTimeParseError;
 pub use gc_time::GC_TIME_FORMAT;
