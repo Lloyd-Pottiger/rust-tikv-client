@@ -327,6 +327,13 @@ pub struct Config {
     /// Defaults to 500ms (client-go default).
     pub async_commit_allowed_clock_drift: Duration,
     pub timeout: Duration,
+    /// Timeout applied to PD requests (client-go `config.PDClient.PDServerTimeout`).
+    ///
+    /// This bounds both PD gRPC and PD HTTP requests, and is intentionally separate from
+    /// [`Config::timeout`] which primarily targets TiKV KV requests.
+    ///
+    /// Defaults to 3 seconds (client-go default).
+    pub pd_server_timeout: Duration,
     /// Timeout for a single coprocessor request.
     ///
     /// When non-zero, coprocessor requests use this timeout instead of [`Config::timeout`],
@@ -582,6 +589,7 @@ pub struct Config {
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_PD_SERVER_TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) const DEFAULT_COMMIT_TIMEOUT: Duration = Duration::from_secs(41);
 pub(crate) const DEFAULT_COPR_REQ_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DEFAULT_ASYNC_COMMIT_KEYS_LIMIT: usize = 256;
@@ -623,6 +631,7 @@ impl Default for Config {
             async_commit_safe_window: DEFAULT_ASYNC_COMMIT_SAFE_WINDOW,
             async_commit_allowed_clock_drift: DEFAULT_ASYNC_COMMIT_ALLOWED_CLOCK_DRIFT,
             timeout: DEFAULT_REQUEST_TIMEOUT,
+            pd_server_timeout: DEFAULT_PD_SERVER_TIMEOUT,
             copr_req_timeout: DEFAULT_COPR_REQ_TIMEOUT,
             copr_cache: CoprocessorCacheConfig::default(),
             enable_chunk_rpc: true,
@@ -689,6 +698,11 @@ impl Config {
         if self.max_txn_ttl.is_zero() {
             return Err(crate::Error::StringError(
                 "max-txn-ttl should be greater than 0".to_owned(),
+            ));
+        }
+        if self.pd_server_timeout.is_zero() {
+            return Err(crate::Error::StringError(
+                "pd-server-timeout should be greater than 0".to_owned(),
             ));
         }
         if self.grpc_connection_count == 0 {
@@ -795,6 +809,15 @@ impl Config {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the timeout for PD requests (client-go `config.PDClient.PDServerTimeout`).
+    ///
+    /// This bounds both PD gRPC and PD HTTP requests.
+    #[must_use]
+    pub fn with_pd_server_timeout(mut self, timeout: Duration) -> Self {
+        self.pd_server_timeout = timeout;
         self
     }
 
@@ -1370,6 +1393,7 @@ mod tests {
             DEFAULT_BATCH_RPC_OVERLOAD_THRESHOLD
         );
         assert_eq!(config.grpc_connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.pd_server_timeout, Duration::from_secs(3));
         assert!(config.zone_label.is_none());
         assert_eq!(config.committer_concurrency, DEFAULT_COMMITTER_CONCURRENCY);
         assert_eq!(config.max_txn_ttl, DEFAULT_MAX_TXN_TTL);
@@ -1447,6 +1471,12 @@ mod tests {
     fn test_config_enable_chunk_rpc_is_configurable() {
         let config = Config::default().with_enable_chunk_rpc(false);
         assert!(!config.enable_chunk_rpc);
+    }
+
+    #[test]
+    fn test_config_pd_server_timeout_is_configurable() {
+        let config = Config::default().with_pd_server_timeout(Duration::from_secs(7));
+        assert_eq!(config.pd_server_timeout, Duration::from_secs(7));
     }
 
     #[test]

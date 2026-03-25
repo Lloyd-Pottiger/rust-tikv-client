@@ -1356,7 +1356,7 @@ impl PdRpcClient<TikvConnect, Cluster> {
                 RetryClient::connect(
                     pd_endpoints,
                     security_mgr,
-                    config.timeout,
+                    config.pd_server_timeout,
                     config.tso_max_pending_count,
                 )
             },
@@ -1511,7 +1511,7 @@ fn pd_http_base_url(endpoint: &str, use_https: bool) -> String {
 fn build_pd_http_client(config: &Config) -> (Option<reqwest::Client>, bool) {
     let use_https =
         config.ca_path.is_some() && config.cert_path.is_some() && config.key_path.is_some();
-    let mut builder = reqwest::Client::builder().timeout(config.timeout);
+    let mut builder = reqwest::Client::builder().timeout(config.pd_server_timeout);
 
     if let (Some(ca_path), Some(cert_path), Some(key_path)) =
         (&config.ca_path, &config.cert_path, &config.key_path)
@@ -2022,6 +2022,66 @@ pub mod test {
         assert_eq!(store_safe_ts.get(&1).copied(), Some(100));
         assert_eq!(store_safe_ts.get(&2).copied(), Some(10));
 
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pd_http_client_uses_pd_server_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut first_line = String::new();
+            reader.read_line(&mut first_line).unwrap();
+            let path = first_line.split_whitespace().nth(1).unwrap_or("");
+            assert!(
+                path == "/pd/api/v1/min-resolved-ts?scope=1,2"
+                    || path == "/pd/api/v1/min-resolved-ts?scope=1%2C2",
+                "unexpected request path: {path:?}"
+            );
+
+            std::thread::sleep(Duration::from_secs(1));
+        });
+
+        let config = Config::default()
+            .with_timeout(Duration::from_secs(10))
+            .with_pd_server_timeout(Duration::from_millis(50));
+        let mut client = PdRpcClient::new(
+            config.clone(),
+            |_| MockKvConnect,
+            |sm| {
+                futures::future::ok(RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    42,
+                    MockCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        client.pd_http_endpoints = vec![addr.to_string()];
+
+        let fut = pd_http_min_resolved_ts_by_stores(
+            client
+                .pd_http_client
+                .as_ref()
+                .expect("pd http client should be constructed"),
+            &client.pd_http_endpoints,
+            client.pd_http_use_https,
+            &[1, 2],
+        );
+
+        let err = match tokio::time::timeout(Duration::from_millis(500), fut).await {
+            Ok(Ok(_)) => panic!("expected pd http request to fail"),
+            Ok(Err(err)) => err,
+            Err(_) => panic!("expected pd http request to respect pd_server_timeout"),
+        };
+
+        assert!(matches!(err, Error::StringError(_)));
         server.join().unwrap();
     }
 
