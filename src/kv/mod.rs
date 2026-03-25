@@ -14,6 +14,14 @@ pub use key::KvPairTTL;
 pub use kvpair::KvPair;
 pub use value::Value;
 
+pub use crate::store_vars::access_location_type;
+pub use crate::store_vars::global_store_limit;
+pub use crate::store_vars::set_store_limit;
+pub use crate::store_vars::store_limit;
+pub use crate::store_vars::with_store_limit;
+pub use crate::store_vars::AccessLocationType;
+pub use crate::ReplicaReadType;
+
 pub struct HexRepr<'a>(pub &'a [u8]);
 
 impl fmt::Display for HexRepr<'_> {
