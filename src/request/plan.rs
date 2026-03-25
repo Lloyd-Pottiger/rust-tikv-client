@@ -270,9 +270,14 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
         let stats = tikv_stats_with_context(label, self.request.context());
 
         let Some(kv_client) = self.kv_client.as_ref() else {
-            return stats.done(Err(Error::InternalError {
-                message: "kv_client has not been initialised in Dispatch".to_owned(),
-            }));
+            return stats.done_with_request_source(
+                Err(Error::InternalError {
+                    message: "kv_client has not been initialised in Dispatch".to_owned(),
+                }),
+                self.request
+                    .context()
+                    .map(|context| context.request_source.as_str()),
+            );
         };
 
         let prewrite_req = (&self.request as &dyn Any).downcast_ref::<kvrpcpb::PrewriteRequest>();
@@ -360,7 +365,14 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
         {
             let wait_result = match resource_control.on_request_wait(&request_info).await {
                 Ok(result) => result,
-                Err(err) => return stats.done(Err(err)),
+                Err(err) => {
+                    return stats.done_with_request_source(
+                        Err(err),
+                        self.request
+                            .context()
+                            .map(|context| context.request_source.as_str()),
+                    );
+                }
             };
             let target = kv_client.store_address().unwrap_or("");
             let mut rpc_request = RpcRequest::new(target, label, request.context_mut());
@@ -395,7 +407,12 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
                     .on_response_wait(&request_info, &response_info)
                     .await
                 {
-                    return stats.done(Err(err));
+                    return stats.done_with_request_source(
+                        Err(err),
+                        request_ref
+                            .context()
+                            .map(|context| context.request_source.as_str()),
+                    );
                 }
             }
         }
@@ -481,7 +498,12 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
             }
         }
 
-        stats.done(result)
+        stats.done_with_request_source(
+            result,
+            request_ref
+                .context()
+                .map(|context| context.request_source.as_str()),
+        )
     }
 }
 
@@ -607,7 +629,14 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                 let mut rpc_request = RpcRequest::new(target, label, request.context_mut());
                 let wait_result = match resource_control.on_request_wait(&request_info).await {
                     Ok(result) => result,
-                    Err(err) => return stats.done(Err(err)),
+                    Err(err) => {
+                        return stats.done_with_request_source(
+                            Err(err),
+                            request
+                                .context()
+                                .map(|context| context.request_source.as_str()),
+                        );
+                    }
                 };
                 rpc_request.set_resource_control_penalty(wait_result.penalty);
                 if rpc_request.resource_control_override_priority() == 0 {
@@ -640,7 +669,12 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                         .on_response_wait(&request_info, &response_info)
                         .await
                     {
-                        return stats.done(Err(err));
+                        return stats.done_with_request_source(
+                            Err(err),
+                            request_ref
+                                .context()
+                                .map(|context| context.request_source.as_str()),
+                        );
                     }
                 }
             }
@@ -721,7 +755,12 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                 }
             }
 
-            return stats.done(result);
+            return stats.done_with_request_source(
+                result,
+                request_ref
+                    .context()
+                    .map(|context| context.request_source.as_str()),
+            );
         }
 
         let mut request = self.request.clone();
@@ -810,7 +849,14 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         if let Some(resource_control) = resource_control.as_ref() {
             let wait_result = match resource_control.on_request_wait(&request_info).await {
                 Ok(result) => result,
-                Err(err) => return stats.done(Err(err)),
+                Err(err) => {
+                    return stats.done_with_request_source(
+                        Err(err),
+                        request
+                            .context()
+                            .map(|context| context.request_source.as_str()),
+                    );
+                }
             };
             let mut rpc_request = RpcRequest::new(target, label, request.context_mut());
             rpc_request.set_resource_control_penalty(wait_result.penalty);
@@ -843,7 +889,12 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                     .on_response_wait(&request_info, &response_info)
                     .await
                 {
-                    return stats.done(Err(err));
+                    return stats.done_with_request_source(
+                        Err(err),
+                        request
+                            .context()
+                            .map(|context| context.request_source.as_str()),
+                    );
                 }
             }
         }
@@ -930,7 +981,12 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
             }
         }
 
-        stats.done(result)
+        stats.done_with_request_source(
+            result,
+            request
+                .context()
+                .map(|context| context.request_source.as_str()),
+        )
     }
 }
 
@@ -4283,6 +4339,106 @@ mod test {
         fn apply_store(&mut self, store: &crate::store::RegionStore) -> Result<()> {
             crate::store::Request::set_leader(self, &store.region_with_leader)
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct SourceMetricTestRequest {
+        context: Option<kvrpcpb::Context>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::store::Request for SourceMetricTestRequest {
+        async fn dispatch(
+            &self,
+            _client: &crate::proto::tikvpb::tikv_client::TikvClient<tonic::transport::Channel>,
+            _timeout: std::time::Duration,
+        ) -> crate::Result<Box<dyn Any>> {
+            unreachable!("SourceMetricTestRequest::dispatch should not be called")
+        }
+
+        fn label(&self) -> &'static str {
+            "unit_test_source_request_seconds"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn set_leader(&mut self, _leader: &crate::region::RegionWithLeader) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn set_api_version(&mut self, _api_version: crate::proto::kvrpcpb::ApiVersion) {}
+
+        fn set_is_retry_request(&mut self, _is_retry_request: bool) {}
+
+        fn context(&self) -> Option<&kvrpcpb::Context> {
+            self.context.as_ref()
+        }
+
+        fn context_mut(&mut self) -> Option<&mut kvrpcpb::Context> {
+            Some(self.context.get_or_insert(kvrpcpb::Context::default()))
+        }
+    }
+
+    impl crate::request::KvRequest for SourceMetricTestRequest {
+        type Response = crate::proto::kvrpcpb::GetResponse;
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_dispatch_records_source_request_seconds_metric() {
+        let response = crate::proto::kvrpcpb::GetResponse::default();
+        let kv = std::sync::Arc::new(MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+            req.downcast_ref::<SourceMetricTestRequest>()
+                .expect("expected SourceMetricTestRequest");
+            Ok(Box::new(response.clone()) as Box<dyn Any>)
+        }));
+
+        let mut ctx = kvrpcpb::Context::default();
+        ctx.peer = Some(metapb::Peer {
+            store_id: 9_876_543_210,
+            ..Default::default()
+        });
+        ctx.stale_read = true;
+        ctx.request_source = "internal_unit_test_source_request_seconds".to_owned();
+
+        let plan = Dispatch {
+            request: SourceMetricTestRequest { context: Some(ctx) },
+            kv_client: Some(kv),
+        };
+
+        let result = plan.execute().await;
+        assert!(result.is_ok());
+
+        fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+            metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.get_name() == name)
+                .map(|pair| pair.get_value())
+        }
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_source_request_seconds")
+            .expect("source_request_seconds histogram not registered");
+
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "type") == Some("unit_test_source_request_seconds")
+                && label_value(metric, "store") == Some("9876543210")
+                && label_value(metric, "stale_read") == Some("true")
+                && label_value(metric, "scope") == Some("true")
+                && label_value(metric, "source")
+                    == Some("internal_unit_test_source_request_seconds")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+
+        assert!(
+            found,
+            "expected source_request_seconds histogram metric not found"
+        );
     }
 
     #[tokio::test]

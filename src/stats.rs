@@ -20,7 +20,7 @@ use prometheus::Opts;
 use crate::proto::coprocessor;
 use crate::proto::errorpb;
 use crate::proto::kvrpcpb;
-use crate::request_context::is_internal_request_source;
+use crate::request_context::{is_internal_request_source, SOURCE_UNKNOWN};
 use crate::Error;
 use crate::Result;
 
@@ -38,6 +38,7 @@ pub struct RequestStats {
     failed_duration: Option<&'static HistogramVec>,
     failed_counter: Option<&'static IntCounterVec>,
     tikv_client_request_seconds: Option<&'static HistogramVec>,
+    tikv_client_source_request_seconds: Option<&'static HistogramVec>,
     tikv_client_rpc_net_latency_seconds: Option<&'static HistogramVec>,
     tikv_client_request_labels: Option<TikvClientRequestLabels>,
 }
@@ -76,6 +77,7 @@ impl RequestStats {
             failed_duration,
             failed_counter,
             tikv_client_request_seconds: None,
+            tikv_client_source_request_seconds: None,
             tikv_client_rpc_net_latency_seconds: None,
             tikv_client_request_labels: None,
         }
@@ -86,6 +88,8 @@ impl RequestStats {
         labels: Option<TikvClientRequestLabels>,
     ) -> RequestStats {
         self.tikv_client_request_seconds = TIKV_CLIENT_RUST_REQUEST_SECONDS_HISTOGRAM_VEC.as_ref();
+        self.tikv_client_source_request_seconds =
+            TIKV_CLIENT_RUST_SOURCE_REQUEST_SECONDS_HISTOGRAM_VEC.as_ref();
         self.tikv_client_rpc_net_latency_seconds =
             TIKV_CLIENT_RUST_RPC_NET_LATENCY_SECONDS_HISTOGRAM_VEC.as_ref();
         self.tikv_client_request_labels = labels;
@@ -93,6 +97,14 @@ impl RequestStats {
     }
 
     pub fn done<R: Any>(&self, r: Result<R>) -> Result<R> {
+        self.done_with_request_source(r, None)
+    }
+
+    pub(crate) fn done_with_request_source<R: Any>(
+        &self,
+        r: Result<R>,
+        request_source: Option<&str>,
+    ) -> Result<R> {
         let elapsed = self.start.elapsed();
         let elapsed_sec = duration_to_sec(elapsed);
 
@@ -106,6 +118,25 @@ impl RequestStats {
             let store = u64_label_value(labels.store_id, &mut buf);
             duration
                 .with_label_values(&[self.cmd, store, stale_read, internal])
+                .observe(elapsed_sec);
+        }
+
+        if let (Some(duration), Some(labels), Some(request_source)) = (
+            self.tikv_client_source_request_seconds,
+            self.tikv_client_request_labels,
+            request_source,
+        ) {
+            let stale_read = bool_label_value(labels.stale_read);
+            let internal = bool_label_value(labels.internal);
+            let mut buf = [0u8; 20];
+            let store = u64_label_value(labels.store_id, &mut buf);
+            let source = if request_source.is_empty() {
+                SOURCE_UNKNOWN
+            } else {
+                request_source
+            };
+            duration
+                .with_label_values(&[self.cmd, store, stale_read, internal, source])
                 .observe(elapsed_sec);
         }
 
@@ -1942,6 +1973,24 @@ lazy_static::lazy_static! {
             name,
             help,
             &["type", "store", "stale_read", "scope"],
+            buckets,
+        )
+    };
+
+    static ref TIKV_CLIENT_RUST_SOURCE_REQUEST_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_source_request_seconds";
+        let help = "Bucketed histogram of sending request with multi dimensions.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 24) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(
+            name,
+            help,
+            &["type", "store", "stale_read", "scope", "source"],
             buckets,
         )
     };
