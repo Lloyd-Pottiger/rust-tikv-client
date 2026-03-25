@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
-use tokio::time::sleep;
 
 use crate::internal_err;
 use crate::pd::Cluster;
@@ -204,7 +203,7 @@ macro_rules! retry_core {
                     if reconnect_count == 0 {
                         break 'retry Err(e);
                     }
-                    sleep(Duration::from_secs(RECONNECT_INTERVAL_SEC)).await;
+                    crate::util::sleep_backoff(Duration::from_secs(RECONNECT_INTERVAL_SEC)).await;
                 }
             }
 

@@ -1291,7 +1291,7 @@ impl<PdC: PdClient> Client<PdC> {
                 }));
             };
 
-            tokio::time::sleep(delay).await;
+            crate::util::sleep_backoff(delay).await;
         }
     }
 

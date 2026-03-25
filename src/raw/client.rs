@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use log::debug;
-use tokio::time::sleep;
 
 use crate::backoff::{DEFAULT_REGION_BACKOFF, DEFAULT_STORE_BACKOFF};
 use crate::common::Error;
@@ -1212,7 +1211,7 @@ impl<PdC: PdClient> Client<PdC> {
                         if status {
                             continue;
                         } else if let Some(duration) = scan_args.backoff.next_delay_duration() {
-                            sleep(duration).await;
+                            crate::util::sleep_backoff(duration).await;
                             continue;
                         } else {
                             return Err(RegionError(Box::new(err)));

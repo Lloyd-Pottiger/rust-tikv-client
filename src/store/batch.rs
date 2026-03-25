@@ -740,7 +740,7 @@ impl BatchCommandsClient {
                                 "batch_commands stream reconnect failed: target={}, err={err:?}",
                                 target_reader
                             );
-                            tokio::time::sleep(retry_backoff).await;
+                            crate::util::sleep_backoff(retry_backoff).await;
                             retry_backoff = (retry_backoff * 2).min(Duration::from_secs(10));
                         }
                     }

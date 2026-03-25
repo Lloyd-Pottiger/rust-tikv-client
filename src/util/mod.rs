@@ -63,6 +63,8 @@ pub use exec_details::TrafficDetails;
 pub use exec_details::WriteDetail;
 pub use failpoint::enable_failpoints;
 pub use failpoint::eval_failpoint;
+pub use failpoint::is_failpoint_active;
+pub(crate) use failpoint::sleep_backoff;
 pub use failpoint::FailpointsDisabledError;
 pub use gc_time::compatible_parse_gc_time;
 pub use gc_time::GcTimeParseError;

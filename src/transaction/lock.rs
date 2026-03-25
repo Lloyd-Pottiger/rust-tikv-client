@@ -12,7 +12,6 @@ use log::debug;
 use log::error;
 use log::warn;
 use tokio::sync::{watch, Mutex, RwLock};
-use tokio::time::sleep;
 
 use crate::backoff::Backoff;
 use crate::backoff::DEFAULT_REGION_BACKOFF;
@@ -1118,7 +1117,7 @@ async fn resolve_lock_with_retry(
                         if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                             stats.record_backoff("region", duration);
                         }
-                        sleep(duration).await;
+                        crate::util::sleep_backoff(duration).await;
                         continue;
                     }
                     None => return Err(Error::LeaderNotFound { region }),
@@ -1145,7 +1144,7 @@ async fn resolve_lock_with_retry(
                                 if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                                     stats.record_backoff("region", duration);
                                 }
-                                sleep(duration).await;
+                                crate::util::sleep_backoff(duration).await;
                             }
                             continue;
                         }
@@ -1178,7 +1177,7 @@ async fn resolve_lock_with_retry(
                     if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                         stats.record_backoff("grpc", duration);
                     }
-                    sleep(duration).await;
+                    crate::util::sleep_backoff(duration).await;
                     continue;
                 }
                 None => return Err(e),
@@ -1311,7 +1310,7 @@ async fn rollback_pessimistic_lock_with_retry(
                         if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                             stats.record_backoff("region", duration);
                         }
-                        sleep(duration).await;
+                        crate::util::sleep_backoff(duration).await;
                         continue;
                     }
                     None => return Err(Error::LeaderNotFound { region }),
@@ -1333,7 +1332,7 @@ async fn rollback_pessimistic_lock_with_retry(
                             if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                                 stats.record_backoff("region", duration);
                             }
-                            sleep(duration).await;
+                            crate::util::sleep_backoff(duration).await;
                         }
                         continue;
                     }
@@ -1364,7 +1363,7 @@ async fn rollback_pessimistic_lock_with_retry(
                     if let Some(stats) = rpc_context.runtime_stats.as_ref() {
                         stats.record_backoff("grpc", duration);
                     }
-                    sleep(duration).await;
+                    crate::util::sleep_backoff(duration).await;
                     continue;
                 }
                 None => return Err(e),
@@ -2285,7 +2284,7 @@ impl LockResolver {
                     } else {
                         delay_duration
                     };
-                    sleep(delay_duration).await;
+                    crate::util::sleep_backoff(delay_duration).await;
                 }
             }
         }
@@ -2814,7 +2813,7 @@ impl LockResolver {
                             if let Some(stats) = self.rpc_context.runtime_stats.as_ref() {
                                 stats.record_backoff("region", duration);
                             }
-                            sleep(duration).await;
+                            crate::util::sleep_backoff(duration).await;
                             continue;
                         }
                         None => return Err(Error::LeaderNotFound { region }),
@@ -2835,7 +2834,7 @@ impl LockResolver {
                                 if let Some(stats) = self.rpc_context.runtime_stats.as_ref() {
                                     stats.record_backoff("region", duration);
                                 }
-                                sleep(duration).await;
+                                crate::util::sleep_backoff(duration).await;
                             }
                             continue;
                         }
@@ -2854,7 +2853,7 @@ impl LockResolver {
                         if let Some(stats) = self.rpc_context.runtime_stats.as_ref() {
                             stats.record_backoff("grpc", duration);
                         }
-                        sleep(duration).await;
+                        crate::util::sleep_backoff(duration).await;
                         continue;
                     }
                     None => return Err(e),
@@ -2993,7 +2992,7 @@ impl LockResolver {
                     if let Some(duration) = backoff.next_delay_duration() {
                         check_killed(&killed)?;
                         crate::util::record_task_local_backoff(duration);
-                        sleep(duration).await;
+                        crate::util::sleep_backoff(duration).await;
                         continue;
                     }
                     return Err(Error::TxnNotFound(txn_not_found));

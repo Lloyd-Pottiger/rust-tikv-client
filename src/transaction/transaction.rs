@@ -1430,7 +1430,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             if delay.is_zero() {
                 break;
             }
-            tokio::time::sleep(delay).await;
+            crate::util::sleep_backoff(delay).await;
 
             lag_timer.inc_attempts();
             last_attempt =
@@ -7826,7 +7826,7 @@ impl<PdC: PdClient> Committer<PdC> {
             if delay.is_zero() {
                 break;
             }
-            tokio::time::sleep(delay).await;
+            crate::util::sleep_backoff(delay).await;
 
             lag_timer.inc_attempts();
             last_attempt =

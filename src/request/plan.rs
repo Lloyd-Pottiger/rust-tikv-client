@@ -14,7 +14,6 @@ use log::debug;
 use log::info;
 use prost::Message;
 use tokio::sync::{RwLock, Semaphore};
-use tokio::time::sleep;
 
 use crate::backoff::Backoff;
 use crate::pd::PdClient;
@@ -2725,7 +2724,7 @@ where
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("region", duration);
                         }
-                        sleep(duration).await;
+                        crate::util::sleep_backoff(duration).await;
                     }
                     let replica_read = match (is_server_busy, replica_read) {
                         (true, Some(state)) if state.read_type == ReplicaReadType::PreferLeader => {
@@ -2842,7 +2841,7 @@ where
                 if let Some(stats) = plan.runtime_stats() {
                     stats.record_backoff(label, duration);
                 }
-                sleep(duration).await;
+                crate::util::sleep_backoff(duration).await;
                 Self::single_plan_handler(
                     pd_client,
                     plan,
@@ -3202,7 +3201,7 @@ where
                             if let Some(stats) = plan.runtime_stats() {
                                 stats.record_backoff("grpc", duration);
                             }
-                            sleep(duration).await;
+                            crate::util::sleep_backoff(duration).await;
                             continue;
                         }
                         None => return Err(e),
@@ -3305,7 +3304,7 @@ where
                             if let Some(stats) = plan.runtime_stats() {
                                 stats.record_backoff("grpc", duration);
                             }
-                            sleep(duration).await;
+                            crate::util::sleep_backoff(duration).await;
                             continue;
                         }
                         None => return Err(e),
@@ -3508,7 +3507,7 @@ where
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("txnLockFast", delay_duration);
                         }
-                        sleep(delay_duration).await;
+                        crate::util::sleep_backoff(delay_duration).await;
                         result = plan.execute().await?;
                     }
                 }
@@ -3610,7 +3609,7 @@ where
                         if let Some(stats) = plan.runtime_stats() {
                             stats.record_backoff("txnLockFast", delay_duration);
                         }
-                        sleep(delay_duration).await;
+                        crate::util::sleep_backoff(delay_duration).await;
                         result = plan.execute().await?;
                     }
                 }
@@ -3826,7 +3825,7 @@ where
                     if let Some(stats) = plan.runtime_stats() {
                         stats.record_backoff("txnLockFast", delay_duration);
                     }
-                    sleep(delay_duration).await;
+                    crate::util::sleep_backoff(delay_duration).await;
                     result = match plan.execute().await {
                         Ok(result) => result,
                         Err(err) => {
