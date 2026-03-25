@@ -6,12 +6,14 @@
 
 pub mod r#async;
 pub mod bytes;
+pub mod codec;
 mod exec_details;
 pub mod gc_time;
 #[doc(hidden)]
 pub mod iter;
 mod misc;
 pub mod rate_limit;
+pub mod redact;
 pub mod ts_set;
 
 pub use crate::request_context::build_request_source;
