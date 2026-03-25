@@ -6,6 +6,7 @@ pub mod security;
 pub use self::errors::extract_debug_info_str_from_key_error;
 pub use self::errors::is_err_key_exist;
 pub use self::errors::is_err_write_conflict;
+pub use self::errors::is_error_commit_ts_lag;
 pub use self::errors::is_error_undetermined;
 pub use self::errors::AssertionFailedError;
 pub use self::errors::DeadlockError;

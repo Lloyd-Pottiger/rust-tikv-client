@@ -164,6 +164,8 @@ pub use common::is_err_key_exist;
 #[doc(inline)]
 pub use common::is_err_write_conflict;
 #[doc(inline)]
+pub use common::is_error_commit_ts_lag;
+#[doc(inline)]
 pub use common::is_error_undetermined;
 #[doc(inline)]
 pub use common::security::SecurityManager;

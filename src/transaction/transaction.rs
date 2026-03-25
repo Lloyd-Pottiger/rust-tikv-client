@@ -1387,13 +1387,15 @@ impl<PdC: PdClient> Transaction<PdC> {
 
         let max_sleep = self.commit_wait_until_tso_timeout;
         if max_sleep.is_zero() {
-            return Err(Error::StringError(format!(
-                "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: 1, last attempted commit TS: {}",
-                first_attempt_version,
-                self.commit_wait_until_tso,
-                max_sleep,
-                first_attempt_version
-            )));
+            return Err(Error::CommitTsLag {
+                message: format!(
+                    "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: 1, last attempted commit TS: {}",
+                    first_attempt_version,
+                    self.commit_wait_until_tso,
+                    max_sleep,
+                    first_attempt_version
+                ),
+            });
         }
 
         // Match client-go: if PD lags too far behind (clock drift exceeds the allowed timeout),
@@ -1404,13 +1406,15 @@ impl<PdC: PdClient> Transaction<PdC> {
             u64::try_from(expected_physical.saturating_sub(first_physical)).unwrap_or(0);
         let interval = Duration::from_millis(interval_ms);
         if interval > max_sleep {
-            return Err(Error::StringError(format!(
-                "PD TSO '{}' lags the expected timestamp '{}', clock drift {:?} exceeds maximum allowed timeout {:?}",
-                first_attempt_version,
-                self.commit_wait_until_tso,
-                interval,
-                max_sleep
-            )));
+            return Err(Error::CommitTsLag {
+                message: format!(
+                    "PD TSO '{}' lags the expected timestamp '{}', clock drift {:?} exceeds maximum allowed timeout {:?}",
+                    first_attempt_version,
+                    self.commit_wait_until_tso,
+                    interval,
+                    max_sleep
+                ),
+            });
         }
 
         let deadline = Instant::now() + max_sleep;
@@ -1439,14 +1443,16 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
 
         if last_attempt.version() <= self.commit_wait_until_tso {
-            return Err(Error::StringError(format!(
-                "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: {}, last attempted commit TS: {}",
-                first_attempt_version,
-                self.commit_wait_until_tso,
-                max_sleep,
-                lag_timer.attempts(),
-                last_attempt.version()
-            )));
+            return Err(Error::CommitTsLag {
+                message: format!(
+                    "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: {}, last attempted commit TS: {}",
+                    first_attempt_version,
+                    self.commit_wait_until_tso,
+                    max_sleep,
+                    lag_timer.attempts(),
+                    last_attempt.version()
+                ),
+            });
         }
 
         self.check_commit_ts_upper_bound(last_attempt.version())?;
@@ -7783,13 +7789,15 @@ impl<PdC: PdClient> Committer<PdC> {
 
         let max_sleep = self.commit_wait_until_tso_timeout;
         if max_sleep.is_zero() {
-            return Err(Error::StringError(format!(
-                "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: 1, last attempted commit TS: {}",
-                first_attempt_version,
-                self.commit_wait_until_tso,
-                max_sleep,
-                first_attempt_version
-            )));
+            return Err(Error::CommitTsLag {
+                message: format!(
+                    "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: 1, last attempted commit TS: {}",
+                    first_attempt_version,
+                    self.commit_wait_until_tso,
+                    max_sleep,
+                    first_attempt_version
+                ),
+            });
         }
 
         // Match client-go: if PD lags too far behind (clock drift exceeds the allowed timeout),
@@ -7800,13 +7808,15 @@ impl<PdC: PdClient> Committer<PdC> {
             u64::try_from(expected_physical.saturating_sub(first_physical)).unwrap_or(0);
         let interval = Duration::from_millis(interval_ms);
         if interval > max_sleep {
-            return Err(Error::StringError(format!(
-                "PD TSO '{}' lags the expected timestamp '{}', clock drift {:?} exceeds maximum allowed timeout {:?}",
-                first_attempt_version,
-                self.commit_wait_until_tso,
-                interval,
-                max_sleep
-            )));
+            return Err(Error::CommitTsLag {
+                message: format!(
+                    "PD TSO '{}' lags the expected timestamp '{}', clock drift {:?} exceeds maximum allowed timeout {:?}",
+                    first_attempt_version,
+                    self.commit_wait_until_tso,
+                    interval,
+                    max_sleep
+                ),
+            });
         }
 
         let deadline = Instant::now() + max_sleep;
@@ -7835,14 +7845,16 @@ impl<PdC: PdClient> Committer<PdC> {
         }
 
         if last_attempt.version() <= self.commit_wait_until_tso {
-            return Err(Error::StringError(format!(
-                "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: {}, last attempted commit TS: {}",
-                first_attempt_version,
-                self.commit_wait_until_tso,
-                max_sleep,
-                lag_timer.attempts(),
-                last_attempt.version()
-            )));
+            return Err(Error::CommitTsLag {
+                message: format!(
+                    "PD TSO '{}' lags the expected timestamp '{}', retry timeout: {:?}, attempts: {}, last attempted commit TS: {}",
+                    first_attempt_version,
+                    self.commit_wait_until_tso,
+                    max_sleep,
+                    lag_timer.attempts(),
+                    last_attempt.version()
+                ),
+            });
         }
 
         self.check_commit_ts_upper_bound(last_attempt.version())?;
@@ -16255,7 +16267,16 @@ mod tests {
             .await
             .expect_err("expected commit-wait timeout error");
         assert!(
-            matches!(err, Error::StringError(message) if message.contains("PD TSO '8' lags the expected timestamp '10'"))
+            crate::is_error_commit_ts_lag(&err),
+            "expected CommitTsLag error, got: {err}"
+        );
+        assert!(
+            matches!(
+                &err,
+                Error::CommitTsLag { message }
+                    if message.contains("PD TSO '8' lags the expected timestamp '10'")
+            ),
+            "unexpected CommitTsLag message: {err}"
         );
         assert_eq!(pd_client.get_timestamp_call_count(), 1);
         assert_eq!(prewrite_count.load(Ordering::SeqCst), 1);

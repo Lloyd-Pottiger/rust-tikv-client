@@ -653,6 +653,11 @@ pub enum Error {
     /// This mirrors client-go `oracle.ErrLatestStaleRead`.
     #[error("{0}")]
     LatestStaleRead(#[from] crate::oracle::ErrLatestStaleRead),
+    /// Commit timestamp lags behind expected.
+    ///
+    /// This mirrors client-go `tikverr.ErrCommitTSLag`.
+    #[error("{message}")]
+    CommitTsLag { message: String },
     /// Failed to acquire a pessimistic lock when no-wait is configured.
     #[error("lock acquire failed and no wait is set")]
     LockAcquireFailAndNoWaitSet,
@@ -684,6 +689,14 @@ Use the async TransactionClient instead, or create and use SyncTransactionClient
 /// This mirrors client-go `tikverr.IsErrorUndetermined`.
 pub fn is_error_undetermined(err: &Error) -> bool {
     matches!(err, Error::UndeterminedError(_))
+}
+
+/// Returns `true` when `err` indicates the PD TSO lags behind an expected value.
+///
+/// This mirrors client-go `tikverr.IsErrorCommitTSLag`.
+#[doc(alias = "IsErrorCommitTSLag")]
+pub fn is_error_commit_ts_lag(err: &Error) -> bool {
+    matches!(err, Error::CommitTsLag { .. })
 }
 
 /// Returns `true` when `err` indicates a key already exists.
@@ -774,7 +787,8 @@ macro_rules! internal_err {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_err_key_exist, is_err_write_conflict, is_error_undetermined, DeadlockError, Error,
+        is_err_key_exist, is_err_write_conflict, is_error_commit_ts_lag, is_error_undetermined,
+        DeadlockError, Error,
     };
     use crate::proto::kvrpcpb;
 
@@ -784,6 +798,15 @@ mod tests {
         let err = Error::UndeterminedError(Box::new(inner));
         assert!(is_error_undetermined(&err));
         assert!(!is_error_undetermined(&Error::Unimplemented));
+    }
+
+    #[test]
+    fn test_is_error_commit_ts_lag_matches_variant() {
+        let err = Error::CommitTsLag {
+            message: "boom".to_owned(),
+        };
+        assert!(is_error_commit_ts_lag(&err));
+        assert!(!is_error_commit_ts_lag(&Error::Unimplemented));
     }
 
     #[test]
