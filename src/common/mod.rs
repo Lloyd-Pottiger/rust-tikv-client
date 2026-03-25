@@ -4,6 +4,7 @@ mod errors;
 pub mod security;
 
 pub use self::errors::extract_debug_info_str_from_key_error;
+pub use self::errors::is_error_undetermined;
 pub use self::errors::AssertionFailedError;
 pub use self::errors::DeadlockError;
 pub use self::errors::Error;

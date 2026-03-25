@@ -669,6 +669,13 @@ Use the async TransactionClient instead, or create and use SyncTransactionClient
     NestedRuntimeError(String),
 }
 
+/// Returns `true` when `err` indicates the result is undetermined.
+///
+/// This mirrors client-go `tikverr.IsErrorUndetermined`.
+pub fn is_error_undetermined(err: &Error) -> bool {
+    matches!(err, Error::UndeterminedError(_))
+}
+
 impl From<ProtoRegionError> for Error {
     fn from(e: ProtoRegionError) -> Error {
         Error::RegionError(Box::new(e))
@@ -737,8 +744,16 @@ macro_rules! internal_err {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeadlockError, Error};
+    use super::{is_error_undetermined, DeadlockError, Error};
     use crate::proto::kvrpcpb;
+
+    #[test]
+    fn test_is_error_undetermined_matches_variant() {
+        let inner = Error::StringError("inner".to_owned());
+        let err = Error::UndeterminedError(Box::new(inner));
+        assert!(is_error_undetermined(&err));
+        assert!(!is_error_undetermined(&Error::Unimplemented));
+    }
 
     #[test]
     fn test_key_error_already_exist_maps_to_duplicate_key_insertion() {

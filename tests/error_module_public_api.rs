@@ -3,6 +3,7 @@ use tikv_client::error;
 #[test]
 fn error_module_exports_error_types() {
     let _ = error::Error::Unimplemented;
+    let _: fn(&error::Error) -> bool = error::is_error_undetermined;
 
     let _: Option<error::DeadlockError> = None;
     let _: Option<error::WriteConflictError> = None;
