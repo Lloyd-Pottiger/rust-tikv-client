@@ -110,6 +110,7 @@ pub mod metrics;
 pub mod oracle;
 #[doc(hidden)]
 pub mod raw;
+pub mod rawkv;
 pub mod redact;
 pub mod request;
 pub mod store_vars;
@@ -117,6 +118,7 @@ pub mod tikvrpc;
 pub mod trace;
 #[doc(hidden)]
 pub mod transaction;
+pub mod txnkv;
 
 mod common;
 mod compat;
