@@ -342,6 +342,14 @@ pub struct Config {
     /// When enabled, the client caches eligible coprocessor responses and may fill `data` from the
     /// local cache on TiKV cache-hit responses.
     pub copr_cache: CoprocessorCacheConfig,
+    /// Enable chunk format encoding for coprocessor requests (client-go `EnableChunkRPC`).
+    ///
+    /// This flag is preserved for API parity. The Rust client does not currently automatically
+    /// toggle request encoding based on this setting; callers constructing coprocessor requests
+    /// should set the relevant protobuf fields directly.
+    ///
+    /// Defaults to enabled (`true`) (client-go default).
+    pub enable_chunk_rpc: bool,
     /// Maximum number of in-flight requests allowed per TiKV store.
     ///
     /// When set to a value greater than 0, the client applies a best-effort per-store token limit
@@ -388,6 +396,14 @@ pub struct Config {
     pub grpc_connection_count: usize,
     /// gRPC compression type for TiKV channels (client-go `GrpcCompressionType`).
     pub grpc_compression_type: GrpcCompressionType,
+    /// Whether to share the gRPC buffer pool among TiKV connections (client-go
+    /// `GrpcSharedBufferPool`).
+    ///
+    /// This flag is preserved for API parity. The current Rust transport implementation does not
+    /// expose an equivalent and currently ignores this setting.
+    ///
+    /// Defaults to disabled (`false`) (client-go default).
+    pub grpc_shared_buffer_pool: bool,
     /// Enable batch RPC (`BatchCommands`) for supported KV requests.
     ///
     /// When enabled, the client attempts to dispatch supported requests over a persistent
@@ -609,6 +625,7 @@ impl Default for Config {
             timeout: DEFAULT_REQUEST_TIMEOUT,
             copr_req_timeout: DEFAULT_COPR_REQ_TIMEOUT,
             copr_cache: CoprocessorCacheConfig::default(),
+            enable_chunk_rpc: true,
             store_limit: 0,
             max_concurrency_request_limit: DEFAULT_MAX_CONCURRENCY_REQUEST_LIMIT,
             committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
@@ -617,6 +634,7 @@ impl Default for Config {
             grpc_max_decoding_message_size: DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE,
             grpc_connection_count: DEFAULT_GRPC_CONNECTION_COUNT,
             grpc_compression_type: GrpcCompressionType::None,
+            grpc_shared_buffer_pool: false,
             enable_batch_rpc: false,
             enable_forwarding: false,
             batch_rpc_max_batch_size: DEFAULT_BATCH_RPC_MAX_BATCH_SIZE,
@@ -800,6 +818,18 @@ impl Config {
         self
     }
 
+    /// Enable or disable chunk format encoding for coprocessor requests (client-go
+    /// `EnableChunkRPC`).
+    ///
+    /// This flag is preserved for API parity. The Rust client does not currently automatically
+    /// toggle request encoding based on this setting; callers constructing coprocessor requests
+    /// should set the relevant protobuf fields directly.
+    #[must_use]
+    pub fn with_enable_chunk_rpc(mut self, enable: bool) -> Self {
+        self.enable_chunk_rpc = enable;
+        self
+    }
+
     /// Set the timeout applied to commit requests (client-go `CommitTimeout`).
     ///
     /// When non-zero, `kv_commit` requests use this timeout instead of [`Config::timeout`].
@@ -912,6 +942,17 @@ impl Config {
     #[must_use]
     pub fn with_grpc_compression_type(mut self, compression_type: GrpcCompressionType) -> Self {
         self.grpc_compression_type = compression_type;
+        self
+    }
+
+    /// Set whether to share the gRPC buffer pool among TiKV connections (client-go
+    /// `GrpcSharedBufferPool`).
+    ///
+    /// This flag is preserved for API parity. The current Rust transport implementation does not
+    /// expose an equivalent and currently ignores this setting.
+    #[must_use]
+    pub fn with_grpc_shared_buffer_pool(mut self, shared: bool) -> Self {
+        self.grpc_shared_buffer_pool = shared;
         self
     }
 
@@ -1311,6 +1352,7 @@ mod tests {
         assert_eq!(config.grpc_initial_conn_window_size, 1 << 27);
         assert_eq!(config.grpc_connection_count, 4);
         assert_eq!(config.grpc_compression_type, GrpcCompressionType::None);
+        assert!(!config.grpc_shared_buffer_pool);
         assert!(!config.enable_batch_rpc);
         assert!(!config.enable_forwarding);
         assert_eq!(
@@ -1338,6 +1380,7 @@ mod tests {
         assert_eq!(config.commit_timeout, DEFAULT_COMMIT_TIMEOUT);
         assert_eq!(config.copr_req_timeout, DEFAULT_COPR_REQ_TIMEOUT);
         assert_eq!(config.copr_cache, CoprocessorCacheConfig::default());
+        assert!(config.enable_chunk_rpc);
         assert_eq!(
             config.async_commit_keys_limit,
             DEFAULT_ASYNC_COMMIT_KEYS_LIMIT
@@ -1379,6 +1422,12 @@ mod tests {
     }
 
     #[test]
+    fn test_config_grpc_shared_buffer_pool_is_configurable() {
+        let config = Config::default().with_grpc_shared_buffer_pool(true);
+        assert!(config.grpc_shared_buffer_pool);
+    }
+
+    #[test]
     fn test_config_copr_req_timeout_is_configurable() {
         let config = Config::default().with_copr_req_timeout(Duration::from_secs(123));
         assert_eq!(config.copr_req_timeout, Duration::from_secs(123));
@@ -1392,6 +1441,12 @@ mod tests {
         };
         let config = Config::default().with_copr_cache(cache.clone());
         assert_eq!(config.copr_cache, cache);
+    }
+
+    #[test]
+    fn test_config_enable_chunk_rpc_is_configurable() {
+        let config = Config::default().with_enable_chunk_rpc(false);
+        assert!(!config.enable_chunk_rpc);
     }
 
     #[test]
