@@ -224,6 +224,8 @@ pub use crate::raw::ColumnFamily;
 #[doc(inline)]
 pub use crate::raw::RawChecksum;
 #[doc(inline)]
+pub use crate::region::{RegionId, RegionVerId, RegionWithLeader, StoreId};
+#[doc(inline)]
 pub use crate::region_cache::RegionCache;
 #[doc(inline)]
 pub use crate::replica_read::ReplicaReadAdjuster;
@@ -271,6 +273,8 @@ pub use crate::rpc_interceptor::RpcInterceptor;
 pub use crate::rpc_interceptor::RpcInterceptorChain;
 #[doc(inline)]
 pub use crate::rpc_interceptor::RpcRequest;
+#[doc(inline)]
+pub use crate::store::{KvClient, RegionStore, Store};
 #[doc(inline)]
 pub use crate::store_vars::AccessLocationType;
 #[doc(inline)]
