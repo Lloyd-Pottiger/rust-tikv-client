@@ -14,6 +14,7 @@ fn error_module_exports_error_types() {
     let _: Option<error::DeadlockError> = None;
     let _: Option<error::WriteConflictError> = None;
     let _: Option<error::AssertionFailedError> = None;
+    let _: Option<error::TokenLimitError> = None;
 }
 
 #[test]

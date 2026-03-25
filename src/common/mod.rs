@@ -17,4 +17,5 @@ pub use self::errors::ProtoKeyError;
 pub use self::errors::ProtoRegionError;
 pub use self::errors::ProtoWriteConflict;
 pub use self::errors::Result;
+pub use self::errors::TokenLimitError;
 pub use self::errors::WriteConflictError;

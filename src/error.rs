@@ -17,4 +17,5 @@ pub use crate::ProtoKeyError;
 pub use crate::ProtoRegionError;
 pub use crate::ProtoWriteConflict;
 pub use crate::Result;
+pub use crate::TokenLimitError;
 pub use crate::WriteConflictError;

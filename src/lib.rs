@@ -188,6 +188,8 @@ pub use common::ProtoWriteConflict;
 #[doc(inline)]
 pub use common::Result;
 #[doc(inline)]
+pub use common::TokenLimitError;
+#[doc(inline)]
 pub use common::WriteConflictError;
 #[doc(inline)]
 #[allow(deprecated)]

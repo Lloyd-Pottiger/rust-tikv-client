@@ -306,10 +306,7 @@ impl StoreLimitKvClient {
             });
         }
         crate::stats::inc_get_store_limit_token_error(&self.store_address, self.store_id);
-        Err(Error::StringError(format!(
-            "Store token is up to the limit, store id = {}.",
-            self.store_id
-        )))
+        Err(crate::TokenLimitError::new(self.store_id).into())
     }
 }
 
@@ -4291,12 +4288,15 @@ mod tests {
                 "expected get_store_limit_token_error to increase"
             );
 
-            let Error::StringError(message) = err else {
-                panic!("expected StringError, got {err:?}");
+            let Error::TokenLimit(token_err) = err else {
+                panic!("expected TokenLimit error, got {err:?}");
             };
+            assert_eq!(token_err.store_id(), 42);
             assert!(
-                message.contains("Store token is up to the limit"),
-                "unexpected store limit error message: {message}"
+                token_err
+                    .to_string()
+                    .contains("Store token is up to the limit"),
+                "unexpected store limit error: {token_err}"
             );
 
             assert_eq!(token_count.load(Ordering::Relaxed), 1);

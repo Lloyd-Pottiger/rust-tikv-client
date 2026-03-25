@@ -526,6 +526,27 @@ impl From<ProtoAssertionFailed> for AssertionFailedError {
     }
 }
 
+/// Store token is up to the limit.
+///
+/// This mirrors client-go `tikverr.ErrTokenLimit`.
+#[derive(Clone, Debug, Error)]
+#[error("Store token is up to the limit, store id = {store_id}.")]
+pub struct TokenLimitError {
+    store_id: u64,
+}
+
+impl TokenLimitError {
+    #[must_use]
+    pub fn new(store_id: u64) -> Self {
+        Self { store_id }
+    }
+
+    #[must_use]
+    pub fn store_id(&self) -> u64 {
+        self.store_id
+    }
+}
+
 /// An error originating from the TiKV client or dependencies.
 #[derive(Debug, Error)]
 #[allow(clippy::large_enum_variant)]
@@ -658,6 +679,11 @@ pub enum Error {
     /// This mirrors client-go `tikverr.ErrCommitTSLag`.
     #[error("{message}")]
     CommitTsLag { message: String },
+    /// Store token is up to the limit.
+    ///
+    /// This mirrors client-go `tikverr.ErrTokenLimit`.
+    #[error("{0}")]
+    TokenLimit(#[from] TokenLimitError),
     /// Failed to acquire a pessimistic lock when no-wait is configured.
     #[error("lock acquire failed and no wait is set")]
     LockAcquireFailAndNoWaitSet,
