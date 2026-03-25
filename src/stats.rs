@@ -24,6 +24,14 @@ use crate::request_context::{is_internal_request_source, SOURCE_UNKNOWN};
 use crate::Error;
 use crate::Result;
 
+const GRPC_CONNECTION_STATES: [&str; 5] = [
+    "IDLE",
+    "CONNECTING",
+    "READY",
+    "TRANSIENT_FAILURE",
+    "SHUTDOWN",
+];
+
 #[derive(Clone, Copy, Debug)]
 struct TikvClientRequestLabels {
     store_id: u64,
@@ -296,6 +304,31 @@ pub(crate) fn inc_stale_region_from_pd_counter() {
 pub(crate) fn inc_bucket_clamped_counter() {
     if let Some(counter) = TIKV_CLIENT_RUST_BUCKET_CLAMPED_COUNTER.as_ref() {
         counter.inc();
+    }
+}
+
+pub(crate) fn set_grpc_connection_state(connection_id: &str, store_ip: &str, state: &str) {
+    let Some(gauges) = TIKV_CLIENT_RUST_GRPC_CONNECTION_STATE_GAUGE_VEC.as_ref() else {
+        return;
+    };
+
+    for candidate in GRPC_CONNECTION_STATES {
+        let value = if candidate == state { 1.0 } else { 0.0 };
+        gauges
+            .with_label_values(&[connection_id, store_ip, candidate])
+            .set(value);
+    }
+}
+
+pub(crate) fn clear_grpc_connection_state(connection_id: &str, store_ip: &str) {
+    let Some(gauges) = TIKV_CLIENT_RUST_GRPC_CONNECTION_STATE_GAUGE_VEC.as_ref() else {
+        return;
+    };
+
+    for candidate in GRPC_CONNECTION_STATES {
+        gauges
+            .with_label_values(&[connection_id, store_ip, candidate])
+            .set(0.0);
     }
 }
 
@@ -2030,6 +2063,12 @@ lazy_static::lazy_static! {
         "tikv_client_prewrite_assertion_count",
         "Counter of assertions used in prewrite requests.",
         &["type"],
+    );
+
+    static ref TIKV_CLIENT_RUST_GRPC_CONNECTION_STATE_GAUGE_VEC: Option<GaugeVec> = register_gauge_vec(
+        "tikv_client_grpc_connection_state",
+        "State of gRPC connection",
+        &["connection_id", "store_ip", "grpc_state"],
     );
 
     static ref TIKV_CLIENT_RUST_KV_STATUS_API_DURATION_HISTOGRAM_VEC: Option<HistogramVec> = {

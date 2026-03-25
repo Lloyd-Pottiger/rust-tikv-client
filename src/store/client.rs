@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicI64;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -353,10 +354,67 @@ pub struct KvRpcClient {
     copr_req_timeout: Duration,
     copr_cache: Option<Arc<CoprocessorCache>>,
     store_address: String,
+    grpc_connection_state: Option<Arc<GrpcConnectionStateTracker>>,
     batch: Option<BatchCommandsClient>,
     forwarded_batch_clients: Option<ForwardedBatchCommandsClientPool>,
     max_concurrency_request_limit: Option<RateLimit>,
     health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum TrackedGrpcConnectionState {
+    Ready = 0,
+    TransientFailure = 1,
+}
+
+impl TrackedGrpcConnectionState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            TrackedGrpcConnectionState::Ready => "READY",
+            TrackedGrpcConnectionState::TransientFailure => "TRANSIENT_FAILURE",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GrpcConnectionStateTracker {
+    connection_id: String,
+    store_ip: String,
+    state: AtomicU8,
+}
+
+impl GrpcConnectionStateTracker {
+    fn new(store_address: &str) -> Self {
+        let connection_id = format!("{store_address}-0");
+        crate::stats::set_grpc_connection_state(&connection_id, store_address, "READY");
+
+        GrpcConnectionStateTracker {
+            connection_id,
+            store_ip: store_address.to_owned(),
+            state: AtomicU8::new(TrackedGrpcConnectionState::Ready as u8),
+        }
+    }
+
+    fn set_state(&self, state: TrackedGrpcConnectionState) {
+        let next = state as u8;
+        let prev = self.state.swap(next, Ordering::Relaxed);
+        if prev == next {
+            return;
+        }
+
+        crate::stats::set_grpc_connection_state(
+            &self.connection_id,
+            &self.store_ip,
+            state.as_str(),
+        );
+    }
+}
+
+impl Drop for GrpcConnectionStateTracker {
+    fn drop(&mut self) {
+        crate::stats::clear_grpc_connection_state(&self.connection_id, &self.store_ip);
+    }
 }
 
 #[derive(Clone)]
@@ -481,12 +539,15 @@ impl KvRpcClient {
             None
         };
 
+        let grpc_connection_state = Some(Arc::new(GrpcConnectionStateTracker::new(&store_address)));
+
         KvRpcClient {
             rpc_client,
             timeout,
             copr_req_timeout,
             copr_cache,
             store_address,
+            grpc_connection_state,
             batch,
             forwarded_batch_clients: enable_batch_rpc.then_some(forwarded_batch_config),
             max_concurrency_request_limit,
@@ -1283,18 +1344,33 @@ impl KvClient for KvRpcClient {
 
         let timeout = self.timeout_for_request(request);
 
-        if let Some(resp) = self.try_dispatch_batch(request).await? {
-            return Ok(resp);
+        let result = async {
+            if let Some(resp) = self.try_dispatch_batch(request).await? {
+                return Ok(resp);
+            }
+            if let (Some(cache), Some(cop_req)) = (
+                self.copr_cache.as_ref(),
+                request.as_any().downcast_ref::<coprocessor::Request>(),
+            ) {
+                return self
+                    .dispatch_coprocessor_unary_with_cache(cache, cop_req, timeout)
+                    .await;
+            }
+            request.dispatch(&self.rpc_client, timeout).await
         }
-        if let (Some(cache), Some(cop_req)) = (
-            self.copr_cache.as_ref(),
-            request.as_any().downcast_ref::<coprocessor::Request>(),
-        ) {
-            return self
-                .dispatch_coprocessor_unary_with_cache(cache, cop_req, timeout)
-                .await;
+        .await;
+
+        if let Some(tracker) = self.grpc_connection_state.as_ref() {
+            match &result {
+                Ok(_) => tracker.set_state(TrackedGrpcConnectionState::Ready),
+                Err(Error::GrpcAPI(_)) => {
+                    tracker.set_state(TrackedGrpcConnectionState::TransientFailure)
+                }
+                Err(_) => {}
+            }
         }
-        request.dispatch(&self.rpc_client, timeout).await
+
+        result
     }
 
     fn timeout(&self) -> Duration {
@@ -1442,6 +1518,7 @@ mod tests {
             copr_req_timeout: Duration::ZERO,
             copr_cache: None,
             store_address: "127.0.0.1:1".to_owned(),
+            grpc_connection_state: None,
             batch: Some(batch),
             forwarded_batch_clients: None,
             max_concurrency_request_limit: None,
@@ -1492,6 +1569,7 @@ mod tests {
             copr_req_timeout: Duration::ZERO,
             copr_cache: None,
             store_address: "127.0.0.1:1".to_owned(),
+            grpc_connection_state: None,
             batch: Some(base_batch),
             forwarded_batch_clients: Some(forwarded_batch_clients),
             max_concurrency_request_limit: None,
@@ -1602,6 +1680,77 @@ mod tests {
             "expected batch dispatch to fall back to unary"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_kv_rpc_client_updates_grpc_connection_state_metric() {
+        const STORE_ADDR: &str = "127.0.0.1:2";
+        const STORE_URI: &str = "http://127.0.0.1:2";
+        let connection_id = format!("{STORE_ADDR}-0");
+
+        fn label_value<'a>(metric: &'a prometheus::proto::Metric, name: &str) -> Option<&'a str> {
+            metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.get_name() == name)
+                .map(|pair| pair.get_value())
+        }
+
+        fn gauge_value(connection_id: &str, store_ip: &str, state: &str) -> Option<f64> {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_grpc_connection_state")
+                .and_then(|family| {
+                    family.get_metric().iter().find(|metric| {
+                        label_value(metric, "connection_id") == Some(connection_id)
+                            && label_value(metric, "store_ip") == Some(store_ip)
+                            && label_value(metric, "grpc_state") == Some(state)
+                    })
+                })
+                .map(|metric| metric.get_gauge().get_value())
+        }
+
+        let rpc_client = TikvClient::new(Channel::from_static(STORE_URI).connect_lazy());
+        let client = KvRpcClient::new(
+            rpc_client,
+            Duration::from_millis(50),
+            Duration::ZERO,
+            STORE_ADDR.to_owned(),
+            false,
+            0,
+            String::new(),
+            0,
+            0,
+            Duration::ZERO,
+            i64::MAX,
+            None,
+            Arc::new(Mutex::new(None)),
+        )
+        .await;
+
+        assert_eq!(
+            gauge_value(&connection_id, STORE_ADDR, "READY"),
+            Some(1.0),
+            "expected READY grpc_connection_state gauge to be set when KvRpcClient is created"
+        );
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = b"k".to_vec();
+        request.version = 1;
+        request.context = Some(kvrpcpb::Context::default());
+
+        let result = client.dispatch(&request).await;
+        assert!(
+            result.is_err(),
+            "expected dispatch to fail against {STORE_URI}"
+        );
+
+        assert_eq!(
+            gauge_value(&connection_id, STORE_ADDR, "TRANSIENT_FAILURE"),
+            Some(1.0),
+            "expected TRANSIENT_FAILURE grpc_connection_state gauge to be set after dispatch error"
+        );
     }
 
     #[tokio::test]
@@ -1872,6 +2021,7 @@ mod tests {
             copr_req_timeout: Duration::from_secs(9),
             copr_cache: None,
             store_address: "127.0.0.1:1".to_owned(),
+            grpc_connection_state: None,
             batch: None,
             forwarded_batch_clients: None,
             max_concurrency_request_limit: None,
@@ -4163,6 +4313,7 @@ mod tests {
             copr_req_timeout: Duration::from_secs(1),
             copr_cache: None,
             store_address: "test".to_owned(),
+            grpc_connection_state: None,
             batch: None,
             forwarded_batch_clients: None,
             health_feedback_observer: Arc::new(Mutex::new(None)),
