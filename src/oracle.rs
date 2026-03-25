@@ -40,6 +40,28 @@ impl OracleOption {
     }
 }
 
+/// A dummy read-ts validator that always lets the validation pass.
+///
+/// This mirrors client-go `oracle.NoopReadTSValidator` and is useful in tests or in code paths that
+/// do not require timestamp validation (for example, rawkv operations).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "NoopReadTSValidator")]
+pub struct NoopReadTsValidator;
+
+impl NoopReadTsValidator {
+    /// Validate that `read_ts` is safe to use for reads.
+    ///
+    /// This always returns `Ok(())`.
+    pub async fn validate_read_ts(
+        &self,
+        _read_ts: u64,
+        _is_stale_read: bool,
+        _opt: &OracleOption,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
 /// Timestamp oracle interface.
 ///
 /// This is a Rust mapping of client-go `oracle.Oracle`. It is intentionally async and focuses on

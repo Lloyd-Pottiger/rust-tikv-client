@@ -25,6 +25,8 @@ fn oracle_module_exposes_oracle_traits_and_errors() {
     let opt = oracle::OracleOption::new();
     let _ = opt.txn_scope;
 
+    let _: Option<oracle::NoopReadTsValidator> = None;
+
     fn assert_oracle<T: oracle::Oracle + Send + Sync>() {}
     assert_oracle::<tikv_client::TransactionClient>();
 
