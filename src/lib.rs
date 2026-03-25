@@ -160,6 +160,10 @@ pub use crate::shutting_down::store_shutting_down;
 #[doc(inline)]
 pub use common::extract_debug_info_str_from_key_error;
 #[doc(inline)]
+pub use common::is_err_key_exist;
+#[doc(inline)]
+pub use common::is_err_write_conflict;
+#[doc(inline)]
 pub use common::is_error_undetermined;
 #[doc(inline)]
 pub use common::security::SecurityManager;

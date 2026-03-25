@@ -676,6 +676,25 @@ pub fn is_error_undetermined(err: &Error) -> bool {
     matches!(err, Error::UndeterminedError(_))
 }
 
+/// Returns `true` when `err` indicates a key already exists.
+///
+/// This mirrors client-go `tikverr.IsErrKeyExist`.
+#[doc(alias = "IsErrKeyExist")]
+pub fn is_err_key_exist(err: &Error) -> bool {
+    matches!(err, Error::DuplicateKeyInsertion)
+}
+
+/// Returns `true` when `err` indicates a write conflict.
+///
+/// This mirrors client-go `tikverr.IsErrWriteConflict`.
+#[doc(alias = "IsErrWriteConflict")]
+pub fn is_err_write_conflict(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::WriteConflict(_) | Error::WriteConflictInLatch { .. }
+    )
+}
+
 impl From<ProtoRegionError> for Error {
     fn from(e: ProtoRegionError) -> Error {
         Error::RegionError(Box::new(e))
@@ -744,7 +763,9 @@ macro_rules! internal_err {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_error_undetermined, DeadlockError, Error};
+    use super::{
+        is_err_key_exist, is_err_write_conflict, is_error_undetermined, DeadlockError, Error,
+    };
     use crate::proto::kvrpcpb;
 
     #[test]
@@ -753,6 +774,27 @@ mod tests {
         let err = Error::UndeterminedError(Box::new(inner));
         assert!(is_error_undetermined(&err));
         assert!(!is_error_undetermined(&Error::Unimplemented));
+    }
+
+    #[test]
+    fn test_is_err_key_exist_matches_duplicate_key_insertion() {
+        assert!(is_err_key_exist(&Error::DuplicateKeyInsertion));
+        assert!(!is_err_key_exist(&Error::Unimplemented));
+    }
+
+    #[test]
+    fn test_is_err_write_conflict_matches_write_conflict_variants() {
+        let err = Error::WriteConflict(super::WriteConflictError::new(kvrpcpb::WriteConflict {
+            start_ts: 1,
+            conflict_ts: 2,
+            key: b"k".to_vec(),
+            ..Default::default()
+        }));
+        assert!(is_err_write_conflict(&err));
+        assert!(is_err_write_conflict(&Error::WriteConflictInLatch {
+            start_ts: 7
+        }));
+        assert!(!is_err_write_conflict(&Error::Unimplemented));
     }
 
     #[test]
