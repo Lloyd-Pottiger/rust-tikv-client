@@ -32,18 +32,22 @@ pub fn disable_resource_control() {
 ///
 /// This mirrors client-go `tikv.SetResourceControlInterceptor`.
 pub fn set_resource_control_interceptor(interceptor: Arc<dyn ResourceGroupKvInterceptor>) {
-    *RESOURCE_CONTROL_INTERCEPTOR
+    // This is a library crate: avoid panicking on lock poisoning and keep the best-effort
+    // semantics (the interceptor can still be installed/uninstalled).
+    let mut guard = RESOURCE_CONTROL_INTERCEPTOR
         .write()
-        .expect("resource control interceptor lock poisoned") = Some(interceptor);
+        .unwrap_or_else(|poison| poison.into_inner());
+    *guard = Some(interceptor);
 }
 
 /// Removes the global resource control interceptor.
 ///
 /// This mirrors client-go `tikv.UnsetResourceControlInterceptor`.
 pub fn unset_resource_control_interceptor() {
-    *RESOURCE_CONTROL_INTERCEPTOR
+    let mut guard = RESOURCE_CONTROL_INTERCEPTOR
         .write()
-        .expect("resource control interceptor lock poisoned") = None;
+        .unwrap_or_else(|poison| poison.into_inner());
+    *guard = None;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -171,7 +175,7 @@ pub(crate) fn hook_for_context(
 
     let interceptor = RESOURCE_CONTROL_INTERCEPTOR
         .read()
-        .expect("resource control interceptor lock poisoned")
+        .unwrap_or_else(|poison| poison.into_inner())
         .clone()?;
 
     let ctx = context?;
@@ -214,5 +218,70 @@ impl ResourceControlHook {
         self.interceptor
             .on_response_wait(&self.resource_group_name, request, response)
             .await
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::panic;
+
+    use serial_test::serial;
+
+    use super::*;
+
+    struct ResetGuard;
+
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            disable_resource_control();
+            unset_resource_control_interceptor();
+        }
+    }
+
+    struct TestInterceptor;
+
+    #[async_trait]
+    impl ResourceGroupKvInterceptor for TestInterceptor {
+        async fn on_request_wait(
+            &self,
+            _resource_group_name: &str,
+            _request: &ResourceControlRequestInfo,
+        ) -> Result<ResourceControlRequestWaitResult> {
+            Ok(ResourceControlRequestWaitResult::default())
+        }
+
+        async fn on_response_wait(
+            &self,
+            _resource_group_name: &str,
+            _request: &ResourceControlRequestInfo,
+            _response: &ResourceControlResponseInfo,
+        ) -> Result<ResourceControlResponseWaitResult> {
+            Ok(ResourceControlResponseWaitResult::default())
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_resource_control_interceptor_lock_poison_is_tolerated() {
+        let _reset = ResetGuard;
+
+        let _ = panic::catch_unwind(|| {
+            let _guard = RESOURCE_CONTROL_INTERCEPTOR.write().unwrap();
+            panic!("poison resource control interceptor lock");
+        });
+
+        set_resource_control_interceptor(Arc::new(TestInterceptor));
+        enable_resource_control();
+
+        let ctx = crate::proto::kvrpcpb::Context {
+            request_source: "external_test".to_owned(),
+            resource_control_context: Some(crate::proto::kvrpcpb::ResourceControlContext {
+                resource_group_name: "rg".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(hook_for_context(Some(&ctx)).is_some());
     }
 }
