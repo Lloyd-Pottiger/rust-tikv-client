@@ -127,6 +127,7 @@ mod region;
 mod region_cache;
 mod replica_read;
 mod request_context;
+mod resource_control;
 mod rpc_interceptor;
 mod safe_ts;
 mod shutting_down;
@@ -213,6 +214,8 @@ pub use crate::pd_region_meta_circuit_breaker::change_pd_region_meta_circuit_bre
 #[doc(inline)]
 pub use crate::pd_region_meta_circuit_breaker::PdRegionMetaCircuitBreakerSettings;
 #[doc(inline)]
+pub use crate::proto::resource_manager::Consumption as ProtoResourceConsumption;
+#[doc(inline)]
 pub use crate::raw::lowering as raw_lowering;
 #[doc(inline)]
 pub use crate::raw::Client as RawClient;
@@ -238,6 +241,24 @@ pub use crate::request_context::IsolationLevel;
 pub use crate::request_context::RequestSource;
 #[doc(inline)]
 pub use crate::request_context::TraceControlFlags;
+#[doc(inline)]
+pub use crate::resource_control::disable_resource_control;
+#[doc(inline)]
+pub use crate::resource_control::enable_resource_control;
+#[doc(inline)]
+pub use crate::resource_control::set_resource_control_interceptor;
+#[doc(inline)]
+pub use crate::resource_control::unset_resource_control_interceptor;
+#[doc(inline)]
+pub use crate::resource_control::ResourceControlRequestInfo;
+#[doc(inline)]
+pub use crate::resource_control::ResourceControlRequestWaitResult;
+#[doc(inline)]
+pub use crate::resource_control::ResourceControlResponseInfo;
+#[doc(inline)]
+pub use crate::resource_control::ResourceControlResponseWaitResult;
+#[doc(inline)]
+pub use crate::resource_control::ResourceGroupKvInterceptor;
 #[doc(inline)]
 pub use crate::rpc_interceptor::chain_rpc_interceptors;
 #[doc(inline)]

@@ -227,6 +227,53 @@ impl<'a> RpcRequest<'a> {
         }
     }
 
+    /// Returns the resource control penalty attached to this request, if any.
+    ///
+    /// This maps to `kvrpcpb::Context.resource_control_context.penalty`.
+    #[must_use]
+    pub fn resource_control_penalty(&self) -> Option<&crate::ProtoResourceConsumption> {
+        self.context
+            .as_ref()
+            .and_then(|ctx| ctx.resource_control_context.as_ref())
+            .and_then(|ctx| ctx.penalty.as_ref())
+    }
+
+    /// Set the resource control penalty attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.resource_control_context.penalty`.
+    pub fn set_resource_control_penalty(
+        &mut self,
+        penalty: Option<crate::ProtoResourceConsumption>,
+    ) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.resource_control_context
+                .get_or_insert_with(kvrpcpb::ResourceControlContext::default)
+                .penalty = penalty;
+        }
+    }
+
+    /// Returns the resource control override priority attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.resource_control_context.override_priority`.
+    #[must_use]
+    pub fn resource_control_override_priority(&self) -> u64 {
+        self.context
+            .as_ref()
+            .and_then(|ctx| ctx.resource_control_context.as_ref())
+            .map_or(0, |ctx| ctx.override_priority)
+    }
+
+    /// Set the resource control override priority attached to this request.
+    ///
+    /// This maps to `kvrpcpb::Context.resource_control_context.override_priority`.
+    pub fn set_resource_control_override_priority(&mut self, override_priority: u64) {
+        if let Some(ctx) = self.context.as_deref_mut() {
+            ctx.resource_control_context
+                .get_or_insert_with(kvrpcpb::ResourceControlContext::default)
+                .override_priority = override_priority;
+        }
+    }
+
     /// Returns the transaction source attached to this request.
     ///
     /// This maps to `kvrpcpb::Context.txn_source`.
@@ -661,6 +708,46 @@ mod tests {
                 .map(|ctx| ctx.resource_group_name.as_str()),
             Some("rg-c")
         );
+    }
+
+    #[test]
+    fn test_rpc_request_exposes_resource_control_penalty_and_override_priority() {
+        let mut ctx = kvrpcpb::Context::default();
+        let mut req = RpcRequest::new("target", "kv_get", Some(&mut ctx));
+
+        assert_eq!(req.resource_control_penalty(), None);
+        assert_eq!(req.resource_control_override_priority(), 0);
+
+        let penalty = crate::ProtoResourceConsumption {
+            r_r_u: 1.0,
+            ..Default::default()
+        };
+        req.set_resource_control_penalty(Some(penalty.clone()));
+        req.set_resource_control_override_priority(7);
+
+        assert_eq!(req.resource_control_penalty(), Some(&penalty));
+        assert_eq!(req.resource_control_override_priority(), 7);
+
+        assert_eq!(
+            ctx.resource_control_context
+                .as_ref()
+                .and_then(|ctx| ctx.penalty.as_ref()),
+            Some(&penalty)
+        );
+        assert_eq!(
+            ctx.resource_control_context
+                .as_ref()
+                .map(|ctx| ctx.override_priority),
+            Some(7)
+        );
+
+        let mut req_without_context = RpcRequest::new("target", "kv_get", None);
+        assert_eq!(req_without_context.resource_control_penalty(), None);
+        assert_eq!(req_without_context.resource_control_override_priority(), 0);
+        req_without_context.set_resource_control_penalty(Some(penalty));
+        req_without_context.set_resource_control_override_priority(9);
+        assert_eq!(req_without_context.resource_control_penalty(), None);
+        assert_eq!(req_without_context.resource_control_override_priority(), 0);
     }
 
     #[test]

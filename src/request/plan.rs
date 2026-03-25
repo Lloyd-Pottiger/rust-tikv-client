@@ -336,15 +336,46 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
             .request
             .context()
             .is_some_and(|context| context.stale_read);
-        let request_bytes = (track_exec_details || track_traffic_metrics)
-            .then(|| request_encoded_len(&self.request));
         let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
             Some(Instant::now())
         } else {
             None
         };
 
-        let result = kv_client.dispatch(&self.request).await.and_then(|r| {
+        let resource_control = crate::resource_control::hook_for_context(self.request.context());
+        let mut request = resource_control.as_ref().map(|_| self.request.clone());
+
+        let request_info = {
+            let request_ref = request.as_ref().unwrap_or(&self.request);
+            let request_size = u64::try_from(request_ref.encoded_len()).unwrap_or(u64::MAX);
+            let store_id = request_ref
+                .context()
+                .and_then(|ctx| ctx.peer.as_ref())
+                .map(|peer| peer.store_id)
+                .unwrap_or(0);
+            crate::resource_control::ResourceControlRequestInfo::new(label, request_size, store_id)
+        };
+
+        if let (Some(resource_control), Some(request)) =
+            (resource_control.as_ref(), request.as_mut())
+        {
+            let wait_result = match resource_control.on_request_wait(&request_info).await {
+                Ok(result) => result,
+                Err(err) => return stats.done(Err(err)),
+            };
+            let target = kv_client.store_address().unwrap_or("");
+            let mut rpc_request = RpcRequest::new(target, label, request.context_mut());
+            rpc_request.set_resource_control_penalty(wait_result.penalty);
+            if rpc_request.resource_control_override_priority() == 0 {
+                rpc_request.set_resource_control_override_priority(wait_result.priority);
+            }
+        }
+
+        let request_ref = request.as_ref().unwrap_or(&self.request);
+        let request_bytes =
+            (track_exec_details || track_traffic_metrics).then(|| request_encoded_len(request_ref));
+
+        let result = kv_client.dispatch(request_ref).await.and_then(|r| {
             r.downcast::<Req::Response>()
                 .map(|r| *r)
                 .map_err(|_| Error::InternalError {
@@ -354,6 +385,21 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
                     ),
                 })
         });
+
+        if let Some(resource_control) = resource_control.as_ref() {
+            if let Ok(resp) = result.as_ref() {
+                let response_size =
+                    u64::try_from(response_encoded_len(resp as &dyn Any)).unwrap_or(u64::MAX);
+                let response_info =
+                    crate::resource_control::ResourceControlResponseInfo::new(response_size);
+                if let Err(err) = resource_control
+                    .on_response_wait(&request_info, &response_info)
+                    .await
+                {
+                    return stats.done(Err(err));
+                }
+            }
+        }
 
         if let Some(started_at) = started_at.as_ref() {
             crate::util::record_task_local_wait_kv_response(started_at.elapsed());
@@ -531,15 +577,50 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                 .request
                 .context()
                 .is_some_and(|context| context.stale_read);
-            let request_bytes = (track_exec_details || track_traffic_metrics)
-                .then(|| request_encoded_len(&self.request));
             let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
                 Some(Instant::now())
             } else {
                 None
             };
 
-            let result = kv_client.dispatch(&self.request).await.and_then(|r| {
+            let resource_control =
+                crate::resource_control::hook_for_context(self.request.context());
+            let mut request = resource_control.as_ref().map(|_| self.request.clone());
+
+            let request_info = {
+                let request_ref = request.as_ref().unwrap_or(&self.request);
+                let request_size = u64::try_from(request_ref.encoded_len()).unwrap_or(u64::MAX);
+                let store_id = request_ref
+                    .context()
+                    .and_then(|ctx| ctx.peer.as_ref())
+                    .map(|peer| peer.store_id)
+                    .unwrap_or(0);
+                crate::resource_control::ResourceControlRequestInfo::new(
+                    label,
+                    request_size,
+                    store_id,
+                )
+            };
+
+            if let (Some(resource_control), Some(request)) =
+                (resource_control.as_ref(), request.as_mut())
+            {
+                let mut rpc_request = RpcRequest::new(target, label, request.context_mut());
+                let wait_result = match resource_control.on_request_wait(&request_info).await {
+                    Ok(result) => result,
+                    Err(err) => return stats.done(Err(err)),
+                };
+                rpc_request.set_resource_control_penalty(wait_result.penalty);
+                if rpc_request.resource_control_override_priority() == 0 {
+                    rpc_request.set_resource_control_override_priority(wait_result.priority);
+                }
+            }
+
+            let request_ref = request.as_ref().unwrap_or(&self.request);
+            let request_bytes = (track_exec_details || track_traffic_metrics)
+                .then(|| request_encoded_len(request_ref));
+
+            let result = kv_client.dispatch(request_ref).await.and_then(|r| {
                 r.downcast::<Req::Response>()
                     .map(|r| *r)
                     .map_err(|_| Error::InternalError {
@@ -549,6 +630,21 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                         ),
                     })
             });
+
+            if let Some(resource_control) = resource_control.as_ref() {
+                if let Ok(resp) = result.as_ref() {
+                    let response_size =
+                        u64::try_from(response_encoded_len(resp as &dyn Any)).unwrap_or(u64::MAX);
+                    let response_info =
+                        crate::resource_control::ResourceControlResponseInfo::new(response_size);
+                    if let Err(err) = resource_control
+                        .on_response_wait(&request_info, &response_info)
+                        .await
+                    {
+                        return stats.done(Err(err));
+                    }
+                }
+            }
 
             if let Some(started_at) = started_at.as_ref() {
                 crate::util::record_task_local_wait_kv_response(started_at.elapsed());
@@ -696,13 +792,36 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
 
         let track_exec_details = crate::util::exec_details().is_some();
         let track_traffic_metrics = request.context().is_some_and(|context| context.stale_read);
-        let request_bytes =
-            (track_exec_details || track_traffic_metrics).then(|| request_encoded_len(&request));
         let started_at = if kv_trace_enabled || txn_2pc_trace_enabled || track_exec_details {
             Some(Instant::now())
         } else {
             None
         };
+
+        let resource_control = crate::resource_control::hook_for_context(request.context());
+        let request_info = crate::resource_control::ResourceControlRequestInfo::new(
+            label,
+            u64::try_from(request.encoded_len()).unwrap_or(u64::MAX),
+            request
+                .context()
+                .and_then(|ctx| ctx.peer.as_ref())
+                .map(|peer| peer.store_id)
+                .unwrap_or(0),
+        );
+        if let Some(resource_control) = resource_control.as_ref() {
+            let wait_result = match resource_control.on_request_wait(&request_info).await {
+                Ok(result) => result,
+                Err(err) => return stats.done(Err(err)),
+            };
+            let mut rpc_request = RpcRequest::new(target, label, request.context_mut());
+            rpc_request.set_resource_control_penalty(wait_result.penalty);
+            if rpc_request.resource_control_override_priority() == 0 {
+                rpc_request.set_resource_control_override_priority(wait_result.priority);
+            }
+        }
+
+        let request_bytes =
+            (track_exec_details || track_traffic_metrics).then(|| request_encoded_len(&request));
 
         let result = kv_client.dispatch(&request).await.and_then(|r| {
             r.downcast::<Req::Response>()
@@ -714,6 +833,21 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                     ),
                 })
         });
+
+        if let Some(resource_control) = resource_control.as_ref() {
+            if let Ok(resp) = result.as_ref() {
+                let response_size =
+                    u64::try_from(response_encoded_len(resp as &dyn Any)).unwrap_or(u64::MAX);
+                let response_info =
+                    crate::resource_control::ResourceControlResponseInfo::new(response_size);
+                if let Err(err) = resource_control
+                    .on_response_wait(&request_info, &response_info)
+                    .await
+                {
+                    return stats.done(Err(err));
+                }
+            }
+        }
 
         if let Some(started_at) = started_at.as_ref() {
             crate::util::record_task_local_wait_kv_response(started_at.elapsed());
@@ -7973,5 +8107,161 @@ mod test {
         let result = plan.execute().await?;
         assert_eq!(result.resolved_locks, 1);
         Ok(())
+    }
+
+    struct ResourceControlReset;
+
+    impl Drop for ResourceControlReset {
+        fn drop(&mut self) {
+            crate::disable_resource_control();
+            crate::unset_resource_control_interceptor();
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestResourceControlInterceptor {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ResourceGroupKvInterceptor for TestResourceControlInterceptor {
+        async fn on_request_wait(
+            &self,
+            resource_group_name: &str,
+            _request: &crate::resource_control::ResourceControlRequestInfo,
+        ) -> crate::Result<crate::ResourceControlRequestWaitResult> {
+            if resource_group_name != "rg-rc-test" {
+                return Ok(crate::ResourceControlRequestWaitResult::default());
+            }
+
+            self.calls.lock().unwrap().push("request_wait");
+            Ok(crate::ResourceControlRequestWaitResult {
+                penalty: Some(crate::ProtoResourceConsumption {
+                    r_r_u: 1.0,
+                    ..Default::default()
+                }),
+                priority: 42,
+                ..Default::default()
+            })
+        }
+
+        async fn on_response_wait(
+            &self,
+            resource_group_name: &str,
+            request: &crate::resource_control::ResourceControlRequestInfo,
+            response: &crate::resource_control::ResourceControlResponseInfo,
+        ) -> crate::Result<crate::ResourceControlResponseWaitResult> {
+            if resource_group_name != "rg-rc-test" {
+                return Ok(crate::ResourceControlResponseWaitResult::default());
+            }
+
+            self.calls.lock().unwrap().push("response_wait");
+            assert_eq!(request.label(), "raw_get");
+            assert_eq!(request.cmd_type(), crate::CmdType::RawGet);
+            let _ = response.response_size();
+            Ok(crate::ResourceControlResponseWaitResult::default())
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_dispatch_applies_resource_control_hook() {
+        let _reset = ResourceControlReset;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        crate::set_resource_control_interceptor(Arc::new(TestResourceControlInterceptor {
+            calls: Arc::clone(&calls),
+        }));
+        crate::enable_resource_control();
+
+        let kv_client = MockKvClient::with_dispatch_hook(|req| {
+            let req = req
+                .downcast_ref::<crate::proto::kvrpcpb::RawGetRequest>()
+                .unwrap();
+            let ctx = req.context.as_ref().unwrap();
+            let rc = ctx.resource_control_context.as_ref().unwrap();
+
+            assert_eq!(rc.resource_group_name, "rg-rc-test");
+            assert_eq!(rc.override_priority, 42);
+            assert!(rc.penalty.as_ref().is_some_and(|c| c.r_r_u == 1.0));
+            Ok(Box::new(crate::proto::kvrpcpb::RawGetResponse::default()))
+        });
+
+        let request = crate::proto::kvrpcpb::RawGetRequest {
+            key: b"k".to_vec(),
+            context: Some(crate::proto::kvrpcpb::Context {
+                request_source: "external_test".to_owned(),
+                resource_control_context: Some(crate::proto::kvrpcpb::ResourceControlContext {
+                    resource_group_name: "rg-rc-test".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let plan = Dispatch {
+            request,
+            kv_client: Some(Arc::new(kv_client)),
+        };
+
+        plan.execute().await.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["request_wait", "response_wait"]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_dispatch_with_interceptor_applies_resource_control_after_before_hook() {
+        let _reset = ResourceControlReset;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        crate::set_resource_control_interceptor(Arc::new(TestResourceControlInterceptor {
+            calls: Arc::clone(&calls),
+        }));
+        crate::enable_resource_control();
+
+        let kv_client = MockKvClient::with_dispatch_hook(|req| {
+            let req = req
+                .downcast_ref::<crate::proto::kvrpcpb::RawGetRequest>()
+                .unwrap();
+            let ctx = req.context.as_ref().unwrap();
+            let rc = ctx.resource_control_context.as_ref().unwrap();
+
+            assert_eq!(rc.resource_group_name, "rg-rc-test");
+            assert_eq!(rc.override_priority, 42);
+            assert!(rc.penalty.as_ref().is_some_and(|c| c.r_r_u == 1.0));
+            Ok(Box::new(crate::proto::kvrpcpb::RawGetResponse::default()))
+        });
+
+        let request = crate::proto::kvrpcpb::RawGetRequest {
+            key: b"k".to_vec(),
+            context: Some(crate::proto::kvrpcpb::Context {
+                request_source: "external_test".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let rpc_interceptors: crate::rpc_interceptor::RpcInterceptors = Arc::new(vec![Arc::new(
+            crate::FnRpcInterceptor::new("resource-group-before").on_before(|req| {
+                req.set_resource_group_name("rg-rc-test");
+            }),
+        )]);
+
+        let plan = DispatchWithInterceptor {
+            request,
+            kv_client: Some(Arc::new(kv_client)),
+            store_address: Some("mock://tikv".to_owned()),
+            rpc_interceptors,
+        };
+
+        plan.execute().await.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["request_wait", "response_wait"]
+        );
     }
 }
