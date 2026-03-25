@@ -122,7 +122,8 @@ mod gc_safe_point;
 mod kv;
 mod pd;
 mod pd_region_meta_circuit_breaker;
-mod proto;
+#[doc(hidden)]
+pub mod proto;
 mod region;
 mod region_cache;
 mod replica_read;
