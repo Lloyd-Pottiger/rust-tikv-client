@@ -293,6 +293,12 @@ pub(crate) fn inc_stale_region_from_pd_counter() {
     }
 }
 
+pub(crate) fn inc_bucket_clamped_counter() {
+    if let Some(counter) = TIKV_CLIENT_RUST_BUCKET_CLAMPED_COUNTER.as_ref() {
+        counter.inc();
+    }
+}
+
 pub(crate) fn inc_gc_unsafe_destroy_range_failures(label: &'static str) {
     if let Some(counter) = TIKV_CLIENT_RUST_GC_UNSAFE_DESTROY_RANGE_FAILURES_COUNTER_VEC.as_ref() {
         counter.with_label_values(&[label]).inc();
@@ -2706,6 +2712,11 @@ lazy_static::lazy_static! {
         "Counter of stale region from PD",
     );
 
+    static ref TIKV_CLIENT_RUST_BUCKET_CLAMPED_COUNTER: Option<IntCounter> = register_int_counter(
+        "tikv_client_bucket_clamped",
+        "Counter of bucket boundaries clamped to region boundaries",
+    );
+
     static ref TIKV_CLIENT_RUST_GC_UNSAFE_DESTROY_RANGE_FAILURES_COUNTER_VEC: Option<IntCounterVec> =
         register_int_counter_vec(
             "tikv_client_gc_unsafe_destroy_range_failures",
@@ -4172,6 +4183,32 @@ mod tests {
         assert!(
             after >= before + 1.0,
             "expected stale_region_from_pd counter to increase"
+        );
+    }
+
+    #[test]
+    #[serial(metrics)]
+    fn test_bucket_clamped_counter_increments() {
+        fn counter_value() -> f64 {
+            prometheus::gather()
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_bucket_clamped")
+                .and_then(|family| {
+                    family
+                        .get_metric()
+                        .first()
+                        .map(|metric| metric.get_counter().get_value())
+                })
+                .unwrap_or(0.0)
+        }
+
+        let before = counter_value();
+        super::inc_bucket_clamped_counter();
+        let after = counter_value();
+
+        assert!(
+            after >= before + 1.0,
+            "expected bucket_clamped counter to increase"
         );
     }
 
