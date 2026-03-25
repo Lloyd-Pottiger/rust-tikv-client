@@ -674,9 +674,7 @@ impl<PdC: PdClient> Client<PdC> {
         // `u64::MAX` is used as "latest" in some code paths, but it must not be used for stale reads.
         if read_ts == u64::MAX {
             if is_stale_read {
-                return Err(crate::Error::StringError(
-                    "cannot set read ts to max uint64 for stale read".to_owned(),
-                ));
+                return Err(crate::oracle::ErrLatestStaleRead.into());
             }
             return Ok(());
         }
@@ -697,9 +695,11 @@ impl<PdC: PdClient> Client<PdC> {
         if read_ts <= current_version {
             Ok(())
         } else {
-            Err(crate::Error::StringError(format!(
-                "cannot set read timestamp to a future time, readTS: {read_ts}, currentTS: {current_version}"
-            )))
+            Err(crate::oracle::ErrFutureTsRead {
+                read_ts,
+                current_ts: current_version,
+            }
+            .into())
         }
     }
 
@@ -1531,6 +1531,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::error::Error as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -2942,14 +2943,13 @@ mod tests {
         };
 
         let before = validate_read_ts_from_pd_counter_value();
-        let err = client
-            .validate_read_ts(u64::MAX, true)
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = client.validate_read_ts(u64::MAX, true).await.unwrap_err();
         let after = validate_read_ts_from_pd_counter_value();
         assert_eq!(before, after);
-        assert!(err.contains("max uint64"));
+        let source = err
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::oracle::ErrLatestStaleRead>());
+        assert!(source.is_some(), "expected ErrLatestStaleRead, got: {err}");
         assert_eq!(pd_client.get_timestamp_call_count(), 0);
     }
 
@@ -3017,14 +3017,18 @@ mod tests {
         let err = client
             .validate_read_ts(start_version + 1, false)
             .await
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
         let after = validate_read_ts_from_pd_counter_value();
         assert!(
             after >= before + 1.0,
             "expected validate_read_ts_from_pd_count to increase"
         );
-        assert!(err.contains("future time"));
+        let source = err
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::oracle::ErrFutureTsRead>())
+            .expect("expected ErrFutureTsRead");
+        assert_eq!(source.read_ts, start_version + 1);
+        assert_eq!(source.current_ts, start_version);
         assert_eq!(pd_client.get_timestamp_call_count(), 1);
     }
 

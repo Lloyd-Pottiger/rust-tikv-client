@@ -643,6 +643,16 @@ pub enum Error {
     InternalError { message: String },
     #[error("{0}")]
     StringError(String),
+    /// A read timestamp is in the future.
+    ///
+    /// This mirrors client-go `oracle.ErrFutureTSRead`.
+    #[error("{0}")]
+    FutureTsRead(#[from] crate::oracle::ErrFutureTsRead),
+    /// A stale read cannot use `u64::MAX` as a timestamp.
+    ///
+    /// This mirrors client-go `oracle.ErrLatestStaleRead`.
+    #[error("{0}")]
+    LatestStaleRead(#[from] crate::oracle::ErrLatestStaleRead),
     /// Failed to acquire a pessimistic lock when no-wait is configured.
     #[error("lock acquire failed and no wait is set")]
     LockAcquireFailAndNoWaitSet,
