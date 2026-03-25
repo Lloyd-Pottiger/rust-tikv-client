@@ -3,7 +3,7 @@ use tikv_client::kv;
 #[test]
 fn kv_module_exports_basic_types() {
     let _: kv::Key = b"k".to_vec().into();
-    let _: kv::Value = b"v".to_vec().into();
+    let _: kv::Value = b"v".to_vec();
     let _: kv::KvPair = kv::KvPair::new(b"k".to_vec(), b"v".to_vec());
 }
 
