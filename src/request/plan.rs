@@ -5642,9 +5642,7 @@ mod test {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| {
-                    family.get_name() == "tikv_client_replica_selector_failure_counter"
-                })
+                .find(|family| family.get_name() == "tikv_client_replica_selector_failure_counter")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         metric

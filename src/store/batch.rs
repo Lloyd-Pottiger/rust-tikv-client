@@ -23,9 +23,12 @@ use crate::proto::kvrpcpb;
 use crate::proto::tikvpb;
 use crate::proto::tikvpb::tikv_client::TikvClient;
 use crate::stats::{
-    inc_panic_total, observe_batch_client_reset, observe_batch_client_unavailable,
-    observe_batch_client_wait_connection_establish, observe_batch_pending_requests,
-    observe_batch_recv_tail_latency_seconds, observe_batch_requests,
+    inc_batch_wait_overload, inc_panic_total, observe_batch_best_size, observe_batch_client_reset,
+    observe_batch_client_unavailable, observe_batch_client_wait_connection_establish,
+    observe_batch_head_arrival_interval_seconds, observe_batch_more_requests_total,
+    observe_batch_pending_requests, observe_batch_recv_loop_duration_seconds,
+    observe_batch_recv_tail_latency_seconds, observe_batch_request_duration_seconds,
+    observe_batch_requests, observe_batch_send_loop_duration_seconds,
     observe_batch_send_tail_latency_seconds,
 };
 use crate::Error;
@@ -324,6 +327,8 @@ fn outbound_stream(
         turbo_batch_trigger,
     };
     stream::unfold(state, move |mut state| async move {
+        let send_loop_started_at = tokio::time::Instant::now();
+
         let mut head = if let Some(request) = state.pending.take() {
             request
         } else {
@@ -331,11 +336,17 @@ fn outbound_stream(
         };
 
         let head_received_at = tokio::time::Instant::now();
+        observe_batch_send_loop_duration_seconds(
+            &state.target,
+            "wait_head",
+            head_received_at.duration_since(send_loop_started_at),
+        );
         let head_arrival_interval = state
             .last_head_received_at
             .map(|prev| head_received_at.duration_since(prev))
             .unwrap_or(Duration::ZERO);
         state.last_head_received_at = Some(head_received_at);
+        observe_batch_head_arrival_interval_seconds(&state.target, head_arrival_interval);
 
         while head.requests.len() < max_requests {
             match state.receiver.try_recv() {
@@ -357,6 +368,7 @@ fn outbound_stream(
             let is_overload = state.max_wait_time > Duration::ZERO
                 && state.transport_layer_load.load(Ordering::Relaxed) > state.overload_threshold;
             if is_overload {
+                inc_batch_wait_overload();
                 let batch_wait_size = state.batch_wait_size;
                 let max_wait_time = state.max_wait_time;
                 fetch_more_pending_requests(&mut state, &mut head, batch_wait_size, max_wait_time)
@@ -373,6 +385,7 @@ fn outbound_stream(
                         .turbo_batch_trigger
                         .preferred_batch_wait_size(state.avg_batch_wait_size, state.batch_wait_size)
                         .min(state.max_requests);
+                    let before_len = head.requests.len();
                     fetch_more_pending_requests(
                         &mut state,
                         &mut head,
@@ -380,12 +393,21 @@ fn outbound_stream(
                         turbo_wait_time,
                     )
                     .await;
+                    let more_requests = head.requests.len().saturating_sub(before_len);
+                    observe_batch_more_requests_total(&state.target, more_requests);
                 }
             }
         }
 
+        observe_batch_send_loop_duration_seconds(
+            &state.target,
+            "wait_more",
+            send_loop_started_at.elapsed(),
+        );
+
         let length = head.requests.len();
         state.avg_batch_wait_size = 0.2 * length as f64 + 0.8 * state.avg_batch_wait_size;
+        observe_batch_best_size(&state.target, state.avg_batch_wait_size);
 
         let batch_size = head.requests.len();
         observe_batch_requests(&state.target, batch_size);
@@ -400,6 +422,12 @@ fn outbound_stream(
             batch_size
                 .saturating_add(pending_in_channel)
                 .saturating_add(pending_buffered),
+        );
+
+        observe_batch_send_loop_duration_seconds(
+            &state.target,
+            "send",
+            send_loop_started_at.elapsed(),
         );
 
         Some((head, state))
@@ -598,6 +626,7 @@ impl BatchCommandsClient {
                         let recv_started_at = Instant::now();
                         let next = inbound.next().await;
                         let recv_elapsed = recv_started_at.elapsed();
+                        observe_batch_recv_loop_duration_seconds(&target_reader, "recv", recv_elapsed);
                         if recv_elapsed > BATCH_TAIL_LATENCY_THRESHOLD {
                             observe_batch_recv_tail_latency_seconds(&target_reader, recv_elapsed);
                         }
@@ -663,6 +692,11 @@ impl BatchCommandsClient {
                                     request_ids_len, responses_len
                                 );
                             }
+                            observe_batch_recv_loop_duration_seconds(
+                                &target_reader,
+                                "process",
+                                recv_started_at.elapsed(),
+                            );
                             }
                             Some(Err(status)) => break status,
                             None => break Status::unavailable("batch_commands stream ended"),
@@ -776,6 +810,7 @@ impl BatchCommandsClient {
             return Err(Error::GrpcAPI(status));
         }
 
+        let request_started_at = Instant::now();
         let request_id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         {
@@ -808,6 +843,7 @@ impl BatchCommandsClient {
         if send_elapsed > BATCH_TAIL_LATENCY_THRESHOLD {
             observe_batch_send_tail_latency_seconds(&self.inner.target, send_elapsed);
         }
+        observe_batch_request_duration_seconds("send", request_started_at.elapsed());
         if send_result.is_err() {
             let status =
                 Status::unavailable("batch_commands stream is unavailable (sender dropped)");
@@ -820,7 +856,8 @@ impl BatchCommandsClient {
             return Err(Error::GrpcAPI(status));
         }
 
-        match tokio::time::timeout(timeout, receiver).await {
+        let recv_started_at = Instant::now();
+        let result = match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(Error::GrpcAPI(Status::unavailable(
                 "batch_commands response channel closed",
@@ -828,7 +865,10 @@ impl BatchCommandsClient {
             Err(_) => Err(Error::GrpcAPI(Status::deadline_exceeded(
                 "batch_commands request timed out",
             ))),
-        }
+        };
+        observe_batch_request_duration_seconds("recv", recv_started_at.elapsed());
+        observe_batch_request_duration_seconds("done", request_started_at.elapsed());
+        result
     }
 }
 
@@ -1212,6 +1252,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(metrics)]
     async fn test_outbound_stream_turbo_policy_waits_for_more_requests() {
         let (out_tx, out_rx) = mpsc::channel(8);
         let transport_layer_load = Arc::new(AtomicU64::new(0));
@@ -1257,6 +1298,85 @@ mod tests {
 
         let batch = next.await.expect("second batch");
         assert_eq!(batch.request_ids, vec![2, 3]);
+
+        let families = prometheus::gather();
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_batch_more_requests_total")
+            .expect("batch_more_requests_total summary not registered");
+        let found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some("unit_test_turbo_wait")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            found,
+            "expected batch_more_requests_total summary to record observations"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_outbound_stream_overload_wait_increments_batch_wait_overload_counter() {
+        let target = "unit_test_target_batch_metrics_overload_wait".to_owned();
+        let (out_tx, out_rx) = mpsc::channel(8);
+        let transport_layer_load = Arc::new(AtomicU64::new(500));
+        let mut stream = Box::pin(outbound_stream(
+            out_rx,
+            8,
+            2,
+            Duration::from_millis(50),
+            "basic".to_owned(),
+            200,
+            transport_layer_load,
+            target,
+        ));
+
+        let before = prometheus::gather();
+        let before_value = before
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_batch_wait_overload")
+            .map(|family| {
+                family
+                    .get_metric()
+                    .iter()
+                    .map(|metric| metric.get_counter().get_value())
+                    .sum::<f64>()
+            })
+            .unwrap_or(0.0);
+
+        let mk_req = |request_id| tikvpb::BatchCommandsRequest {
+            requests: vec![tikvpb::batch_commands_request::Request {
+                cmd: Some(tikvpb::batch_commands_request::request::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyRequest::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+        };
+
+        out_tx.send(mk_req(1)).await.expect("send req 1");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        out_tx.send(mk_req(2)).await.expect("send req 2");
+
+        let batch = stream.next().await.expect("first batch");
+        assert_eq!(batch.request_ids, vec![1, 2]);
+
+        let after = prometheus::gather();
+        let after_value = after
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_batch_wait_overload")
+            .map(|family| {
+                family
+                    .get_metric()
+                    .iter()
+                    .map(|metric| metric.get_counter().get_value())
+                    .sum::<f64>()
+            })
+            .unwrap_or(0.0);
+
+        assert!(
+            after_value >= before_value + 1.0,
+            "expected batch_wait_overload counter to increase"
+        );
     }
 
     #[tokio::test]
@@ -1318,6 +1438,46 @@ mod tests {
         assert!(
             pending_found,
             "expected batch_pending_requests metrics for target not found"
+        );
+
+        let send_loop_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_batch_send_loop_duration_seconds")
+            .expect("batch_send_loop_duration_seconds summary not registered");
+        let send_loop_found = send_loop_family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some(target.as_str())
+                && label_value(metric, "step") == Some("wait_head")
+                && metric.get_histogram().get_sample_count() >= 2
+        });
+        assert!(
+            send_loop_found,
+            "expected batch_send_loop_duration_seconds summary for target not found"
+        );
+
+        let head_interval_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_batch_head_arrival_interval_seconds")
+            .expect("batch_head_arrival_interval_seconds summary not registered");
+        let head_interval_found = head_interval_family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some(target.as_str())
+                && metric.get_histogram().get_sample_count() >= 2
+        });
+        assert!(
+            head_interval_found,
+            "expected batch_head_arrival_interval_seconds summary for target not found"
+        );
+
+        let best_size_family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_batch_best_size")
+            .expect("batch_best_size summary not registered");
+        let best_size_found = best_size_family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some(target.as_str())
+                && metric.get_histogram().get_sample_count() >= 2
+        });
+        assert!(
+            best_size_found,
+            "expected batch_best_size summary for target not found"
         );
     }
 
@@ -1774,6 +1934,29 @@ mod tests {
             found,
             "expected batch_recv_tail_latency_seconds histogram to record observations"
         );
+
+        let family = families
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_batch_recv_loop_duration_seconds")
+            .expect("batch_recv_loop_duration_seconds summary not registered");
+        let recv_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some("test")
+                && label_value(metric, "step") == Some("recv")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            recv_found,
+            "expected batch_recv_loop_duration_seconds(recv) summary to record observations"
+        );
+        let process_found = family.get_metric().iter().any(|metric| {
+            label_value(metric, "target") == Some("test")
+                && label_value(metric, "step") == Some("process")
+                && metric.get_histogram().get_sample_count() >= 1
+        });
+        assert!(
+            process_found,
+            "expected batch_recv_loop_duration_seconds(process) summary to record observations"
+        );
     }
 
     #[tokio::test]
@@ -1839,6 +2022,87 @@ mod tests {
         assert!(
             found,
             "expected batch_send_tail_latency_seconds histogram to record observations"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_batch_commands_client_records_batch_request_duration_seconds_summary() {
+        fn sample_count(families: &[prometheus::proto::MetricFamily], step: &str) -> u64 {
+            families
+                .iter()
+                .find(|family| family.get_name() == "tikv_client_batch_request_duration_seconds")
+                .map(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .filter(|metric| label_value(metric, "step") == Some(step))
+                        .map(|metric| metric.get_histogram().get_sample_count())
+                        .sum()
+                })
+                .unwrap_or(0)
+        }
+
+        let before = prometheus::gather();
+        let before_send = sample_count(&before, "send");
+        let before_recv = sample_count(&before, "recv");
+        let before_done = sample_count(&before, "done");
+
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let client = client_with_channels(out_tx, in_rx);
+
+        let request_task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .dispatch(
+                        tikvpb::batch_commands_request::request::Cmd::Empty(
+                            tikvpb::BatchCommandsEmptyRequest::default(),
+                        ),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            })
+        };
+
+        let req = out_rx.recv().await.expect("batch request");
+        let request_id = *req.request_ids.first().expect("request id");
+
+        let response = tikvpb::BatchCommandsResponse {
+            responses: vec![tikvpb::batch_commands_response::Response {
+                cmd: Some(tikvpb::batch_commands_response::response::Cmd::Empty(
+                    tikvpb::BatchCommandsEmptyResponse::default(),
+                )),
+            }],
+            request_ids: vec![request_id],
+            transport_layer_load: 0,
+            health_feedback: None,
+        };
+        in_tx.send(Ok(response)).await.expect("send response");
+
+        let result = request_task.await.expect("request task");
+        assert!(matches!(
+            result.expect("dispatch response").cmd,
+            tikvpb::batch_commands_response::response::Cmd::Empty(_)
+        ));
+
+        let after = prometheus::gather();
+        let after_send = sample_count(&after, "send");
+        let after_recv = sample_count(&after, "recv");
+        let after_done = sample_count(&after, "done");
+
+        assert!(
+            after_send >= before_send + 1,
+            "expected send sample count to increase"
+        );
+        assert!(
+            after_recv >= before_recv + 1,
+            "expected recv sample count to increase"
+        );
+        assert!(
+            after_done >= before_done + 1,
+            "expected done sample count to increase"
         );
     }
 }

@@ -1516,8 +1516,7 @@ mod tests {
             families
                 .iter()
                 .find(|family| {
-                    family.get_name()
-                        == "tikv_client_batch_client_no_available_connection_total"
+                    family.get_name() == "tikv_client_batch_client_no_available_connection_total"
                 })
                 .and_then(|family| family.get_metric().first())
                 .map(|metric| metric.get_counter().get_value())
@@ -1542,8 +1541,7 @@ mod tests {
             let family = families
                 .iter()
                 .find(|family| {
-                    family.get_name()
-                        == "tikv_client_batch_client_no_available_connection_total"
+                    family.get_name() == "tikv_client_batch_client_no_available_connection_total"
                 })
                 .expect("batch client no-available-connection counter not registered");
             family

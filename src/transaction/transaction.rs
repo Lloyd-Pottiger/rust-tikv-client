@@ -16601,8 +16601,7 @@ mod tests {
                 .unwrap_or(0.0)
         };
 
-        let one_pc_fallback_before =
-            counter_value("tikv_client_one_pc_txn_counter", "fallback");
+        let one_pc_fallback_before = counter_value("tikv_client_one_pc_txn_counter", "fallback");
         let two_pc_ok_before = counter_value("tikv_client_commit_txn_counter", "ok");
 
         let client = MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
@@ -16647,8 +16646,7 @@ mod tests {
         let commit_ts = txn.commit().await.unwrap().expect("expected commit ts");
         assert_eq!(commit_ts.version(), commit_version);
 
-        let one_pc_fallback_after =
-            counter_value("tikv_client_one_pc_txn_counter", "fallback");
+        let one_pc_fallback_after = counter_value("tikv_client_one_pc_txn_counter", "fallback");
         let two_pc_ok_after = counter_value("tikv_client_commit_txn_counter", "ok");
 
         assert!(

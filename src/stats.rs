@@ -545,6 +545,75 @@ pub(crate) fn inc_batch_client_no_available_connection() {
     }
 }
 
+pub(crate) fn observe_batch_send_loop_duration_seconds(
+    target: &str,
+    step: &str,
+    elapsed: Duration,
+) {
+    let Some(histogram) = TIKV_CLIENT_RUST_BATCH_SEND_LOOP_DURATION_SECONDS_HISTOGRAM_VEC.as_ref()
+    else {
+        return;
+    };
+    histogram
+        .with_label_values(&[target, step])
+        .observe(duration_to_sec(elapsed));
+}
+
+pub(crate) fn observe_batch_recv_loop_duration_seconds(
+    target: &str,
+    step: &str,
+    elapsed: Duration,
+) {
+    let Some(histogram) = TIKV_CLIENT_RUST_BATCH_RECV_LOOP_DURATION_SECONDS_HISTOGRAM_VEC.as_ref()
+    else {
+        return;
+    };
+    histogram
+        .with_label_values(&[target, step])
+        .observe(duration_to_sec(elapsed));
+}
+
+pub(crate) fn observe_batch_head_arrival_interval_seconds(target: &str, elapsed: Duration) {
+    let Some(histogram) =
+        TIKV_CLIENT_RUST_BATCH_HEAD_ARRIVAL_INTERVAL_SECONDS_HISTOGRAM_VEC.as_ref()
+    else {
+        return;
+    };
+    histogram
+        .with_label_values(&[target])
+        .observe(duration_to_sec(elapsed));
+}
+
+pub(crate) fn observe_batch_best_size(target: &str, best_size: f64) {
+    let Some(histogram) = TIKV_CLIENT_RUST_BATCH_BEST_SIZE_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    histogram.with_label_values(&[target]).observe(best_size);
+}
+
+pub(crate) fn observe_batch_more_requests_total(target: &str, count: usize) {
+    let Some(histogram) = TIKV_CLIENT_RUST_BATCH_MORE_REQUESTS_TOTAL_HISTOGRAM_VEC.as_ref() else {
+        return;
+    };
+    histogram.with_label_values(&[target]).observe(count as f64);
+}
+
+pub(crate) fn inc_batch_wait_overload() {
+    if let Some(counter) = TIKV_CLIENT_RUST_BATCH_WAIT_OVERLOAD_COUNTER.as_ref() {
+        counter.inc();
+    }
+}
+
+pub(crate) fn observe_batch_request_duration_seconds(step: &str, elapsed: Duration) {
+    let Some(histogram) = TIKV_CLIENT_RUST_BATCH_REQUEST_DURATION_SECONDS_HISTOGRAM_VEC.as_ref()
+    else {
+        return;
+    };
+    histogram
+        .with_label_values(&[step])
+        .observe(duration_to_sec(elapsed));
+}
+
 pub(crate) fn set_range_task_stats(task: &str, completed_regions: usize, failed_regions: usize) {
     let Some(gauge) = TIKV_CLIENT_RUST_RANGE_TASK_STATS_GAUGE_VEC.as_ref() else {
         return;
@@ -2096,6 +2165,90 @@ lazy_static::lazy_static! {
         register_histogram_vec_with_buckets(name, help, &["target"], buckets)
     };
 
+    static ref TIKV_CLIENT_RUST_BATCH_SEND_LOOP_DURATION_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_batch_send_loop_duration_seconds";
+        let help = "Batch send loop duration breakdown by steps.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 24) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["target", "step"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_BATCH_RECV_LOOP_DURATION_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_batch_recv_loop_duration_seconds";
+        let help = "Batch recv loop duration breakdown by steps.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 24) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["target", "step"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_BATCH_HEAD_ARRIVAL_INTERVAL_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_batch_head_arrival_interval_seconds";
+        let help = "Arrival interval of the head request in batch.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 24) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["target"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_BATCH_BEST_SIZE_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_batch_best_size";
+        let help = "Best batch size estimated by the batch client.";
+        let buckets = match prometheus::exponential_buckets(1.0, 2.0, 11) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["target"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_BATCH_MORE_REQUESTS_TOTAL_HISTOGRAM_VEC: Option<HistogramVec> = {
+        let name = "tikv_client_batch_more_requests_total";
+        let help = "Number of requests batched by extra fetch.";
+        let buckets = match prometheus::exponential_buckets(1.0, 2.0, 11) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["target"], buckets)
+    };
+
+    static ref TIKV_CLIENT_RUST_BATCH_WAIT_OVERLOAD_COUNTER: Option<IntCounter> = register_int_counter(
+        "tikv_client_batch_wait_overload",
+        "Event of tikv transport layer overload.",
+    );
+
+    static ref TIKV_CLIENT_RUST_BATCH_REQUEST_DURATION_SECONDS_HISTOGRAM_VEC: Option<HistogramVec> =
+    {
+        let name = "tikv_client_batch_request_duration_seconds";
+        let help = "Batch request duration breakdown by steps.";
+        let buckets = match prometheus::exponential_buckets(0.0005, 2.0, 24) {
+            Ok(buckets) => buckets,
+            Err(err) => {
+                warn!("failed to build prometheus histogram buckets {name}: {err}");
+                return None;
+            }
+        };
+        register_histogram_vec_with_buckets(name, help, &["step"], buckets)
+    };
+
     static ref TIKV_CLIENT_RUST_BATCH_CLIENT_WAIT_ESTABLISH_HISTOGRAM: Option<Histogram> = {
         let name = "tikv_client_batch_client_wait_connection_establish";
         let help = "Batch client wait new connection establish.";
@@ -2937,9 +3090,7 @@ mod tests {
             let families = prometheus::gather();
             families
                 .iter()
-                .find(|family| {
-                    family.get_name() == "tikv_client_batch_client_unavailable_seconds"
-                })
+                .find(|family| family.get_name() == "tikv_client_batch_client_unavailable_seconds")
                 .map(|family| {
                     family
                         .get_metric()
@@ -2956,9 +3107,7 @@ mod tests {
             let families = prometheus::gather();
             let family = families
                 .iter()
-                .find(|family| {
-                    family.get_name() == "tikv_client_batch_client_unavailable_seconds"
-                })
+                .find(|family| family.get_name() == "tikv_client_batch_client_unavailable_seconds")
                 .expect("batch_client_unavailable_seconds histogram not registered");
             family
                 .get_metric()
@@ -3020,8 +3169,7 @@ mod tests {
             families
                 .iter()
                 .find(|family| {
-                    family.get_name()
-                        == "tikv_client_batch_client_no_available_connection_total"
+                    family.get_name() == "tikv_client_batch_client_no_available_connection_total"
                 })
                 .and_then(|family| family.get_metric().first())
                 .map(|metric| metric.get_counter().get_value())
@@ -3037,8 +3185,7 @@ mod tests {
             let family = families
                 .iter()
                 .find(|family| {
-                    family.get_name()
-                        == "tikv_client_batch_client_no_available_connection_total"
+                    family.get_name() == "tikv_client_batch_client_no_available_connection_total"
                 })
                 .expect("batch client no-available-connection counter not registered");
             family
@@ -3822,9 +3969,7 @@ mod tests {
         fn counter_value() -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| {
-                    family.get_name() == "tikv_client_validate_read_ts_from_pd_count"
-                })
+                .find(|family| family.get_name() == "tikv_client_validate_read_ts_from_pd_count")
                 .and_then(|family| {
                     family
                         .get_metric()
@@ -3987,9 +4132,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| {
-                    family.get_name() == "tikv_client_gc_unsafe_destroy_range_failures"
-                })
+                .find(|family| family.get_name() == "tikv_client_gc_unsafe_destroy_range_failures")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)
@@ -4543,9 +4686,7 @@ mod tests {
         fn counter_value(label: &str) -> f64 {
             prometheus::gather()
                 .iter()
-                .find(|family| {
-                    family.get_name() == "tikv_client_replica_selector_failure_counter"
-                })
+                .find(|family| family.get_name() == "tikv_client_replica_selector_failure_counter")
                 .and_then(|family| {
                     family.get_metric().iter().find(|metric| {
                         label_value(metric, "type") == Some(label)
