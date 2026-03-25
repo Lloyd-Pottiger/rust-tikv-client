@@ -4,4 +4,5 @@
 //! namespace for the raw client types.
 
 pub use crate::raw::Client;
+pub use crate::ColumnFamily;
 pub use crate::RawChecksum;
