@@ -11,6 +11,7 @@ pub use crate::is_error_undetermined;
 pub use crate::AssertionFailedError;
 pub use crate::DeadlockError;
 pub use crate::Error;
+pub use crate::PdServerTimeoutError;
 pub use crate::ProtoAssertionFailed;
 pub use crate::ProtoDeadlock;
 pub use crate::ProtoKeyError;

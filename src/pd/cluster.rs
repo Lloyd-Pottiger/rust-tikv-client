@@ -607,7 +607,17 @@ trait PdMessage: Sized {
     async fn send(self, client: &mut Self::Client, timeout: Duration) -> Result<Self::Response> {
         let mut req = self.into_request();
         req.set_timeout(timeout);
-        let response = Self::rpc(req, client).await?;
+        let response = match Self::rpc(req, client).await {
+            Ok(response) => response,
+            Err(status) => {
+                if status.code() == tonic::Code::DeadlineExceeded {
+                    return Err(
+                        crate::PdServerTimeoutError::new(status.message().to_owned()).into(),
+                    );
+                }
+                return Err(status.into());
+            }
+        };
 
         let header = response
             .header()
@@ -920,6 +930,22 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct DeadlineExceededRequest;
+
+    #[async_trait::async_trait]
+    impl PdMessage for DeadlineExceededRequest {
+        type Client = ();
+        type Response = TestResponse;
+
+        async fn rpc(
+            _req: Request<Self>,
+            _client: &mut Self::Client,
+        ) -> GrpcResult<Self::Response> {
+            Err(tonic::Status::deadline_exceeded("deadline exceeded"))
+        }
+    }
+
     #[tokio::test]
     async fn test_pd_message_send_missing_header_returns_error() {
         let req = TestRequest::default();
@@ -962,6 +988,20 @@ mod tests {
         };
         let mut client = ();
         req.send(&mut client, Duration::from_secs(1)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pd_message_send_deadline_exceeded_maps_error_type() {
+        let req = DeadlineExceededRequest::default();
+        let mut client = ();
+        let err = req
+            .send(&mut client, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        let Error::PdServerTimeout(timeout) = err else {
+            panic!("expected PdServerTimeout error, got: {err}");
+        };
+        assert_eq!(timeout.message(), "deadline exceeded");
     }
 
     #[test]

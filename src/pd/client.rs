@@ -1601,9 +1601,13 @@ async fn pd_http_min_resolved_ts_by_stores(
         let resp = match http_client.get(&url).send().await {
             Ok(resp) => resp,
             Err(err) => {
-                last_err = Some(Error::StringError(format!(
-                    "pd http min-resolved-ts request to {endpoint} failed: {err}"
-                )));
+                let message =
+                    format!("pd http min-resolved-ts request to {endpoint} failed: {err}");
+                last_err = Some(if err.is_timeout() {
+                    crate::PdServerTimeoutError::new(message).into()
+                } else {
+                    Error::StringError(message)
+                });
                 continue;
             }
         };
@@ -2081,7 +2085,13 @@ pub mod test {
             Err(_) => panic!("expected pd http request to respect pd_server_timeout"),
         };
 
-        assert!(matches!(err, Error::StringError(_)));
+        let Error::PdServerTimeout(timeout) = err else {
+            panic!("expected PdServerTimeout error, got: {err}");
+        };
+        assert!(
+            timeout.message().contains("pd http min-resolved-ts"),
+            "unexpected PdServerTimeout message: {timeout}"
+        );
         server.join().unwrap();
     }
 

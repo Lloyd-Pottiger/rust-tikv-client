@@ -176,6 +176,8 @@ pub use common::DeadlockError;
 #[doc(inline)]
 pub use common::Error;
 #[doc(inline)]
+pub use common::PdServerTimeoutError;
+#[doc(inline)]
 pub use common::ProtoAssertionFailed;
 #[doc(inline)]
 pub use common::ProtoDeadlock;

@@ -547,6 +547,29 @@ impl TokenLimitError {
     }
 }
 
+/// PD server is timeout/unavailable.
+///
+/// This mirrors client-go `tikverr.ErrPDServerTimeout`.
+#[derive(Clone, Debug, Error)]
+#[error("{message}")]
+pub struct PdServerTimeoutError {
+    message: String,
+}
+
+impl PdServerTimeoutError {
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 /// An error originating from the TiKV client or dependencies.
 #[derive(Debug, Error)]
 #[allow(clippy::large_enum_variant)]
@@ -684,6 +707,11 @@ pub enum Error {
     /// This mirrors client-go `tikverr.ErrTokenLimit`.
     #[error("{0}")]
     TokenLimit(#[from] TokenLimitError),
+    /// PD server is timeout/unavailable.
+    ///
+    /// This mirrors client-go `tikverr.ErrPDServerTimeout`.
+    #[error("{0}")]
+    PdServerTimeout(#[from] PdServerTimeoutError),
     /// Failed to acquire a pessimistic lock when no-wait is configured.
     #[error("lock acquire failed and no wait is set")]
     LockAcquireFailAndNoWaitSet,

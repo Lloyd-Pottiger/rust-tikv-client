@@ -11,6 +11,7 @@ pub use self::errors::is_error_undetermined;
 pub use self::errors::AssertionFailedError;
 pub use self::errors::DeadlockError;
 pub use self::errors::Error;
+pub use self::errors::PdServerTimeoutError;
 pub use self::errors::ProtoAssertionFailed;
 pub use self::errors::ProtoDeadlock;
 pub use self::errors::ProtoKeyError;
