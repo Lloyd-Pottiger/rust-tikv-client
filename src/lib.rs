@@ -133,7 +133,8 @@ mod rpc_interceptor;
 mod safe_ts;
 mod shutting_down;
 mod stats;
-mod store;
+#[doc(hidden)]
+pub mod store;
 mod timestamp;
 pub mod util;
 
