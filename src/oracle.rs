@@ -11,6 +11,9 @@ use std::time::UNIX_EPOCH;
 
 use crate::TimestampExt;
 
+/// Oracle implementations mirroring client-go `oracle/oracles`.
+pub mod oracles;
+
 /// The shift bit width used by PD timestamps (physical ms + logical part).
 ///
 /// This mirrors client-go `oracle.physicalShiftBits`.
