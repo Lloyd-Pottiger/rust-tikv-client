@@ -799,6 +799,22 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Ok(self.key_location_for_region(region).await)
     }
 
+    /// Load a region by region id directly from PD without updating the local cache.
+    ///
+    /// This is mainly useful for diagnostics when callers want to bypass potentially stale cached
+    /// metadata. The input/output keys use the region cache's key encoding.
+    #[doc(alias = "LocateRegionByIDFromPD")]
+    pub async fn locate_region_by_id_from_pd(&self, id: RegionId) -> Result<KeyLocation> {
+        let (region, buckets) = self
+            .pd_region_meta_circuit_breaker
+            .execute(|| self.inner_client.clone().get_region_by_id_with_buckets(id))
+            .await?;
+        Ok(Self::key_location_from_parts(
+            &region,
+            buckets.map(Arc::new),
+        ))
+    }
+
     /// Locate multiple key ranges and merge adjacent duplicates from the same region.
     ///
     /// This low-level API operates on the region cache's key encoding. Higher-level callers that

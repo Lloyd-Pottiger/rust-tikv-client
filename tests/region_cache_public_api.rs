@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -100,6 +101,60 @@ async fn region_cache_exports_single_key_and_region_id_locate_apis() -> Result<(
     assert_eq!(locate_region.region.id, 2);
     assert_eq!(locate_region.start_key, Key::from(vec![10]));
     assert_eq!(locate_region.end_key, Key::from(vec![20]));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn region_cache_exports_region_id_direct_pd_locate_api() -> Result<()> {
+    struct DummyClient {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RetryClientTrait for DummyClient {
+        async fn get_region(self: Arc<Self>, _key: Vec<u8>) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_store(self: Arc<Self>, _id: u64) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_region_by_id(self: Arc<Self>, region_id: u64) -> Result<RegionWithLeader> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(region(region_id, vec![10], vec![20]))
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    let client = Arc::new(DummyClient {
+        calls: AtomicUsize::new(0),
+    });
+    let cache = RegionCache::new_with_ttl(client.clone(), Duration::ZERO, Duration::ZERO);
+
+    let location = cache.locate_region_by_id_from_pd(2).await?;
+    assert_eq!(location.region.id, 2);
+    assert_eq!(location.start_key, Key::from(vec![10]));
+    assert_eq!(location.end_key, Key::from(vec![20]));
+    assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+
+    assert!(cache.try_locate_key(Key::from(vec![12])).await.is_none());
 
     Ok(())
 }

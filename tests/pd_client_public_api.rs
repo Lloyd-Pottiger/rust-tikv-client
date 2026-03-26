@@ -33,6 +33,7 @@ fn crate_root_exports_pd_locate_entrypoints() {
     let _ = PdRpcClient::<tikv_client::store::TikvConnect>::try_locate_key;
     let _ = PdRpcClient::<tikv_client::store::TikvConnect>::locate_end_key;
     let _ = PdRpcClient::<tikv_client::store::TikvConnect>::locate_region_by_id;
+    let _ = PdRpcClient::<tikv_client::store::TikvConnect>::locate_region_by_id_from_pd;
     let _ = PdRpcClient::<tikv_client::store::TikvConnect>::locate_key_range;
     let _ = PdRpcClient::<tikv_client::store::TikvConnect>::batch_locate_key_ranges;
 }

@@ -876,6 +876,18 @@ where
             .and_then(|location| decode_key_location(location, self.enable_codec))
     }
 
+    /// Load a region by region id directly from PD without updating the local cache.
+    ///
+    /// Unlike [`RegionCache::locate_region_by_id_from_pd`], this helper automatically decodes
+    /// region keys for clients configured with API V2 codecs.
+    #[doc(alias = "LocateRegionByIDFromPD")]
+    pub async fn locate_region_by_id_from_pd(&self, id: RegionId) -> Result<KeyLocation> {
+        self.region_cache
+            .locate_region_by_id_from_pd(id)
+            .await
+            .and_then(|location| decode_key_location(location, self.enable_codec))
+    }
+
     /// Locate the consecutive regions covering `[start_key, end_key)`.
     ///
     /// Unlike [`RegionCache::locate_key_range`], this helper automatically applies PD key
@@ -1956,6 +1968,59 @@ pub mod test {
             _region_id: RegionId,
         ) -> Result<RegionWithLeader> {
             Err(Error::Unimplemented)
+        }
+
+        async fn get_store(self: Arc<Self>, _id: StoreId) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    struct DirectLocateCluster;
+
+    #[async_trait]
+    impl RetryClientTrait for RetryClient<DirectLocateCluster> {
+        async fn get_region(self: Arc<Self>, _key: Vec<u8>) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_region_by_id(
+            self: Arc<Self>,
+            region_id: RegionId,
+        ) -> Result<RegionWithLeader> {
+            let (start_key, end_key) = match region_id {
+                2 => (
+                    Key::from(vec![10]).to_encoded().into(),
+                    Key::from(vec![20]).to_encoded().into(),
+                ),
+                _ => return Err(Error::Unimplemented),
+            };
+
+            Ok(RegionWithLeader {
+                region: metapb::Region {
+                    id: region_id,
+                    start_key,
+                    end_key,
+                    region_epoch: Some(metapb::RegionEpoch::default()),
+                    ..Default::default()
+                },
+                leader: None,
+            })
         }
 
         async fn get_store(self: Arc<Self>, _id: StoreId) -> Result<metapb::Store> {
@@ -3145,6 +3210,38 @@ pub mod test {
         assert_eq!(region_location.region.id, 2);
         assert_eq!(region_location.start_key, Key::from(vec![10]));
         assert_eq!(region_location.end_key, Key::from(vec![20]));
+    }
+
+    #[tokio::test]
+    async fn test_pd_rpc_client_locate_region_by_id_from_pd_decodes_without_warming_cache() {
+        let config = Config::default();
+        let mut client = PdRpcClient::new(
+            config.clone(),
+            |_| MockKvConnect,
+            |sm| {
+                futures::future::ok(RetryClient::new_with_cluster(
+                    sm,
+                    config.timeout,
+                    0,
+                    DirectLocateCluster,
+                ))
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        client.enable_codec = true;
+
+        let location = client.locate_region_by_id_from_pd(2).await.unwrap();
+        assert_eq!(location.region.id, 2);
+        assert_eq!(location.start_key, Key::from(vec![10]));
+        assert_eq!(location.end_key, Key::from(vec![20]));
+
+        let cached = client.try_locate_key(Key::from(vec![12])).await.unwrap();
+        assert!(
+            cached.is_none(),
+            "direct PD locate should not populate region cache"
+        );
     }
 
     #[tokio::test]
