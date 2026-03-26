@@ -58,6 +58,17 @@ impl Cluster {
         req.send(&mut self.client, timeout).await
     }
 
+    pub async fn get_region_with_buckets(
+        &mut self,
+        key: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<pdpb::GetRegionResponse> {
+        let mut req = pd_request!(self.id, pdpb::GetRegionRequest);
+        req.region_key = key;
+        req.need_buckets = true;
+        req.send(&mut self.client, timeout).await
+    }
+
     pub async fn get_prev_region(
         &mut self,
         key: Vec<u8>,
@@ -79,6 +90,28 @@ impl Cluster {
         }
     }
 
+    pub async fn get_prev_region_with_buckets(
+        &mut self,
+        key: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<pdpb::GetRegionResponse> {
+        let mut req = pd_request!(self.id, pdpb::GetRegionRequest);
+        req.region_key = key;
+        req.need_buckets = true;
+        let mut request = Request::new(req);
+        request.set_timeout(timeout);
+        let response = self.client.get_prev_region(request).await?.into_inner();
+
+        let header = response
+            .header()
+            .ok_or_else(|| internal_err!("PD response missing header"))?;
+        if let Some(err) = &header.error {
+            Err(internal_err!(err.message))
+        } else {
+            Ok(response)
+        }
+    }
+
     pub async fn get_region_by_id(
         &mut self,
         id: u64,
@@ -86,6 +119,17 @@ impl Cluster {
     ) -> Result<pdpb::GetRegionResponse> {
         let mut req = pd_request!(self.id, pdpb::GetRegionByIdRequest);
         req.region_id = id;
+        req.send(&mut self.client, timeout).await
+    }
+
+    pub async fn get_region_by_id_with_buckets(
+        &mut self,
+        id: u64,
+        timeout: Duration,
+    ) -> Result<pdpb::GetRegionResponse> {
+        let mut req = pd_request!(self.id, pdpb::GetRegionByIdRequest);
+        req.region_id = id;
+        req.need_buckets = true;
         req.send(&mut self.client, timeout).await
     }
 

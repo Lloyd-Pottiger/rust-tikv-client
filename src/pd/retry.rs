@@ -39,6 +39,19 @@ pub trait RetryClientTrait {
     // It does not know about encoding. Caller should take care of it.
     async fn get_region(self: Arc<Self>, key: Vec<u8>) -> Result<RegionWithLeader>;
 
+    /// Retrieve region metadata from PD along with its buckets, if available.
+    ///
+    /// This mirrors client-go `opt.WithBuckets()` when loading regions from PD.
+    ///
+    /// The default implementation falls back to [`Self::get_region`] and returns no buckets.
+    async fn get_region_with_buckets(
+        self: Arc<Self>,
+        key: Vec<u8>,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        let region = self.clone().get_region(key).await?;
+        Ok((region, None))
+    }
+
     /// Return the region whose end boundary is `key` (i.e. the region immediately before `key`).
     ///
     /// This maps to PD `GetPrevRegion` and is used by reverse raw scans (`LocateEndKey` behavior).
@@ -49,7 +62,29 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    /// Retrieve "previous region" metadata from PD along with its buckets, if available.
+    ///
+    /// The default implementation falls back to [`Self::get_prev_region`] and returns no buckets.
+    async fn get_prev_region_with_buckets(
+        self: Arc<Self>,
+        key: Vec<u8>,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        let region = self.clone().get_prev_region(key).await?;
+        Ok((region, None))
+    }
+
     async fn get_region_by_id(self: Arc<Self>, region_id: RegionId) -> Result<RegionWithLeader>;
+
+    /// Retrieve region metadata by id from PD along with its buckets, if available.
+    ///
+    /// The default implementation falls back to [`Self::get_region_by_id`] and returns no buckets.
+    async fn get_region_by_id_with_buckets(
+        self: Arc<Self>,
+        region_id: RegionId,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        let region = self.clone().get_region_by_id(region_id).await?;
+        Ok((region, None))
+    }
 
     async fn scan_regions(
         self: Arc<Self>,
@@ -285,6 +320,29 @@ impl RetryClientTrait for RetryClient<Cluster> {
         )
     }
 
+    async fn get_region_with_buckets(
+        self: Arc<Self>,
+        key: Vec<u8>,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_region", |cluster| {
+                let key = key.clone();
+                async {
+                    cluster
+                        .get_region_with_buckets(key.clone(), self.timeout)
+                        .await
+                        .and_then(|resp| {
+                            region_and_buckets_from_response(resp, || Error::RegionForKeyNotFound {
+                                key,
+                            })
+                        })
+                }
+            }),
+        )
+    }
+
     async fn get_prev_region(self: Arc<Self>, key: Vec<u8>) -> Result<RegionWithLeader> {
         let started_at = Instant::now();
         finish_pd_wait(
@@ -303,6 +361,29 @@ impl RetryClientTrait for RetryClient<Cluster> {
         )
     }
 
+    async fn get_prev_region_with_buckets(
+        self: Arc<Self>,
+        key: Vec<u8>,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_prev_region", |cluster| {
+                let key = key.clone();
+                async {
+                    cluster
+                        .get_prev_region_with_buckets(key.clone(), self.timeout)
+                        .await
+                        .and_then(|resp| {
+                            region_and_buckets_from_response(resp, || Error::RegionForKeyNotFound {
+                                key,
+                            })
+                        })
+                }
+            }),
+        )
+    }
+
     async fn get_region_by_id(self: Arc<Self>, region_id: RegionId) -> Result<RegionWithLeader> {
         let started_at = Instant::now();
         finish_pd_wait(
@@ -313,6 +394,26 @@ impl RetryClientTrait for RetryClient<Cluster> {
                     .await
                     .and_then(|resp| {
                         region_from_response(resp, || Error::RegionNotFoundInResponse { region_id })
+                    })
+            }),
+        )
+    }
+
+    async fn get_region_by_id_with_buckets(
+        self: Arc<Self>,
+        region_id: RegionId,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_region_by_id", |cluster| async {
+                cluster
+                    .get_region_by_id_with_buckets(region_id, self.timeout)
+                    .await
+                    .and_then(|resp| {
+                        region_and_buckets_from_response(resp, || Error::RegionNotFoundInResponse {
+                            region_id,
+                        })
                     })
             }),
         )
@@ -590,6 +691,21 @@ fn region_from_response(
         ));
     }
     Ok(RegionWithLeader::new(region, resp.leader.take()))
+}
+
+fn region_and_buckets_from_response(
+    mut resp: pdpb::GetRegionResponse,
+    err: impl FnOnce() -> Error,
+) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+    let buckets = resp.buckets.take();
+    let region = resp.region.take().ok_or_else(err)?;
+    if region.region_epoch.is_none() {
+        return Err(internal_err!(
+            "missing region_epoch in PD GetRegionResponse for region_id {}",
+            region.id
+        ));
+    }
+    Ok((RegionWithLeader::new(region, resp.leader.take()), buckets))
 }
 
 fn scan_regions_from_response(resp: pdpb::ScanRegionsResponse) -> Result<Vec<RegionWithLeader>> {
