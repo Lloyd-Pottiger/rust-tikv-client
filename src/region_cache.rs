@@ -104,6 +104,10 @@ struct RegionCacheMap {
     /// RegionVerID -> Region. It stores the concrete region caches.
     /// RegionVerID is the unique identifier of a region *across time*.
     ver_id_to_region: HashMap<RegionVerId, RegionWithLeader>,
+    /// RegionVerId -> buckets meta.
+    ///
+    /// Buckets can change without region epoch changes and may be stale.
+    ver_id_to_buckets: HashMap<RegionVerId, Arc<metapb::Buckets>>,
     /// RegionVerId -> TTL deadline (epoch milliseconds).
     ///
     /// This mirrors client-go's region cache TTL behavior: entries are considered expired after
@@ -126,6 +130,7 @@ impl RegionCacheMap {
     fn new() -> RegionCacheMap {
         RegionCacheMap {
             ver_id_to_region: HashMap::new(),
+            ver_id_to_buckets: HashMap::new(),
             ver_id_to_ttl_deadline_ms: HashMap::new(),
             key_to_ver_id: BTreeMap::new(),
             id_to_ver_id: HashMap::new(),
@@ -221,6 +226,22 @@ impl<Client> RegionCache<Client> {
         drop(region_cache);
 
         self.store_cache.write().await.clear();
+    }
+
+    /// Return cached buckets metadata for the given region version id.
+    ///
+    /// Note: buckets are best-effort and may be absent or stale (PD followers can lag and buckets
+    /// can change even when the region epoch does not).
+    pub async fn get_buckets_by_ver_id(
+        &self,
+        ver_id: &RegionVerId,
+    ) -> Option<Arc<metapb::Buckets>> {
+        self.region_cache
+            .read()
+            .await
+            .ver_id_to_buckets
+            .get(ver_id)
+            .cloned()
     }
 }
 
@@ -437,15 +458,19 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 &[TraceField::u64("keyLen", key_len)],
             );
         }
-        let region = match self
+        let (region, buckets) = match self
             .pd_region_meta_circuit_breaker
-            .execute(|| self.inner_client.clone().get_region(key.into()))
+            .execute(|| {
+                self.inner_client
+                    .clone()
+                    .get_region_with_buckets(key.into())
+            })
             .await
         {
-            Ok(region) => {
+            Ok((region, buckets)) => {
                 stats::region_cache_operation("get_region_when_miss", true);
                 stats::observe_load_region_cache("get_region_when_miss", started_at.elapsed());
-                region
+                (region, buckets)
             }
             Err(err) => {
                 stats::region_cache_operation("get_region_when_miss", false);
@@ -460,7 +485,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 &[TraceField::u64("regionID", region.id())],
             );
         }
-        self.add_region(region.clone()).await;
+        self.add_region_with_buckets(region.clone(), buckets).await;
         Ok(region)
     }
 
@@ -553,10 +578,10 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
         let result = match self
             .pd_region_meta_circuit_breaker
-            .execute(|| self.inner_client.clone().get_region_by_id(id))
+            .execute(|| self.inner_client.clone().get_region_by_id_with_buckets(id))
             .await
         {
-            Ok(region) => {
+            Ok((region, buckets)) => {
                 if trace_enabled {
                     trace::trace(
                         Category::RegionCache,
@@ -564,7 +589,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                         &[TraceField::u64("regionID", region.id())],
                     );
                 }
-                self.add_region(region.clone()).await;
+                self.add_region_with_buckets(region.clone(), buckets).await;
                 Ok(region)
             }
             Err(err) => Err(err),
@@ -582,6 +607,22 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     }
 
     pub async fn add_region(&self, region: RegionWithLeader) {
+        let _ = self.add_region_internal(region, None).await;
+    }
+
+    pub(crate) async fn add_region_with_buckets(
+        &self,
+        region: RegionWithLeader,
+        buckets: Option<metapb::Buckets>,
+    ) {
+        let _ = self.add_region_internal(region, buckets).await;
+    }
+
+    async fn add_region_internal(
+        &self,
+        region: RegionWithLeader,
+        buckets: Option<metapb::Buckets>,
+    ) -> bool {
         // This takes a write lock because we update multiple indices consistently. This runs on
         // region-cache update paths (e.g. cache miss), not the hot-path request routing.
         let mut cache = self.region_cache.write().await;
@@ -592,7 +633,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             // regions.
             if old_ver_id.ver > new_ver_id.ver || old_ver_id.conf_ver > new_ver_id.conf_ver {
                 stats::inc_stale_region_from_pd_counter();
-                return;
+                return false;
             }
         }
 
@@ -625,7 +666,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                     if region_in_cache.region.end_key > region.region.start_key {
                         if region_in_cache.ver_id().ver > new_ver_id.ver {
                             stats::inc_stale_region_from_pd_counter();
-                            return;
+                            return false;
                         }
                         to_be_removed.insert(ver_id_in_cache.clone());
                     } else {
@@ -643,6 +684,9 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         let mut stale_ver_ids = HashSet::new();
         for ver_id in to_be_removed {
             cache.ver_id_to_ttl_deadline_ms.remove(&ver_id);
+            if ver_id != new_ver_id || buckets.is_some() {
+                cache.ver_id_to_buckets.remove(&ver_id);
+            }
             match cache.ver_id_to_region.remove(&ver_id) {
                 Some(region_to_remove) => {
                     cache.key_to_ver_id.remove(&region_to_remove.start_key());
@@ -669,7 +713,19 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         cache.ver_id_to_region.insert(ver_id.clone(), region);
         cache
             .ver_id_to_ttl_deadline_ms
-            .insert(ver_id, AtomicU64::new(ttl_deadline_ms));
+            .insert(ver_id.clone(), AtomicU64::new(ttl_deadline_ms));
+
+        if let Some(buckets) = buckets {
+            let should_replace = cache
+                .ver_id_to_buckets
+                .get(&ver_id)
+                .map_or(true, |cached| buckets.version >= cached.version);
+            if should_replace {
+                cache.ver_id_to_buckets.insert(ver_id, Arc::new(buckets));
+            }
+        }
+
+        true
     }
 
     pub async fn update_leader(
@@ -701,6 +757,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         );
         let mut cache = self.region_cache.write().await;
         cache.ver_id_to_ttl_deadline_ms.remove(&ver_id);
+        cache.ver_id_to_buckets.remove(&ver_id);
         if let Some(region) = cache.ver_id_to_region.remove(&ver_id) {
             cache.id_to_ver_id.remove(&region.id());
             cache.key_to_ver_id.remove(&region.start_key());
@@ -809,6 +866,7 @@ mod test {
     use crate::proto::metapb::RegionEpoch;
     use crate::proto::metapb::{self};
     use crate::region::RegionId;
+    use crate::region::RegionVerId;
     use crate::region::RegionWithLeader;
     use crate::region_cache::is_tiflash_compute_store;
     use crate::region_cache::is_tiflash_related_store;
@@ -874,6 +932,7 @@ mod test {
     #[derive(Default)]
     struct MockRetryClient {
         pub regions: Mutex<HashMap<RegionId, RegionWithLeader>>,
+        pub buckets: Mutex<HashMap<RegionVerId, metapb::Buckets>>,
         pub stores: Mutex<Vec<metapb::Store>>,
         pub get_region_count: AtomicU64,
         pub get_store_count: AtomicU64,
@@ -898,6 +957,16 @@ mod test {
                 .ok_or_else(|| Error::StringError("MockRetryClient: region not found".to_owned()))
         }
 
+        async fn get_region_with_buckets(
+            self: Arc<Self>,
+            key: Vec<u8>,
+        ) -> Result<(crate::region::RegionWithLeader, Option<metapb::Buckets>)> {
+            let region = self.clone().get_region(key).await?;
+            let ver_id = region.ver_id();
+            let buckets = self.buckets.lock().await.get(&ver_id).cloned();
+            Ok((region, buckets))
+        }
+
         async fn get_region_by_id(
             self: Arc<Self>,
             region_id: crate::region::RegionId,
@@ -911,6 +980,16 @@ mod test {
                 .map(|(_, r)| r.clone())
                 .next()
                 .ok_or_else(|| Error::StringError("MockRetryClient: region not found".to_owned()))
+        }
+
+        async fn get_region_by_id_with_buckets(
+            self: Arc<Self>,
+            region_id: crate::region::RegionId,
+        ) -> Result<(crate::region::RegionWithLeader, Option<metapb::Buckets>)> {
+            let region = self.clone().get_region_by_id(region_id).await?;
+            let ver_id = region.ver_id();
+            let buckets = self.buckets.lock().await.get(&ver_id).cloned();
+            Ok((region, buckets))
         }
 
         async fn scan_regions(
@@ -1061,6 +1140,145 @@ mod test {
         assert_eq!(
             cache.get_region_by_id(2).await?.leader.unwrap().store_id,
             102
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_caches_and_invalidates_buckets() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let region = RegionWithLeader {
+            region: metapb::Region {
+                id: 42,
+                start_key: vec![0],
+                end_key: vec![10],
+                region_epoch: Some(RegionEpoch {
+                    conf_ver: 1,
+                    version: 1,
+                }),
+                ..Default::default()
+            },
+            leader: Some(metapb::Peer {
+                store_id: 1,
+                ..Default::default()
+            }),
+        };
+        let ver_id = region.ver_id();
+
+        let buckets = metapb::Buckets {
+            region_id: region.id(),
+            version: 7,
+            keys: vec![vec![0], vec![5], vec![10]],
+            ..Default::default()
+        };
+
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(region.id(), region);
+        retry_client
+            .buckets
+            .lock()
+            .await
+            .insert(ver_id.clone(), buckets.clone());
+
+        let loaded = cache.read_through_region_by_key(Key::from(vec![1])).await?;
+        assert_eq!(loaded.ver_id(), ver_id);
+
+        let cached = cache
+            .get_buckets_by_ver_id(&ver_id)
+            .await
+            .expect("expected cached buckets");
+        assert_eq!(cached.version, buckets.version);
+
+        // Refreshing the region info without buckets should keep the bucket meta.
+        cache.add_region(loaded).await;
+        assert!(cache.get_buckets_by_ver_id(&ver_id).await.is_some());
+
+        cache.invalidate_region_cache(ver_id.clone()).await;
+        assert!(cache.get_buckets_by_ver_id(&ver_id).await.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_removes_buckets_on_region_replacement() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client, Duration::ZERO, Duration::ZERO);
+
+        let region_v1 = RegionWithLeader {
+            region: metapb::Region {
+                id: 7,
+                start_key: vec![],
+                end_key: vec![10],
+                region_epoch: Some(RegionEpoch {
+                    conf_ver: 1,
+                    version: 1,
+                }),
+                ..Default::default()
+            },
+            leader: Some(metapb::Peer {
+                store_id: 1,
+                ..Default::default()
+            }),
+        };
+        let ver_id_v1 = region_v1.ver_id();
+
+        cache
+            .add_region_with_buckets(
+                region_v1,
+                Some(metapb::Buckets {
+                    region_id: 7,
+                    version: 1,
+                    keys: vec![vec![], vec![10]],
+                    ..Default::default()
+                }),
+            )
+            .await;
+        assert!(cache.get_buckets_by_ver_id(&ver_id_v1).await.is_some());
+
+        let region_v2 = RegionWithLeader {
+            region: metapb::Region {
+                id: 7,
+                start_key: vec![],
+                end_key: vec![20],
+                region_epoch: Some(RegionEpoch {
+                    conf_ver: 1,
+                    version: 2,
+                }),
+                ..Default::default()
+            },
+            leader: Some(metapb::Peer {
+                store_id: 2,
+                ..Default::default()
+            }),
+        };
+        let ver_id_v2 = region_v2.ver_id();
+
+        cache
+            .add_region_with_buckets(
+                region_v2,
+                Some(metapb::Buckets {
+                    region_id: 7,
+                    version: 2,
+                    keys: vec![vec![], vec![20]],
+                    ..Default::default()
+                }),
+            )
+            .await;
+
+        assert!(cache.get_buckets_by_ver_id(&ver_id_v1).await.is_none());
+        assert_eq!(
+            cache
+                .get_buckets_by_ver_id(&ver_id_v2)
+                .await
+                .expect("expected cached buckets")
+                .version,
+            2
         );
 
         Ok(())
