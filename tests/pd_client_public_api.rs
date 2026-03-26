@@ -5,6 +5,7 @@ use tikv_client::{
 };
 
 fn assert_pd_client_trait<T: PdClient>() {}
+fn assert_retry_client_trait<T: tikv_client::RetryClientTrait>() {}
 
 #[test]
 fn crate_root_exports_pd_client_types() {
@@ -12,6 +13,11 @@ fn crate_root_exports_pd_client_types() {
     let _: fn(&TransactionClient) -> Arc<PdRpcClient> = TransactionClient::pd_client;
     let _: fn(&SyncTransactionClient) -> Arc<PdRpcClient> = SyncTransactionClient::pd_client;
     assert_pd_client_trait::<PdRpcClient>();
+}
+
+#[test]
+fn crate_root_exports_retry_client_types() {
+    assert_retry_client_trait::<tikv_client::RetryClient>();
 }
 
 #[test]
