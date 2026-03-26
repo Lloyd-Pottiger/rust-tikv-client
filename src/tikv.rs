@@ -6,7 +6,11 @@
 use std::sync::Arc;
 
 pub use crate::Backoff as Backoffer;
+#[doc(inline)]
+pub use crate::Store;
 pub use crate::TransactionClient as KVStore;
+#[doc(inline)]
+pub use crate::Variables;
 
 #[doc(inline)]
 pub use crate::change_pd_region_meta_circuit_breaker_settings;
@@ -45,6 +49,15 @@ pub use crate::region_cache::BatchLocateKeyRangesOpt;
 pub use crate::region_cache::KeyLocation;
 #[doc(inline)]
 pub use crate::region_cache::RegionCache;
+
+/// Create a region-version identifier.
+///
+/// This mirrors client-go `tikv.NewRegionVerID`.
+#[doc(alias = "NewRegionVerID")]
+#[must_use]
+pub fn new_region_ver_id(id: u64, conf_ver: u64, ver: u64) -> crate::RegionVerId {
+    crate::RegionVerId { id, conf_ver, ver }
+}
 
 /// Create a new region cache instance using the global config defaults.
 ///

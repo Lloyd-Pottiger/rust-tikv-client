@@ -7,6 +7,22 @@ use tikv_client::tikv;
 fn tikv_module_exports_kvstore_and_backoffer() {
     let _: Option<tikv::KVStore> = None;
     let _ = tikv::Backoffer::no_backoff();
+    let _: Option<tikv::Store> = None;
+    let _: Option<tikv::Variables> = None;
+}
+
+#[test]
+fn tikv_module_exports_region_ver_id_constructor() {
+    let _: fn(u64, u64, u64) -> tikv::RegionVerId = tikv::new_region_ver_id;
+
+    assert_eq!(
+        tikv::new_region_ver_id(11, 22, 33),
+        tikv::RegionVerId {
+            id: 11,
+            conf_ver: 22,
+            ver: 33,
+        }
+    );
 }
 
 #[test]
