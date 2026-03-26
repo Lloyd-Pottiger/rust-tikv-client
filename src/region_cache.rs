@@ -942,151 +942,153 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         // When range grouping is used on cold cache, avoid issuing N PD lookups by preloading the
         // region metadata with PD BatchScanRegions requests.
         //
-        // Note: PD requires ranges in order. If the caller passes unsorted ranges, keep the
-        // existing locate behavior.
+        // Note: PD requires ranges in order. Preheating sorts ranges before issuing PD requests;
+        // this only warms the cache and does not affect the final locate output order.
         let ranges_are_sorted = ranges
             .windows(2)
             .all(|pair| pair[0].start_key <= pair[1].start_key);
-        if ranges_are_sorted {
-            let to_send = ranges.len().min(MAX_RANGES_PER_BATCH);
+        let to_send = ranges.len().min(MAX_RANGES_PER_BATCH);
 
-            // Even if the range start hits cache, later regions may still be missing. In that
-            // case, preheat only the uncached tail ranges to reduce per-key PD lookups in the main
-            // locate path.
-            let mut uncached_ranges = Vec::new();
-            for range in ranges.iter().take(to_send) {
-                let mut start_key = range.start_key.clone();
-                let end_key = range.end_key.clone();
+        // Even if the range start hits cache, later regions may still be missing. In that case,
+        // preheat only the uncached tail ranges to reduce per-key PD lookups in the main locate
+        // path.
+        let mut uncached_ranges = Vec::new();
+        for range in ranges.iter().take(to_send) {
+            let mut start_key = range.start_key.clone();
+            let end_key = range.end_key.clone();
 
-                loop {
-                    let Some(location) = self.try_locate_key(start_key.clone()).await else {
-                        uncached_ranges.push(crate::kv::KeyRange {
-                            start_key,
-                            end_key: end_key.clone(),
-                        });
-                        break;
-                    };
+            loop {
+                let Some(location) = self.try_locate_key(start_key.clone()).await else {
+                    uncached_ranges.push(crate::kv::KeyRange {
+                        start_key,
+                        end_key: end_key.clone(),
+                    });
+                    break;
+                };
 
-                    let next_start_key = location.end_key;
-                    if next_start_key.is_empty() {
-                        break;
-                    }
-                    if !end_key.is_empty() && next_start_key >= end_key {
-                        break;
-                    }
-                    // Defensive guard against non-progressing cached locations.
-                    if next_start_key <= start_key {
-                        uncached_ranges.push(crate::kv::KeyRange {
-                            start_key,
-                            end_key: end_key.clone(),
-                        });
-                        break;
-                    }
-
-                    start_key = next_start_key;
+                let next_start_key = location.end_key;
+                if next_start_key.is_empty() {
+                    break;
                 }
+                if !end_key.is_empty() && next_start_key >= end_key {
+                    break;
+                }
+                // Defensive guard against non-progressing cached locations.
+                if next_start_key <= start_key {
+                    uncached_ranges.push(crate::kv::KeyRange {
+                        start_key,
+                        end_key: end_key.clone(),
+                    });
+                    break;
+                }
+
+                start_key = next_start_key;
+            }
+        }
+
+        if !uncached_ranges.is_empty() {
+            if !ranges_are_sorted {
+                uncached_ranges.sort_by(|left, right| left.start_key.cmp(&right.start_key));
             }
 
-            if !uncached_ranges.is_empty() {
-                let mut remaining_ranges = uncached_ranges;
+            let mut remaining_ranges = uncached_ranges;
 
-                // Drop ranges that are fully covered by `split_key` and continue from there.
-                //
-                // This mirrors client-go `rangesAfterKey` but is best-effort (linear scan) because
-                // callers may pass overlapping or otherwise irregular range lists.
-                fn ranges_after_key(
-                    mut key_ranges: Vec<crate::kv::KeyRange>,
-                    split_key: &Key,
-                ) -> Vec<crate::kv::KeyRange> {
-                    if key_ranges.is_empty() {
-                        return Vec::new();
-                    }
-                    if split_key.is_empty() {
-                        return Vec::new();
-                    }
-
-                    let last_end = &key_ranges[key_ranges.len() - 1].end_key;
-                    if !last_end.is_empty() && split_key >= last_end {
-                        return Vec::new();
-                    }
-
-                    let mut idx = 0usize;
-                    while idx < key_ranges.len() {
-                        let end = &key_ranges[idx].end_key;
-                        if end.is_empty() || split_key < end {
-                            break;
-                        }
-                        idx += 1;
-                    }
-                    if idx >= key_ranges.len() {
-                        return Vec::new();
-                    }
-
-                    let mut rest = key_ranges.split_off(idx);
-                    if split_key > &rest[0].start_key {
-                        rest[0].start_key = split_key.clone();
-                    }
-                    rest
+            // Drop ranges that are fully covered by `split_key` and continue from there.
+            //
+            // This mirrors client-go `rangesAfterKey` but is best-effort (linear scan) because
+            // callers may pass overlapping or otherwise irregular range lists.
+            fn ranges_after_key(
+                mut key_ranges: Vec<crate::kv::KeyRange>,
+                split_key: &Key,
+            ) -> Vec<crate::kv::KeyRange> {
+                if key_ranges.is_empty() {
+                    return Vec::new();
+                }
+                if split_key.is_empty() {
+                    return Vec::new();
                 }
 
-                loop {
-                    let pd_ranges: Vec<pdpb::KeyRange> = remaining_ranges
-                        .iter()
-                        .map(|range| pdpb::KeyRange {
-                            start_key: range.start_key.clone().into(),
-                            end_key: range.end_key.clone().into(),
-                        })
-                        .collect();
+                let last_end = &key_ranges[key_ranges.len() - 1].end_key;
+                if !last_end.is_empty() && split_key >= last_end {
+                    return Vec::new();
+                }
 
-                    let result = self
-                        .pd_region_meta_circuit_breaker
-                        .execute(|| {
-                            let inner = self.inner_client.clone();
-                            let pd_ranges = pd_ranges;
-                            async move {
-                                inner
-                                    .batch_scan_regions(
-                                        pd_ranges,
-                                        DEFAULT_REGIONS_PER_BATCH,
-                                        options.need_buckets,
-                                    )
-                                    .await
-                            }
-                        })
-                        .await;
-
-                    match result {
-                        Ok(regions) => {
-                            if regions.is_empty() {
-                                break;
-                            }
-
-                            let split_key = regions
-                                .last()
-                                .map(|(region, _)| region.end_key())
-                                .unwrap_or_default();
-
-                            for (region, buckets) in regions {
-                                self.add_region_with_buckets(region, buckets).await;
-                            }
-
-                            // `end_key == ""` means the last region extends to +inf.
-                            if split_key.is_empty() {
-                                break;
-                            }
-                            // Defensive guard against non-progressing PD responses.
-                            if split_key <= remaining_ranges[0].start_key {
-                                break;
-                            }
-
-                            remaining_ranges = ranges_after_key(remaining_ranges, &split_key);
-                            if remaining_ranges.is_empty() {
-                                break;
-                            }
-                        }
-                        Err(Error::Unimplemented) => break,
-                        Err(_) => break,
+                let mut idx = 0usize;
+                while idx < key_ranges.len() {
+                    let end = &key_ranges[idx].end_key;
+                    if end.is_empty() || split_key < end {
+                        break;
                     }
+                    idx += 1;
+                }
+                if idx >= key_ranges.len() {
+                    return Vec::new();
+                }
+
+                let mut rest = key_ranges.split_off(idx);
+                if split_key > &rest[0].start_key {
+                    rest[0].start_key = split_key.clone();
+                }
+                rest
+            }
+
+            loop {
+                let pd_ranges: Vec<pdpb::KeyRange> = remaining_ranges
+                    .iter()
+                    .map(|range| pdpb::KeyRange {
+                        start_key: range.start_key.clone().into(),
+                        end_key: range.end_key.clone().into(),
+                    })
+                    .collect();
+
+                let result = self
+                    .pd_region_meta_circuit_breaker
+                    .execute(|| {
+                        let inner = self.inner_client.clone();
+                        let pd_ranges = pd_ranges;
+                        async move {
+                            inner
+                                .batch_scan_regions(
+                                    pd_ranges,
+                                    DEFAULT_REGIONS_PER_BATCH,
+                                    options.need_buckets,
+                                )
+                                .await
+                        }
+                    })
+                    .await;
+
+                match result {
+                    Ok(regions) => {
+                        if regions.is_empty() {
+                            break;
+                        }
+
+                        let split_key = regions
+                            .last()
+                            .map(|(region, _)| region.end_key())
+                            .unwrap_or_default();
+
+                        for (region, buckets) in regions {
+                            self.add_region_with_buckets(region, buckets).await;
+                        }
+
+                        // `end_key == ""` means the last region extends to +inf.
+                        if split_key.is_empty() {
+                            break;
+                        }
+                        // Defensive guard against non-progressing PD responses.
+                        if split_key <= remaining_ranges[0].start_key {
+                            break;
+                        }
+
+                        remaining_ranges = ranges_after_key(remaining_ranges, &split_key);
+                        if remaining_ranges.is_empty() {
+                            break;
+                        }
+                    }
+                    Err(Error::Unimplemented) => break,
+                    Err(_) => break,
                 }
             }
         }
@@ -2457,6 +2459,39 @@ mod test {
 
         // Even if the range start hits cache, preheat should still batch-load the missing tail so
         // the main locate path doesn't fall back to per-key PD lookups.
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 1);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_preheats_when_ranges_unsorted(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let region1 = region_with_leader(1, vec![], vec![10], 42);
+        let region2 = region_with_leader(2, vec![10], vec![20], 42);
+        let region3 = region_with_leader(3, vec![20], vec![], 42);
+
+        retry_client.regions.lock().await.insert(1, region1);
+        retry_client.regions.lock().await.insert(2, region2);
+        retry_client.regions.lock().await.insert(3, region3);
+
+        // Caller-provided ranges may not be sorted. Preheating should still send sorted ranges to
+        // PD, while keeping the final locate output order unchanged.
+        let _ = cache
+            .batch_locate_key_ranges_with_opts(
+                vec![
+                    crate::kv::KeyRange::new(vec![12], vec![18]),
+                    crate::kv::KeyRange::new(vec![1], vec![3]),
+                    crate::kv::KeyRange::new(vec![3], vec![8]),
+                ],
+                std::iter::empty(),
+            )
+            .await?;
+
         assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 1);
         assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
 
