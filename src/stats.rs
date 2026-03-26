@@ -301,6 +301,7 @@ pub(crate) fn inc_stale_region_from_pd_counter() {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn inc_bucket_clamped_counter() {
     if let Some(counter) = TIKV_CLIENT_RUST_BUCKET_CLAMPED_COUNTER.as_ref() {
         counter.inc();
