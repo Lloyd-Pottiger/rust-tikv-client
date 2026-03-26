@@ -59,6 +59,8 @@ fn tikv_module_exports_region_cache_helpers_and_keyrange() {
 #[test]
 fn tikv_module_exports_label_filters() {
     let _: tikv::LabelFilter = tikv::label_filter_all_node;
+    let _: fn(&tikv_client::proto::metapb::Store) -> tikv_client::tikvrpc::EndpointType =
+        tikv::get_store_type_by_meta;
 
     let tiflash_labels = vec![tikv_client::StoreLabel {
         key: tikv_client::tikvrpc::ENGINE_LABEL_KEY.to_owned(),
@@ -98,4 +100,13 @@ fn tikv_module_exports_label_filters() {
         &non_tiflash_labels
     ));
     assert!(tikv::label_filter_all_node(&non_tiflash_labels));
+
+    let tiflash_store = tikv_client::proto::metapb::Store {
+        labels: tiflash_labels,
+        ..Default::default()
+    };
+    assert_eq!(
+        tikv::get_store_type_by_meta(&tiflash_store),
+        tikv_client::tikvrpc::EndpointType::TiFlash
+    );
 }

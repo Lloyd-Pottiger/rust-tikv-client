@@ -73,6 +73,15 @@ fn store_has_label(labels: &[crate::StoreLabel], key: &str, value: &str) -> bool
         .any(|label| label.key == key && label.value == value)
 }
 
+/// Determine the store endpoint type from PD store metadata.
+///
+/// This mirrors client-go `tikv.GetStoreTypeByMeta`.
+#[doc(alias = "GetStoreTypeByMeta")]
+#[must_use]
+pub fn get_store_type_by_meta(store: &crate::proto::metapb::Store) -> crate::tikvrpc::EndpointType {
+    crate::tikvrpc::EndpointType::from_store_labels(&store.labels)
+}
+
 /// Select stores whose labels contain `<engine, tiflash>` and `<engine_role, write>`.
 ///
 /// This mirrors client-go `tikv.LabelFilterOnlyTiFlashWriteNode`.
