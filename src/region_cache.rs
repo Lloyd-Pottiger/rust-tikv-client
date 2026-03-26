@@ -23,6 +23,7 @@ use crate::pd_region_meta_circuit_breaker::default_pd_region_meta_circuit_breake
 use crate::pd_region_meta_circuit_breaker::PdRegionMetaCircuitBreaker;
 use crate::proto::metapb::Store;
 use crate::proto::metapb::{self};
+use crate::proto::pdpb;
 use crate::region::RegionId;
 use crate::region::RegionVerId;
 use crate::region::RegionWithLeader;
@@ -33,6 +34,7 @@ use crate::Key;
 use crate::Result;
 
 const MAX_RETRY_WAITING_CONCURRENT_REQUEST: usize = 4;
+const DEFAULT_REGIONS_PER_BATCH: i32 = 128;
 
 fn duration_to_millis_saturating(duration: Duration) -> u64 {
     let millis = duration.as_millis();
@@ -924,13 +926,73 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     where
         I: IntoIterator<Item = BatchLocateKeyRangesOpt> + Clone,
     {
+        let options = BatchLocateKeyRangesOptions::from_opts(opts.clone());
+
+        let ranges: Vec<crate::kv::KeyRange> = ranges
+            .into_iter()
+            .filter(|range| range.end_key.is_empty() || range.start_key < range.end_key)
+            .collect();
+
+        if ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // When range grouping is used on cold cache, avoid issuing N PD lookups by preloading the
+        // region metadata with a single BatchScanRegions request.
+        //
+        // Note: PD requires ranges in order. If the caller passes unsorted ranges, keep the
+        // existing locate behavior.
+        let ranges_are_sorted = ranges
+            .windows(2)
+            .all(|pair| pair[0].start_key <= pair[1].start_key);
+        if ranges_are_sorted {
+            let mut has_miss = false;
+            for range in &ranges {
+                if self.try_locate_key(range.start_key.clone()).await.is_none() {
+                    has_miss = true;
+                    break;
+                }
+            }
+            if has_miss {
+                let pd_ranges: Vec<pdpb::KeyRange> = ranges
+                    .iter()
+                    .map(|range| pdpb::KeyRange {
+                        start_key: range.start_key.clone().into(),
+                        end_key: range.end_key.clone().into(),
+                    })
+                    .collect();
+
+                match self
+                    .pd_region_meta_circuit_breaker
+                    .execute(|| {
+                        let inner = self.inner_client.clone();
+                        let pd_ranges = pd_ranges;
+                        async move {
+                            inner
+                                .batch_scan_regions(
+                                    pd_ranges,
+                                    DEFAULT_REGIONS_PER_BATCH,
+                                    options.need_buckets,
+                                )
+                                .await
+                        }
+                    })
+                    .await
+                {
+                    Ok(regions) => {
+                        for (region, buckets) in regions {
+                            self.add_region_with_buckets(region, buckets).await;
+                        }
+                    }
+                    Err(Error::Unimplemented) => {}
+                    Err(_) => {}
+                }
+            }
+        }
+
         let mut locations = Vec::new();
 
         for range in ranges {
-            if !range.end_key.is_empty() && range.start_key >= range.end_key {
-                continue;
-            }
-
             for location in self
                 .locate_key_range_with_opts(range.start_key, range.end_key, opts.clone())
                 .await?
@@ -1398,6 +1460,7 @@ mod test {
     use crate::proto::keyspacepb;
     use crate::proto::metapb::RegionEpoch;
     use crate::proto::metapb::{self};
+    use crate::proto::pdpb;
     use crate::region::RegionId;
     use crate::region::RegionVerId;
     use crate::region::RegionWithLeader;
@@ -1409,6 +1472,7 @@ mod test {
     use crate::Result;
 
     type ScanRegionsCall = (Vec<u8>, Vec<u8>, i32);
+    type BatchScanRegionsCall = (Vec<pdpb::KeyRange>, i32, bool);
 
     struct TraceHookReset;
 
@@ -1484,6 +1548,8 @@ mod test {
         pub get_store_count: AtomicU64,
         pub scan_regions_count: AtomicU64,
         pub scan_regions_calls: Mutex<Vec<ScanRegionsCall>>,
+        pub batch_scan_regions_count: AtomicU64,
+        pub batch_scan_regions_calls: Mutex<Vec<BatchScanRegionsCall>>,
     }
 
     #[async_trait]
@@ -1576,6 +1642,64 @@ mod test {
                 out.push(region);
                 if out.len() >= limit as usize {
                     break;
+                }
+            }
+
+            Ok(out)
+        }
+
+        async fn batch_scan_regions(
+            self: Arc<Self>,
+            ranges: Vec<pdpb::KeyRange>,
+            limit: i32,
+            need_buckets: bool,
+        ) -> Result<Vec<(RegionWithLeader, Option<metapb::Buckets>)>> {
+            self.batch_scan_regions_count.fetch_add(1, SeqCst);
+            self.batch_scan_regions_calls
+                .lock()
+                .await
+                .push((ranges.clone(), limit, need_buckets));
+
+            if limit <= 0 {
+                return Ok(Vec::new());
+            }
+
+            let mut regions: Vec<RegionWithLeader> =
+                self.regions.lock().await.values().cloned().collect();
+            regions.sort_by(|left, right| left.region.start_key.cmp(&right.region.start_key));
+
+            let buckets = self.buckets.lock().await.clone();
+
+            let mut seen = HashSet::new();
+            let mut out = Vec::new();
+            for range in ranges {
+                let start_key = Key::from(range.start_key);
+                let end_key = Key::from(range.end_key);
+
+                let Some(start_idx) = regions
+                    .iter()
+                    .position(|region| region.contains(&start_key))
+                else {
+                    continue;
+                };
+
+                for region in regions.iter().skip(start_idx) {
+                    if !end_key.is_empty() && region.start_key() >= end_key {
+                        break;
+                    }
+                    let ver_id = region.ver_id();
+                    if !seen.insert(ver_id.clone()) {
+                        continue;
+                    }
+                    let buckets = if need_buckets {
+                        buckets.get(&ver_id).cloned()
+                    } else {
+                        None
+                    };
+                    out.push((region.clone(), buckets));
+                    if out.len() >= limit as usize {
+                        return Ok(out);
+                    }
                 }
             }
 
@@ -2049,6 +2173,77 @@ mod test {
         assert_eq!(locations.len(), 2);
         assert_eq!(locations[0].region.id, 1);
         assert_eq!(locations[1].region.id, 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_uses_pd_batch_scan_when_cache_misses(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let region1 = region(1, vec![], vec![10]);
+        let region2 = region(2, vec![10], vec![20]);
+        let region3 = region(3, vec![20], vec![]);
+
+        let ver_id1 = region1.ver_id();
+        let ver_id2 = region2.ver_id();
+        let ver_id3 = region3.ver_id();
+
+        retry_client.regions.lock().await.insert(1, region1);
+        retry_client.regions.lock().await.insert(2, region2);
+        retry_client.regions.lock().await.insert(3, region3);
+
+        retry_client.buckets.lock().await.insert(
+            ver_id1,
+            metapb::Buckets {
+                region_id: 1,
+                version: 3,
+                keys: vec![vec![], vec![10]],
+                ..Default::default()
+            },
+        );
+        retry_client.buckets.lock().await.insert(
+            ver_id2,
+            metapb::Buckets {
+                region_id: 2,
+                version: 5,
+                keys: vec![vec![10], vec![20]],
+                ..Default::default()
+            },
+        );
+        retry_client.buckets.lock().await.insert(
+            ver_id3,
+            metapb::Buckets {
+                region_id: 3,
+                version: 7,
+                keys: vec![vec![20], vec![]],
+                ..Default::default()
+            },
+        );
+
+        let locations = cache
+            .batch_locate_key_ranges_with_opts(
+                vec![
+                    crate::kv::KeyRange::new(vec![1], vec![3]),
+                    crate::kv::KeyRange::new(vec![3], vec![8]),
+                    crate::kv::KeyRange::new(vec![12], vec![18]),
+                ],
+                [with_need_buckets()],
+            )
+            .await?;
+
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[0].bucket_version(), 3);
+        assert_eq!(locations[1].region.id, 2);
+        assert_eq!(locations[1].bucket_version(), 5);
+
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 1);
+        let calls = retry_client.batch_scan_regions_calls.lock().await.clone();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].2, "expected need_buckets=true");
 
         Ok(())
     }
