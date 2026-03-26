@@ -35,6 +35,7 @@ use crate::Result;
 
 const MAX_RETRY_WAITING_CONCURRENT_REQUEST: usize = 4;
 const DEFAULT_REGIONS_PER_BATCH: i32 = 128;
+const MAX_RANGES_PER_BATCH: usize = 16 * DEFAULT_REGIONS_PER_BATCH as usize;
 
 fn duration_to_millis_saturating(duration: Duration) -> u64 {
     let millis = duration.as_millis();
@@ -954,8 +955,10 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 }
             }
             if has_miss {
+                let to_send = ranges.len().min(MAX_RANGES_PER_BATCH);
                 let pd_ranges: Vec<pdpb::KeyRange> = ranges
                     .iter()
+                    .take(to_send)
                     .map(|range| pdpb::KeyRange {
                         start_key: range.start_key.clone().into(),
                         end_key: range.end_key.clone().into(),
@@ -2244,6 +2247,38 @@ mod test {
         let calls = retry_client.batch_scan_regions_calls.lock().await.clone();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].2, "expected need_buckets=true");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_caps_pd_batch_scan_ranges(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        // Ensure the post-preload locate path can succeed without issuing per-range PD requests.
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(1, region(1, vec![], vec![]));
+
+        let total = 2048 + 10;
+        let mut ranges = Vec::with_capacity(total);
+        for i in 0..total {
+            let start = (i as u32).to_be_bytes().to_vec();
+            let end = ((i + 1) as u32).to_be_bytes().to_vec();
+            ranges.push(crate::kv::KeyRange::new(start, end));
+        }
+
+        let _ = cache
+            .batch_locate_key_ranges_with_opts(ranges, std::iter::empty())
+            .await?;
+
+        let calls = retry_client.batch_scan_regions_calls.lock().await.clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.len(), 2048);
 
         Ok(())
     }
