@@ -96,6 +96,16 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    async fn batch_scan_regions(
+        self: Arc<Self>,
+        ranges: Vec<pdpb::KeyRange>,
+        limit: i32,
+        need_buckets: bool,
+    ) -> Result<Vec<(RegionWithLeader, Option<metapb::Buckets>)>> {
+        let _ = (ranges, limit, need_buckets);
+        Err(Error::Unimplemented)
+    }
+
     async fn get_store(self: Arc<Self>, id: StoreId) -> Result<metapb::Store>;
 
     async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>>;
@@ -441,6 +451,27 @@ impl RetryClientTrait for RetryClient<Cluster> {
         )
     }
 
+    async fn batch_scan_regions(
+        self: Arc<Self>,
+        ranges: Vec<pdpb::KeyRange>,
+        limit: i32,
+        need_buckets: bool,
+    ) -> Result<Vec<(RegionWithLeader, Option<metapb::Buckets>)>> {
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "batch_scan_regions", |cluster| {
+                let ranges = ranges.clone();
+                async {
+                    cluster
+                        .batch_scan_regions(ranges, limit, need_buckets, self.timeout)
+                        .await
+                        .and_then(batch_scan_regions_from_response)
+                }
+            }),
+        )
+    }
+
     async fn get_store(self: Arc<Self>, id: StoreId) -> Result<metapb::Store> {
         let started_at = Instant::now();
         finish_pd_wait(
@@ -750,6 +781,29 @@ fn scan_regions_from_response(resp: pdpb::ScanRegionsResponse) -> Result<Vec<Reg
     }
 }
 
+fn batch_scan_regions_from_response(
+    resp: pdpb::BatchScanRegionsResponse,
+) -> Result<Vec<(RegionWithLeader, Option<metapb::Buckets>)>> {
+    resp.regions
+        .into_iter()
+        .map(|region_info| {
+            let region = region_info.region.ok_or_else(|| {
+                internal_err!("missing region in PD BatchScanRegionsResponse.regions entry")
+            })?;
+            if region.region_epoch.is_none() {
+                return Err(internal_err!(
+                    "missing region_epoch in PD BatchScanRegionsResponse for region_id {}",
+                    region.id
+                ));
+            }
+            Ok((
+                RegionWithLeader::new(region, region_info.leader),
+                region_info.buckets,
+            ))
+        })
+        .collect()
+}
+
 fn store_from_response(resp: pdpb::GetStoreResponse, store_id: StoreId) -> Result<metapb::Store> {
     resp.store.ok_or_else(|| {
         internal_err!(
@@ -985,6 +1039,77 @@ mod test {
 
         let err = scan_regions_from_response(resp).unwrap_err().to_string();
         assert!(err.contains("length mismatch"));
+    }
+
+    #[test]
+    fn test_batch_scan_regions_from_response_returns_regions_and_buckets() {
+        let mut region = metapb::Region::default();
+        region.id = 7;
+        region.start_key = vec![1];
+        region.end_key = vec![2];
+        region.region_epoch = Some(metapb::RegionEpoch::default());
+
+        let leader = metapb::Peer {
+            store_id: 11,
+            ..Default::default()
+        };
+
+        let buckets = metapb::Buckets {
+            region_id: 7,
+            version: 9,
+            keys: vec![vec![1], vec![2]],
+            ..Default::default()
+        };
+
+        let resp = pdpb::BatchScanRegionsResponse {
+            regions: vec![pdpb::Region {
+                region: Some(region.clone()),
+                leader: Some(leader.clone()),
+                buckets: Some(buckets.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let regions = batch_scan_regions_from_response(resp).unwrap();
+        assert_eq!(
+            regions,
+            vec![(RegionWithLeader::new(region, Some(leader)), Some(buckets))]
+        );
+    }
+
+    #[test]
+    fn test_batch_scan_regions_from_response_missing_epoch_returns_error() {
+        let mut region = metapb::Region::default();
+        region.id = 7;
+        region.start_key = vec![1];
+        region.end_key = vec![2];
+
+        let resp = pdpb::BatchScanRegionsResponse {
+            regions: vec![pdpb::Region {
+                region: Some(region),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let err = batch_scan_regions_from_response(resp)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing region_epoch"));
+    }
+
+    #[test]
+    fn test_batch_scan_regions_from_response_missing_region_returns_error() {
+        let resp = pdpb::BatchScanRegionsResponse {
+            regions: vec![pdpb::Region::default()],
+            ..Default::default()
+        };
+
+        let err = batch_scan_regions_from_response(resp)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing region"));
     }
 
     #[test]

@@ -147,6 +147,22 @@ impl Cluster {
         req.send(&mut self.client, timeout).await
     }
 
+    pub async fn batch_scan_regions(
+        &mut self,
+        ranges: Vec<pdpb::KeyRange>,
+        limit: i32,
+        need_buckets: bool,
+        timeout: Duration,
+    ) -> Result<pdpb::BatchScanRegionsResponse> {
+        let mut req = pd_request!(self.id, pdpb::BatchScanRegionsRequest);
+        req.need_buckets = need_buckets;
+        req.ranges = ranges;
+        req.limit = limit;
+        // Keep `contain_all_key_range` false to allow partial responses when `limit` is reached,
+        // matching client-go's incremental batch scan usage.
+        req.send(&mut self.client, timeout).await
+    }
+
     pub async fn get_store(
         &mut self,
         id: u64,
@@ -705,6 +721,16 @@ impl PdMessage for pdpb::ScanRegionsRequest {
 }
 
 #[async_trait]
+impl PdMessage for pdpb::BatchScanRegionsRequest {
+    type Client = pdpb::pd_client::PdClient<Channel>;
+    type Response = pdpb::BatchScanRegionsResponse;
+
+    async fn rpc(req: Request<Self>, client: &mut Self::Client) -> GrpcResult<Self::Response> {
+        Ok(client.batch_scan_regions(req).await?.into_inner())
+    }
+}
+
+#[async_trait]
 impl PdMessage for pdpb::GetStoreRequest {
     type Client = pdpb::pd_client::PdClient<Channel>;
     type Response = pdpb::GetStoreResponse;
@@ -861,6 +887,12 @@ impl PdResponse for pdpb::GetRegionResponse {
 }
 
 impl PdResponse for pdpb::ScanRegionsResponse {
+    fn header(&self) -> Option<&pdpb::ResponseHeader> {
+        self.header.as_ref()
+    }
+}
+
+impl PdResponse for pdpb::BatchScanRegionsResponse {
     fn header(&self) -> Option<&pdpb::ResponseHeader> {
         self.header.as_ref()
     }
