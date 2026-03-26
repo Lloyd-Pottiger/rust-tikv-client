@@ -34,7 +34,7 @@ pub use crate::kv::KeyRange;
 #[doc(alias = "NewRegionCache")]
 pub fn new_region_cache<C>(pd_client: Arc<C>) -> crate::RegionCache<C>
 where
-    C: crate::pd::RetryClientTrait + Send + Sync,
+    C: crate::RetryClientTrait + Send + Sync,
 {
     let config = crate::config::get_global_config();
     crate::RegionCache::new_with_ttl(

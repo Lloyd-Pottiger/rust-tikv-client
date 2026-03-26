@@ -154,6 +154,10 @@ pub use crate::pd::PdClient;
 #[doc(inline)]
 pub use crate::pd::PdRpcClient;
 #[doc(inline)]
+pub use crate::pd::RetryClient;
+#[doc(inline)]
+pub use crate::pd::RetryClientTrait;
+#[doc(inline)]
 pub use crate::shutting_down::load_shutting_down;
 #[doc(inline)]
 pub use crate::shutting_down::store_shutting_down;
