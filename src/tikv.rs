@@ -15,7 +15,11 @@ pub use crate::disable_resource_control;
 #[doc(inline)]
 pub use crate::enable_resource_control;
 #[doc(inline)]
+pub use crate::load_shutting_down;
+#[doc(inline)]
 pub use crate::set_resource_control_interceptor;
+#[doc(inline)]
+pub use crate::store_shutting_down;
 #[doc(inline)]
 pub use crate::unset_resource_control_interceptor;
 
