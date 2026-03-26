@@ -38,6 +38,8 @@ fn tikv_module_exports_codec_prefix_helpers() {
 
 #[test]
 fn tikv_module_exports_region_cache_helpers_and_keyrange() {
+    let _: Option<tikv::RegionVerId> = None;
+    let _: Option<tikv::KeyLocation> = None;
     let _: Option<tikv::KeyRange> = None;
     let _: tikv::BatchLocateKeyRangesOpt = tikv::with_need_buckets();
     let _: tikv::BatchLocateKeyRangesOpt = tikv::with_need_region_has_leader_peer();
@@ -46,7 +48,7 @@ fn tikv_module_exports_region_cache_helpers_and_keyrange() {
     where
         C: tikv_client::RetryClientTrait + Send + Sync,
     {
-        let _: fn(Arc<C>) -> tikv_client::RegionCache<C> = tikv::new_region_cache::<C>;
+        let _: fn(Arc<C>) -> tikv::RegionCache<C> = tikv::new_region_cache::<C>;
     }
 
     assert_new_region_cache_signature::<tikv_client::RetryClient>();

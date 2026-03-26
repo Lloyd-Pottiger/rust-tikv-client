@@ -30,11 +30,17 @@ pub use crate::set_store_liveness_timeout;
 #[doc(inline)]
 pub use crate::kv::KeyRange;
 #[doc(inline)]
+pub use crate::region::RegionVerId;
+#[doc(inline)]
 pub use crate::region_cache::with_need_buckets;
 #[doc(inline)]
 pub use crate::region_cache::with_need_region_has_leader_peer;
 #[doc(inline)]
 pub use crate::region_cache::BatchLocateKeyRangesOpt;
+#[doc(inline)]
+pub use crate::region_cache::KeyLocation;
+#[doc(inline)]
+pub use crate::region_cache::RegionCache;
 
 /// Create a new region cache instance using the global config defaults.
 ///
