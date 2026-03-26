@@ -15,6 +15,8 @@ fn tikv_module_exports_global_helpers() {
     let _: fn(Duration) = tikv::set_store_liveness_timeout;
     #[allow(deprecated)]
     let _: fn(Duration) = tikv::set_region_cache_ttl;
+    let _: fn(fn(&mut tikv_client::PdRegionMetaCircuitBreakerSettings)) =
+        tikv::change_pd_region_meta_circuit_breaker_settings;
 
     let _: fn() = tikv::enable_resource_control;
     let _: fn() = tikv::disable_resource_control;

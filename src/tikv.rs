@@ -9,6 +9,8 @@ pub use crate::Backoff as Backoffer;
 pub use crate::TransactionClient as KVStore;
 
 #[doc(inline)]
+pub use crate::change_pd_region_meta_circuit_breaker_settings;
+#[doc(inline)]
 pub use crate::disable_resource_control;
 #[doc(inline)]
 pub use crate::enable_resource_control;
