@@ -22,3 +22,14 @@ fn tikv_module_exports_global_helpers() {
         tikv::set_resource_control_interceptor;
     let _: fn() = tikv::unset_resource_control_interceptor;
 }
+
+#[test]
+fn tikv_module_exports_codec_prefix_helpers() {
+    let _: u8 = tikv::CODEC_V2_RAW_KEYSPACE_PREFIX;
+    let _: u8 = tikv::CODEC_V2_TXN_KEYSPACE_PREFIX;
+    let v2 = tikv::codec_v2_prefixes();
+    assert_eq!(v2.len(), 2);
+    assert_eq!(v2[0], &[tikv::CODEC_V2_RAW_KEYSPACE_PREFIX]);
+    assert_eq!(v2[1], &[tikv::CODEC_V2_TXN_KEYSPACE_PREFIX]);
+    assert_eq!(tikv::codec_v1_exclude_prefixes(), v2);
+}
