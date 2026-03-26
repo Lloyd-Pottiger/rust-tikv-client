@@ -100,6 +100,67 @@ fn check_and_maybe_extend_ttl(
     }
 }
 
+fn clamp_bucket_keys_to_region(
+    region_start: &[u8],
+    region_end: &[u8],
+    keys: Vec<Vec<u8>>,
+) -> (Vec<Vec<u8>>, bool) {
+    if keys.len() < 2 {
+        return (vec![region_start.to_vec(), region_end.to_vec()], true);
+    }
+
+    let start_matches = keys
+        .first()
+        .map(|key| key.as_slice() == region_start)
+        .unwrap_or(false);
+    let end_matches = keys
+        .last()
+        .map(|key| key.as_slice() == region_end)
+        .unwrap_or(false);
+
+    let keys_len = keys.len();
+    let region_end_bounded = !region_end.is_empty();
+    let mut clamped = !start_matches || !end_matches;
+
+    let mut out = Vec::with_capacity(keys_len);
+    out.push(region_start.to_vec());
+
+    for (index, key) in keys.into_iter().enumerate() {
+        if index == 0 || index + 1 == keys_len {
+            continue;
+        }
+
+        // Empty end key means infinity and is only valid for the region end boundary.
+        if key.is_empty() {
+            clamped = true;
+            continue;
+        }
+
+        if key.as_slice() <= region_start {
+            clamped = true;
+            continue;
+        }
+
+        if region_end_bounded && key.as_slice() >= region_end {
+            clamped = true;
+            continue;
+        }
+
+        if let Some(prev) = out.last() {
+            if key.as_slice() <= prev.as_slice() {
+                clamped = true;
+                continue;
+            }
+        }
+
+        out.push(key);
+    }
+
+    out.push(region_end.to_vec());
+
+    (out, clamped)
+}
+
 struct RegionCacheMap {
     /// RegionVerID -> Region. It stores the concrete region caches.
     /// RegionVerID is the unique identifier of a region *across time*.
@@ -250,17 +311,23 @@ impl<Client> RegionCache<Client> {
         version: u64,
         keys: Vec<Vec<u8>>,
     ) {
-        let region_id = ver_id.id;
         let mut cache = self.region_cache.write().await;
-        if !cache.ver_id_to_region.contains_key(&ver_id) {
+        let Some(region) = cache.ver_id_to_region.get(&ver_id) else {
             return;
-        }
+        };
 
         let should_replace = cache
             .ver_id_to_buckets
             .get(&ver_id)
             .map_or(true, |cached| cached.version < version);
         if should_replace {
+            let (keys, clamped) =
+                clamp_bucket_keys_to_region(&region.region.start_key, &region.region.end_key, keys);
+            if clamped {
+                stats::inc_bucket_clamped_counter();
+            }
+
+            let region_id = ver_id.id;
             cache.ver_id_to_buckets.insert(
                 ver_id,
                 Arc::new(metapb::Buckets {
@@ -654,6 +721,9 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     ) -> bool {
         // This takes a write lock because we update multiple indices consistently. This runs on
         // region-cache update paths (e.g. cache miss), not the hot-path request routing.
+        let region_start_key = region.region.start_key.clone();
+        let region_end_key = region.region.end_key.clone();
+
         let mut cache = self.region_cache.write().await;
         let new_ver_id = region.ver_id();
         if let Some(old_ver_id) = cache.id_to_ver_id.get(&new_ver_id.id) {
@@ -744,12 +814,19 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             .ver_id_to_ttl_deadline_ms
             .insert(ver_id.clone(), AtomicU64::new(ttl_deadline_ms));
 
-        if let Some(buckets) = buckets {
+        if let Some(mut buckets) = buckets {
             let should_replace = cache
                 .ver_id_to_buckets
                 .get(&ver_id)
                 .map_or(true, |cached| buckets.version >= cached.version);
             if should_replace {
+                let (keys, clamped) =
+                    clamp_bucket_keys_to_region(&region_start_key, &region_end_key, buckets.keys);
+                if clamped {
+                    stats::inc_bucket_clamped_counter();
+                }
+                buckets.keys = keys;
+
                 cache.ver_id_to_buckets.insert(ver_id, Arc::new(buckets));
             }
         }
@@ -929,6 +1006,19 @@ mod test {
         prometheus::gather()
             .iter()
             .find(|family| family.get_name() == "tikv_client_stale_region_from_pd")
+            .and_then(|family| {
+                family
+                    .get_metric()
+                    .first()
+                    .map(|metric| metric.get_counter().get_value())
+            })
+            .unwrap_or(0.0)
+    }
+
+    fn bucket_clamped_counter_value() -> f64 {
+        prometheus::gather()
+            .iter()
+            .find(|family| family.get_name() == "tikv_client_bucket_clamped")
             .and_then(|family| {
                 family
                     .get_metric()
@@ -1355,6 +1445,58 @@ mod test {
             .await
             .expect("expected buckets");
         assert_eq!(buckets.version, 10);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(metrics)]
+    async fn test_region_cache_clamps_bucket_keys_and_records_metrics() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client, Duration::ZERO, Duration::ZERO);
+
+        let region = RegionWithLeader {
+            region: metapb::Region {
+                id: 123,
+                start_key: vec![10],
+                end_key: vec![20],
+                region_epoch: Some(RegionEpoch {
+                    conf_ver: 1,
+                    version: 1,
+                }),
+                ..Default::default()
+            },
+            leader: Some(metapb::Peer {
+                store_id: 1,
+                ..Default::default()
+            }),
+        };
+        let ver_id = region.ver_id();
+
+        let before = bucket_clamped_counter_value();
+        cache
+            .add_region_with_buckets(
+                region,
+                Some(metapb::Buckets {
+                    region_id: 123,
+                    version: 1,
+                    keys: vec![vec![0], vec![15], vec![30]],
+                    ..Default::default()
+                }),
+            )
+            .await;
+
+        let after = bucket_clamped_counter_value();
+        assert!(
+            after >= before + 1.0,
+            "expected bucket_clamped counter to increase"
+        );
+
+        let buckets = cache
+            .get_buckets_by_ver_id(&ver_id)
+            .await
+            .expect("expected buckets");
+        assert_eq!(buckets.keys, vec![vec![10], vec![15], vec![20]]);
 
         Ok(())
     }
