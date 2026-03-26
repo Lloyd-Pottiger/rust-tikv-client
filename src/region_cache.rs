@@ -161,6 +161,75 @@ fn clamp_bucket_keys_to_region(
     (out, clamped)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BucketLocation {
+    pub start_key: Key,
+    pub end_key: Key,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct KeyLocation {
+    pub region: RegionVerId,
+    pub start_key: Key,
+    pub end_key: Key,
+    pub buckets: Option<Arc<metapb::Buckets>>,
+}
+
+impl KeyLocation {
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn contains(&self, key: &Key) -> bool {
+        self.start_key.as_ref() <= key && (self.end_key.is_empty() || key < &self.end_key)
+    }
+
+    fn covers_end_key(&self, end_key: &Key) -> bool {
+        end_key.is_empty() || self.end_key.is_empty() || end_key <= &self.end_key
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn bucket_version(&self) -> u64 {
+        self.buckets.as_ref().map_or(0, |buckets| buckets.version)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn locate_bucket(&self, key: &Key) -> Option<BucketLocation> {
+        if !self.contains(key) {
+            return None;
+        }
+
+        let Some(buckets) = self.buckets.as_ref() else {
+            return Some(BucketLocation {
+                start_key: self.start_key.clone(),
+                end_key: self.end_key.clone(),
+            });
+        };
+
+        if buckets.keys.is_empty() {
+            return Some(BucketLocation {
+                start_key: self.start_key.clone(),
+                end_key: self.end_key.clone(),
+            });
+        }
+
+        let mut bucket_start = self.start_key.clone();
+        for boundary in &buckets.keys {
+            let boundary = Key::from(boundary.clone());
+            if key < &boundary {
+                return Some(BucketLocation {
+                    start_key: bucket_start,
+                    end_key: boundary,
+                });
+            }
+            bucket_start = boundary;
+        }
+
+        Some(BucketLocation {
+            start_key: bucket_start,
+            end_key: self.end_key.clone(),
+        })
+    }
+}
+
 struct RegionCacheMap {
     /// RegionVerID -> Region. It stores the concrete region caches.
     /// RegionVerID is the unique identifier of a region *across time*.
@@ -342,6 +411,24 @@ impl<Client> RegionCache<Client> {
 }
 
 impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
+    async fn key_location_for_region(&self, region: RegionWithLeader) -> KeyLocation {
+        let ver_id = region.ver_id();
+        let buckets = self
+            .region_cache
+            .read()
+            .await
+            .ver_id_to_buckets
+            .get(&ver_id)
+            .cloned();
+
+        KeyLocation {
+            region: ver_id,
+            start_key: region.start_key(),
+            end_key: region.end_key(),
+            buckets,
+        }
+    }
+
     // Retrieve cache entry by key. If there's no entry, query PD and update cache.
     pub async fn get_region_by_key(&self, key: &Key) -> Result<RegionWithLeader> {
         let trace_enabled = trace::is_category_enabled(Category::RegionCache);
@@ -520,6 +607,57 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         stats::region_cache_operation("get_region_by_id", false);
         stats::observe_load_region_cache("get_region_by_id", started_at.elapsed());
         Err(err)
+    }
+
+    pub(crate) async fn locate_key_range(
+        &self,
+        mut start_key: Key,
+        end_key: Key,
+    ) -> Result<Vec<KeyLocation>> {
+        if !end_key.is_empty() && start_key >= end_key {
+            return Ok(Vec::new());
+        }
+
+        let mut locations = Vec::new();
+        loop {
+            let region = self.get_region_by_key(&start_key).await?;
+            let location = self.key_location_for_region(region).await;
+            let location_end = location.end_key.clone();
+            let covers_end = location.covers_end_key(&end_key);
+            locations.push(location);
+
+            if covers_end || location_end == start_key {
+                break;
+            }
+            start_key = location_end;
+        }
+
+        Ok(locations)
+    }
+
+    pub(crate) async fn batch_locate_key_ranges(
+        &self,
+        ranges: Vec<crate::kv::KeyRange>,
+    ) -> Result<Vec<KeyLocation>> {
+        let mut locations = Vec::new();
+
+        for range in ranges {
+            if !range.end_key.is_empty() && range.start_key >= range.end_key {
+                continue;
+            }
+
+            for location in self
+                .locate_key_range(range.start_key, range.end_key)
+                .await?
+            {
+                if locations.last() == Some(&location) {
+                    continue;
+                }
+                locations.push(location);
+            }
+        }
+
+        Ok(locations)
     }
 
     pub async fn get_store_by_id(&self, id: StoreId) -> Result<Store> {
@@ -964,6 +1102,8 @@ mod test {
     use serial_test::serial;
     use tokio::sync::Mutex;
 
+    use super::BucketLocation;
+    use super::KeyLocation;
     use super::RegionCache;
     use crate::common::Error;
     use crate::pd::RetryClientTrait;
@@ -1497,6 +1637,131 @@ mod test {
             .await
             .expect("expected buckets");
         assert_eq!(buckets.keys, vec![vec![10], vec![15], vec![20]]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_key_location_locates_bucket_and_clamps_region_edges() {
+        let location = KeyLocation {
+            region: RegionVerId {
+                id: 1,
+                conf_ver: 1,
+                ver: 1,
+            },
+            start_key: vec![10].into(),
+            end_key: vec![20].into(),
+            buckets: Some(Arc::new(metapb::Buckets {
+                region_id: 1,
+                version: 7,
+                keys: vec![vec![12], vec![15]],
+                ..Default::default()
+            })),
+        };
+
+        assert_eq!(
+            location.locate_bucket(&Key::from(vec![11])),
+            Some(BucketLocation {
+                start_key: vec![10].into(),
+                end_key: vec![12].into(),
+            })
+        );
+        assert_eq!(
+            location.locate_bucket(&Key::from(vec![12])),
+            Some(BucketLocation {
+                start_key: vec![12].into(),
+                end_key: vec![15].into(),
+            })
+        );
+        assert_eq!(
+            location.locate_bucket(&Key::from(vec![18])),
+            Some(BucketLocation {
+                start_key: vec![15].into(),
+                end_key: vec![20].into(),
+            })
+        );
+        assert_eq!(location.locate_bucket(&Key::from(vec![20])), None);
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_locate_key_range_returns_locations_with_bucket_versions(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let region1 = region(1, vec![], vec![10]);
+        let region2 = region(2, vec![10], vec![20]);
+        let ver_id1 = region1.ver_id();
+        let ver_id2 = region2.ver_id();
+
+        retry_client.regions.lock().await.insert(1, region1);
+        retry_client.regions.lock().await.insert(2, region2);
+        retry_client.buckets.lock().await.insert(
+            ver_id1,
+            metapb::Buckets {
+                region_id: 1,
+                version: 3,
+                keys: vec![vec![], vec![4], vec![10]],
+                ..Default::default()
+            },
+        );
+        retry_client.buckets.lock().await.insert(
+            ver_id2,
+            metapb::Buckets {
+                region_id: 2,
+                version: 5,
+                keys: vec![vec![10], vec![15], vec![20]],
+                ..Default::default()
+            },
+        );
+
+        let locations = cache
+            .locate_key_range(Key::from(vec![2]), Key::from(vec![18]))
+            .await?;
+
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[0].bucket_version(), 3);
+        assert_eq!(
+            locations[0].locate_bucket(&Key::from(vec![2])),
+            Some(BucketLocation {
+                start_key: vec![].into(),
+                end_key: vec![4].into(),
+            })
+        );
+        assert_eq!(locations[1].region.id, 2);
+        assert_eq!(locations[1].bucket_version(), 5);
+        assert_eq!(
+            locations[1].locate_bucket(&Key::from(vec![17])),
+            Some(BucketLocation {
+                start_key: vec![15].into(),
+                end_key: vec![20].into(),
+            })
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_merges_duplicate_regions() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client, Duration::ZERO, Duration::ZERO);
+
+        cache.add_region(region(1, vec![], vec![10])).await;
+        cache.add_region(region(2, vec![10], vec![20])).await;
+        cache.add_region(region(3, vec![20], vec![])).await;
+
+        let locations = cache
+            .batch_locate_key_ranges(vec![
+                crate::kv::KeyRange::new(vec![1], vec![3]),
+                crate::kv::KeyRange::new(vec![3], vec![8]),
+                crate::kv::KeyRange::new(vec![12], vec![18]),
+            ])
+            .await?;
+
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[1].region.id, 2);
 
         Ok(())
     }

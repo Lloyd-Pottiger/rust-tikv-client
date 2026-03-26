@@ -1040,6 +1040,85 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         Self::decode_region(prev_region, enable_codec)
     }
 
+    fn group_ranges_by_region(
+        self: Arc<Self>,
+        ranges: Vec<kvrpcpb::KeyRange>,
+    ) -> BoxStream<'static, Result<(Vec<kvrpcpb::KeyRange>, RegionWithLeader)>> {
+        futures::stream::once(async move {
+            self.ensure_open()?;
+            let enable_codec = self.enable_codec;
+            let encoded_ranges = ranges
+                .iter()
+                .map(|range| {
+                    crate::kv::KeyRange::new(
+                        if enable_codec {
+                            Key::from(range.start_key.clone()).to_encoded()
+                        } else {
+                            range.start_key.clone().into()
+                        },
+                        if enable_codec {
+                            Key::from(range.end_key.clone()).to_encoded()
+                        } else {
+                            range.end_key.clone().into()
+                        },
+                    )
+                })
+                .collect();
+            let locations = self
+                .region_cache
+                .batch_locate_key_ranges(encoded_ranges)
+                .await?;
+
+            let mut groups = Vec::with_capacity(locations.len());
+            let mut pending_ranges = ranges.into_iter();
+            let mut current_range = pending_ranges.next();
+            for location in locations {
+                let region = self
+                    .region_cache
+                    .get_region_by_id(location.region.id)
+                    .await?;
+                let region = Self::decode_region(region, enable_codec)?;
+                let region_start = region.start_key();
+                let region_end = region.end_key();
+                let mut grouped = Vec::new();
+
+                loop {
+                    let Some(range) = current_range.take() else {
+                        break;
+                    };
+
+                    let start_key: Key = range.start_key.clone().into();
+                    let end_key: Key = range.end_key.clone().into();
+                    if start_key < region_start
+                        || (!region_end.is_empty() && start_key >= region_end)
+                    {
+                        current_range = Some(range);
+                        break;
+                    }
+                    if !region_end.is_empty() && (end_key > region_end || end_key.is_empty()) {
+                        grouped.push(make_key_range(start_key.into(), region_end.clone().into()));
+                        current_range = Some(make_key_range(region_end.into(), end_key.into()));
+                        break;
+                    }
+
+                    grouped.push(range);
+                    current_range = pending_ranges.next();
+                }
+
+                if !grouped.is_empty() {
+                    groups.push((grouped, region));
+                }
+                if current_range.is_none() {
+                    break;
+                }
+            }
+
+            Ok::<_, Error>(futures::stream::iter(groups.into_iter().map(Ok)))
+        })
+        .try_flatten()
+        .boxed()
+    }
+
     async fn region_for_id(&self, id: RegionId) -> Result<RegionWithLeader> {
         self.ensure_open()?;
         let region = self.region_cache.get_region_by_id(id).await?;
