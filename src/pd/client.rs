@@ -894,6 +894,20 @@ where
     /// encoding/decoding for clients configured with API V2 codecs.
     #[doc(alias = "LocateKeyRange")]
     pub async fn locate_key_range(&self, start_key: Key, end_key: Key) -> Result<Vec<KeyLocation>> {
+        self.locate_key_range_with_opts(start_key, end_key, std::iter::empty())
+            .await
+    }
+
+    /// Locate the consecutive regions covering `[start_key, end_key)` with extra locate options.
+    pub async fn locate_key_range_with_opts<I>(
+        &self,
+        start_key: Key,
+        end_key: Key,
+        opts: I,
+    ) -> Result<Vec<KeyLocation>>
+    where
+        I: IntoIterator<Item = crate::BatchLocateKeyRangesOpt>,
+    {
         let enable_codec = self.enable_codec;
         let start_key = if enable_codec {
             start_key.to_encoded()
@@ -907,7 +921,7 @@ where
         };
 
         self.region_cache
-            .locate_key_range(start_key, end_key)
+            .locate_key_range_with_opts(start_key, end_key, opts)
             .await?
             .into_iter()
             .map(|location| decode_key_location(location, enable_codec))
@@ -923,6 +937,20 @@ where
         &self,
         ranges: Vec<crate::kv::KeyRange>,
     ) -> Result<Vec<KeyLocation>> {
+        self.batch_locate_key_ranges_with_opts(ranges, std::iter::empty())
+            .await
+    }
+
+    /// Locate multiple key ranges and merge adjacent duplicates from the same region, with extra
+    /// locate options applied before decoding keys back to the caller's API version.
+    pub async fn batch_locate_key_ranges_with_opts<I>(
+        &self,
+        ranges: Vec<crate::kv::KeyRange>,
+        opts: I,
+    ) -> Result<Vec<KeyLocation>>
+    where
+        I: IntoIterator<Item = crate::BatchLocateKeyRangesOpt> + Clone,
+    {
         let enable_codec = self.enable_codec;
         let ranges = ranges
             .into_iter()
@@ -943,7 +971,7 @@ where
             .collect();
 
         self.region_cache
-            .batch_locate_key_ranges(ranges)
+            .batch_locate_key_ranges_with_opts(ranges, opts)
             .await?
             .into_iter()
             .map(|location| decode_key_location(location, enable_codec))
@@ -2705,7 +2733,10 @@ pub mod test {
                     region_epoch: Some(metapb::RegionEpoch::default()),
                     ..Default::default()
                 },
-                leader: None,
+                leader: Some(metapb::Peer {
+                    store_id: id + 40,
+                    ..Default::default()
+                }),
             }
         }
 
@@ -3129,6 +3160,37 @@ pub mod test {
         assert_eq!(locations[1].region.id, 2);
         assert_eq!(locations[0].end_key, Key::from(vec![10]));
         assert_eq!(locations[1].start_key, Key::from(vec![10]));
+
+        let locations = client
+            .locate_key_range_with_opts(
+                Key::from(vec![2]),
+                Key::from(vec![18]),
+                [crate::with_need_buckets()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].bucket_version(), 7);
+        assert_eq!(locations[1].bucket_version(), 9);
+        assert_eq!(locations[0].end_key, Key::from(vec![10]));
+        assert_eq!(locations[1].start_key, Key::from(vec![10]));
+
+        let locations = client
+            .batch_locate_key_ranges_with_opts(
+                vec![
+                    crate::kv::KeyRange::new(vec![1], vec![3]),
+                    crate::kv::KeyRange::new(vec![3], vec![8]),
+                    crate::kv::KeyRange::new(vec![12], vec![18]),
+                ],
+                [crate::with_need_buckets()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[1].region.id, 2);
+        assert_eq!(locations[0].bucket_version(), 7);
+        assert_eq!(locations[1].bucket_version(), 9);
     }
 
     #[tokio::test]

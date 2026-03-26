@@ -7,8 +7,8 @@ use tikv_client::proto::keyspacepb;
 use tikv_client::proto::metapb;
 use tikv_client::proto::pdpb;
 use tikv_client::{
-    BucketLocation, Error, Key, KeyLocation, RegionCache, RegionVerId, RegionWithLeader, Result,
-    RetryClientTrait,
+    with_need_buckets, with_need_region_has_leader_peer, BatchLocateKeyRangesOpt, BucketLocation,
+    Error, Key, KeyLocation, RegionCache, RegionVerId, RegionWithLeader, Result, RetryClientTrait,
 };
 
 fn region(id: u64, start_key: Vec<u8>, end_key: Vec<u8>) -> RegionWithLeader {
@@ -252,6 +252,109 @@ async fn region_cache_exports_locate_range_apis() -> Result<()> {
     assert_eq!(locations.len(), 2);
     assert_eq!(locations[0].region.id, 1);
     assert_eq!(locations[1].region.id, 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn region_cache_exports_locate_range_option_helpers() -> Result<()> {
+    struct DummyClient {
+        reloads: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RetryClientTrait for DummyClient {
+        async fn get_region(self: Arc<Self>, _key: Vec<u8>) -> Result<RegionWithLeader> {
+            self.reloads.fetch_add(1, Ordering::SeqCst);
+
+            let mut region = region(1, vec![], vec![10]);
+            region.leader = Some(metapb::Peer {
+                store_id: 7,
+                ..Default::default()
+            });
+            Ok(region)
+        }
+
+        async fn get_region_with_buckets(
+            self: Arc<Self>,
+            key: Vec<u8>,
+        ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+            let region = self.clone().get_region(key).await?;
+            Ok((
+                region,
+                Some(metapb::Buckets {
+                    region_id: 1,
+                    version: 3,
+                    keys: vec![vec![], vec![4], vec![10]],
+                    ..Default::default()
+                }),
+            ))
+        }
+
+        async fn get_store(self: Arc<Self>, _id: u64) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_region_by_id(self: Arc<Self>, _region_id: u64) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    let _: BatchLocateKeyRangesOpt = with_need_buckets();
+    let _: BatchLocateKeyRangesOpt = with_need_region_has_leader_peer();
+
+    let client = Arc::new(DummyClient {
+        reloads: AtomicUsize::new(0),
+    });
+    let cache = RegionCache::new_with_ttl(client.clone(), Duration::ZERO, Duration::ZERO);
+    cache.add_region(region(1, vec![], vec![10])).await;
+
+    let locations = cache
+        .locate_key_range_with_opts(
+            Key::from(vec![2]),
+            Key::from(vec![8]),
+            [with_need_buckets(), with_need_region_has_leader_peer()],
+        )
+        .await?;
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].region.id, 1);
+    assert_eq!(locations[0].bucket_version(), 3);
+    assert_eq!(
+        locations[0].locate_bucket(&Key::from(vec![2])),
+        Some(BucketLocation {
+            start_key: vec![].into(),
+            end_key: vec![4].into(),
+        })
+    );
+    assert_eq!(client.reloads.load(Ordering::SeqCst), 1);
+
+    let locations = cache
+        .batch_locate_key_ranges_with_opts(
+            vec![
+                tikv_client::tikv::KeyRange::new(vec![1], vec![3]),
+                tikv_client::tikv::KeyRange::new(vec![3], vec![8]),
+            ],
+            [with_need_buckets(), with_need_region_has_leader_peer()],
+        )
+        .await?;
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].bucket_version(), 3);
 
     Ok(())
 }

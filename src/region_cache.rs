@@ -247,6 +247,57 @@ impl KeyLocation {
     }
 }
 
+/// Option bit for locate-range helpers.
+///
+/// This mirrors client-go `locate.BatchLocateKeyRangesOpt`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchLocateKeyRangesOpt {
+    /// Request bucket metadata for each located region when PD can provide it.
+    NeedBuckets,
+    /// Skip regions that still have no leader after refresh.
+    NeedRegionHasLeaderPeer,
+}
+
+/// Request PD bucket metadata for locate-range helpers.
+///
+/// This mirrors client-go `locate.WithNeedBuckets`.
+#[doc(alias = "WithNeedBuckets")]
+pub const fn with_need_buckets() -> BatchLocateKeyRangesOpt {
+    BatchLocateKeyRangesOpt::NeedBuckets
+}
+
+/// Skip regions without a leader peer when locating ranges.
+///
+/// This mirrors client-go `locate.WithNeedRegionHasLeaderPeer`.
+#[doc(alias = "WithNeedRegionHasLeaderPeer")]
+pub const fn with_need_region_has_leader_peer() -> BatchLocateKeyRangesOpt {
+    BatchLocateKeyRangesOpt::NeedRegionHasLeaderPeer
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BatchLocateKeyRangesOptions {
+    need_buckets: bool,
+    need_region_has_leader_peer: bool,
+}
+
+impl BatchLocateKeyRangesOptions {
+    fn from_opts<I>(opts: I) -> Self
+    where
+        I: IntoIterator<Item = BatchLocateKeyRangesOpt>,
+    {
+        let mut options = Self::default();
+        for opt in opts {
+            match opt {
+                BatchLocateKeyRangesOpt::NeedBuckets => options.need_buckets = true,
+                BatchLocateKeyRangesOpt::NeedRegionHasLeaderPeer => {
+                    options.need_region_has_leader_peer = true;
+                }
+            }
+        }
+        options
+    }
+}
+
 struct RegionCacheMap {
     /// RegionVerID -> Region. It stores the concrete region caches.
     /// RegionVerID is the unique identifier of a region *across time*.
@@ -482,6 +533,24 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Self::key_location_from_cache(&cache, &region)
     }
 
+    async fn key_location_for_region_with_opts(
+        &self,
+        key: &Key,
+        mut region: RegionWithLeader,
+        options: BatchLocateKeyRangesOptions,
+    ) -> Result<(RegionWithLeader, KeyLocation)> {
+        let mut location = self.key_location_for_region(region.clone()).await;
+        let needs_refresh = (options.need_buckets && location.buckets.is_none())
+            || (options.need_region_has_leader_peer && region.leader.is_none());
+
+        if needs_refresh {
+            region = self.read_through_region_by_key(key.clone()).await?;
+            location = self.key_location_for_region(region.clone()).await;
+        }
+
+        Ok((region, location))
+    }
+
     async fn try_locate_prev_region_by_end_key(&self, key: &Key) -> Option<KeyLocation> {
         let cache = self.region_cache.read().await;
         let candidate = cache
@@ -690,11 +759,23 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     /// This low-level API operates on the region cache's key encoding. Higher-level callers that
     /// rely on API V2 key encoding should prefer [`crate::PdRpcClient::locate_key_range`].
     #[doc(alias = "LocateKeyRange")]
-    pub async fn locate_key_range(
+    pub async fn locate_key_range(&self, start_key: Key, end_key: Key) -> Result<Vec<KeyLocation>> {
+        self.locate_key_range_with_opts(start_key, end_key, std::iter::empty())
+            .await
+    }
+
+    /// Locate the consecutive regions covering `[start_key, end_key)` with extra locate options.
+    pub async fn locate_key_range_with_opts<I>(
         &self,
         mut start_key: Key,
         end_key: Key,
-    ) -> Result<Vec<KeyLocation>> {
+        opts: I,
+    ) -> Result<Vec<KeyLocation>>
+    where
+        I: IntoIterator<Item = BatchLocateKeyRangesOpt>,
+    {
+        let options = BatchLocateKeyRangesOptions::from_opts(opts);
+
         if !end_key.is_empty() && start_key >= end_key {
             return Ok(Vec::new());
         }
@@ -702,10 +783,15 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         let mut locations = Vec::new();
         loop {
             let region = self.get_region_by_key(&start_key).await?;
-            let location = self.key_location_for_region(region).await;
+            let (region, location) = self
+                .key_location_for_region_with_opts(&start_key, region, options)
+                .await?;
             let location_end = location.end_key.clone();
             let covers_end = location.covers_end_key(&end_key);
-            locations.push(location);
+
+            if !options.need_region_has_leader_peer || region.leader.is_some() {
+                locations.push(location);
+            }
 
             if covers_end || location_end == start_key {
                 break;
@@ -824,6 +910,20 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         &self,
         ranges: Vec<crate::kv::KeyRange>,
     ) -> Result<Vec<KeyLocation>> {
+        self.batch_locate_key_ranges_with_opts(ranges, std::iter::empty())
+            .await
+    }
+
+    /// Locate multiple key ranges and merge adjacent duplicates from the same region, with extra
+    /// locate options applied to each region lookup.
+    pub async fn batch_locate_key_ranges_with_opts<I>(
+        &self,
+        ranges: Vec<crate::kv::KeyRange>,
+        opts: I,
+    ) -> Result<Vec<KeyLocation>>
+    where
+        I: IntoIterator<Item = BatchLocateKeyRangesOpt> + Clone,
+    {
         let mut locations = Vec::new();
 
         for range in ranges {
@@ -832,7 +932,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             }
 
             for location in self
-                .locate_key_range(range.start_key, range.end_key)
+                .locate_key_range_with_opts(range.start_key, range.end_key, opts.clone())
                 .await?
             {
                 if locations.last() == Some(&location) {
@@ -1287,6 +1387,8 @@ mod test {
     use serial_test::serial;
     use tokio::sync::Mutex;
 
+    use super::with_need_buckets;
+    use super::with_need_region_has_leader_peer;
     use super::BucketLocation;
     use super::KeyLocation;
     use super::RegionCache;
@@ -1952,6 +2054,113 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_region_cache_locate_key_range_with_opts_reloads_buckets() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let pd_region = region_with_leader(1, vec![], vec![10], 42);
+        let ver_id = pd_region.ver_id();
+        retry_client.regions.lock().await.insert(1, pd_region);
+        retry_client.buckets.lock().await.insert(
+            ver_id.clone(),
+            metapb::Buckets {
+                region_id: 1,
+                version: 7,
+                keys: vec![vec![], vec![4], vec![10]],
+                ..Default::default()
+            },
+        );
+
+        cache.add_region(region(1, vec![], vec![10])).await;
+
+        let locations = cache
+            .locate_key_range_with_opts(
+                Key::from(vec![2]),
+                Key::from(vec![8]),
+                [with_need_buckets(), with_need_region_has_leader_peer()],
+            )
+            .await?;
+
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[0].bucket_version(), 7);
+        assert_eq!(
+            locations[0].locate_bucket(&Key::from(vec![2])),
+            Some(BucketLocation {
+                start_key: vec![].into(),
+                end_key: vec![4].into(),
+            })
+        );
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 1);
+        assert_eq!(
+            cache
+                .get_buckets_by_ver_id(&ver_id)
+                .await
+                .map(|b| b.version),
+            Some(7)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_skips_regions_without_leader(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let leaderful_region = region_with_leader(1, vec![], vec![10], 42);
+        let leaderful_ver_id = leaderful_region.ver_id();
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(1, leaderful_region);
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(2, region(2, vec![10], vec![20]));
+        retry_client.buckets.lock().await.insert(
+            leaderful_ver_id,
+            metapb::Buckets {
+                region_id: 1,
+                version: 11,
+                keys: vec![vec![], vec![5], vec![10]],
+                ..Default::default()
+            },
+        );
+
+        cache.add_region(region(1, vec![], vec![10])).await;
+        cache.add_region(region(2, vec![10], vec![20])).await;
+
+        let locations = cache
+            .batch_locate_key_ranges_with_opts(
+                vec![
+                    crate::kv::KeyRange::new(vec![1], vec![3]),
+                    crate::kv::KeyRange::new(vec![3], vec![8]),
+                    crate::kv::KeyRange::new(vec![12], vec![18]),
+                ],
+                [with_need_buckets(), with_need_region_has_leader_peer()],
+            )
+            .await?;
+
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[0].bucket_version(), 11);
+        assert_eq!(
+            locations[0].locate_bucket(&Key::from(vec![2])),
+            Some(BucketLocation {
+                start_key: vec![].into(),
+                end_key: vec![5].into(),
+            })
+        );
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_region_cache_trace_emits_hit_and_miss_events() -> Result<()> {
         let _lock = crate::trace::TRACE_HOOK_TEST_LOCK.lock().await;
         let _reset = TraceHookReset;
@@ -2442,6 +2651,20 @@ mod test {
         });
         // We don't care about other fields here
 
+        region
+    }
+
+    fn region_with_leader(
+        id: RegionId,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        store_id: u64,
+    ) -> RegionWithLeader {
+        let mut region = region(id, start_key, end_key);
+        region.leader = Some(metapb::Peer {
+            store_id,
+            ..Default::default()
+        });
         region
     }
 

@@ -35,7 +35,19 @@ fn crate_root_exports_pd_locate_entrypoints() {
     let _ = PdRpcClient::<tikv_client::store::TikvConnect>::locate_region_by_id;
     let _ = PdRpcClient::<tikv_client::store::TikvConnect>::locate_region_by_id_from_pd;
     let _ = PdRpcClient::<tikv_client::store::TikvConnect>::locate_key_range;
+    let _ = PdRpcClient::<tikv_client::store::TikvConnect>::locate_key_range_with_opts::<
+        [tikv_client::BatchLocateKeyRangesOpt; 1],
+    >;
     let _ = PdRpcClient::<tikv_client::store::TikvConnect>::batch_locate_key_ranges;
+    let _ = PdRpcClient::<tikv_client::store::TikvConnect>::batch_locate_key_ranges_with_opts::<
+        [tikv_client::BatchLocateKeyRangesOpt; 1],
+    >;
+}
+
+#[test]
+fn crate_root_exports_batch_locate_option_helpers() {
+    let _: tikv_client::BatchLocateKeyRangesOpt = tikv_client::with_need_buckets();
+    let _: tikv_client::BatchLocateKeyRangesOpt = tikv_client::with_need_region_has_leader_peer();
 }
 
 #[test]

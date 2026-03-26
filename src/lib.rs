@@ -250,6 +250,12 @@ pub use crate::raw::RawChecksum;
 #[doc(inline)]
 pub use crate::region::{RegionId, RegionVerId, RegionWithLeader, StoreId};
 #[doc(inline)]
+pub use crate::region_cache::with_need_buckets;
+#[doc(inline)]
+pub use crate::region_cache::with_need_region_has_leader_peer;
+#[doc(inline)]
+pub use crate::region_cache::BatchLocateKeyRangesOpt;
+#[doc(inline)]
 pub use crate::region_cache::BucketLocation;
 #[doc(inline)]
 pub use crate::region_cache::KeyLocation;
