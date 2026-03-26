@@ -2093,15 +2093,15 @@ mod tests {
         let after_done = sample_count(&after, "done");
 
         assert!(
-            after_send >= before_send + 1,
+            after_send > before_send,
             "expected send sample count to increase"
         );
         assert!(
-            after_recv >= before_recv + 1,
+            after_recv > before_recv,
             "expected recv sample count to increase"
         );
         assert!(
-            after_done >= before_done + 1,
+            after_done > before_done,
             "expected done sample count to increase"
         );
     }

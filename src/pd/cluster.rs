@@ -992,7 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pd_message_send_deadline_exceeded_maps_error_type() {
-        let req = DeadlineExceededRequest::default();
+        let req = DeadlineExceededRequest;
         let mut client = ();
         let err = req
             .send(&mut client, Duration::from_secs(1))
