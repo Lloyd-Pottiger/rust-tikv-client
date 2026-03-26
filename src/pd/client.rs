@@ -819,6 +819,63 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl>
 where
     RetryClient<Cl>: RetryClientTrait + Send + Sync,
 {
+    /// Locate the region containing `key`.
+    ///
+    /// Unlike [`RegionCache::locate_key`], this helper automatically applies PD key encoding and
+    /// decoding for clients configured with API V2 codecs.
+    #[doc(alias = "LocateKey")]
+    pub async fn locate_key(&self, key: Key) -> Result<KeyLocation> {
+        let enable_codec = self.enable_codec;
+        let key = if enable_codec { key.to_encoded() } else { key };
+
+        self.region_cache
+            .locate_key(key)
+            .await
+            .and_then(|location| decode_key_location(location, enable_codec))
+    }
+
+    /// Try locating the region containing `key` from the local cache only.
+    ///
+    /// Returns `Ok(None)` if the region is missing or expired. No PD request is issued.
+    #[doc(alias = "TryLocateKey")]
+    pub async fn try_locate_key(&self, key: Key) -> Result<Option<KeyLocation>> {
+        let enable_codec = self.enable_codec;
+        let key = if enable_codec { key.to_encoded() } else { key };
+
+        self.region_cache
+            .try_locate_key(key)
+            .await
+            .map(|location| decode_key_location(location, enable_codec))
+            .transpose()
+    }
+
+    /// Locate the region containing the last key strictly less than `key`.
+    ///
+    /// Unlike [`RegionCache::locate_end_key`], this helper automatically applies PD key encoding
+    /// and decoding for clients configured with API V2 codecs.
+    #[doc(alias = "LocateEndKey")]
+    pub async fn locate_end_key(&self, key: Key) -> Result<KeyLocation> {
+        let enable_codec = self.enable_codec;
+        let key = if enable_codec { key.to_encoded() } else { key };
+
+        self.region_cache
+            .locate_end_key(key)
+            .await
+            .and_then(|location| decode_key_location(location, enable_codec))
+    }
+
+    /// Locate a region by region id and return its range metadata.
+    ///
+    /// Unlike [`RegionCache::locate_region_by_id`], this helper automatically decodes region keys
+    /// for clients configured with API V2 codecs.
+    #[doc(alias = "LocateRegionByID")]
+    pub async fn locate_region_by_id(&self, id: RegionId) -> Result<KeyLocation> {
+        self.region_cache
+            .locate_region_by_id(id)
+            .await
+            .and_then(|location| decode_key_location(location, self.enable_codec))
+    }
+
     /// Locate the consecutive regions covering `[start_key, end_key)`.
     ///
     /// Unlike [`RegionCache::locate_key_range`], this helper automatically applies PD key
@@ -3007,6 +3064,87 @@ pub mod test {
         assert_eq!(locations[1].region.id, 2);
         assert_eq!(locations[0].end_key, Key::from(vec![10]));
         assert_eq!(locations[1].start_key, Key::from(vec![10]));
+    }
+
+    #[tokio::test]
+    async fn test_pd_rpc_client_single_locate_helpers_decode_codec_keys() {
+        fn encoded_key(raw: Vec<u8>) -> Vec<u8> {
+            Key::from(raw).to_encoded().into()
+        }
+
+        fn region(id: u64, start_key: Vec<u8>, end_key: Vec<u8>) -> RegionWithLeader {
+            RegionWithLeader {
+                region: metapb::Region {
+                    id,
+                    start_key,
+                    end_key,
+                    region_epoch: Some(metapb::RegionEpoch::default()),
+                    ..Default::default()
+                },
+                leader: None,
+            }
+        }
+
+        let mut client = pd_rpc_client().await;
+        client.enable_codec = true;
+
+        client
+            .region_cache
+            .add_region_with_buckets(
+                region(1, vec![], encoded_key(vec![10])),
+                Some(metapb::Buckets {
+                    region_id: 1,
+                    version: 7,
+                    keys: vec![vec![], encoded_key(vec![4]), encoded_key(vec![10])],
+                    ..Default::default()
+                }),
+            )
+            .await;
+        client
+            .region_cache
+            .add_region_with_buckets(
+                region(2, encoded_key(vec![10]), encoded_key(vec![20])),
+                Some(metapb::Buckets {
+                    region_id: 2,
+                    version: 9,
+                    keys: vec![
+                        encoded_key(vec![10]),
+                        encoded_key(vec![15]),
+                        encoded_key(vec![20]),
+                    ],
+                    ..Default::default()
+                }),
+            )
+            .await;
+
+        let location = client.locate_key(Key::from(vec![12])).await.unwrap();
+        assert_eq!(location.region.id, 2);
+        assert_eq!(location.start_key, Key::from(vec![10]));
+        assert_eq!(location.end_key, Key::from(vec![20]));
+        assert_eq!(location.bucket_version(), 9);
+
+        let try_location = client
+            .try_locate_key(Key::from(vec![3]))
+            .await
+            .unwrap()
+            .expect("expected cached region");
+        assert_eq!(try_location.region.id, 1);
+        assert_eq!(
+            try_location.locate_bucket(&Key::from(vec![3])),
+            Some(crate::BucketLocation {
+                start_key: vec![].into(),
+                end_key: vec![4].into(),
+            })
+        );
+
+        let end_location = client.locate_end_key(Key::from(vec![10])).await.unwrap();
+        assert_eq!(end_location.region.id, 1);
+        assert_eq!(end_location.end_key, Key::from(vec![10]));
+
+        let region_location = client.locate_region_by_id(2).await.unwrap();
+        assert_eq!(region_location.region.id, 2);
+        assert_eq!(region_location.start_key, Key::from(vec![10]));
+        assert_eq!(region_location.end_key, Key::from(vec![20]));
     }
 
     #[tokio::test]

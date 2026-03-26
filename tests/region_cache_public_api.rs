@@ -35,6 +35,75 @@ async fn region_cache_exports_buckets_query_api() {
     assert!(buckets.is_none());
 }
 
+#[tokio::test]
+async fn region_cache_exports_single_key_and_region_id_locate_apis() -> Result<()> {
+    struct DummyClient;
+
+    #[async_trait]
+    impl RetryClientTrait for DummyClient {
+        async fn get_region(self: Arc<Self>, _key: Vec<u8>) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_store(self: Arc<Self>, _id: u64) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_region_by_id(self: Arc<Self>, _region_id: u64) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    let cache = RegionCache::new_with_ttl(Arc::new(DummyClient), Duration::ZERO, Duration::ZERO);
+    cache.add_region(region(1, vec![], vec![10])).await;
+    cache.add_region(region(2, vec![10], vec![20])).await;
+    cache.add_region(region(3, vec![20], vec![])).await;
+
+    let locate_key = cache.locate_key(Key::from(vec![12])).await?;
+    assert_eq!(locate_key.region.id, 2);
+    assert_eq!(locate_key.start_key, Key::from(vec![10]));
+    assert_eq!(locate_key.end_key, Key::from(vec![20]));
+
+    let try_locate = cache.try_locate_key(Key::from(vec![21])).await;
+    assert_eq!(
+        try_locate.as_ref().map(|location| location.region.id),
+        Some(3)
+    );
+
+    let empty_cache =
+        RegionCache::new_with_ttl(Arc::new(DummyClient), Duration::ZERO, Duration::ZERO);
+    assert!(empty_cache
+        .try_locate_key(Key::from(vec![30]))
+        .await
+        .is_none());
+
+    let locate_end_key = cache.locate_end_key(Key::from(vec![10])).await?;
+    assert_eq!(locate_end_key.region.id, 1);
+
+    let locate_region = cache.locate_region_by_id(2).await?;
+    assert_eq!(locate_region.region.id, 2);
+    assert_eq!(locate_region.start_key, Key::from(vec![10]));
+    assert_eq!(locate_region.end_key, Key::from(vec![20]));
+
+    Ok(())
+}
+
 #[test]
 fn crate_root_exports_bucket_location_and_key_location_types() {
     let location = KeyLocation {

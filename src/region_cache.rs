@@ -391,6 +391,55 @@ impl<Client> RegionCache<Client> {
             .cloned()
     }
 
+    fn cached_region_is_fresh(
+        &self,
+        cache: &RegionCacheMap,
+        ver_id: &RegionVerId,
+        region_id: RegionId,
+        trace_name: &'static str,
+    ) -> bool {
+        if self.region_cache_ttl_ms == 0 {
+            if trace::is_category_enabled(Category::RegionCache) {
+                trace::trace(
+                    Category::RegionCache,
+                    trace_name,
+                    &[TraceField::u64("regionID", region_id)],
+                );
+            }
+            return true;
+        }
+
+        let now_ms = now_epoch_millis();
+        cache
+            .ver_id_to_ttl_deadline_ms
+            .get(ver_id)
+            .is_some_and(|ttl| {
+                check_and_maybe_extend_ttl(
+                    ttl,
+                    now_ms,
+                    self.region_cache_ttl_ms,
+                    self.region_cache_ttl_jitter_ms,
+                )
+            })
+    }
+
+    fn key_location_from_parts(
+        region: &RegionWithLeader,
+        buckets: Option<Arc<metapb::Buckets>>,
+    ) -> KeyLocation {
+        KeyLocation {
+            region: region.ver_id(),
+            start_key: region.start_key(),
+            end_key: region.end_key(),
+            buckets,
+        }
+    }
+
+    fn key_location_from_cache(cache: &RegionCacheMap, region: &RegionWithLeader) -> KeyLocation {
+        let buckets = cache.ver_id_to_buckets.get(&region.ver_id()).cloned();
+        Self::key_location_from_parts(region, buckets)
+    }
+
     pub(crate) async fn on_bucket_version_not_match(
         &self,
         ver_id: RegionVerId,
@@ -429,21 +478,31 @@ impl<Client> RegionCache<Client> {
 
 impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     async fn key_location_for_region(&self, region: RegionWithLeader) -> KeyLocation {
-        let ver_id = region.ver_id();
-        let buckets = self
-            .region_cache
-            .read()
-            .await
-            .ver_id_to_buckets
-            .get(&ver_id)
-            .cloned();
+        let cache = self.region_cache.read().await;
+        Self::key_location_from_cache(&cache, &region)
+    }
 
-        KeyLocation {
-            region: ver_id,
-            start_key: region.start_key(),
-            end_key: region.end_key(),
-            buckets,
+    async fn try_locate_prev_region_by_end_key(&self, key: &Key) -> Option<KeyLocation> {
+        let cache = self.region_cache.read().await;
+        let candidate = cache
+            .key_to_ver_id
+            .range(..key)
+            .next_back()
+            .map(|(_, ver_id)| ver_id.clone())?;
+        let region = cache.ver_id_to_region.get(&candidate)?;
+        if !region.end_key().is_empty() && key.as_ref() > region.end_key().as_ref() {
+            return None;
         }
+        if !self.cached_region_is_fresh(
+            &cache,
+            &candidate,
+            region.id(),
+            "region_cache.locate_end_key.cache_hit",
+        ) {
+            return None;
+        }
+
+        Some(Self::key_location_from_cache(&cache, region))
     }
 
     // Retrieve cache entry by key. If there's no entry, query PD and update cache.
@@ -655,6 +714,89 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         }
 
         Ok(locations)
+    }
+
+    /// Locate the region containing `key`.
+    ///
+    /// This low-level API operates on the region cache's key encoding. Higher-level callers that
+    /// rely on API V2 key encoding should prefer [`crate::PdRpcClient::locate_key`].
+    #[doc(alias = "LocateKey")]
+    pub async fn locate_key(&self, key: Key) -> Result<KeyLocation> {
+        let region = self.get_region_by_key(&key).await?;
+        Ok(self.key_location_for_region(region).await)
+    }
+
+    /// Try locating the region containing `key` from the local cache only.
+    ///
+    /// Returns `None` if the region is missing or expired. No PD request is issued.
+    #[doc(alias = "TryLocateKey")]
+    pub async fn try_locate_key(&self, key: Key) -> Option<KeyLocation> {
+        let cache = self.region_cache.read().await;
+        let candidate = cache
+            .key_to_ver_id
+            .range(..=&key)
+            .next_back()
+            .map(|(_, ver_id)| ver_id.clone())?;
+        let region = cache.ver_id_to_region.get(&candidate)?;
+        if !region.contains(&key) {
+            return None;
+        }
+        if !self.cached_region_is_fresh(
+            &cache,
+            &candidate,
+            region.id(),
+            "region_cache.try_locate_key.cache_hit",
+        ) {
+            return None;
+        }
+
+        Some(Self::key_location_from_cache(&cache, region))
+    }
+
+    /// Locate the region containing the last key strictly less than `key`.
+    ///
+    /// This mirrors client-go `LocateEndKey` semantics. The input key must use the region cache's
+    /// key encoding.
+    #[doc(alias = "LocateEndKey")]
+    pub async fn locate_end_key(&self, key: Key) -> Result<KeyLocation> {
+        if key.is_empty() {
+            return Err(Error::Unimplemented);
+        }
+
+        let key_bytes: &[u8] = (&key).into();
+        let region = self.get_region_by_key(&key).await?;
+        if key_bytes > region.region.start_key.as_slice() {
+            return Ok(self.key_location_for_region(region).await);
+        }
+
+        if let Some(location) = self.try_locate_prev_region_by_end_key(&key).await {
+            return Ok(location);
+        }
+
+        let (prev_region, buckets) = self
+            .pd_region_meta_circuit_breaker
+            .execute(|| {
+                self.inner_client
+                    .clone()
+                    .get_prev_region_with_buckets(key.clone().into())
+            })
+            .await?;
+        let location = Self::key_location_from_parts(
+            &prev_region,
+            buckets.as_ref().map(|bucket| Arc::new(bucket.clone())),
+        );
+        self.add_region_with_buckets(prev_region, buckets).await;
+        Ok(location)
+    }
+
+    /// Locate a region by region id and return its range metadata.
+    ///
+    /// This low-level API operates on the region cache's key encoding. Higher-level callers that
+    /// rely on API V2 key encoding should prefer [`crate::PdRpcClient::locate_region_by_id`].
+    #[doc(alias = "LocateRegionByID")]
+    pub async fn locate_region_by_id(&self, id: RegionId) -> Result<KeyLocation> {
+        let region = self.get_region_by_id(id).await?;
+        Ok(self.key_location_for_region(region).await)
     }
 
     /// Locate multiple key ranges and merge adjacent duplicates from the same region.
