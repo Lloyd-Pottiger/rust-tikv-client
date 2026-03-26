@@ -701,6 +701,21 @@ pub trait PdClient: Send + Sync + 'static {
     async fn add_region_to_cache(&self, region: RegionWithLeader) {
         let _ = region;
     }
+
+    /// Update cached bucket meta for a region when TiKV returns `BucketVersionNotMatch`.
+    ///
+    /// This allows fast retries without an extra PD round-trip.
+    ///
+    /// The default implementation is a no-op.
+    #[doc(hidden)]
+    async fn on_bucket_version_not_match(
+        &self,
+        ver_id: RegionVerId,
+        version: u64,
+        keys: Vec<Vec<u8>>,
+    ) {
+        let _ = (ver_id, version, keys);
+    }
 }
 
 /// This client converts requests for the logical TiKV cluster into requests
@@ -1321,6 +1336,17 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 
     async fn add_region_to_cache(&self, region: RegionWithLeader) {
         self.region_cache.add_region(region).await;
+    }
+
+    async fn on_bucket_version_not_match(
+        &self,
+        ver_id: RegionVerId,
+        version: u64,
+        keys: Vec<Vec<u8>>,
+    ) {
+        self.region_cache
+            .on_bucket_version_not_match(ver_id, version, keys)
+            .await;
     }
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {

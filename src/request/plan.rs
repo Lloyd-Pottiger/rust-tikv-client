@@ -2993,6 +2993,15 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
         Ok(false)
     } else if let Some(epoch_not_match) = e.epoch_not_match.take() {
         on_region_epoch_not_match(pd_client.clone(), region_store, epoch_not_match).await
+    } else if let Some(bucket_version_not_match) = e.bucket_version_not_match.take() {
+        pd_client
+            .on_bucket_version_not_match(
+                ver_id,
+                bucket_version_not_match.version,
+                bucket_version_not_match.keys,
+            )
+            .await;
+        Ok(true)
     } else if e.stale_command.is_some()
         || e.region_not_found.is_some()
         || e.key_not_in_region.is_some()
@@ -3021,10 +3030,7 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
         Ok(false)
     } else if e.flashback_in_progress.is_some() || e.flashback_not_prepared.is_some() {
         Err(Error::RegionError(Box::new(e)))
-    } else if e.is_witness.is_some()
-        || e.mismatch_peer_id.is_some()
-        || e.bucket_version_not_match.is_some()
-    {
+    } else if e.is_witness.is_some() || e.mismatch_peer_id.is_some() {
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
     } else if is_invalid_max_ts_update_region_error(&e) {
@@ -7875,6 +7881,31 @@ mod test {
 
         let resolved = handle_region_error(pd_client, err, store).await.unwrap();
         assert!(!resolved);
+    }
+
+    #[tokio::test]
+    async fn test_handle_region_error_bucket_version_not_match_retries_immediately() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let store = RegionStore::new(
+            MockPdClient::region1(),
+            Arc::new(MockKvClient::with_dispatch_hook(|_| {
+                unreachable!("dispatch not expected")
+            })),
+            "mock://41".to_owned(),
+        );
+
+        let mut err = errorpb::Error::default();
+        err.bucket_version_not_match = Some(errorpb::BucketVersionNotMatch {
+            version: 42,
+            keys: vec![vec![], vec![1]],
+        });
+
+        let resolved = handle_region_error(pd_client.clone(), err, store)
+            .await
+            .unwrap();
+        assert!(resolved);
+        assert!(pd_client.invalidated_region_ver_ids().is_empty());
+        assert!(pd_client.invalidated_store_ids().is_empty());
     }
 
     #[tokio::test]

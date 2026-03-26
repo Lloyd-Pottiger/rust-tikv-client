@@ -243,6 +243,35 @@ impl<Client> RegionCache<Client> {
             .get(ver_id)
             .cloned()
     }
+
+    pub(crate) async fn on_bucket_version_not_match(
+        &self,
+        ver_id: RegionVerId,
+        version: u64,
+        keys: Vec<Vec<u8>>,
+    ) {
+        let region_id = ver_id.id;
+        let mut cache = self.region_cache.write().await;
+        if !cache.ver_id_to_region.contains_key(&ver_id) {
+            return;
+        }
+
+        let should_replace = cache
+            .ver_id_to_buckets
+            .get(&ver_id)
+            .map_or(true, |cached| cached.version < version);
+        if should_replace {
+            cache.ver_id_to_buckets.insert(
+                ver_id,
+                Arc::new(metapb::Buckets {
+                    region_id,
+                    version,
+                    keys,
+                    ..Default::default()
+                }),
+            );
+        }
+    }
 }
 
 impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
@@ -1280,6 +1309,52 @@ mod test {
                 .version,
             2
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_on_bucket_version_not_match_updates_cached_buckets() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client, Duration::ZERO, Duration::ZERO);
+
+        let region = RegionWithLeader {
+            region: metapb::Region {
+                id: 9,
+                start_key: vec![],
+                end_key: vec![10],
+                region_epoch: Some(RegionEpoch {
+                    conf_ver: 1,
+                    version: 1,
+                }),
+                ..Default::default()
+            },
+            leader: Some(metapb::Peer {
+                store_id: 1,
+                ..Default::default()
+            }),
+        };
+        let ver_id = region.ver_id();
+        cache.add_region(region).await;
+
+        cache
+            .on_bucket_version_not_match(ver_id.clone(), 10, vec![vec![], vec![5], vec![10]])
+            .await;
+        let buckets = cache
+            .get_buckets_by_ver_id(&ver_id)
+            .await
+            .expect("expected buckets");
+        assert_eq!(buckets.version, 10);
+
+        // Older versions should not overwrite the cached value.
+        cache
+            .on_bucket_version_not_match(ver_id.clone(), 5, vec![vec![1]])
+            .await;
+        let buckets = cache
+            .get_buckets_by_ver_id(&ver_id)
+            .await
+            .expect("expected buckets");
+        assert_eq!(buckets.version, 10);
 
         Ok(())
     }
