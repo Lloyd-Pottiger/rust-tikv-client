@@ -940,7 +940,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         }
 
         // When range grouping is used on cold cache, avoid issuing N PD lookups by preloading the
-        // region metadata with a single BatchScanRegions request.
+        // region metadata with PD BatchScanRegions requests.
         //
         // Note: PD requires ranges in order. If the caller passes unsorted ranges, keep the
         // existing locate behavior.
@@ -948,17 +948,47 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             .windows(2)
             .all(|pair| pair[0].start_key <= pair[1].start_key);
         if ranges_are_sorted {
-            let mut has_miss = false;
-            for range in &ranges {
-                if self.try_locate_key(range.start_key.clone()).await.is_none() {
-                    has_miss = true;
-                    break;
+            let to_send = ranges.len().min(MAX_RANGES_PER_BATCH);
+
+            // Even if the range start hits cache, later regions may still be missing. In that
+            // case, preheat only the uncached tail ranges to reduce per-key PD lookups in the main
+            // locate path.
+            let mut uncached_ranges = Vec::new();
+            for range in ranges.iter().take(to_send) {
+                let mut start_key = range.start_key.clone();
+                let end_key = range.end_key.clone();
+
+                loop {
+                    let Some(location) = self.try_locate_key(start_key.clone()).await else {
+                        uncached_ranges.push(crate::kv::KeyRange {
+                            start_key,
+                            end_key: end_key.clone(),
+                        });
+                        break;
+                    };
+
+                    let next_start_key = location.end_key;
+                    if next_start_key.is_empty() {
+                        break;
+                    }
+                    if !end_key.is_empty() && next_start_key >= end_key {
+                        break;
+                    }
+                    // Defensive guard against non-progressing cached locations.
+                    if next_start_key <= start_key {
+                        uncached_ranges.push(crate::kv::KeyRange {
+                            start_key,
+                            end_key: end_key.clone(),
+                        });
+                        break;
+                    }
+
+                    start_key = next_start_key;
                 }
             }
-            if has_miss {
-                let to_send = ranges.len().min(MAX_RANGES_PER_BATCH);
-                let mut remaining_ranges: Vec<crate::kv::KeyRange> =
-                    ranges.iter().take(to_send).cloned().collect();
+
+            if !uncached_ranges.is_empty() {
+                let mut remaining_ranges = uncached_ranges;
 
                 // Drop ranges that are fully covered by `split_key` and continue from there.
                 //
@@ -2382,6 +2412,52 @@ mod test {
         // Preheat should keep scanning until the requested ranges are covered so the main locate
         // path doesn't fall back to per-key PD lookups.
         assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 2);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_preheats_on_mid_range_cache_miss(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        // PD side knows about the full keyspace.
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(1, region_with_leader(1, vec![], vec![10], 42));
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(2, region_with_leader(2, vec![10], vec![20], 42));
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(3, region_with_leader(3, vec![20], vec![], 42));
+
+        // Warm the local cache partially: the range start hits cache, but the tail will miss.
+        cache
+            .add_region(region_with_leader(1, vec![], vec![10], 42))
+            .await;
+        cache
+            .add_region(region_with_leader(2, vec![10], vec![20], 42))
+            .await;
+
+        let _ = cache
+            .batch_locate_key_ranges_with_opts(
+                vec![crate::kv::KeyRange::new(vec![1], vec![25])],
+                std::iter::empty(),
+            )
+            .await?;
+
+        // Even if the range start hits cache, preheat should still batch-load the missing tail so
+        // the main locate path doesn't fall back to per-key PD lookups.
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 1);
         assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
 
         Ok(())
