@@ -161,24 +161,36 @@ fn clamp_bucket_keys_to_region(
     (out, clamped)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+/// A key range describing a single bucket within a region.
+///
+/// When no bucket metadata is available, callers typically treat the whole region as one bucket.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct BucketLocation {
+pub struct BucketLocation {
+    /// The inclusive start key of the bucket range.
     pub start_key: Key,
+    /// The exclusive end key of the bucket range. Empty means unbounded.
     pub end_key: Key,
 }
 
+/// Region location metadata for a key range lookup.
+///
+/// This mirrors client-go `locate.KeyLocation`.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct KeyLocation {
+pub struct KeyLocation {
+    /// The region identifier and epoch version.
     pub region: RegionVerId,
+    /// The inclusive start key of the region range.
     pub start_key: Key,
+    /// The exclusive end key of the region range. Empty means unbounded.
     pub end_key: Key,
+    /// Cached bucket metadata returned by PD for this region, when available.
     pub buckets: Option<Arc<metapb::Buckets>>,
 }
 
 impl KeyLocation {
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn contains(&self, key: &Key) -> bool {
+    /// Return whether `key` falls within this region range.
+    #[doc(alias = "Contains")]
+    pub fn contains(&self, key: &Key) -> bool {
         self.start_key.as_ref() <= key && (self.end_key.is_empty() || key < &self.end_key)
     }
 
@@ -186,13 +198,18 @@ impl KeyLocation {
         end_key.is_empty() || self.end_key.is_empty() || end_key <= &self.end_key
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn bucket_version(&self) -> u64 {
+    /// Return the cached bucket version, or `0` when no bucket metadata is attached.
+    #[doc(alias = "BucketVersion")]
+    pub fn bucket_version(&self) -> u64 {
         self.buckets.as_ref().map_or(0, |buckets| buckets.version)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn locate_bucket(&self, key: &Key) -> Option<BucketLocation> {
+    /// Locate the bucket range containing `key`.
+    ///
+    /// If PD has not provided bucket metadata, this returns the whole region range. Sparse bucket
+    /// boundaries are clamped to the region edges, matching client-go `LocateBucket`.
+    #[doc(alias = "LocateBucket")]
+    pub fn locate_bucket(&self, key: &Key) -> Option<BucketLocation> {
         if !self.contains(key) {
             return None;
         }
@@ -609,7 +626,12 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Err(err)
     }
 
-    pub(crate) async fn locate_key_range(
+    /// Locate the consecutive regions covering `[start_key, end_key)`.
+    ///
+    /// This low-level API operates on the region cache's key encoding. Higher-level callers that
+    /// rely on API V2 key encoding should prefer [`crate::PdRpcClient::locate_key_range`].
+    #[doc(alias = "LocateKeyRange")]
+    pub async fn locate_key_range(
         &self,
         mut start_key: Key,
         end_key: Key,
@@ -635,7 +657,12 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Ok(locations)
     }
 
-    pub(crate) async fn batch_locate_key_ranges(
+    /// Locate multiple key ranges and merge adjacent duplicates from the same region.
+    ///
+    /// This low-level API operates on the region cache's key encoding. Higher-level callers that
+    /// rely on API V2 key encoding should prefer [`crate::PdRpcClient::batch_locate_key_ranges`].
+    #[doc(alias = "BatchLocateKeyRanges")]
+    pub async fn batch_locate_key_ranges(
         &self,
         ranges: Vec<crate::kv::KeyRange>,
     ) -> Result<Vec<KeyLocation>> {

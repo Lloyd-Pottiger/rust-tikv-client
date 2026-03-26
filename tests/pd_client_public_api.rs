@@ -28,6 +28,12 @@ fn crate_root_exports_region_cache_accessors() {
 }
 
 #[test]
+fn crate_root_exports_pd_locate_entrypoints() {
+    let _ = PdRpcClient::<tikv_client::store::TikvConnect>::locate_key_range;
+    let _ = PdRpcClient::<tikv_client::store::TikvConnect>::batch_locate_key_ranges;
+}
+
+#[test]
 fn crate_root_exports_pd_http_accessors() {
     let _: fn(&PdRpcClient) -> Option<&reqwest::Client> = PdRpcClient::pd_http_client;
     let _: fn(&PdRpcClient) -> &[String] = PdRpcClient::pd_http_endpoints;

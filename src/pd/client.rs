@@ -35,6 +35,7 @@ use crate::region::RegionVerId;
 use crate::region::RegionWithLeader;
 use crate::region::StoreId;
 use crate::region_cache::is_tiflash_store;
+use crate::region_cache::KeyLocation;
 use crate::region_cache::RegionCache;
 use crate::store::KvConnect;
 use crate::store::RegionStore;
@@ -727,6 +728,26 @@ pub trait PdClient: Send + Sync + 'static {
     }
 }
 
+fn decode_key_location(mut location: KeyLocation, enable_codec: bool) -> Result<KeyLocation> {
+    if enable_codec {
+        let mut start_key: Vec<u8> = location.start_key.into();
+        codec::decode_bytes_in_place(&mut start_key, false)?;
+        location.start_key = start_key.into();
+
+        let mut end_key: Vec<u8> = location.end_key.into();
+        codec::decode_bytes_in_place(&mut end_key, false)?;
+        location.end_key = end_key.into();
+
+        if let Some(buckets) = location.buckets.as_mut() {
+            let buckets = Arc::make_mut(buckets);
+            for key in &mut buckets.keys {
+                codec::decode_bytes_in_place(key, false)?;
+            }
+        }
+    }
+    Ok(location)
+}
+
 /// This client converts requests for the logical TiKV cluster into requests
 /// for a single TiKV store using PD and internal logic.
 #[derive(Clone)]
@@ -793,6 +814,73 @@ pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl 
 }
 
 const REGION_CACHE_PRELOAD_LIMIT: i32 = 10_000;
+
+impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl>
+where
+    RetryClient<Cl>: RetryClientTrait + Send + Sync,
+{
+    /// Locate the consecutive regions covering `[start_key, end_key)`.
+    ///
+    /// Unlike [`RegionCache::locate_key_range`], this helper automatically applies PD key
+    /// encoding/decoding for clients configured with API V2 codecs.
+    #[doc(alias = "LocateKeyRange")]
+    pub async fn locate_key_range(&self, start_key: Key, end_key: Key) -> Result<Vec<KeyLocation>> {
+        let enable_codec = self.enable_codec;
+        let start_key = if enable_codec {
+            start_key.to_encoded()
+        } else {
+            start_key
+        };
+        let end_key = if enable_codec {
+            end_key.to_encoded()
+        } else {
+            end_key
+        };
+
+        self.region_cache
+            .locate_key_range(start_key, end_key)
+            .await?
+            .into_iter()
+            .map(|location| decode_key_location(location, enable_codec))
+            .collect()
+    }
+
+    /// Locate multiple key ranges and merge adjacent duplicates from the same region.
+    ///
+    /// Unlike [`RegionCache::batch_locate_key_ranges`], this helper automatically applies PD key
+    /// encoding/decoding for clients configured with API V2 codecs.
+    #[doc(alias = "BatchLocateKeyRanges")]
+    pub async fn batch_locate_key_ranges(
+        &self,
+        ranges: Vec<crate::kv::KeyRange>,
+    ) -> Result<Vec<KeyLocation>> {
+        let enable_codec = self.enable_codec;
+        let ranges = ranges
+            .into_iter()
+            .map(|range| {
+                crate::kv::KeyRange::new(
+                    if enable_codec {
+                        range.start_key.to_encoded()
+                    } else {
+                        range.start_key
+                    },
+                    if enable_codec {
+                        range.end_key.to_encoded()
+                    } else {
+                        range.end_key
+                    },
+                )
+            })
+            .collect();
+
+        self.region_cache
+            .batch_locate_key_ranges(ranges)
+            .await?
+            .into_iter()
+            .map(|location| decode_key_location(location, enable_codec))
+            .collect()
+    }
+}
 
 impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
     /// Return the shared PD HTTP client, if this client was configured with one.
@@ -1800,6 +1888,40 @@ pub mod test {
     use crate::mock::*;
     use crate::store::Request;
 
+    #[async_trait]
+    impl RetryClientTrait for RetryClient<MockCluster> {
+        async fn get_region(self: Arc<Self>, _key: Vec<u8>) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_region_by_id(
+            self: Arc<Self>,
+            _region_id: RegionId,
+        ) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_store(self: Arc<Self>, _id: StoreId) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
     #[tokio::test]
     async fn test_kv_client_caching() {
         let client = block_on(pd_rpc_client());
@@ -2793,6 +2915,98 @@ pub mod test {
         assert_eq!(ranges2.0, vec![make_key_range(k3, k4)]);
         assert_eq!(ranges3.1.id(), 3);
         assert_eq!(ranges3.0, vec![make_key_range(k5, k6)]);
+    }
+
+    #[tokio::test]
+    async fn test_pd_rpc_client_locate_ranges_decode_codec_keys() {
+        fn encoded_key(raw: Vec<u8>) -> Vec<u8> {
+            Key::from(raw).to_encoded().into()
+        }
+
+        fn region(id: u64, start_key: Vec<u8>, end_key: Vec<u8>) -> RegionWithLeader {
+            RegionWithLeader {
+                region: metapb::Region {
+                    id,
+                    start_key,
+                    end_key,
+                    region_epoch: Some(metapb::RegionEpoch::default()),
+                    ..Default::default()
+                },
+                leader: None,
+            }
+        }
+
+        let mut client = pd_rpc_client().await;
+        client.enable_codec = true;
+
+        client
+            .region_cache
+            .add_region_with_buckets(
+                region(1, vec![], encoded_key(vec![10])),
+                Some(metapb::Buckets {
+                    region_id: 1,
+                    version: 7,
+                    keys: vec![vec![], encoded_key(vec![4]), encoded_key(vec![10])],
+                    ..Default::default()
+                }),
+            )
+            .await;
+        client
+            .region_cache
+            .add_region_with_buckets(
+                region(2, encoded_key(vec![10]), encoded_key(vec![20])),
+                Some(metapb::Buckets {
+                    region_id: 2,
+                    version: 9,
+                    keys: vec![
+                        encoded_key(vec![10]),
+                        encoded_key(vec![15]),
+                        encoded_key(vec![20]),
+                    ],
+                    ..Default::default()
+                }),
+            )
+            .await;
+
+        let locations = client
+            .locate_key_range(Key::from(vec![2]), Key::from(vec![18]))
+            .await
+            .unwrap();
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].start_key, Key::from(vec![]));
+        assert_eq!(locations[0].end_key, Key::from(vec![10]));
+        assert_eq!(locations[0].bucket_version(), 7);
+        assert_eq!(
+            locations[0].locate_bucket(&Key::from(vec![2])),
+            Some(crate::BucketLocation {
+                start_key: vec![].into(),
+                end_key: vec![4].into(),
+            })
+        );
+        assert_eq!(locations[1].start_key, Key::from(vec![10]));
+        assert_eq!(locations[1].end_key, Key::from(vec![20]));
+        assert_eq!(locations[1].bucket_version(), 9);
+        assert_eq!(
+            locations[1].locate_bucket(&Key::from(vec![17])),
+            Some(crate::BucketLocation {
+                start_key: vec![15].into(),
+                end_key: vec![20].into(),
+            })
+        );
+
+        let locations = client
+            .batch_locate_key_ranges(vec![
+                crate::kv::KeyRange::new(vec![1], vec![3]),
+                crate::kv::KeyRange::new(vec![3], vec![8]),
+                crate::kv::KeyRange::new(vec![12], vec![18]),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[1].region.id, 2);
+        assert_eq!(locations[0].end_key, Key::from(vec![10]));
+        assert_eq!(locations[1].start_key, Key::from(vec![10]));
     }
 
     #[tokio::test]

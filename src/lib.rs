@@ -250,6 +250,10 @@ pub use crate::raw::RawChecksum;
 #[doc(inline)]
 pub use crate::region::{RegionId, RegionVerId, RegionWithLeader, StoreId};
 #[doc(inline)]
+pub use crate::region_cache::BucketLocation;
+#[doc(inline)]
+pub use crate::region_cache::KeyLocation;
+#[doc(inline)]
 pub use crate::region_cache::RegionCache;
 #[doc(inline)]
 pub use crate::replica_read::ReplicaReadAdjuster;
