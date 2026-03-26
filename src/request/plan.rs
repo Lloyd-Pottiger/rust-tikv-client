@@ -2529,33 +2529,56 @@ where
                                 leader_address,
                             ));
 
-                        return Ok((
-                            RegionStore::new(region, client, proxy_store.store_address),
-                            Some(proxy_store_id),
-                        ));
+                        let region_store =
+                            RegionStore::new(region, client, proxy_store.store_address);
+                        plan.apply_store(&region_store)?;
+                        if let Some(replica_read_type) = replica_read_type {
+                            if let Some(ctx) = plan.kv_context_mut() {
+                                adjust_replica_read_flag(
+                                    ctx,
+                                    Some(leader_store_id),
+                                    replica_read_type,
+                                );
+                            }
+                        }
+                        let buckets_version = pd_client
+                            .buckets_version(region_store.region_with_leader.ver_id())
+                            .await;
+                        if let Some(ctx) = plan.kv_context_mut() {
+                            ctx.buckets_version = buckets_version;
+                        }
+
+                        return Ok((region_store, Some(proxy_store_id)));
                     }
                 }
             }
 
-            pd_client
+            let (region_store, send_store_id) = pd_client
                 .clone()
                 .map_region_to_store(region)
                 .await
                 .map(|region_store| {
                     let store_id = region_store.region_with_leader.get_store_id().ok();
                     (region_store, store_id)
-                })
-        })
-        .await
-        .and_then(|(region_store, send_store_id)| {
+                })?;
+
             plan.apply_store(&region_store)?;
             if let Some(replica_read_type) = replica_read_type {
                 if let Some(ctx) = plan.kv_context_mut() {
                     adjust_replica_read_flag(ctx, leader_store_id, replica_read_type);
                 }
             }
+            let buckets_version = pd_client
+                .buckets_version(region_store.region_with_leader.ver_id())
+                .await;
+            if let Some(ctx) = plan.kv_context_mut() {
+                ctx.buckets_version = buckets_version;
+            }
+
             Ok((region_store, send_store_id))
-        }) {
+        })
+        .await
+        {
             Ok(result) => result,
             Err(Error::LeaderNotFound { region }) => {
                 debug!(
@@ -7906,6 +7929,82 @@ mod test {
         assert!(resolved);
         assert!(pd_client.invalidated_region_ver_ids().is_empty());
         assert!(pd_client.invalidated_store_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_sets_context_buckets_version_and_updates_after_bucket_version_not_match()
+    {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let kv = {
+            let calls = calls.clone();
+            MockKvClient::with_dispatch_hook(move |req: &dyn Any| {
+                let request = req
+                    .downcast_ref::<kvrpcpb::GetRequest>()
+                    .expect("expected GetRequest");
+                let context = request.context.as_ref().expect("expected request context");
+
+                match calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => {
+                        assert_eq!(context.buckets_version, 0);
+
+                        let mut resp = kvrpcpb::GetResponse::default();
+                        resp.region_error = Some(errorpb::Error {
+                            bucket_version_not_match: Some(errorpb::BucketVersionNotMatch {
+                                version: 42,
+                                keys: vec![vec![], vec![1]],
+                            }),
+                            ..Default::default()
+                        });
+                        Ok(Box::new(resp) as Box<dyn Any>)
+                    }
+                    1 => {
+                        assert_eq!(context.buckets_version, 42);
+
+                        let mut resp = kvrpcpb::GetResponse::default();
+                        resp.value = b"ok".to_vec();
+                        Ok(Box::new(resp) as Box<dyn Any>)
+                    }
+                    idx => unreachable!("unexpected dispatch call #{idx}"),
+                }
+            })
+        };
+
+        let pd_client = Arc::new(MockPdClient::new(kv));
+
+        let mut request = kvrpcpb::GetRequest::default();
+        request.key = vec![1];
+        request.version = 10;
+        request.context = Some(kvrpcpb::Context::default());
+
+        let plan = Dispatch {
+            request,
+            kv_client: None,
+        };
+        let permits = Arc::new(Semaphore::new(1));
+        let match_store_ids = Arc::new(Vec::new());
+        let match_store_labels = Arc::new(Vec::new());
+
+        let results = RetryableMultiRegion::<Dispatch<kvrpcpb::GetRequest>, MockPdClient>::single_shard_handler(
+            pd_client,
+            plan,
+            MockPdClient::region1(),
+            Backoff::no_jitter_backoff(0, 0, 2),
+            None,
+            permits,
+            false,
+            false,
+            None,
+            match_store_ids,
+            match_store_labels,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
     }
 
     #[tokio::test]

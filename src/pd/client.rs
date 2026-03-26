@@ -716,6 +716,15 @@ pub trait PdClient: Send + Sync + 'static {
     ) {
         let _ = (ver_id, version, keys);
     }
+
+    /// Return cached bucket version for a region, if available.
+    ///
+    /// The default implementation returns `0`.
+    #[doc(hidden)]
+    async fn buckets_version(&self, ver_id: RegionVerId) -> u64 {
+        let _ = ver_id;
+        0
+    }
 }
 
 /// This client converts requests for the logical TiKV cluster into requests
@@ -1347,6 +1356,14 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         self.region_cache
             .on_bucket_version_not_match(ver_id, version, keys)
             .await;
+    }
+
+    async fn buckets_version(&self, ver_id: RegionVerId) -> u64 {
+        self.region_cache
+            .get_buckets_by_ver_id(&ver_id)
+            .await
+            .map(|buckets| buckets.version)
+            .unwrap_or(0)
     }
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {

@@ -110,6 +110,8 @@ pub struct MockPdClient {
     invalidated_store_ids: Mutex<Vec<StoreId>>,
     #[new(value = "Mutex::new(Vec::new())")]
     added_regions_to_cache: Mutex<Vec<RegionWithLeader>>,
+    #[new(value = "Mutex::new(HashMap::new())")]
+    buckets_version_by_ver_id: Mutex<HashMap<RegionVerId, u64>>,
     #[new(value = "Arc::new(AtomicU64::new(0))")]
     tso_version: Arc<AtomicU64>,
     #[new(value = "false")]
@@ -1090,6 +1092,33 @@ impl PdClient for MockPdClient {
             Err(poisoned) => poisoned.into_inner(),
         };
         added.push(region);
+    }
+
+    async fn on_bucket_version_not_match(
+        &self,
+        ver_id: RegionVerId,
+        version: u64,
+        keys: Vec<Vec<u8>>,
+    ) {
+        let _ = keys;
+        let mut buckets = match self.buckets_version_by_ver_id.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match buckets.get(&ver_id) {
+            Some(existing) if *existing >= version => {}
+            _ => {
+                buckets.insert(ver_id, version);
+            }
+        }
+    }
+
+    async fn buckets_version(&self, ver_id: RegionVerId) -> u64 {
+        let buckets = match self.buckets_version_by_ver_id.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        buckets.get(&ver_id).copied().unwrap_or(0)
     }
 
     async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
