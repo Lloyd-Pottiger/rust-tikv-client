@@ -562,7 +562,8 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             .next_back()
             .map(|(_, ver_id)| ver_id.clone())?;
         let region = cache.ver_id_to_region.get(&candidate)?;
-        if !region.end_key().is_empty() && key.as_ref() > region.end_key().as_ref() {
+        let region_end_key: &Key = (&region.region.end_key).into();
+        if !region_end_key.is_empty() && key > region_end_key {
             return None;
         }
         if !self.cached_region_is_fresh(
