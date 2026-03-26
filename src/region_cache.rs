@@ -957,39 +957,106 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             }
             if has_miss {
                 let to_send = ranges.len().min(MAX_RANGES_PER_BATCH);
-                let pd_ranges: Vec<pdpb::KeyRange> = ranges
-                    .iter()
-                    .take(to_send)
-                    .map(|range| pdpb::KeyRange {
-                        start_key: range.start_key.clone().into(),
-                        end_key: range.end_key.clone().into(),
-                    })
-                    .collect();
+                let mut remaining_ranges: Vec<crate::kv::KeyRange> =
+                    ranges.iter().take(to_send).cloned().collect();
 
-                match self
-                    .pd_region_meta_circuit_breaker
-                    .execute(|| {
-                        let inner = self.inner_client.clone();
-                        let pd_ranges = pd_ranges;
-                        async move {
-                            inner
-                                .batch_scan_regions(
-                                    pd_ranges,
-                                    DEFAULT_REGIONS_PER_BATCH,
-                                    options.need_buckets,
-                                )
-                                .await
-                        }
-                    })
-                    .await
-                {
-                    Ok(regions) => {
-                        for (region, buckets) in regions {
-                            self.add_region_with_buckets(region, buckets).await;
-                        }
+                // Drop ranges that are fully covered by `split_key` and continue from there.
+                //
+                // This mirrors client-go `rangesAfterKey` but is best-effort (linear scan) because
+                // callers may pass overlapping or otherwise irregular range lists.
+                fn ranges_after_key(
+                    mut key_ranges: Vec<crate::kv::KeyRange>,
+                    split_key: &Key,
+                ) -> Vec<crate::kv::KeyRange> {
+                    if key_ranges.is_empty() {
+                        return Vec::new();
                     }
-                    Err(Error::Unimplemented) => {}
-                    Err(_) => {}
+                    if split_key.is_empty() {
+                        return Vec::new();
+                    }
+
+                    let last_end = &key_ranges[key_ranges.len() - 1].end_key;
+                    if !last_end.is_empty() && split_key >= last_end {
+                        return Vec::new();
+                    }
+
+                    let mut idx = 0usize;
+                    while idx < key_ranges.len() {
+                        let end = &key_ranges[idx].end_key;
+                        if end.is_empty() || split_key < end {
+                            break;
+                        }
+                        idx += 1;
+                    }
+                    if idx >= key_ranges.len() {
+                        return Vec::new();
+                    }
+
+                    let mut rest = key_ranges.split_off(idx);
+                    if split_key > &rest[0].start_key {
+                        rest[0].start_key = split_key.clone();
+                    }
+                    rest
+                }
+
+                loop {
+                    let pd_ranges: Vec<pdpb::KeyRange> = remaining_ranges
+                        .iter()
+                        .map(|range| pdpb::KeyRange {
+                            start_key: range.start_key.clone().into(),
+                            end_key: range.end_key.clone().into(),
+                        })
+                        .collect();
+
+                    let result = self
+                        .pd_region_meta_circuit_breaker
+                        .execute(|| {
+                            let inner = self.inner_client.clone();
+                            let pd_ranges = pd_ranges;
+                            async move {
+                                inner
+                                    .batch_scan_regions(
+                                        pd_ranges,
+                                        DEFAULT_REGIONS_PER_BATCH,
+                                        options.need_buckets,
+                                    )
+                                    .await
+                            }
+                        })
+                        .await;
+
+                    match result {
+                        Ok(regions) => {
+                            if regions.is_empty() {
+                                break;
+                            }
+
+                            let split_key = regions
+                                .last()
+                                .map(|(region, _)| region.end_key())
+                                .unwrap_or_default();
+
+                            for (region, buckets) in regions {
+                                self.add_region_with_buckets(region, buckets).await;
+                            }
+
+                            // `end_key == ""` means the last region extends to +inf.
+                            if split_key.is_empty() {
+                                break;
+                            }
+                            // Defensive guard against non-progressing PD responses.
+                            if split_key <= remaining_ranges[0].start_key {
+                                break;
+                            }
+
+                            remaining_ranges = ranges_after_key(remaining_ranges, &split_key);
+                            if remaining_ranges.is_empty() {
+                                break;
+                            }
+                        }
+                        Err(Error::Unimplemented) => break,
+                        Err(_) => break,
+                    }
                 }
             }
         }
@@ -2280,6 +2347,42 @@ mod test {
         let calls = retry_client.batch_scan_regions_calls.lock().await.clone();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0.len(), 2048);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_repeats_pd_batch_scan_until_complete(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        // Prepare more regions than DEFAULT_REGIONS_PER_BATCH so a single PD BatchScanRegions call
+        // will not cover the entire range.
+        //
+        // We use 200 contiguous regions: [-inf, 1), [1, 2), ..., [199, +inf).
+        for i in 0u8..200 {
+            let id = u64::from(i) + 1;
+            let start_key = if i == 0 { vec![] } else { vec![i] };
+            let end_key = if i == 199 { vec![] } else { vec![i + 1] };
+            retry_client
+                .regions
+                .lock()
+                .await
+                .insert(id, region_with_leader(id, start_key, end_key, 42));
+        }
+
+        let _ = cache
+            .batch_locate_key_ranges_with_opts(
+                vec![crate::kv::KeyRange::new(vec![0], vec![200])],
+                std::iter::empty(),
+            )
+            .await?;
+
+        // Preheat should keep scanning until the requested ranges are covered so the main locate
+        // path doesn't fall back to per-key PD lookups.
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 2);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
 
         Ok(())
     }
