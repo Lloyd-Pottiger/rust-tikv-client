@@ -2462,6 +2462,15 @@ mod test {
         assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 1);
         assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
 
+        let calls = retry_client.batch_scan_regions_calls.lock().await.clone();
+        assert_eq!(calls.len(), 1);
+        let sent = &calls[0].0;
+        assert!(
+            sent.windows(2)
+                .all(|pair| pair[0].start_key <= pair[1].start_key),
+            "expected preheat ranges sent to PD to be sorted"
+        );
+
         Ok(())
     }
 
