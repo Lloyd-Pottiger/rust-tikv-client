@@ -37,6 +37,8 @@ fn tikv_module_exports_codec_prefix_helpers() {
 #[test]
 fn tikv_module_exports_region_cache_helpers_and_keyrange() {
     let _: Option<tikv::KeyRange> = None;
+    let _: tikv::BatchLocateKeyRangesOpt = tikv::with_need_buckets();
+    let _: tikv::BatchLocateKeyRangesOpt = tikv::with_need_region_has_leader_peer();
 
     fn assert_new_region_cache_signature<C>()
     where
