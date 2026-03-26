@@ -33,3 +33,61 @@ fn tikv_module_exports_codec_prefix_helpers() {
     assert_eq!(v2[1], &[tikv::CODEC_V2_TXN_KEYSPACE_PREFIX]);
     assert_eq!(tikv::codec_v1_exclude_prefixes(), v2);
 }
+
+#[test]
+fn tikv_module_exports_region_cache_helpers_and_keyrange() {
+    let _: Option<tikv::KeyRange> = None;
+
+    fn assert_new_region_cache_signature<C>()
+    where
+        C: tikv_client::RetryClientTrait + Send + Sync,
+    {
+        let _: fn(Arc<C>) -> tikv_client::RegionCache<C> = tikv::new_region_cache::<C>;
+    }
+
+    assert_new_region_cache_signature::<tikv_client::RetryClient>();
+}
+
+#[test]
+fn tikv_module_exports_label_filters() {
+    let _: tikv::LabelFilter = tikv::label_filter_all_node;
+
+    let tiflash_labels = vec![tikv_client::StoreLabel {
+        key: tikv_client::tikvrpc::ENGINE_LABEL_KEY.to_owned(),
+        value: tikv_client::tikvrpc::ENGINE_LABEL_TIFLASH.to_owned(),
+    }];
+    assert!(tikv::label_filter_all_tiflash_node(&tiflash_labels));
+    assert!(tikv::label_filter_no_tiflash_write_node(&tiflash_labels));
+    assert!(!tikv::label_filter_only_tiflash_write_node(&tiflash_labels));
+
+    let tiflash_write_labels = vec![
+        tikv_client::StoreLabel {
+            key: tikv_client::tikvrpc::ENGINE_LABEL_KEY.to_owned(),
+            value: tikv_client::tikvrpc::ENGINE_LABEL_TIFLASH.to_owned(),
+        },
+        tikv_client::StoreLabel {
+            key: tikv_client::tikvrpc::ENGINE_ROLE_LABEL_KEY.to_owned(),
+            value: tikv_client::tikvrpc::ENGINE_ROLE_WRITE.to_owned(),
+        },
+    ];
+    assert!(tikv::label_filter_all_tiflash_node(&tiflash_write_labels));
+    assert!(tikv::label_filter_only_tiflash_write_node(
+        &tiflash_write_labels
+    ));
+    assert!(!tikv::label_filter_no_tiflash_write_node(
+        &tiflash_write_labels
+    ));
+
+    let non_tiflash_labels = vec![tikv_client::StoreLabel {
+        key: tikv_client::tikvrpc::ENGINE_LABEL_KEY.to_owned(),
+        value: "not-tiflash".to_owned(),
+    }];
+    assert!(!tikv::label_filter_all_tiflash_node(&non_tiflash_labels));
+    assert!(!tikv::label_filter_only_tiflash_write_node(
+        &non_tiflash_labels
+    ));
+    assert!(!tikv::label_filter_no_tiflash_write_node(
+        &non_tiflash_labels
+    ));
+    assert!(tikv::label_filter_all_node(&non_tiflash_labels));
+}
