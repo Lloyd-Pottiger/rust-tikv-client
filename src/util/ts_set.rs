@@ -12,6 +12,9 @@ pub struct TsSet {
 }
 
 impl TsSet {
+    /// Create an empty timestamp set.
+    ///
+    /// The backing storage is allocated lazily on first insertion.
     pub fn new() -> TsSet {
         TsSet::default()
     }

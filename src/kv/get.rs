@@ -64,7 +64,15 @@ pub enum GetOrBatchGetOption {
     ReturnCommitTs,
 }
 
+/// Shared option alias for single-key get operations.
+///
+/// This currently aliases [`GetOrBatchGetOption`] so single-key and batch-get
+/// requests stay on the same stable option surface.
 pub type GetOption = GetOrBatchGetOption;
+/// Shared option alias for batch-get operations.
+///
+/// This currently aliases [`GetOrBatchGetOption`] so single-key and batch-get
+/// requests stay on the same stable option surface.
 pub type BatchGetOption = GetOrBatchGetOption;
 
 /// Returns an option indicating commit timestamps should be returned (when supported).

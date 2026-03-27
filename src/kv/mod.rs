@@ -45,6 +45,10 @@ pub use crate::transaction::DEF_BACKOFF_WEIGHT;
 pub use crate::ReplicaReadType;
 pub use crate::Variables;
 
+/// Wrapper that formats a byte slice as uppercase hexadecimal.
+///
+/// This is primarily exposed for diagnostics and debug-style output in public
+/// key/value types such as [`Key`](crate::kv::Key) and [`KvPair`](crate::kv::KvPair).
 pub struct HexRepr<'a>(pub &'a [u8]);
 
 impl fmt::Display for HexRepr<'_> {
