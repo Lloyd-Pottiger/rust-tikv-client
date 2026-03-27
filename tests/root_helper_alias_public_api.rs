@@ -93,4 +93,57 @@ fn crate_root_exports_lowering_alias_modules() {
     let get = transaction_lowering::new_get_request(b"k".to_vec().into(), start_ts);
     assert_eq!(get.version, 42);
     assert_eq!(get.key, b"k".to_vec());
+
+    let prepare_range: tikv_client::BoundRange = (b"a".to_vec()..b"m".to_vec()).into();
+    let prepare_flashback =
+        transaction_lowering::new_prepare_flashback_to_version_request(prepare_range, 123, 99);
+    assert_eq!(prepare_flashback.start_key, b"a".to_vec());
+    assert_eq!(prepare_flashback.end_key, b"m".to_vec());
+    assert_eq!(prepare_flashback.start_ts, 123);
+    assert_eq!(prepare_flashback.version, 99);
+
+    let flashback_range: tikv_client::BoundRange = (b"n".to_vec()..b"z".to_vec()).into();
+    let flashback =
+        transaction_lowering::new_flashback_to_version_request(flashback_range, 321, 456, 654);
+    assert_eq!(flashback.start_key, b"n".to_vec());
+    assert_eq!(flashback.end_key, b"z".to_vec());
+    assert_eq!(flashback.version, 321);
+    assert_eq!(flashback.start_ts, 456);
+    assert_eq!(flashback.commit_ts, 654);
+
+    let compact = transaction_lowering::new_compact_request(b"t".to_vec().into(), 11, 22, 33);
+    assert_eq!(compact.start_key, b"t".to_vec());
+    assert_eq!(compact.physical_table_id, 11);
+    assert_eq!(compact.logical_table_id, 22);
+    assert_eq!(compact.keyspace_id, 33);
+
+    let register = transaction_lowering::new_register_lock_observer_request(700);
+    assert_eq!(register.max_ts, 700);
+
+    let check = transaction_lowering::new_check_lock_observer_request(701);
+    assert_eq!(check.max_ts, 701);
+
+    let remove = transaction_lowering::new_remove_lock_observer_request(702);
+    assert_eq!(remove.max_ts, 702);
+
+    let physical_scan =
+        transaction_lowering::new_physical_scan_lock_request(703, b"scan".to_vec().into(), 12);
+    assert_eq!(physical_scan.max_ts, 703);
+    assert_eq!(physical_scan.start_key, b"scan".to_vec());
+    assert_eq!(physical_scan.limit, 12);
+
+    let lock_wait_info = transaction_lowering::new_get_lock_wait_info_request();
+    assert_eq!(
+        lock_wait_info,
+        tikv_client::proto::kvrpcpb::GetLockWaitInfoRequest::default()
+    );
+
+    let lock_wait_history = transaction_lowering::new_get_lock_wait_history_request();
+    assert_eq!(
+        lock_wait_history,
+        tikv_client::proto::kvrpcpb::GetLockWaitHistoryRequest::default()
+    );
+
+    let tiflash = transaction_lowering::new_get_ti_flash_system_table_request("select 1".into());
+    assert_eq!(tiflash.sql, "select 1");
 }
