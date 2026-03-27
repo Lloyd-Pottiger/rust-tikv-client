@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tikv_client::{
-    proto::kvrpcpb, transaction, CommandPriority, IsolationLevel, Key, ReplicaReadType,
-    RetryOptions, Timestamp, TimestampExt,
+    proto::kvrpcpb, transaction, CommandPriority, DiskFullOpt, IsolationLevel, Key,
+    ReplicaReadType, RetryOptions, Timestamp, TimestampExt, TraceControlFlags,
 };
 
 async fn begin_with_txn_scope_entry(
@@ -218,6 +218,65 @@ fn transaction_module_exports_option_and_filter_helpers() {
     let key = Key::from(vec![b'a']);
     let put = transaction::Mutation::Put(key.clone(), b"value".to_vec());
     assert_eq!(put.key(), &key);
+}
+
+#[test]
+fn transaction_module_exports_pipelined_and_request_metadata_option_builders() {
+    let defaults = transaction::PipelinedTxnOptions::default();
+    assert_eq!(
+        defaults.flush_concurrency(),
+        transaction::PipelinedTxnOptions::DEFAULT_FLUSH_CONCURRENCY
+    );
+    assert_eq!(
+        defaults.resolve_lock_concurrency(),
+        transaction::PipelinedTxnOptions::DEFAULT_RESOLVE_LOCK_CONCURRENCY
+    );
+    assert_eq!(
+        defaults.write_throttle_ratio(),
+        transaction::PipelinedTxnOptions::DEFAULT_WRITE_THROTTLE_RATIO
+    );
+
+    let custom = transaction::PipelinedTxnOptions::new(16, 4, 0.25).expect("custom pipeline");
+    assert_eq!(custom.flush_concurrency(), 16);
+    assert_eq!(custom.resolve_lock_concurrency(), 4);
+    assert_eq!(custom.write_throttle_ratio(), 0.25);
+    assert!(transaction::PipelinedTxnOptions::new(0, 4, 0.25).is_err());
+    assert!(transaction::PipelinedTxnOptions::new(16, 0, 0.25).is_err());
+    assert!(transaction::PipelinedTxnOptions::new(16, 4, 1.0).is_err());
+
+    let base = transaction::TransactionOptions::new_optimistic();
+    assert_eq!(
+        base.clone().pipelined(),
+        base.clone().pipelined_txn(defaults)
+    );
+    assert_ne!(base.clone(), base.clone().pipelined());
+    assert_ne!(base.clone(), base.clone().pipelined_txn(custom));
+    assert_ne!(base.clone(), base.clone().try_one_pc());
+    assert_ne!(base.clone(), base.clone().causal_consistency(true));
+    assert_ne!(
+        base.clone(),
+        base.clone()
+            .assertion_level(transaction::AssertionLevel::Strict)
+    );
+    assert_ne!(
+        base.clone(),
+        base.clone()
+            .prewrite_encounter_lock_policy(transaction::PrewriteEncounterLockPolicy::NoResolve,)
+    );
+    assert_ne!(
+        base.clone(),
+        base.clone()
+            .disk_full_opt(DiskFullOpt::AllowedOnAlreadyFull)
+    );
+    assert_ne!(base.clone(), base.clone().txn_source(42));
+    assert_ne!(base.clone(), base.clone().request_source("cdc"));
+    assert_ne!(base.clone(), base.clone().trace_id(vec![9, 8, 7]));
+
+    let flags = TraceControlFlags::default()
+        .with(TraceControlFlags::IMMEDIATE_LOG)
+        .with(TraceControlFlags::TIKV_CATEGORY_REQUEST);
+    assert_ne!(base.clone(), base.clone().trace_control_flags(flags));
+    assert_ne!(base.clone(), base.sync_log(true));
 }
 
 #[test]
