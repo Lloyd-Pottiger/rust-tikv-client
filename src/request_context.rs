@@ -16,6 +16,24 @@ tokio::task_local! {
     static TASK_RESOURCE_GROUP_NAME: String;
 }
 
+/// Marker key type for request source type stored in task-local context.
+///
+/// This mirrors client-go `util.RequestSourceTypeKeyType` and `util.RequestSourceTypeKey`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RequestSourceTypeKey;
+
+/// Type alias kept for client-go API parity.
+pub type RequestSourceTypeKeyType = RequestSourceTypeKey;
+
+/// Marker key type for request source stored in task-local context.
+///
+/// This mirrors client-go `util.RequestSourceKeyType` and `util.RequestSourceKey`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RequestSourceKey;
+
+/// Type alias kept for client-go API parity.
+pub type RequestSourceKeyType = RequestSourceKey;
+
 /// The priority of commands executed by TiKV.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(i32)]

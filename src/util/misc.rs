@@ -6,6 +6,12 @@ tokio::task_local! {
     static TASK_SESSION_ID: u64;
 }
 
+/// Marker key for session id stored in task-local context.
+///
+/// This mirrors client-go `util.SessionID`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SessionID;
+
 /// Runs `future` with a task-local session id.
 ///
 /// This mirrors client-go `util.SetSessionID`, but uses Tokio task-local storage instead of
