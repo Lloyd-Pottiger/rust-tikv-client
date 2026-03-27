@@ -140,21 +140,29 @@ impl<T, E> CallbackInner<T, E> {
 /// Execution state of a [`RunLoop`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
+    /// The run-loop is idle and not currently waiting or executing tasks.
     Idle,
+    /// The run-loop is blocked waiting for new tasks to be appended.
     Waiting,
+    /// The run-loop is currently draining queued tasks.
     Running,
 }
 
 /// Errors returned by [`RunLoop::exec`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RunLoopExecError {
+    /// Another thread is already calling [`RunLoop::exec`].
     #[error("runloop: already executing")]
     AlreadyExecuting,
+    /// Execution was cancelled after the given number of tasks had already run.
     #[error("runloop: cancelled")]
     Cancelled { executed: usize },
 }
 
 impl RunLoopExecError {
+    /// Return how many tasks were executed before this error was reported.
+    ///
+    /// This is always `0` for [`RunLoopExecError::AlreadyExecuting`].
     pub fn executed(&self) -> usize {
         match self {
             RunLoopExecError::AlreadyExecuting => 0,
@@ -170,10 +178,16 @@ pub struct CancellationToken {
 }
 
 impl CancellationToken {
+    /// Mark the token as cancelled.
+    ///
+    /// Future calls to [`CancellationToken::is_cancelled`] return `true`, and a
+    /// currently running [`RunLoop::exec`] call will stop before executing any
+    /// further queued tasks.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
 
+    /// Return whether cancellation has been requested for this token.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
