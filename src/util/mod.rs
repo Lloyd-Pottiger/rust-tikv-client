@@ -13,6 +13,7 @@ pub mod gc_time;
 #[doc(hidden)]
 pub mod iter;
 mod misc;
+mod option;
 pub mod rate_limit;
 pub mod redact;
 pub mod ts_set;
@@ -83,6 +84,9 @@ pub use misc::session_id;
 pub use misc::with_recovery;
 pub use misc::with_session_id;
 pub use misc::SessionID;
+pub use option::none;
+pub use option::some;
+pub use option::Option;
 pub use rate_limit::RateLimit;
 pub use rate_limit::RateLimitError;
 pub use rate_limit::RateLimitPermit;
