@@ -173,6 +173,46 @@ pub fn label_filter_all_node(_labels: &[crate::StoreLabel]) -> bool {
     true
 }
 
+/// The key mode for API V2 requests.
+///
+/// This mirrors client-go `tikv.Mode`.
+pub type Mode = crate::request::KeyMode;
+
+/// The keyspace identifier type used by API V2 requests.
+///
+/// This mirrors client-go `tikv.KeyspaceID`.
+pub type KeyspaceID = u32;
+
+/// API V2 raw key mode.
+///
+/// This mirrors client-go `tikv.ModeRaw`.
+#[doc(alias = "ModeRaw")]
+pub const MODE_RAW: Mode = Mode::Raw;
+
+/// API V2 transactional key mode.
+///
+/// This mirrors client-go `tikv.ModeTxn`.
+#[doc(alias = "ModeTxn")]
+pub const MODE_TXN: Mode = Mode::Txn;
+
+/// The keyspace ID of the default keyspace.
+///
+/// This mirrors client-go `tikv.DefaultKeyspaceID`.
+#[doc(alias = "DefaultKeyspaceID")]
+pub const DEFAULT_KEYSPACE_ID: KeyspaceID = 0;
+
+/// The name of the default keyspace.
+///
+/// This mirrors client-go `tikv.DefaultKeyspaceName`.
+#[doc(alias = "DefaultKeyspaceName")]
+pub const DEFAULT_KEYSPACE_NAME: &str = "DEFAULT";
+
+/// A sentinel keyspace ID indicating that no keyspace is associated with the request.
+///
+/// This mirrors client-go `tikv.NullspaceID`.
+#[doc(alias = "NullspaceID")]
+pub const NULLSPACE_ID: KeyspaceID = u32::MAX;
+
 /// The API V2 prefix byte for transactional keys.
 ///
 /// This mirrors client-go `tikv.CodecV2TxnKeyspacePrefix`.

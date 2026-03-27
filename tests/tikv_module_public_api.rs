@@ -100,6 +100,17 @@ fn tikv_module_exports_resource_control_info_accessors() {
 
 #[test]
 fn tikv_module_exports_codec_prefix_helpers() {
+    let _: tikv::Mode = tikv::MODE_RAW;
+    let _: tikv::Mode = tikv::MODE_TXN;
+    let _: tikv::KeyspaceID = tikv::DEFAULT_KEYSPACE_ID;
+    let _: tikv::KeyspaceID = tikv::NULLSPACE_ID;
+
+    assert_eq!(tikv::MODE_RAW, tikv::Mode::Raw);
+    assert_eq!(tikv::MODE_TXN, tikv::Mode::Txn);
+    assert_eq!(tikv::DEFAULT_KEYSPACE_ID, 0);
+    assert_eq!(tikv::DEFAULT_KEYSPACE_NAME, "DEFAULT");
+    assert_eq!(tikv::NULLSPACE_ID, u32::MAX);
+
     let _: u8 = tikv::CODEC_V2_RAW_KEYSPACE_PREFIX;
     let _: u8 = tikv::CODEC_V2_TXN_KEYSPACE_PREFIX;
     let v2 = tikv::codec_v2_prefixes();
