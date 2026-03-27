@@ -44,3 +44,52 @@ fn config_module_exports_types_and_global_helpers() {
     let _: fn(Duration, Duration) = config::set_region_cache_ttl_with_jitter;
     let _: fn(Duration) = config::set_store_liveness_timeout;
 }
+
+#[test]
+fn config_module_exposes_recent_parity_builders_and_fields() {
+    let copr_cache = config::CoprocessorCacheConfig {
+        capacity_mb: 64,
+        admission_max_ranges: 12,
+        admission_max_result_mb: 8,
+        admission_min_process_ms: 9,
+    };
+    let _: config::CoprocessorCacheConfig = copr_cache.clone();
+
+    let config = config::Config::default()
+        .with_pd_server_timeout(Duration::from_secs(9))
+        .with_commit_timeout(Duration::from_secs(41))
+        .with_async_commit_keys_limit(512)
+        .with_async_commit_total_key_size_limit(8192)
+        .with_async_commit_safe_window(Duration::from_secs(3))
+        .with_async_commit_allowed_clock_drift(Duration::from_millis(750))
+        .with_batch_rpc_policy(config::BATCH_POLICY_BASIC)
+        .with_batch_rpc_overload_threshold(321)
+        .with_batch_rpc_wait_size(16)
+        .with_batch_rpc_max_wait_time(Duration::from_millis(5))
+        .with_copr_req_timeout(Duration::from_secs(7))
+        .with_copr_cache(copr_cache.clone())
+        .with_enable_chunk_rpc(false)
+        .with_grpc_shared_buffer_pool(true)
+        .with_max_concurrency_request_limit(42)
+        .with_resolve_lock_lite_threshold(24);
+
+    assert_eq!(config.pd_server_timeout, Duration::from_secs(9));
+    assert_eq!(config.commit_timeout, Duration::from_secs(41));
+    assert_eq!(config.async_commit_keys_limit, 512);
+    assert_eq!(config.async_commit_total_key_size_limit, 8192);
+    assert_eq!(config.async_commit_safe_window, Duration::from_secs(3));
+    assert_eq!(
+        config.async_commit_allowed_clock_drift,
+        Duration::from_millis(750)
+    );
+    assert_eq!(config.batch_rpc_policy, config::BATCH_POLICY_BASIC);
+    assert_eq!(config.batch_rpc_overload_threshold, 321);
+    assert_eq!(config.batch_rpc_wait_size, 16);
+    assert_eq!(config.batch_rpc_max_wait_time, Duration::from_millis(5));
+    assert_eq!(config.copr_req_timeout, Duration::from_secs(7));
+    assert_eq!(config.copr_cache, copr_cache);
+    assert!(!config.enable_chunk_rpc);
+    assert!(config.grpc_shared_buffer_pool);
+    assert_eq!(config.max_concurrency_request_limit, 42);
+    assert_eq!(config.resolve_lock_lite_threshold, 24);
+}
