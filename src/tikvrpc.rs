@@ -70,7 +70,16 @@ macro_rules! cmd_type_table {
         #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
         #[non_exhaustive]
         pub enum CmdType {
-            $($variant,)*
+            $(
+                #[doc = concat!(
+                    "`",
+                    $name,
+                    "` command type for requests labeled `",
+                    $label,
+                    "`."
+                )]
+                $variant,
+            )*
             /// Command label not known to this compatibility layer.
             Unknown,
         }
@@ -222,13 +231,16 @@ impl fmt::Display for EndpointType {
 ///
 /// They should be kept in sync with PD and client-go.
 pub const ENGINE_LABEL_KEY: &str = "engine";
+/// Label value identifying a TiFlash store.
 pub const ENGINE_LABEL_TIFLASH: &str = "tiflash";
+/// Label value identifying a TiFlash compute store.
 pub const ENGINE_LABEL_TIFLASH_COMPUTE: &str = "tiflash_compute";
 
 /// Constants to determine engine role.
 ///
 /// They should be kept in sync with PD and client-go.
 pub const ENGINE_ROLE_LABEL_KEY: &str = "engine_role";
+/// Label value identifying a writable TiKV engine role.
 pub const ENGINE_ROLE_WRITE: &str = "write";
 
 #[cfg(test)]

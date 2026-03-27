@@ -26,6 +26,9 @@ pub use crate::TransactionClient as KVStore;
 #[doc(inline)]
 pub use crate::Variables;
 #[doc(alias = "MaxTxnTimeUse")]
+/// The maximum time a transaction may use, in milliseconds, from begin to commit.
+///
+/// This mirrors client-go `tikv.MaxTxnTimeUse`.
 pub const MAX_TXN_TIME_USE: i64 = crate::MAX_TXN_TIME_USE;
 
 /// Client-go style in-memory mutation buffer type.

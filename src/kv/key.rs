@@ -107,7 +107,15 @@ impl AsRef<Key> for kvrpcpb::Mutation {
     }
 }
 
-pub struct KvPairTTL(pub KvPair, pub u64);
+/// A key-value pair bundled with its raw TTL, in seconds.
+///
+/// This mirrors the raw API shape used by client-go batch put requests with per-pair TTLs.
+pub struct KvPairTTL(
+    /// The key-value pair payload.
+    pub KvPair,
+    /// The TTL applied to the pair, in seconds.
+    pub u64,
+);
 
 impl AsRef<Key> for KvPairTTL {
     fn as_ref(&self) -> &Key {
@@ -203,6 +211,8 @@ impl Key {
         Key(encoded)
     }
 
+    /// Return the length of the raw key, in bytes.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -213,11 +223,14 @@ impl Key {
 /// This maps to client-go `kv.KeyRange`.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct KeyRange {
+    /// Inclusive start key of the range.
     pub start_key: Key,
+    /// Exclusive end key of the range.
     pub end_key: Key,
 }
 
 impl KeyRange {
+    /// Create a half-open key range `[start_key, end_key)`.
     #[must_use]
     pub fn new(start_key: impl Into<Key>, end_key: impl Into<Key>) -> Self {
         Self {
