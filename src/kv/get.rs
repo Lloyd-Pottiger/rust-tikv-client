@@ -85,6 +85,17 @@ pub fn with_return_commit_ts() -> GetOrBatchGetOption {
     GetOrBatchGetOption::ReturnCommitTs
 }
 
+/// Converts batch-get options into the equivalent single-get options.
+///
+/// This mirrors client-go `kv.BatchGetToGetOptions`. In the Rust client both option types are
+/// aliases of [`GetOrBatchGetOption`], so this preserves order and simply copies the shared enum
+/// values into a new [`Vec`].
+#[doc(alias = "BatchGetToGetOptions")]
+#[must_use]
+pub fn batch_get_to_get_options(options: &[BatchGetOption]) -> Vec<GetOption> {
+    options.to_vec()
+}
+
 /// Options passed to get operations.
 ///
 /// This mirrors client-go `kv.GetOptions`.

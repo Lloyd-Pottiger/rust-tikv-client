@@ -18,6 +18,7 @@ mod value;
 
 pub use bound_range::BoundRange;
 pub use bound_range::IntoOwnedRange;
+pub use get::batch_get_to_get_options;
 pub use get::with_return_commit_ts;
 pub use get::BatchGetOption;
 pub use get::BatchGetOptions;

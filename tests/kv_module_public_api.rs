@@ -49,6 +49,7 @@ fn kv_module_exports_get_and_batch_get_option_types() {
     let _: kv::GetOption = shared;
     let _: kv::BatchGetOption = shared;
     let _: kv::GetOrBatchGetOption = kv::with_return_commit_ts();
+    let _: fn(&[kv::BatchGetOption]) -> Vec<kv::GetOption> = kv::batch_get_to_get_options;
 
     let mut opts = kv::GetOptions::default();
     opts.apply(&[kv::with_return_commit_ts()]);
@@ -57,6 +58,11 @@ fn kv_module_exports_get_and_batch_get_option_types() {
     let mut opts = kv::BatchGetOptions::default();
     opts.apply(&[kv::with_return_commit_ts()]);
     assert!(opts.return_commit_ts());
+
+    assert_eq!(
+        kv::batch_get_to_get_options(&[kv::with_return_commit_ts()]),
+        vec![kv::GetOrBatchGetOption::ReturnCommitTs],
+    );
 
     let value = kv::ValueEntry::new(Some(b"v".to_vec()), 42);
     assert!(value.exists());
