@@ -60,14 +60,19 @@ fn async_util_public_api_exposes_callback_and_error_types() {
 
 #[test]
 fn async_util_public_api_exposes_runloop_and_cancellation() {
-    let mut run_loop = RunLoop::new();
+    let pool = Arc::new(RecordingExecutor::default());
+    let _: fn(Arc<dyn Pool>) -> RunLoop = RunLoop::with_pool;
+
+    let mut run_loop = RunLoop::with_pool(pool.clone());
     assert_eq!(run_loop.state(), State::Idle);
     assert_eq!(run_loop.num_runnable(), 0);
-
-    let pool = Arc::new(RecordingExecutor::default());
-    run_loop.set_pool(Some(pool.clone()));
     run_loop.go(Box::new(|| {}));
     assert_eq!(pool.tasks.lock().unwrap().len(), 1);
+
+    let replacement_pool = Arc::new(RecordingExecutor::default());
+    run_loop.set_pool(Some(replacement_pool.clone()));
+    run_loop.go(Box::new(|| {}));
+    assert_eq!(replacement_pool.tasks.lock().unwrap().len(), 1);
 
     let executed = Arc::new(Mutex::new(Vec::new()));
     let executed_task = executed.clone();

@@ -1,5 +1,6 @@
 use tikv_client::tikvrpc::{
     EndpointType, ENGINE_LABEL_KEY, ENGINE_LABEL_TIFLASH, ENGINE_LABEL_TIFLASH_COMPUTE,
+    ENGINE_ROLE_LABEL_KEY, ENGINE_ROLE_WRITE,
 };
 use tikv_client::StoreLabel;
 
@@ -16,6 +17,8 @@ fn tikvrpc_endpoint_type_and_constants_are_public() {
 
     assert_eq!(EndpointType::TiFlashCompute.name(), "tiflash_compute");
     assert!(EndpointType::TiFlashCompute.is_tiflash_related_type());
+    assert_eq!(ENGINE_ROLE_LABEL_KEY, "engine_role");
+    assert_eq!(ENGINE_ROLE_WRITE, "write");
 
     let labels = vec![StoreLabel {
         key: ENGINE_LABEL_KEY.to_owned(),

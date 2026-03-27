@@ -26,9 +26,18 @@ fn crate_root_exports_request_context_types() {
     let _ = DiskFullOpt::AllowedOnAlreadyFull;
     let flags = TraceControlFlags::default()
         .with(TraceControlFlags::IMMEDIATE_LOG)
-        .with(TraceControlFlags::TIKV_CATEGORY_REQUEST);
+        .with(TraceControlFlags::TIKV_CATEGORY_REQUEST)
+        .with(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS)
+        .with(TraceControlFlags::TIKV_CATEGORY_READ_DETAILS);
     assert!(flags.has(TraceControlFlags::IMMEDIATE_LOG));
     assert!(flags.has(TraceControlFlags::TIKV_CATEGORY_REQUEST));
+    assert!(flags.has(TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS));
+    assert!(flags.has(TraceControlFlags::TIKV_CATEGORY_READ_DETAILS));
+    assert_eq!(
+        TraceControlFlags::TIKV_CATEGORY_WRITE_DETAILS.bits(),
+        1 << 2
+    );
+    assert_eq!(TraceControlFlags::TIKV_CATEGORY_READ_DETAILS.bits(), 1 << 3);
 
     let source = RequestSource::new()
         .internal(true)
