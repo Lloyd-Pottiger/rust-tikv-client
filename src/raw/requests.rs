@@ -44,6 +44,7 @@ use tonic::transport::Channel;
 
 const RAW_KV_REQUEST_BATCH_SIZE: u64 = 16 * 1024; // 16 KB
 
+/// Builds a low-level raw get protobuf request.
 pub fn new_raw_get_request(key: Vec<u8>, cf: Option<ColumnFamily>) -> kvrpcpb::RawGetRequest {
     let mut req = kvrpcpb::RawGetRequest::default();
     req.key = key;
@@ -78,6 +79,7 @@ impl Process<kvrpcpb::RawGetResponse> for DefaultProcessor {
     }
 }
 
+/// Builds a low-level raw batch-get protobuf request.
 pub fn new_raw_batch_get_request(
     keys: Vec<Vec<u8>>,
     cf: Option<ColumnFamily>,
@@ -106,6 +108,7 @@ impl Merge<kvrpcpb::RawBatchGetResponse> for Collect {
     }
 }
 
+/// Builds a low-level request that fetches the remaining TTL, in seconds, for a raw key.
 pub fn new_raw_get_key_ttl_request(
     key: Vec<u8>,
     cf: Option<ColumnFamily>,
@@ -143,6 +146,11 @@ impl Process<kvrpcpb::RawGetKeyTtlResponse> for DefaultProcessor {
     }
 }
 
+/// Builds a low-level raw put protobuf request.
+///
+/// `ttl` is expressed in seconds; `0` keeps the entry without an expiration. When `atomic` is
+/// `true`, the request sets the `for_cas` flag so TiKV handles the write through the atomic/CAS
+/// path.
 pub fn new_raw_put_request(
     key: Vec<u8>,
     value: Vec<u8>,
@@ -172,6 +180,12 @@ impl SingleKey for kvrpcpb::RawPutRequest {
     }
 }
 
+/// Builds a low-level raw batch-put protobuf request.
+///
+/// `ttls` follows the same contract enforced during sharding as
+/// [`crate::raw::Client::batch_put_with_ttl`]: it may be empty, contain a single TTL to reuse for
+/// every pair, or contain one TTL per pair. When `atomic` is `true`, the request sets the
+/// `for_cas` flag.
 pub fn new_raw_batch_put_request(
     pairs: Vec<kvrpcpb::KvPair>,
     ttls: Vec<u64>,
@@ -270,6 +284,10 @@ impl Shardable for kvrpcpb::RawBatchPutRequest {
     }
 }
 
+/// Builds a low-level raw delete protobuf request.
+///
+/// When `atomic` is `true`, the request sets the `for_cas` flag so TiKV handles the write through
+/// the atomic/CAS path.
 pub fn new_raw_delete_request(
     key: Vec<u8>,
     cf: Option<ColumnFamily>,
@@ -295,6 +313,7 @@ impl SingleKey for kvrpcpb::RawDeleteRequest {
     }
 }
 
+/// Builds a low-level raw batch-delete protobuf request.
 pub fn new_raw_batch_delete_request(
     keys: Vec<Vec<u8>>,
     cf: Option<ColumnFamily>,
@@ -361,6 +380,7 @@ impl Shardable for kvrpcpb::RawBatchDeleteRequest {
     }
 }
 
+/// Builds a low-level raw delete-range protobuf request.
 pub fn new_raw_delete_range_request(
     start_key: Vec<u8>,
     end_key: Vec<u8>,
@@ -381,6 +401,7 @@ impl KvRequest for kvrpcpb::RawDeleteRangeRequest {
 range_request!(kvrpcpb::RawDeleteRangeRequest);
 shardable_range!(kvrpcpb::RawDeleteRangeRequest);
 
+/// Builds a low-level raw scan protobuf request.
 pub fn new_raw_scan_request(
     start_key: Vec<u8>,
     end_key: Vec<u8>,
@@ -423,6 +444,7 @@ impl Merge<kvrpcpb::RawScanResponse> for Collect {
     }
 }
 
+/// Builds a low-level raw batch-scan protobuf request.
 pub fn new_raw_batch_scan_request(
     ranges: Vec<kvrpcpb::KeyRange>,
     each_limit: u32,
@@ -472,6 +494,7 @@ impl Merge<kvrpcpb::RawBatchScanResponse> for Collect {
     }
 }
 
+/// Builds a low-level raw checksum protobuf request.
 pub fn new_raw_checksum_request(range: kvrpcpb::KeyRange) -> kvrpcpb::RawChecksumRequest {
     let mut req = kvrpcpb::RawChecksumRequest::default();
     req.algorithm = kvrpcpb::ChecksumAlgorithm::Crc64Xor as i32;
@@ -519,6 +542,10 @@ impl Merge<kvrpcpb::RawChecksumResponse> for Collect {
     }
 }
 
+/// Builds a low-level raw compare-and-swap protobuf request.
+///
+/// Passing `None` for `previous_value` marks the request as "swap only if the key does not
+/// already exist."
 pub fn new_cas_request(
     key: Vec<u8>,
     value: Vec<u8>,
@@ -564,6 +591,11 @@ impl Process<kvrpcpb::RawCasResponse> for DefaultProcessor {
 type RawCoprocessorRequestDataBuilder =
     Arc<dyn Fn(metapb::Region, Vec<kvrpcpb::KeyRange>) -> Vec<u8> + Send + Sync>;
 
+/// Builds a raw coprocessor request wrapper around the underlying protobuf request.
+///
+/// The `data_builder` callback runs after the request has been sharded to a specific region. It
+/// receives that region metadata and the shard-local protobuf ranges, and its return value becomes
+/// the request payload sent to TiKV.
 pub fn new_raw_coprocessor_request(
     copr_name: String,
     copr_version_req: String,
@@ -580,6 +612,7 @@ pub fn new_raw_coprocessor_request(
     }
 }
 
+/// A shard-aware raw coprocessor request whose payload is built per region before dispatch.
 #[derive(Clone)]
 pub struct RawCoprocessorRequest {
     inner: kvrpcpb::RawCoprocessorRequest,

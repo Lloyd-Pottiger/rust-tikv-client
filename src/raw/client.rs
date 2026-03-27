@@ -575,6 +575,13 @@ impl<PdC: PdClient> Client<PdC> {
         self.put_with_ttl(key, value, 0).await
     }
 
+    /// Create a new 'put' request with an explicit TTL in seconds.
+    ///
+    /// Once resolved this request stores `value` at `key` and asks TiKV to expire the entry after
+    /// `ttl_secs` seconds. Passing `0` keeps the entry without an expiration.
+    ///
+    /// If this client was created through [`with_atomic_for_cas`](Client::with_atomic_for_cas),
+    /// the request also uses TiKV's atomic/CAS write path.
     pub async fn put_with_ttl(
         &self,
         key: impl Into<Key>,
@@ -625,6 +632,14 @@ impl<PdC: PdClient> Client<PdC> {
         self.batch_put_with_ttl(pairs, std::iter::repeat(0)).await
     }
 
+    /// Create a new 'batch put' request with explicit TTLs in seconds.
+    ///
+    /// `ttls` follows the same contract as TiKV's raw batch-put API: an empty iterator stores all
+    /// pairs without TTL, a single TTL is reused for every pair, and otherwise the iterator must
+    /// yield one TTL per pair. Any mismatch is rejected before the request is dispatched.
+    ///
+    /// If this client was created through [`with_atomic_for_cas`](Client::with_atomic_for_cas),
+    /// the request also uses TiKV's atomic/CAS write path.
     pub async fn batch_put_with_ttl(
         &self,
         pairs: impl IntoIterator<Item = impl Into<KvPair>>,
@@ -1009,6 +1024,17 @@ impl<PdC: PdClient> Client<PdC> {
         plan.execute().await
     }
 
+    /// Executes a raw coprocessor request over one or more raw-key ranges.
+    ///
+    /// `copr_name` and `copr_version_req` identify the TiKV coprocessor plugin to run. The version
+    /// requirement must parse as a [`semver::VersionReq`].
+    ///
+    /// `request_builder` is invoked once per region shard with that region's metadata and the
+    /// shard-local ranges in this client's keyspace view (that is, any internal keyspace prefix
+    /// has already been removed). The callback must return the serialized request payload for that
+    /// shard.
+    ///
+    /// The result keeps the same shard-local ranges paired with each response payload.
     pub async fn coprocessor(
         &self,
         copr_name: impl Into<String>,
