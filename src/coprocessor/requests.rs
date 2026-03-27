@@ -33,14 +33,17 @@ pub struct CoprocessorStreamRequest {
 }
 
 impl CoprocessorStreamRequest {
+    /// Returns the wrapped protobuf request.
     pub fn inner(&self) -> &coprocessor_pb::Request {
         &self.inner
     }
 
+    /// Returns a mutable reference to the wrapped protobuf request.
     pub fn inner_mut(&mut self) -> &mut coprocessor_pb::Request {
         &mut self.inner
     }
 
+    /// Consumes the wrapper and returns the owned protobuf request.
     pub fn into_inner(self) -> coprocessor_pb::Request {
         self.inner
     }

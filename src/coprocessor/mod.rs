@@ -13,17 +13,24 @@ use crate::Result;
 
 mod requests;
 
+/// Helper constructors that lower crate-native ranges/timestamps into coprocessor protobuf requests.
 pub mod lowering;
 
+/// A streaming coprocessor request wrapper that implements the crate's request traits.
 pub use requests::CoprocessorStreamRequest;
 
 // Re-export protobuf-generated coprocessor types under `tikv_client::coprocessor::*` so downstream
 // code can build/dispatch requests without importing `tikv_client::proto::*` directly.
 pub use crate::proto::coprocessor::*;
 
+/// The gRPC stream returned by a normal coprocessor streaming request.
 pub type CoprocessorResponseStream = Streaming<Response>;
+/// The gRPC stream returned by a batch-coprocessor streaming request.
 pub type BatchCoprocessorResponseStream = Streaming<BatchResponse>;
 
+/// Downcasts an erased request response into a coprocessor response stream.
+///
+/// Returns an internal error when the boxed value does not contain the expected stream type.
 pub fn downcast_coprocessor_response_stream(
     response: Box<dyn Any>,
 ) -> Result<CoprocessorResponseStream> {
@@ -35,6 +42,9 @@ pub fn downcast_coprocessor_response_stream(
         })
 }
 
+/// Downcasts an erased request response into a batch-coprocessor response stream.
+///
+/// Returns an internal error when the boxed value does not contain the expected stream type.
 pub fn downcast_batch_coprocessor_response_stream(
     response: Box<dyn Any>,
 ) -> Result<BatchCoprocessorResponseStream> {

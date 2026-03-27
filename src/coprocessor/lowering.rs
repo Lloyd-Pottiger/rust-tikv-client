@@ -21,6 +21,7 @@ fn to_key_range(range: BoundRange) -> KeyRange {
     }
 }
 
+/// Builds a unary coprocessor request from crate-native ranges and a typed timestamp.
 pub fn new_coprocessor_request<I, R>(
     tp: i64,
     data: Vec<u8>,
@@ -43,6 +44,7 @@ where
     }
 }
 
+/// Builds a streaming coprocessor request using the same payload schema as [`new_coprocessor_request`].
 pub fn new_coprocessor_stream_request<I, R>(
     tp: i64,
     data: Vec<u8>,
@@ -56,6 +58,7 @@ where
     new_coprocessor_request(tp, data, ranges, start_ts).into()
 }
 
+/// Builds a batch-coprocessor request from explicit region metadata and a typed timestamp.
 pub fn new_batch_coprocessor_request<I>(
     tp: i64,
     data: Vec<u8>,
