@@ -13,7 +13,8 @@ use tikv_client::request::{
 };
 use tikv_client::store::{KvClient, RegionStore, Request, Store};
 use tikv_client::{
-    Error, Key, PdClient, RegionVerId, RegionWithLeader, Result, StoreId, Timestamp,
+    Error, Key, PdClient, RegionVerId, RegionWithLeader, ReplicaReadType, Result, StoreId,
+    StoreLabel, Timestamp,
 };
 
 fn assert_kv_request<T: request::KvRequest>() {}
@@ -25,6 +26,7 @@ fn assert_next_batch<T: request::NextBatch>() {}
 fn assert_has_next_batch<T: request::HasNextBatch>() {}
 fn assert_store_request<T: request::StoreRequest>() {}
 fn assert_plan<T: request::Plan>() {}
+fn assert_plan_value<T: request::Plan>(_: &T) {}
 
 macro_rules! impl_test_request {
     ($type_:ty, $label:literal) => {
@@ -284,6 +286,57 @@ async fn request_public_api_exposes_plan_builder_entrypoint() {
     assert_eq!(context.keyspace_id, 0);
     assert_eq!(context.keyspace_name, "DEFAULT");
     assert!(plan.kv_client.is_some());
+}
+
+#[test]
+fn request_public_api_exposes_replica_read_plan_builder_variants() {
+    let request = kvrpcpb::GetRequest {
+        key: b"k".to_vec(),
+        version: 1,
+        ..Default::default()
+    };
+
+    let plan =
+        request::PlanBuilder::new(Arc::new(FakePdClient), Keyspace::Disable, request.clone())
+            .retry_multi_region_with_replica_read(Backoff::no_backoff(), ReplicaReadType::Mixed)
+            .plan();
+    assert_plan_value(&plan);
+
+    let plan =
+        request::PlanBuilder::new(Arc::new(FakePdClient), Keyspace::Disable, request.clone())
+            .retry_multi_region_with_replica_read_and_match_store_labels(
+                Backoff::no_backoff(),
+                ReplicaReadType::PreferLeader,
+                Arc::new(vec![StoreLabel {
+                    key: "zone".to_owned(),
+                    value: "us-east".to_owned(),
+                }]),
+            )
+            .plan();
+    assert_plan_value(&plan);
+
+    let plan =
+        request::PlanBuilder::new(Arc::new(FakePdClient), Keyspace::Disable, request.clone())
+            .retry_multi_region_with_replica_read_and_match_store_ids(
+                Backoff::no_backoff(),
+                ReplicaReadType::Mixed,
+                Arc::new(vec![29]),
+            )
+            .plan();
+    assert_plan_value(&plan);
+
+    let plan = request::PlanBuilder::new(Arc::new(FakePdClient), Keyspace::Disable, request)
+        .retry_multi_region_with_replica_read_and_match_stores(
+            Backoff::no_backoff(),
+            ReplicaReadType::Follower,
+            Arc::new(vec![29]),
+            Arc::new(vec![StoreLabel {
+                key: "zone".to_owned(),
+                value: "us-west".to_owned(),
+            }]),
+        )
+        .plan();
+    assert_plan_value(&plan);
 }
 
 #[test]

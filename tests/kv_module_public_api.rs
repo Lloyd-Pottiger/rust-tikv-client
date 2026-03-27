@@ -103,6 +103,37 @@ fn kv_module_exports_key_helpers_and_key_range() {
 }
 
 #[test]
+fn kv_module_exports_bound_range_and_kv_pair_helpers() {
+    let (start, end) = kv::BoundRange::from(b"a".to_vec()..=b"c".to_vec()).into_keys();
+    assert_eq!(start, kv::Key::from(b"a".to_vec()));
+    assert_eq!(end, Some(kv::Key::from(b"c\0".to_vec())));
+
+    let original = kv::Key::from(b"codec".to_vec());
+    let encoded = original.to_encoded();
+    assert_ne!(encoded, original);
+    let mut encoded_bytes: Vec<u8> = encoded.into();
+    assert_eq!(
+        {
+            kv::codec::decode_bytes_in_place(&mut encoded_bytes, false).expect("decode encoded");
+            encoded_bytes
+        },
+        b"codec".to_vec(),
+    );
+
+    let mut pair = kv::KvPair::new(b"k".to_vec(), b"v".to_vec());
+    *pair.key_mut() = kv::Key::from(b"k1".to_vec());
+    pair.value_mut().push(b'2');
+    pair.set_key(b"reset-key".to_vec());
+    pair.set_value(b"reset-value".to_vec());
+
+    assert_eq!(
+        pair.clone().into_key(),
+        kv::Key::from(b"reset-key".to_vec())
+    );
+    assert_eq!(pair.into_value(), b"reset-value".to_vec());
+}
+
+#[test]
 fn kv_module_exports_hex_repr_and_kv_pair_ttl() {
     assert_eq!(format!("{}", kv::HexRepr(&[0x00, 0xAB, 0x10])), "00AB10");
 
