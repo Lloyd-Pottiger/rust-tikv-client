@@ -1,8 +1,48 @@
+use async_trait::async_trait;
+use std::any::Any;
 use std::convert::TryFrom;
 use std::ops::Range;
 use std::sync::Arc;
-
+use tikv_client::proto::{kvrpcpb, metapb};
+use tikv_client::request::{KvRequest, Shardable};
+use tikv_client::store::{KvClient, RegionStore, Request};
 use tikv_client::{raw, Backoff, Error, Key, KvPair, TraceControlFlags, Value};
+
+#[derive(Clone, Default)]
+struct FakeKvClient;
+
+#[async_trait]
+impl KvClient for FakeKvClient {
+    async fn dispatch(&self, _req: &dyn Request) -> tikv_client::Result<Box<dyn Any>> {
+        Err(Error::Unimplemented)
+    }
+}
+
+fn test_region() -> tikv_client::RegionWithLeader {
+    tikv_client::RegionWithLeader::new(
+        metapb::Region {
+            id: 7,
+            start_key: vec![1],
+            end_key: vec![99],
+            region_epoch: Some(metapb::RegionEpoch {
+                conf_ver: 2,
+                version: 3,
+            }),
+            ..Default::default()
+        },
+        Some(metapb::Peer {
+            id: 11,
+            store_id: 29,
+            ..Default::default()
+        }),
+    )
+}
+
+fn assert_raw_coprocessor_request<T>(_: &T)
+where
+    T: Request + KvRequest + Shardable<Shard = Vec<kvrpcpb::KeyRange>>,
+{
+}
 
 async fn min_safe_ts_with_txn_scope_entry(
     client: &raw::Client,
@@ -212,6 +252,13 @@ fn raw_lowering_helpers_build_expected_requests() {
     assert_eq!(batch_get.keys, vec![vec![3], vec![4, 5]]);
     assert_eq!(batch_get.cf, "write");
 
+    let get_key_ttl = raw::lowering::new_raw_get_key_ttl_request(
+        Key::from(vec![5, 6]),
+        Some(raw::ColumnFamily::Default),
+    );
+    assert_eq!(get_key_ttl.key, vec![5, 6]);
+    assert_eq!(get_key_ttl.cf, "default");
+
     let put = raw::lowering::new_raw_put_request(
         Key::from(vec![6]),
         b"value".to_vec(),
@@ -248,6 +295,13 @@ fn raw_lowering_helpers_build_expected_requests() {
     assert_eq!(delete.key, vec![9]);
     assert_eq!(delete.cf, "write");
     assert!(delete.for_cas);
+
+    let batch_delete = raw::lowering::new_raw_batch_delete_request(
+        vec![Key::from(vec![9]), Key::from(vec![10, 11])].into_iter(),
+        Some(raw::ColumnFamily::Lock),
+    );
+    assert_eq!(batch_delete.keys, vec![vec![9], vec![10, 11]]);
+    assert_eq!(batch_delete.cf, "lock");
 
     let delete_range = raw::lowering::new_raw_delete_range_request(
         (vec![10]..vec![20]).into(),
@@ -302,4 +356,85 @@ fn raw_lowering_helpers_build_expected_requests() {
     let root_get = tikv_client::raw_lowering::new_raw_get_request(Key::from(vec![37]), None);
     assert_eq!(root_get.key, vec![37]);
     assert_eq!(root_get.cf, "");
+
+    let root_get_key_ttl =
+        tikv_client::raw_lowering::new_raw_get_key_ttl_request(Key::from(vec![38]), None);
+    assert_eq!(root_get_key_ttl.key, vec![38]);
+    assert_eq!(root_get_key_ttl.cf, "");
+}
+
+#[test]
+fn raw_coprocessor_request_public_api_builds_and_updates_inner_request() {
+    let mut request = raw::lowering::new_raw_coprocessor_request(
+        "example".to_owned(),
+        "v1".to_owned(),
+        vec![(vec![40]..vec![41]).into(), (vec![42]..vec![44]).into()].into_iter(),
+        |region, ranges: Vec<Range<Key>>| {
+            let first = ranges.first().expect("at least one range");
+            let start: Vec<u8> = first.start.clone().into();
+            let end: Vec<u8> = first.end.clone().into();
+            vec![region.id as u8, ranges.len() as u8, start[0], end[0]]
+        },
+    );
+
+    assert_raw_coprocessor_request(&request);
+    assert_eq!(request.label(), "raw_coprocessor");
+
+    let inner = request
+        .as_any()
+        .downcast_ref::<kvrpcpb::RawCoprocessorRequest>()
+        .expect("raw coprocessor should expose its protobuf request");
+    assert_eq!(inner.copr_name, "example");
+    assert_eq!(inner.copr_version_req, "v1");
+    assert_eq!(inner.ranges.len(), 2);
+    assert_eq!(inner.ranges[0].start_key, vec![40]);
+    assert_eq!(inner.ranges[0].end_key, vec![41]);
+
+    Shardable::apply_shard(
+        &mut request,
+        vec![kvrpcpb::KeyRange {
+            start_key: vec![50],
+            end_key: vec![55],
+        }],
+    );
+    let inner = request
+        .as_any()
+        .downcast_ref::<kvrpcpb::RawCoprocessorRequest>()
+        .expect("raw coprocessor should still expose its protobuf request");
+    assert_eq!(inner.ranges.len(), 1);
+    assert_eq!(inner.ranges[0].start_key, vec![50]);
+    assert_eq!(inner.ranges[0].end_key, vec![55]);
+
+    let store = RegionStore::new(
+        test_region(),
+        Arc::new(FakeKvClient),
+        "fake-store".to_owned(),
+    );
+    Shardable::apply_store(&mut request, &store).expect("apply_store should update context/data");
+    let inner = request
+        .as_any()
+        .downcast_ref::<kvrpcpb::RawCoprocessorRequest>()
+        .expect("raw coprocessor should keep exposing its protobuf request");
+    let context = inner.context.as_ref().expect("context should be populated");
+    assert_eq!(context.region_id, 7);
+    assert_eq!(inner.data, vec![7, 1, 50, 55]);
+
+    let root_request = tikv_client::raw_lowering::new_raw_coprocessor_request(
+        "root".to_owned(),
+        "v2".to_owned(),
+        vec![(vec![60]..vec![61]).into()].into_iter(),
+        |region, ranges: Vec<Range<Key>>| {
+            let first = ranges.first().expect("at least one range");
+            let start: Vec<u8> = first.start.clone().into();
+            vec![region.id as u8, ranges.len() as u8, start[0]]
+        },
+    );
+    assert_raw_coprocessor_request(&root_request);
+    let root_inner = root_request
+        .as_any()
+        .downcast_ref::<kvrpcpb::RawCoprocessorRequest>()
+        .expect("root raw lowering alias should build the same request type");
+    assert_eq!(root_inner.copr_name, "root");
+    assert_eq!(root_inner.copr_version_req, "v2");
+    assert_eq!(root_inner.ranges.len(), 1);
 }
