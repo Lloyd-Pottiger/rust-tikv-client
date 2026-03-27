@@ -10,6 +10,7 @@ pub mod codec;
 mod exec_details;
 mod failpoint;
 pub mod gc_time;
+pub mod israce;
 #[doc(hidden)]
 pub mod iter;
 mod misc;
