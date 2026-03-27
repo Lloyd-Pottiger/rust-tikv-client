@@ -3,7 +3,7 @@ use tikv_client::config;
 #[test]
 fn config_retry_module_exports_backoff_helpers() {
     let _ = config::retry::Backoffer::no_backoff();
-    let _ = config::retry::txn_start_key();
+    let _: config::retry::TxnStartKey = config::retry::txn_start_key();
 
     let _: config::retry::BackoffJitter = config::retry::NO_JITTER;
     let _: config::retry::BackoffJitter = config::retry::FULL_JITTER;
