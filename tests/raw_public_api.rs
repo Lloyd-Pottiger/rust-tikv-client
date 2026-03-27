@@ -34,8 +34,43 @@ async fn batch_get_entry(
     client.batch_get(keys).await
 }
 
+async fn batch_get_values_entry(
+    client: &raw::Client,
+    keys: Vec<Vec<u8>>,
+) -> tikv_client::Result<Vec<Option<Value>>> {
+    client.batch_get_values(keys).await
+}
+
 async fn put_entry(client: &raw::Client, key: Vec<u8>, value: Vec<u8>) -> tikv_client::Result<()> {
     client.put(key, value).await
+}
+
+async fn put_with_ttl_entry(
+    client: &raw::Client,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    ttl: u64,
+) -> tikv_client::Result<()> {
+    client.put_with_ttl(key, value, ttl).await
+}
+
+async fn batch_put_with_ttl_entry(
+    client: &raw::Client,
+    pairs: Vec<KvPair>,
+    ttls: Vec<u64>,
+) -> tikv_client::Result<()> {
+    client.batch_put_with_ttl(pairs, ttls).await
+}
+
+async fn get_key_ttl_secs_entry(
+    client: &raw::Client,
+    key: Vec<u8>,
+) -> tikv_client::Result<Option<u64>> {
+    client.get_key_ttl_secs(key).await
+}
+
+async fn batch_delete_entry(client: &raw::Client, keys: Vec<Vec<u8>>) -> tikv_client::Result<()> {
+    client.batch_delete(keys).await
 }
 
 async fn delete_range_entry(
@@ -59,6 +94,14 @@ async fn batch_scan_entry(
     each_limit: u32,
 ) -> tikv_client::Result<Vec<KvPair>> {
     client.batch_scan(ranges, each_limit).await
+}
+
+async fn batch_scan_keys_entry(
+    client: &raw::Client,
+    ranges: Vec<std::ops::Range<Vec<u8>>>,
+    each_limit: u32,
+) -> tikv_client::Result<Vec<Key>> {
+    client.batch_scan_keys(ranges, each_limit).await
 }
 
 async fn checksum_entry(
@@ -140,10 +183,16 @@ fn raw_module_exports_client_entrypoints() {
     let _ = min_safe_ts_with_txn_scope_entry;
     let _ = get_entry;
     let _ = batch_get_entry;
+    let _ = batch_get_values_entry;
     let _ = put_entry;
+    let _ = put_with_ttl_entry;
+    let _ = batch_put_with_ttl_entry;
+    let _ = get_key_ttl_secs_entry;
+    let _ = batch_delete_entry;
     let _ = delete_range_entry;
     let _ = scan_entry;
     let _ = batch_scan_entry;
+    let _ = batch_scan_keys_entry;
     let _ = checksum_entry;
     let _ = compare_and_swap_entry;
     let _ = coprocessor_entry;
