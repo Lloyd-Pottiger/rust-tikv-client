@@ -1,4 +1,5 @@
 use std::convert::TryFrom;
+use std::time::Duration;
 
 use tikv_client::{
     BoundRange, ColumnFamily, IntoOwnedRange, Key, KvPair, PdRpcClient, RawChecksum, RawClient,
@@ -54,6 +55,180 @@ async fn snapshot_batch_get_entry(
     snapshot.batch_get(keys).await
 }
 
+async fn transaction_current_timestamp_entry(
+    client: &TransactionClient,
+) -> tikv_client::Result<Timestamp> {
+    client.current_timestamp().await
+}
+
+async fn transaction_current_timestamp_with_txn_scope_entry(
+    client: &TransactionClient,
+    txn_scope: &str,
+) -> tikv_client::Result<Timestamp> {
+    client.current_timestamp_with_txn_scope(txn_scope).await
+}
+
+async fn transaction_current_all_tso_keyspace_group_min_ts_entry(
+    client: &TransactionClient,
+) -> tikv_client::Result<Timestamp> {
+    client.current_all_tso_keyspace_group_min_ts().await
+}
+
+async fn transaction_external_timestamp_entry(
+    client: &TransactionClient,
+) -> tikv_client::Result<u64> {
+    client.external_timestamp().await
+}
+
+async fn transaction_set_external_timestamp_entry(
+    client: &TransactionClient,
+    timestamp: u64,
+) -> tikv_client::Result<()> {
+    client.set_external_timestamp(timestamp).await
+}
+
+async fn transaction_validate_read_ts_entry(
+    client: &TransactionClient,
+    read_ts: u64,
+    is_stale_read: bool,
+) -> tikv_client::Result<()> {
+    client.validate_read_ts(read_ts, is_stale_read).await
+}
+
+async fn transaction_validate_read_ts_with_txn_scope_entry(
+    client: &TransactionClient,
+    txn_scope: &str,
+    read_ts: u64,
+    is_stale_read: bool,
+) -> tikv_client::Result<()> {
+    client
+        .validate_read_ts_with_txn_scope(txn_scope, read_ts, is_stale_read)
+        .await
+}
+
+fn transaction_set_low_resolution_timestamp_update_interval_entry(
+    client: &TransactionClient,
+    update_interval: Duration,
+) -> tikv_client::Result<()> {
+    client.set_low_resolution_timestamp_update_interval(update_interval)
+}
+
+async fn transaction_low_resolution_timestamp_entry(
+    client: &TransactionClient,
+) -> tikv_client::Result<Timestamp> {
+    client.low_resolution_timestamp().await
+}
+
+async fn transaction_low_resolution_timestamp_with_txn_scope_entry(
+    client: &TransactionClient,
+    txn_scope: &str,
+) -> tikv_client::Result<Timestamp> {
+    client
+        .low_resolution_timestamp_with_txn_scope(txn_scope)
+        .await
+}
+
+async fn transaction_stale_timestamp_entry(
+    client: &TransactionClient,
+    prev_seconds: u64,
+) -> tikv_client::Result<Timestamp> {
+    client.stale_timestamp(prev_seconds).await
+}
+
+async fn transaction_stale_timestamp_with_txn_scope_entry(
+    client: &TransactionClient,
+    txn_scope: &str,
+    prev_seconds: u64,
+) -> tikv_client::Result<Timestamp> {
+    client
+        .stale_timestamp_with_txn_scope(txn_scope, prev_seconds)
+        .await
+}
+
+fn sync_transaction_current_timestamp_entry(
+    client: &SyncTransactionClient,
+) -> tikv_client::Result<Timestamp> {
+    client.current_timestamp()
+}
+
+fn sync_transaction_current_timestamp_with_txn_scope_entry(
+    client: &SyncTransactionClient,
+    txn_scope: &str,
+) -> tikv_client::Result<Timestamp> {
+    client.current_timestamp_with_txn_scope(txn_scope)
+}
+
+fn sync_transaction_current_all_tso_keyspace_group_min_ts_entry(
+    client: &SyncTransactionClient,
+) -> tikv_client::Result<Timestamp> {
+    client.current_all_tso_keyspace_group_min_ts()
+}
+
+fn sync_transaction_external_timestamp_entry(
+    client: &SyncTransactionClient,
+) -> tikv_client::Result<u64> {
+    client.external_timestamp()
+}
+
+fn sync_transaction_set_external_timestamp_entry(
+    client: &SyncTransactionClient,
+    timestamp: u64,
+) -> tikv_client::Result<()> {
+    client.set_external_timestamp(timestamp)
+}
+
+fn sync_transaction_validate_read_ts_entry(
+    client: &SyncTransactionClient,
+    read_ts: u64,
+    is_stale_read: bool,
+) -> tikv_client::Result<()> {
+    client.validate_read_ts(read_ts, is_stale_read)
+}
+
+fn sync_transaction_validate_read_ts_with_txn_scope_entry(
+    client: &SyncTransactionClient,
+    txn_scope: &str,
+    read_ts: u64,
+    is_stale_read: bool,
+) -> tikv_client::Result<()> {
+    client.validate_read_ts_with_txn_scope(txn_scope, read_ts, is_stale_read)
+}
+
+fn sync_transaction_set_low_resolution_timestamp_update_interval_entry(
+    client: &SyncTransactionClient,
+    update_interval: Duration,
+) -> tikv_client::Result<()> {
+    client.set_low_resolution_timestamp_update_interval(update_interval)
+}
+
+fn sync_transaction_low_resolution_timestamp_entry(
+    client: &SyncTransactionClient,
+) -> tikv_client::Result<Timestamp> {
+    client.low_resolution_timestamp()
+}
+
+fn sync_transaction_low_resolution_timestamp_with_txn_scope_entry(
+    client: &SyncTransactionClient,
+    txn_scope: &str,
+) -> tikv_client::Result<Timestamp> {
+    client.low_resolution_timestamp_with_txn_scope(txn_scope)
+}
+
+fn sync_transaction_stale_timestamp_entry(
+    client: &SyncTransactionClient,
+    prev_seconds: u64,
+) -> tikv_client::Result<Timestamp> {
+    client.stale_timestamp(prev_seconds)
+}
+
+fn sync_transaction_stale_timestamp_with_txn_scope_entry(
+    client: &SyncTransactionClient,
+    txn_scope: &str,
+    prev_seconds: u64,
+) -> tikv_client::Result<Timestamp> {
+    client.stale_timestamp_with_txn_scope(txn_scope, prev_seconds)
+}
+
 #[test]
 fn crate_root_exports_core_client_constructor_and_method_surface() {
     let _ = RawClient::<PdRpcClient>::new::<String>;
@@ -96,6 +271,35 @@ fn crate_root_exports_transaction_and_snapshot_aliases() {
     let _ = |txn: &mut SyncTransaction, key: Vec<u8>, value: Vec<u8>| txn.put(key, value);
     let _ = |snapshot: &mut SyncSnapshot, key: Vec<u8>| snapshot.get(key);
     let _ = |snapshot: &mut SyncSnapshot, keys: Vec<Vec<u8>>| snapshot.batch_get(keys);
+}
+
+#[test]
+fn crate_root_exports_transaction_client_timestamp_helpers() {
+    let _ = transaction_current_timestamp_entry;
+    let _ = transaction_current_timestamp_with_txn_scope_entry;
+    let _ = transaction_current_all_tso_keyspace_group_min_ts_entry;
+    let _ = transaction_external_timestamp_entry;
+    let _ = transaction_set_external_timestamp_entry;
+    let _ = transaction_validate_read_ts_entry;
+    let _ = transaction_validate_read_ts_with_txn_scope_entry;
+    let _ = transaction_set_low_resolution_timestamp_update_interval_entry;
+    let _ = transaction_low_resolution_timestamp_entry;
+    let _ = transaction_low_resolution_timestamp_with_txn_scope_entry;
+    let _ = transaction_stale_timestamp_entry;
+    let _ = transaction_stale_timestamp_with_txn_scope_entry;
+
+    let _ = sync_transaction_current_timestamp_entry;
+    let _ = sync_transaction_current_timestamp_with_txn_scope_entry;
+    let _ = sync_transaction_current_all_tso_keyspace_group_min_ts_entry;
+    let _ = sync_transaction_external_timestamp_entry;
+    let _ = sync_transaction_set_external_timestamp_entry;
+    let _ = sync_transaction_validate_read_ts_entry;
+    let _ = sync_transaction_validate_read_ts_with_txn_scope_entry;
+    let _ = sync_transaction_set_low_resolution_timestamp_update_interval_entry;
+    let _ = sync_transaction_low_resolution_timestamp_entry;
+    let _ = sync_transaction_low_resolution_timestamp_with_txn_scope_entry;
+    let _ = sync_transaction_stale_timestamp_entry;
+    let _ = sync_transaction_stale_timestamp_with_txn_scope_entry;
 }
 
 #[test]
