@@ -23,3 +23,22 @@ fn error_module_exports_result_alias() {
     fn assert_result<T>(_result: error::Result<T>) {}
     assert_result::<()>(Ok(()));
 }
+
+#[test]
+fn error_module_exports_proto_aliases() {
+    let _: Option<error::ProtoRegionError> = None;
+    let _: Option<error::ProtoKeyError> = None;
+    let _: Option<error::ProtoDeadlock> = None;
+    let _: Option<error::ProtoWriteConflict> = None;
+    let _: Option<error::ProtoAssertionFailed> = None;
+    let _: fn(&error::ProtoKeyError) -> String = error::extract_debug_info_str_from_key_error;
+}
+
+#[test]
+fn error_module_extract_debug_info_helper_handles_missing_debug_info() {
+    let key_error = error::ProtoKeyError::default();
+    assert_eq!(
+        error::extract_debug_info_str_from_key_error(&key_error),
+        String::new()
+    );
+}
