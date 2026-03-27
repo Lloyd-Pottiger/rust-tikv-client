@@ -402,6 +402,10 @@ impl Drop for OnMyWayIdGuard {
 }
 
 impl<Client> RegionCache<Client> {
+    /// Create an empty region cache with explicit TTL settings.
+    ///
+    /// `region_cache_ttl` controls the base idle lifetime of cached region entries, while
+    /// `region_cache_ttl_jitter` adds per-entry jitter to avoid synchronized expiry bursts.
     pub fn new_with_ttl(
         inner_client: Arc<Client>,
         region_cache_ttl: Duration,
@@ -582,7 +586,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Some(Self::key_location_from_cache(&cache, region))
     }
 
-    // Retrieve cache entry by key. If there's no entry, query PD and update cache.
+    /// Return the region covering `key`, loading it from PD on cache miss or expiry.
     pub async fn get_region_by_key(&self, key: &Key) -> Result<RegionWithLeader> {
         let trace_enabled = trace::is_category_enabled(Category::RegionCache);
         let region_cache_guard = self.region_cache.read().await;
@@ -666,7 +670,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         self.read_through_region_by_key(key.clone()).await
     }
 
-    // Retrieve cache entry by RegionId. If there's no entry, query PD and update cache.
+    /// Return the region identified by `id`, loading it from PD on cache miss or expiry.
     pub async fn get_region_by_id(&self, id: RegionId) -> Result<RegionWithLeader> {
         let trace_enabled = trace::is_category_enabled(Category::RegionCache);
         let started_at = Instant::now();
@@ -1217,6 +1221,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Ok(locations)
     }
 
+    /// Return the store metadata for `id`, loading it from PD on cache miss.
     pub async fn get_store_by_id(&self, id: StoreId) -> Result<Store> {
         let started_at = Instant::now();
         let store = self.store_cache.read().await.get(&id).cloned();
@@ -1397,6 +1402,9 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Ok(store)
     }
 
+    /// Insert or refresh one region entry in the local cache.
+    ///
+    /// Existing overlapping entries are replaced according to the normal region-version rules.
     pub async fn add_region(&self, region: RegionWithLeader) {
         let _ = self.add_region_internal(region, None).await;
     }
