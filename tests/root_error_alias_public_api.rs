@@ -26,7 +26,6 @@ fn crate_root_exports_proto_backed_error_aliases() {
         key: b"k".to_vec(),
         primary: b"p".to_vec(),
         reason: kvrpcpb::write_conflict::Reason::PessimisticRetry.into(),
-        ..Default::default()
     });
     assert_eq!(conflict.start_ts(), 33);
     assert_eq!(conflict.conflict_ts(), 44);
@@ -45,7 +44,6 @@ fn crate_root_exports_proto_backed_error_aliases() {
         assertion: kvrpcpb::Assertion::Exist.into(),
         existing_start_ts: 77,
         existing_commit_ts: 88,
-        ..Default::default()
     });
     assert_eq!(assertion.start_ts(), 66);
     assert_eq!(assertion.key(), b"assert");

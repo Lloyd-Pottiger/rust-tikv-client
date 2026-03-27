@@ -4,6 +4,8 @@ use tikv_client::async_util::{
     Callback, CancellationToken, Executor, Pool, RunLoop, RunLoopExecError, State, Task,
 };
 
+type CallbackCtor = fn(Arc<dyn Executor>, fn(i32, Option<()>)) -> Callback<i32, ()>;
+
 #[derive(Default)]
 struct RecordingExecutor {
     tasks: Mutex<Vec<Task>>,
@@ -24,8 +26,7 @@ impl Executor for RecordingExecutor {
 #[test]
 fn async_util_public_api_exposes_callback_and_error_types() {
     let _: Option<Task> = None;
-    let _: fn(Arc<dyn Executor>, fn(i32, Option<()>)) -> Callback<i32, ()> =
-        Callback::<i32, ()>::new;
+    let _: CallbackCtor = Callback::<i32, ()>::new;
     let _: fn(&Callback<i32, ()>) -> Arc<dyn Executor> = Callback::<i32, ()>::executor;
     let _: fn(&Callback<i32, ()>, i32, Option<()>) = Callback::<i32, ()>::invoke;
     let _: fn(&Callback<i32, ()>, i32, Option<()>) = Callback::<i32, ()>::schedule;

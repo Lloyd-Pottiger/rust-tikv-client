@@ -166,7 +166,10 @@ fn transaction_module_exports_core_types_and_constants() {
     let _ = transaction::txn_commit_batch_size;
     let _ = transaction::global_txn_commit_batch_size;
     let _: fn(u64) = transaction::set_txn_commit_batch_size;
-    let _ = transaction::with_txn_commit_batch_size(16, std::future::ready(()));
+    std::mem::drop(transaction::with_txn_commit_batch_size(
+        16,
+        std::future::ready(()),
+    ));
 }
 
 #[test]
