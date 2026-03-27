@@ -52,15 +52,21 @@ pub fn unset_resource_control_interceptor() {
 
 #[derive(Clone, Debug, Default)]
 pub struct ResourceControlRequestWaitResult {
+    /// Resource-unit consumption reported by the interceptor before the request is sent.
     pub consumption: Option<crate::ProtoResourceConsumption>,
+    /// Additional penalty RU that should be attached to the outgoing request context.
     pub penalty: Option<crate::ProtoResourceConsumption>,
+    /// How long the interceptor waited before allowing the request to proceed.
     pub wait_duration: Duration,
+    /// The resource-control priority chosen for the request, when any.
     pub priority: u64,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ResourceControlResponseWaitResult {
+    /// Resource-unit consumption reported by the interceptor after the response is received.
     pub consumption: Option<crate::ProtoResourceConsumption>,
+    /// How long the interceptor waited after the response was received.
     pub wait_duration: Duration,
 }
 
@@ -80,6 +86,12 @@ pub struct ResourceControlRequestInfo {
 }
 
 impl ResourceControlRequestInfo {
+    /// Creates a lightweight request descriptor from the stable request label, wire size, and
+    /// target store ID.
+    ///
+    /// Derived fields such as [`Self::cmd_type`] are initialized from `label`, while optional
+    /// accounting metadata (`write_bytes`, `replica_number`, `access_location_type`, `bypass`)
+    /// starts with their neutral defaults until the request planner fills them in.
     #[must_use]
     pub fn new(label: &'static str, request_size: u64, store_id: u64) -> Self {
         Self {
@@ -187,6 +199,10 @@ pub struct ResourceControlResponseInfo {
 }
 
 impl ResourceControlResponseInfo {
+    /// Creates a lightweight response descriptor from the gRPC payload size.
+    ///
+    /// Optional execution-detail fields such as [`Self::read_bytes`] and [`Self::kv_cpu`] start at
+    /// their zero values until the response decoder populates them from TiKV execution details.
     #[must_use]
     pub const fn new(response_size: u64) -> Self {
         Self {
