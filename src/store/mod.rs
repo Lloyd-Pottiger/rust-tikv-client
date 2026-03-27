@@ -1,5 +1,11 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+//! Lower-level TiKV store client traits and request helpers.
+//!
+//! This module contains the transport-facing abstractions that sit beneath the high-level raw and
+//! transactional clients: connection traits, request error inspection helpers, forwarded-host
+//! support, and the coprocessor cache plumbing used by store dispatch.
+
 mod batch;
 mod client;
 mod coprocessor_cache;

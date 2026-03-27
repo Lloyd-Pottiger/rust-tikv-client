@@ -1,3 +1,9 @@
+//! Coprocessor request helpers and protobuf re-exports.
+//!
+//! This namespace mirrors the user-facing parts of client-go's coprocessor support. It exposes
+//! request-lowering helpers, stream request wrappers, and the generated protobuf request/response
+//! types under a stable module path.
+
 use std::any::Any;
 
 use tonic::codec::Streaming;

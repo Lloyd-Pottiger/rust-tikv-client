@@ -315,7 +315,7 @@ impl Client {
     /// Returns whether this default client supports delete-range operations.
     ///
     /// This mirrors client-go `tikv.KVStore::SupportDeleteRange()`. The default Rust
-    /// [`TransactionClient`] always talks to real TiKV servers via [`PdRpcClient`], so
+    /// [`crate::TransactionClient`] always talks to real TiKV servers via [`crate::PdRpcClient`], so
     /// delete-range is available.
     #[must_use]
     pub fn supports_delete_range(&self) -> bool {
@@ -891,7 +891,7 @@ impl<PdC: PdClient> Client<PdC> {
     /// This maps to client-go `KVStore.CheckVisibility`.
     ///
     /// When the provided `start_ts` falls behind the current GC safe point, this returns
-    /// [`Error::TxnAbortedByGc`].
+    /// [`crate::Error::TxnAbortedByGc`].
     pub async fn check_visibility(&self, start_ts: u64) -> Result<()> {
         self.gc_safe_point.check_visibility(start_ts).await
     }

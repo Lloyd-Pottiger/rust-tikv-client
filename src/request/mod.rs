@@ -1,5 +1,13 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+//! Request planning and dispatch building blocks.
+//!
+//! This module contains the lower-level machinery that sits between high-level client APIs and the
+//! actual TiKV RPC layer: request plans, sharding/merging traits, retry helpers, and request
+//! context types such as [`RetryOptions`]. Most users interact with these types indirectly through
+//! [`RawClient`](crate::RawClient) or [`TransactionClient`](crate::TransactionClient), but the
+//! module stays public for advanced integrations and parity with client-go's request stack.
+
 use async_trait::async_trait;
 use derive_new::new;
 

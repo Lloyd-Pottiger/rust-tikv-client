@@ -1,3 +1,9 @@
+//! Async utility primitives mirroring client-go `util/async`.
+//!
+//! This module groups the small execution building blocks used by the client's internal workers
+//! and also exposed publicly for embedders that want the same callback / run-loop patterns:
+//! [`Task`], [`Pool`], [`Executor`], [`Callback`], [`RunLoop`], and [`CancellationToken`].
+
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;

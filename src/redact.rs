@@ -1,3 +1,9 @@
+//! Redaction helpers for keys and other sensitive values.
+//!
+//! This module mirrors the high-level client-go `util/redact` surface. It provides a process-wide
+//! redaction mode plus helpers for formatting keys and protobuf fields without leaking raw key
+//! material into logs or error messages.
+
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::kv::HexRepr;

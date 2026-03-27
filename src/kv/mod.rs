@@ -1,4 +1,11 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
+
+//! Common key/value types and helpers shared across the client.
+//!
+//! This module exposes the fundamental data-model pieces used by both the raw and transactional
+//! APIs: keys, values, ranges, key codecs, and convenience options for point/batch reads. It is
+//! the closest Rust equivalent to the broadly shared types spread across client-go `kv`.
+
 use std::fmt;
 
 mod bound_range;
@@ -48,7 +55,7 @@ pub use crate::Variables;
 /// Wrapper that formats a byte slice as uppercase hexadecimal.
 ///
 /// This is primarily exposed for diagnostics and debug-style output in public
-/// key/value types such as [`Key`](crate::kv::Key) and [`KvPair`](crate::kv::KvPair).
+/// key/value types such as [`Key`] and [`KvPair`].
 pub struct HexRepr<'a>(pub &'a [u8]);
 
 impl fmt::Display for HexRepr<'_> {

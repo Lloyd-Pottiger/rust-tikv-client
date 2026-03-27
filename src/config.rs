@@ -1,5 +1,12 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+//! Client configuration types and global config helpers.
+//!
+//! The main entry point is [`Config`], which controls connection/security settings, retry-related
+//! knobs, request dispatch limits, and other behavior shared by high-level clients. This module
+//! also exposes client-go-compatible helpers such as [`parse_path`] and the nested [`retry`]
+//! namespace.
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -342,8 +349,7 @@ pub struct Config {
     /// When non-zero, coprocessor requests use this timeout instead of [`Config::timeout`],
     /// mirroring client-go `TiKVClient.CoprReqTimeout`.
     ///
-    /// Per-request overrides (for example via [`crate::request::RequestWithTimeout`]) take
-    /// precedence.
+    /// Per-request timeout wrappers inside the request pipeline take precedence.
     ///
     /// Defaults to 60 seconds (client-go default).
     pub copr_req_timeout: Duration,

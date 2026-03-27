@@ -1,3 +1,9 @@
+//! Lightweight tracing hooks and task-local propagation helpers.
+//!
+//! This module mirrors client-go's `trace` package at a high level. It provides task-local trace
+//! ids / trace-control flags, globally configurable trace hooks, and small helpers for recording
+//! trace events from request execution paths.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;

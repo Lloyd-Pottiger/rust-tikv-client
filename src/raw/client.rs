@@ -538,7 +538,7 @@ impl<PdC: PdClient> Client<PdC> {
     /// # let client = RawClient::new(vec!["192.168.0.100"]).await.unwrap();
     /// let key = "TiKV".to_owned();
     /// let req = client.get_key_ttl_secs(key);
-    /// let result: Option<Value> = req.await.unwrap();
+    /// let result: `Option<u64>` = req.await.unwrap();
     /// # });
     pub async fn get_key_ttl_secs(&self, key: impl Into<Key>) -> Result<Option<u64>> {
         debug!("invoking raw get_key_ttl_secs request");
