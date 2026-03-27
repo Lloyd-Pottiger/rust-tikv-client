@@ -2833,6 +2833,105 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_merges_partial_cache_with_pd_results(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        for region in [
+            region_with_leader_version(1, b"", b"a", 1),
+            region_with_leader_version(2, b"a", b"b", 1),
+            region_with_leader_version(3, b"b", b"c", 1),
+            region_with_leader_version(4, b"c", b"d", 1),
+            region_with_leader_version(5, b"d", b"e", 1),
+            region_with_leader_version(6, b"e", b"f", 1),
+            region_with_leader_version(7, b"f", b"g", 1),
+            region_with_leader_version(8, b"g", b"", 1),
+        ] {
+            retry_client
+                .regions
+                .lock()
+                .await
+                .insert(region.id(), region);
+        }
+
+        cache
+            .add_region(region_with_leader_version(2, b"a", b"b", 1))
+            .await;
+        cache
+            .add_region(region_with_leader_version(6, b"e", b"f", 1))
+            .await;
+
+        let locations = cache
+            .batch_locate_key_ranges(vec![
+                crate::kv::KeyRange::new(b"a".to_vec(), b"d".to_vec()),
+                crate::kv::KeyRange::new(b"e".to_vec(), b"g".to_vec()),
+            ])
+            .await?;
+
+        assert_eq!(
+            locations
+                .iter()
+                .map(|location| location.region.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4, 6, 7]
+        );
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 1);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_prefers_newer_pd_merge_over_stale_cache(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        cache
+            .add_region(region_with_leader_version(2, b"a", b"b", 1))
+            .await;
+        cache
+            .add_region(region_with_leader_version(6, b"e", b"f", 1))
+            .await;
+
+        for region in [
+            region_with_leader_version(1, b"", b"a", 1),
+            region_with_leader_version(2, b"a", b"c", 2),
+            region_with_leader_version(4, b"c", b"d", 1),
+            region_with_leader_version(5, b"d", b"e", 1),
+            region_with_leader_version(6, b"e", b"f", 1),
+            region_with_leader_version(7, b"f", b"g", 1),
+            region_with_leader_version(8, b"g", b"", 1),
+        ] {
+            retry_client
+                .regions
+                .lock()
+                .await
+                .insert(region.id(), region);
+        }
+
+        let locations = cache
+            .batch_locate_key_ranges(vec![
+                crate::kv::KeyRange::new(b"a".to_vec(), b"d".to_vec()),
+                crate::kv::KeyRange::new(b"e".to_vec(), b"g".to_vec()),
+            ])
+            .await?;
+
+        assert_eq!(
+            locations
+                .iter()
+                .map(|location| location.region.id)
+                .collect::<Vec<_>>(),
+            vec![2, 4, 6, 7]
+        );
+        assert_eq!(locations[0].start_key, Key::from(b"a".to_vec()));
+        assert_eq!(locations[0].end_key, Key::from(b"c".to_vec()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_region_cache_locate_key_range_with_opts_reloads_buckets() -> Result<()> {
         let retry_client = Arc::new(MockRetryClient::default());
         let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
@@ -3443,6 +3542,20 @@ mod test {
         region.leader = Some(metapb::Peer {
             store_id,
             ..Default::default()
+        });
+        region
+    }
+
+    fn region_with_leader_version(
+        id: RegionId,
+        start_key: &[u8],
+        end_key: &[u8],
+        version: u64,
+    ) -> RegionWithLeader {
+        let mut region = region_with_leader(id, start_key.to_vec(), end_key.to_vec(), id + 1000);
+        region.region.region_epoch = Some(RegionEpoch {
+            conf_ver: 0,
+            version,
         });
         region
     }
