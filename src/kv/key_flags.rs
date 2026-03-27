@@ -39,11 +39,13 @@ const PERSISTENT_FLAGS: u16 = FLAG_KEY_LOCKED
     | FLAG_KEY_LOCKED_IN_SHARE_MODE;
 
 impl KeyFlags {
+    /// Creates a [`KeyFlags`] value from the raw persisted bitset.
     #[must_use]
     pub const fn from_bits(bits: u16) -> Self {
         Self(bits)
     }
 
+    /// Returns the raw bit representation used by client-go and the TiKV client internals.
     #[must_use]
     pub const fn bits(self) -> u16 {
         self.0
@@ -199,27 +201,49 @@ impl std::ops::Not for KeyFlags {
 /// This maps to client-go `kv.FlagsOp` constants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FlagsOp {
+    /// Marks the key as "presume not exists" and enables lazy existence checking.
     SetPresumeKeyNotExists,
+    /// Clears the "presume not exists" state and its paired existence check bit.
     DelPresumeKeyNotExists,
+    /// Marks the key as already locked.
     SetKeyLocked,
+    /// Clears the "key locked" marker.
     DelKeyLocked,
+    /// Marks the key as needing to be locked.
     SetNeedLocked,
+    /// Clears the "need locked" marker.
     DelNeedLocked,
+    /// Records that the locked value is known to exist.
     SetKeyLockedValueExists,
+    /// Records that the locked value is known not to exist.
     SetKeyLockedValueNotExists,
+    /// Clears the lazy existence-check bit.
     DelNeedCheckExists,
+    /// Marks the key as only participating in prewrite.
     SetPrewriteOnly,
+    /// Marks the key to be ignored during 2PC commit/cleanup.
     SetIgnoredIn2PC,
+    /// Marks the key as readable from the in-memory buffer.
     SetReadable,
+    /// Marks the key as newly inserted.
     SetNewlyInserted,
+    /// Requires the key to exist when asserting constraints.
     SetAssertExist,
+    /// Requires the key not to exist when asserting constraints.
     SetAssertNotExist,
+    /// Marks the existence assertion as unknown/undecided.
     SetAssertUnknown,
+    /// Clears any existence assertion bits.
     SetAssertNone,
+    /// Requests a constraint check during prewrite.
     SetNeedConstraintCheckInPrewrite,
+    /// Clears the prewrite constraint-check bit.
     DelNeedConstraintCheckInPrewrite,
+    /// Remembers that the key previously carried the "presume not exists" state.
     SetPreviousPresumeKNE,
+    /// Marks the lock mode as shared.
     SetKeyLockedInShareMode,
+    /// Marks the lock mode as exclusive.
     SetKeyLockedInExclusiveMode,
 }
 
