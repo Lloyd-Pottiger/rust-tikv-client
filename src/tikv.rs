@@ -22,6 +22,10 @@ pub use crate::GcOptions;
 pub use crate::KvFilter as KVFilter;
 #[doc(inline)]
 pub use crate::LockResolver;
+/// Test probe helpers around a bound lock resolver.
+///
+/// This mirrors client-go `tikv.LockResolverProbe`.
+pub type LockResolverProbe<PdC> = crate::transaction::LockResolverProbe<PdC>;
 #[doc(inline)]
 pub use crate::ResolveLocksContext;
 #[doc(inline)]
@@ -147,6 +151,17 @@ pub async fn new_lock_resolver_with_config<S: Into<String>>(
         keyspace,
         resolve_locks_ctx,
     ))
+}
+
+/// Wrap a bound lock resolver in the public test probe facade.
+///
+/// This mirrors client-go `tikv.NewLockResolverProb`.
+#[doc(alias = "NewLockResolverProb")]
+#[must_use]
+pub fn new_lock_resolver_prob<PdC: crate::PdClient>(
+    resolver: crate::BoundLockResolver<PdC>,
+) -> LockResolverProbe<PdC> {
+    crate::transaction::LockResolverProbe::new(resolver)
 }
 
 /// Client-go style transaction begin option.

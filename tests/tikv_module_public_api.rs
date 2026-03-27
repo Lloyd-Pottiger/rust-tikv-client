@@ -75,6 +75,7 @@ async fn tikv_module_exposes_task_local_txn_start_ts_helpers() {
 fn tikv_module_exports_storage_and_lock_resolver_facade() {
     let _: Option<tikv::Storage> = None;
     let _: Option<tikv::LockResolver> = None;
+    let _: Option<tikv::LockResolverProbe<tikv_client::PdRpcClient>> = None;
     let _: Option<tikv::ResolveLocksContext> = None;
     let _: Option<tikv::ResolveLocksOptions> = None;
     let _: Option<tikv::BoundLockResolver<tikv_client::PdRpcClient>> = None;
@@ -85,9 +86,14 @@ fn tikv_module_exports_storage_and_lock_resolver_facade() {
         tikv_client::request::Keyspace,
         tikv::ResolveLocksContext,
     ) -> tikv::BoundLockResolver<tikv_client::PdRpcClient> = tikv::BoundLockResolver::new;
+    fn assert_new_lock_resolver_prob_signature<PdC: tikv_client::PdClient>() {
+        let _: fn(tikv::BoundLockResolver<PdC>) -> tikv::LockResolverProbe<PdC> =
+            tikv::new_lock_resolver_prob::<PdC>;
+    }
 
     let _ = new_lock_resolver_entry;
     let _ = new_lock_resolver_with_config_entry;
+    assert_new_lock_resolver_prob_signature::<tikv_client::PdRpcClient>();
 }
 
 #[test]
