@@ -7,6 +7,10 @@ fn util_exec_details_public_api_exposes_context_key_markers() {
     let _: util::ExecDetailsKey = util::ExecDetailsKey;
     let _: util::RUDetailsCtxKey = util::RUDetailsCtxKey;
 
+    let ru_details = std::sync::Arc::new(util::RUDetails::new());
+    std::mem::drop(util::with_ru_details(ru_details, async {}));
+    let _ = util::ru_details();
+
     std::mem::drop(util::with_trace_exec_details(async {}));
     let _ = util::trace_exec_details_enabled();
 }

@@ -19,6 +19,10 @@ tokio::task_local! {
     static TASK_TRACE_EXEC_DETAILS_ENABLED: bool;
 }
 
+tokio::task_local! {
+    static TASK_RU_DETAILS: Arc<RUDetails>;
+}
+
 /// Marker keys for execution details stored in task-local context.
 ///
 /// These mirror the exported `context.Context` keys in client-go `util/execdetails.go`. The Rust
@@ -1175,15 +1179,65 @@ impl ExecDetails {
 }
 
 /// Resource unit (RU) consumption details.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct RUDetails {
-    read_ru: f64,
-    write_ru: f64,
-    ru_wait_duration: Duration,
+    read_ru_micro: AtomicI64,
+    write_ru_micro: AtomicI64,
+    ru_wait_duration_ns: AtomicU64,
+}
+
+impl Default for RUDetails {
+    fn default() -> Self {
+        Self {
+            read_ru_micro: AtomicI64::new(0),
+            write_ru_micro: AtomicI64::new(0),
+            ru_wait_duration_ns: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Clone for RUDetails {
+    fn clone(&self) -> Self {
+        Self {
+            read_ru_micro: AtomicI64::new(self.read_ru_micro.load(Ordering::Relaxed)),
+            write_ru_micro: AtomicI64::new(self.write_ru_micro.load(Ordering::Relaxed)),
+            ru_wait_duration_ns: AtomicU64::new(self.ru_wait_duration_ns.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl PartialEq for RUDetails {
+    fn eq(&self, other: &Self) -> bool {
+        self.read_ru_micro.load(Ordering::Relaxed) == other.read_ru_micro.load(Ordering::Relaxed)
+            && self.write_ru_micro.load(Ordering::Relaxed)
+                == other.write_ru_micro.load(Ordering::Relaxed)
+            && self.ru_wait_duration_ns.load(Ordering::Relaxed)
+                == other.ru_wait_duration_ns.load(Ordering::Relaxed)
+    }
 }
 
 impl RUDetails {
+    const MICRO_SCALE: f64 = 1_000_000.0;
+
+    fn f64_to_micro(value: f64) -> i64 {
+        if !value.is_finite() {
+            return 0;
+        }
+        let scaled = value * Self::MICRO_SCALE;
+        if scaled >= i64::MAX as f64 {
+            i64::MAX
+        } else if scaled <= i64::MIN as f64 {
+            i64::MIN
+        } else {
+            scaled.round() as i64
+        }
+    }
+
+    fn micro_to_f64(value: i64) -> f64 {
+        value as f64 / Self::MICRO_SCALE
+    }
+
     /// Create an empty RU detail accumulator.
     #[must_use]
     pub fn new() -> Self {
@@ -1194,17 +1248,26 @@ impl RUDetails {
     #[must_use]
     pub fn new_with(read_ru: f64, write_ru: f64, wait_duration: Duration) -> Self {
         Self {
-            read_ru,
-            write_ru,
-            ru_wait_duration: wait_duration,
+            read_ru_micro: AtomicI64::new(Self::f64_to_micro(read_ru)),
+            write_ru_micro: AtomicI64::new(Self::f64_to_micro(write_ru)),
+            ru_wait_duration_ns: AtomicU64::new(duration_to_nanos(wait_duration)),
         }
     }
 
     /// Merge another RU detail snapshot into `self`.
     pub fn merge(&mut self, other: &Self) {
-        self.read_ru += other.read_ru;
-        self.write_ru += other.write_ru;
-        self.ru_wait_duration = self.ru_wait_duration.saturating_add(other.ru_wait_duration);
+        saturating_fetch_add_i64(
+            &self.read_ru_micro,
+            other.read_ru_micro.load(Ordering::Relaxed),
+        );
+        saturating_fetch_add_i64(
+            &self.write_ru_micro,
+            other.write_ru_micro.load(Ordering::Relaxed),
+        );
+        saturating_fetch_add_u64(
+            &self.ru_wait_duration_ns,
+            other.ru_wait_duration_ns.load(Ordering::Relaxed),
+        );
     }
 
     /// Update RU details from a resource-manager consumption snapshot.
@@ -1213,31 +1276,43 @@ impl RUDetails {
         consumption: Option<&resource_manager::Consumption>,
         wait_duration: Duration,
     ) {
+        self.record(consumption, wait_duration);
+    }
+
+    /// Record RU consumption and wait time into this accumulator.
+    ///
+    /// This is a lock-free equivalent of the client-go `RUDetails.Update` helper (which uses
+    /// atomics internally) and is suitable to be stored in task-local storage as `Arc<RUDetails>`.
+    pub fn record(
+        &self,
+        consumption: Option<&resource_manager::Consumption>,
+        wait_duration: Duration,
+    ) {
         let Some(consumption) = consumption else {
             return;
         };
 
-        self.read_ru += consumption.r_r_u;
-        self.write_ru += consumption.w_r_u;
-        self.ru_wait_duration = self.ru_wait_duration.saturating_add(wait_duration);
+        saturating_fetch_add_i64(&self.read_ru_micro, Self::f64_to_micro(consumption.r_r_u));
+        saturating_fetch_add_i64(&self.write_ru_micro, Self::f64_to_micro(consumption.w_r_u));
+        saturating_fetch_add_u64(&self.ru_wait_duration_ns, duration_to_nanos(wait_duration));
     }
 
     /// Total read RU.
     #[must_use]
     pub fn rru(&self) -> f64 {
-        self.read_ru
+        Self::micro_to_f64(self.read_ru_micro.load(Ordering::Relaxed))
     }
 
     /// Total write RU.
     #[must_use]
     pub fn wru(&self) -> f64 {
-        self.write_ru
+        Self::micro_to_f64(self.write_ru_micro.load(Ordering::Relaxed))
     }
 
     /// Total time spent waiting for RU tokens.
     #[must_use]
     pub fn ru_wait_duration(&self) -> Duration {
-        self.ru_wait_duration
+        Duration::from_nanos(self.ru_wait_duration_ns.load(Ordering::Relaxed))
     }
 }
 
@@ -1246,9 +1321,9 @@ impl fmt::Display for RUDetails {
         write!(
             f,
             "RRU:{:.6}, WRU:{:.6}, WaitDuration:{}",
-            self.read_ru,
-            self.write_ru,
-            format_duration(self.ru_wait_duration)
+            self.rru(),
+            self.wru(),
+            format_duration(self.ru_wait_duration())
         )
     }
 }
@@ -1267,6 +1342,23 @@ pub fn exec_details() -> Option<Arc<ExecDetails>> {
     TASK_EXEC_DETAILS.try_with(|details| details.clone()).ok()
 }
 
+/// Runs `future` with a task-local RU detail accumulator.
+///
+/// This mirrors storing `*RUDetails` into a `context.Context` in client-go (key: `RUDetailsCtxKey`),
+/// but uses Tokio task-local storage instead.
+pub fn with_ru_details<T, F>(details: Arc<RUDetails>, future: F) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    TASK_RU_DETAILS.scope(details, future)
+}
+
+/// Returns the task-local RU detail accumulator, if present.
+#[must_use]
+pub fn ru_details() -> Option<Arc<RUDetails>> {
+    TASK_RU_DETAILS.try_with(|details| details.clone()).ok()
+}
+
 /// Runs `future` with trace-exec-details enabled for the current Tokio task.
 #[doc(alias = "ContextWithTraceExecDetails")]
 pub fn with_trace_exec_details<T, F>(future: F) -> impl Future<Output = T>
@@ -1283,6 +1375,16 @@ pub fn trace_exec_details_enabled() -> bool {
     TASK_TRACE_EXEC_DETAILS_ENABLED
         .try_with(|enabled| *enabled)
         .unwrap_or(false)
+}
+
+pub(crate) async fn scope_task_ru_details<T, F>(details: Option<Arc<RUDetails>>, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    match details {
+        Some(details) => with_ru_details(details, future).await,
+        None => future.await,
+    }
 }
 
 pub(crate) async fn scope_task_exec_details<T, F>(
@@ -1340,6 +1442,13 @@ pub(crate) fn record_task_local_wait_pd_response(duration: Duration) {
     if let Some(details) = exec_details() {
         details.add_wait_pd_response(duration);
     }
+}
+
+pub(crate) fn record_task_local_ru_details(
+    consumption: Option<&resource_manager::Consumption>,
+    wait_duration: Duration,
+) {
+    let _ = TASK_RU_DETAILS.try_with(|details| details.record(consumption, wait_duration));
 }
 
 pub(crate) fn record_task_local_kv_traffic(sent_bytes: i64, received_bytes: i64) {
@@ -1956,6 +2065,42 @@ mod tests {
             details.to_string(),
             "RRU:7.000000, WRU:10.000000, WaitDuration:15ms"
         );
+    }
+
+    #[tokio::test]
+    async fn test_ru_details_task_local_scope_restores_outer_value() {
+        assert!(ru_details().is_none());
+
+        let outer = Arc::new(RUDetails::new_with(1.0, 2.0, Duration::from_millis(3)));
+        let inner = Arc::new(RUDetails::new_with(4.0, 5.0, Duration::from_millis(6)));
+
+        with_ru_details(outer.clone(), async {
+            assert!(Arc::ptr_eq(&ru_details().unwrap(), &outer));
+
+            with_ru_details(inner.clone(), async {
+                assert!(Arc::ptr_eq(&ru_details().unwrap(), &inner));
+                record_task_local_ru_details(
+                    Some(&resource_manager::Consumption {
+                        r_r_u: 1.0,
+                        w_r_u: 1.0,
+                        ..Default::default()
+                    }),
+                    Duration::from_millis(2),
+                );
+            })
+            .await;
+
+            assert!(Arc::ptr_eq(&ru_details().unwrap(), &outer));
+        })
+        .await;
+
+        assert!(ru_details().is_none());
+        assert_eq!(outer.rru(), 1.0);
+        assert_eq!(outer.wru(), 2.0);
+        assert_eq!(outer.ru_wait_duration(), Duration::from_millis(3));
+        assert_eq!(inner.rru(), 5.0);
+        assert_eq!(inner.wru(), 6.0);
+        assert_eq!(inner.ru_wait_duration(), Duration::from_millis(8));
     }
 
     #[tokio::test]

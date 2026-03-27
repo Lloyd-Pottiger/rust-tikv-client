@@ -51,8 +51,10 @@ pub use bytes::bytes_to_string;
 pub use bytes::format_bytes;
 pub use exec_details::exec_details;
 pub use exec_details::format_duration;
+pub use exec_details::ru_details;
 pub use exec_details::trace_exec_details_enabled;
 pub use exec_details::with_exec_details;
+pub use exec_details::with_ru_details;
 pub use exec_details::with_trace_exec_details;
 pub use exec_details::CommitDetailCtxKey;
 pub use exec_details::CommitDetails;
@@ -88,9 +90,11 @@ pub use ts_set::TsSet;
 
 pub(crate) use exec_details::record_task_local_backoff;
 pub(crate) use exec_details::record_task_local_kv_traffic;
+pub(crate) use exec_details::record_task_local_ru_details;
 pub(crate) use exec_details::record_task_local_wait_kv_response;
 pub(crate) use exec_details::record_task_local_wait_pd_response;
 pub(crate) use exec_details::scope_task_exec_details;
+pub(crate) use exec_details::scope_task_ru_details;
 pub(crate) use exec_details::scope_task_traffic_kind;
 pub(crate) use exec_details::task_traffic_kind;
 pub(crate) use misc::scope_task_session_id;
@@ -103,6 +107,7 @@ where
     let parent_trace_id = crate::trace::trace_id();
     let parent_trace_control_flags = crate::trace::trace_control_flags();
     let parent_exec_details = exec_details();
+    let parent_ru_details = ru_details();
     let parent_trace_exec_details = trace_exec_details_enabled();
     let parent_request_source = crate::request_context::request_source();
     let parent_resource_group_name = crate::request_context::resource_group_name();
@@ -112,6 +117,7 @@ where
         let future = scope_task_session_id(parent_session_id, future);
         let future =
             scope_task_exec_details(parent_exec_details, parent_trace_exec_details, future);
+        let future = scope_task_ru_details(parent_ru_details, future);
         let future = crate::request_context::scope_task_request_metadata(
             parent_request_source,
             parent_resource_group_name,

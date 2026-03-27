@@ -419,6 +419,10 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
                     );
                 }
             };
+            crate::util::record_task_local_ru_details(
+                wait_result.consumption.as_ref(),
+                wait_result.wait_duration,
+            );
             let target = kv_client.store_address().unwrap_or("");
             let mut rpc_request = RpcRequest::new(target, label, request.context_mut());
             rpc_request.set_resource_control_penalty(wait_result.penalty);
@@ -448,17 +452,24 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
                     u64::try_from(response_encoded_len(resp as &dyn Any)).unwrap_or(u64::MAX);
                 let response_info =
                     crate::resource_control::ResourceControlResponseInfo::new(response_size);
-                if let Err(err) = resource_control
+                let wait_result = match resource_control
                     .on_response_wait(&request_info, &response_info)
                     .await
                 {
-                    return stats.done_with_request_source(
-                        Err(err),
-                        request_ref
-                            .context()
-                            .map(|context| context.request_source.as_str()),
-                    );
-                }
+                    Ok(result) => result,
+                    Err(err) => {
+                        return stats.done_with_request_source(
+                            Err(err),
+                            request_ref
+                                .context()
+                                .map(|context| context.request_source.as_str()),
+                        );
+                    }
+                };
+                crate::util::record_task_local_ru_details(
+                    wait_result.consumption.as_ref(),
+                    wait_result.wait_duration,
+                );
             }
         }
 
@@ -690,6 +701,10 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                         );
                     }
                 };
+                crate::util::record_task_local_ru_details(
+                    wait_result.consumption.as_ref(),
+                    wait_result.wait_duration,
+                );
                 rpc_request.set_resource_control_penalty(wait_result.penalty);
                 if rpc_request.resource_control_override_priority() == 0 {
                     rpc_request.set_resource_control_override_priority(wait_result.priority);
@@ -717,17 +732,24 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                         u64::try_from(response_encoded_len(resp as &dyn Any)).unwrap_or(u64::MAX);
                     let response_info =
                         crate::resource_control::ResourceControlResponseInfo::new(response_size);
-                    if let Err(err) = resource_control
+                    let wait_result = match resource_control
                         .on_response_wait(&request_info, &response_info)
                         .await
                     {
-                        return stats.done_with_request_source(
-                            Err(err),
-                            request_ref
-                                .context()
-                                .map(|context| context.request_source.as_str()),
-                        );
-                    }
+                        Ok(result) => result,
+                        Err(err) => {
+                            return stats.done_with_request_source(
+                                Err(err),
+                                request_ref
+                                    .context()
+                                    .map(|context| context.request_source.as_str()),
+                            );
+                        }
+                    };
+                    crate::util::record_task_local_ru_details(
+                        wait_result.consumption.as_ref(),
+                        wait_result.wait_duration,
+                    );
                 }
             }
 
@@ -915,6 +937,10 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                     );
                 }
             };
+            crate::util::record_task_local_ru_details(
+                wait_result.consumption.as_ref(),
+                wait_result.wait_duration,
+            );
             let mut rpc_request = RpcRequest::new(target, label, request.context_mut());
             rpc_request.set_resource_control_penalty(wait_result.penalty);
             if rpc_request.resource_control_override_priority() == 0 {
@@ -942,17 +968,24 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                     u64::try_from(response_encoded_len(resp as &dyn Any)).unwrap_or(u64::MAX);
                 let response_info =
                     crate::resource_control::ResourceControlResponseInfo::new(response_size);
-                if let Err(err) = resource_control
+                let wait_result = match resource_control
                     .on_response_wait(&request_info, &response_info)
                     .await
                 {
-                    return stats.done_with_request_source(
-                        Err(err),
-                        request
-                            .context()
-                            .map(|context| context.request_source.as_str()),
-                    );
-                }
+                    Ok(result) => result,
+                    Err(err) => {
+                        return stats.done_with_request_source(
+                            Err(err),
+                            request
+                                .context()
+                                .map(|context| context.request_source.as_str()),
+                        );
+                    }
+                };
+                crate::util::record_task_local_ru_details(
+                    wait_result.consumption.as_ref(),
+                    wait_result.wait_duration,
+                );
             }
         }
 
@@ -8476,12 +8509,17 @@ mod test {
 
             self.calls.lock().unwrap().push("request_wait");
             Ok(crate::ResourceControlRequestWaitResult {
+                consumption: Some(crate::ProtoResourceConsumption {
+                    r_r_u: 2.0,
+                    w_r_u: 3.0,
+                    ..Default::default()
+                }),
                 penalty: Some(crate::ProtoResourceConsumption {
                     r_r_u: 1.0,
                     ..Default::default()
                 }),
+                wait_duration: Duration::from_millis(4),
                 priority: 42,
-                ..Default::default()
             })
         }
 
@@ -8499,7 +8537,14 @@ mod test {
             assert_eq!(request.label(), "raw_get");
             assert_eq!(request.cmd_type(), crate::CmdType::RawGet);
             let _ = response.response_size();
-            Ok(crate::ResourceControlResponseWaitResult::default())
+            Ok(crate::ResourceControlResponseWaitResult {
+                consumption: Some(crate::ProtoResourceConsumption {
+                    r_r_u: 0.5,
+                    w_r_u: 1.5,
+                    ..Default::default()
+                }),
+                wait_duration: Duration::from_millis(6),
+            })
         }
     }
 
@@ -8546,6 +8591,62 @@ mod test {
         };
 
         plan.execute().await.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["request_wait", "response_wait"]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_dispatch_records_task_local_ru_details() {
+        let _reset = ResourceControlReset;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        crate::set_resource_control_interceptor(Arc::new(TestResourceControlInterceptor {
+            calls: Arc::clone(&calls),
+        }));
+        crate::enable_resource_control();
+
+        let kv_client = MockKvClient::with_dispatch_hook(|req| {
+            let req = req
+                .downcast_ref::<crate::proto::kvrpcpb::RawGetRequest>()
+                .unwrap();
+            let ctx = req.context.as_ref().unwrap();
+            let rc = ctx.resource_control_context.as_ref().unwrap();
+
+            assert_eq!(rc.resource_group_name, "rg-rc-test");
+            assert_eq!(rc.override_priority, 42);
+            Ok(Box::new(crate::proto::kvrpcpb::RawGetResponse::default()))
+        });
+
+        let request = crate::proto::kvrpcpb::RawGetRequest {
+            key: b"k".to_vec(),
+            context: Some(crate::proto::kvrpcpb::Context {
+                request_source: "external_test".to_owned(),
+                resource_control_context: Some(crate::proto::kvrpcpb::ResourceControlContext {
+                    resource_group_name: "rg-rc-test".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let plan = Dispatch {
+            request,
+            kv_client: Some(Arc::new(kv_client)),
+        };
+
+        let ru_details = Arc::new(crate::util::RUDetails::new());
+        crate::util::with_ru_details(Arc::clone(&ru_details), async {
+            plan.execute().await.unwrap();
+        })
+        .await;
+
+        assert_eq!(ru_details.rru(), 2.5);
+        assert_eq!(ru_details.wru(), 4.5);
+        assert_eq!(ru_details.ru_wait_duration(), Duration::from_millis(10));
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             ["request_wait", "response_wait"]
