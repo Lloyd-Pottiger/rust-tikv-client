@@ -18,7 +18,9 @@ use crate::Result;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ValueEntry {
+    /// Value returned by the read, or `None` when the key does not exist.
     pub value: Option<Value>,
+    /// Commit timestamp returned by the server, or `0` when it was not requested.
     pub commit_ts: u64,
 }
 

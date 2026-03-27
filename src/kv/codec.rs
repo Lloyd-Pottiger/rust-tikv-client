@@ -1,3 +1,8 @@
+//! Memcomparable byte codec helpers for TiKV keys.
+//!
+//! This module exposes the low-level encoding primitives used to map user keys onto TiKV's
+//! ordered byte representation.
+
 use std::io::Write;
 use std::ptr;
 
@@ -17,6 +22,7 @@ pub fn max_encoded_bytes_size(n: usize) -> usize {
     (n / ENC_GROUP_SIZE + 1) * (ENC_GROUP_SIZE + 1)
 }
 
+/// Encode raw keys into TiKV's memcomparable byte format.
 pub trait BytesEncoder: Write {
     /// Refer: <https://github.com/facebook/mysql-5.6/wiki/MyRocks-record-format#memcomparable-format>
     ///

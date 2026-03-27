@@ -67,7 +67,9 @@ use crate::proto::kvrpcpb;
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(test, derive(Arbitrary))]
 pub struct BoundRange {
+    /// Lower bound of the range.
     pub from: Bound<Key>,
+    /// Upper bound of the range.
     pub to: Bound<Key>,
 }
 
