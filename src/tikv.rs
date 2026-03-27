@@ -43,6 +43,13 @@ pub use crate::Variables;
 /// This mirrors client-go `tikv.MaxTxnTimeUse`.
 pub const MAX_TXN_TIME_USE: i64 = crate::MAX_TXN_TIME_USE;
 
+#[doc(alias = "GCScanLockLimit")]
+/// The default per-request lock scan limit used by GC-style cleanup helpers.
+///
+/// This mirrors client-go `tikv.GCScanLockLimit` and matches the current
+/// [`ResolveLocksOptions::default().batch_size`](crate::ResolveLocksOptions).
+pub const GC_SCAN_LOCK_LIMIT: u32 = 1024;
+
 /// Client-go style in-memory mutation buffer type.
 ///
 /// This mirrors client-go `tikv.MemBuffer`.

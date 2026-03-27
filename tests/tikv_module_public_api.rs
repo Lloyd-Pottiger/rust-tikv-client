@@ -82,6 +82,8 @@ fn tikv_module_exports_gc_options_builder() {
     let options = tikv::GcOptions::new().with_concurrency(6);
     assert_eq!(options.concurrency, 6);
     assert_eq!(tikv::GcOptions::default().concurrency, 8);
+    assert_eq!(tikv::GC_SCAN_LOCK_LIMIT, 1024);
+    assert_eq!(tikv::ResolveLocksOptions::default().batch_size, 1024);
 }
 
 #[test]
