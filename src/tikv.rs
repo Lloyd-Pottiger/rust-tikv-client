@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use crate::timestamp::TimestampExt;
+
 #[doc(inline)]
 pub use crate::kv::Getter;
 pub use crate::Backoff as Backoffer;
@@ -40,6 +42,104 @@ pub type MemBuffer = crate::transaction::Buffer;
 ///
 /// This mirrors client-go `tikv.BackoffConfig` (alias of `retry.Config`).
 pub type BackoffConfig = crate::config::retry::Config;
+
+/// Client-go style transaction begin option.
+///
+/// These options are consumed by
+/// [`TransactionClient::begin_with_tikv_options`](crate::TransactionClient::begin_with_tikv_options)
+/// and
+/// [`SyncTransactionClient::begin_with_tikv_options`](crate::SyncTransactionClient::begin_with_tikv_options).
+///
+/// Repeated options follow client-go semantics: later entries override earlier ones.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum TxnOption {
+    /// Override the transaction scope used when starting the transaction.
+    ///
+    /// This mirrors client-go `tikv.WithTxnScope`.
+    TxnScope(String),
+    /// Use an explicit start timestamp instead of fetching one from PD.
+    ///
+    /// This mirrors client-go `tikv.WithStartTS`.
+    StartTs(u64),
+    /// Enable pipelined DML with the default client-go parameters.
+    ///
+    /// This mirrors client-go `tikv.WithDefaultPipelinedTxn`.
+    DefaultPipelinedTxn,
+    /// Enable pipelined DML with custom parameters.
+    ///
+    /// This mirrors client-go `tikv.WithPipelinedTxn`.
+    PipelinedTxn(crate::PipelinedTxnOptions),
+}
+
+/// Create a transaction begin option that sets the transaction scope.
+///
+/// This mirrors client-go `tikv.WithTxnScope`.
+#[doc(alias = "WithTxnScope")]
+#[must_use]
+pub fn with_txn_scope(txn_scope: &str) -> TxnOption {
+    TxnOption::TxnScope(txn_scope.to_owned())
+}
+
+/// Create a transaction begin option that uses an explicit start timestamp.
+///
+/// This mirrors client-go `tikv.WithStartTS`.
+#[doc(alias = "WithStartTS")]
+#[must_use]
+pub fn with_start_ts(start_ts: u64) -> TxnOption {
+    TxnOption::StartTs(start_ts)
+}
+
+/// Create a transaction begin option that enables pipelined DML with default parameters.
+///
+/// This mirrors client-go `tikv.WithDefaultPipelinedTxn`.
+#[doc(alias = "WithDefaultPipelinedTxn")]
+#[must_use]
+pub fn with_default_pipelined_txn() -> TxnOption {
+    TxnOption::DefaultPipelinedTxn
+}
+
+/// Create a transaction begin option that enables pipelined DML with custom parameters.
+///
+/// This mirrors client-go `tikv.WithPipelinedTxn`.
+#[doc(alias = "WithPipelinedTxn")]
+pub fn with_pipelined_txn(
+    flush_concurrency: usize,
+    resolve_lock_concurrency: usize,
+    write_throttle_ratio: f64,
+) -> crate::Result<TxnOption> {
+    Ok(TxnOption::PipelinedTxn(crate::PipelinedTxnOptions::new(
+        flush_concurrency,
+        resolve_lock_concurrency,
+        write_throttle_ratio,
+    )?))
+}
+
+pub(crate) fn build_begin_options(
+    options: impl IntoIterator<Item = TxnOption>,
+) -> crate::Result<(crate::TransactionOptions, Option<crate::Timestamp>)> {
+    let mut txn_options = crate::TransactionOptions::new_optimistic();
+    let mut start_ts = None;
+
+    for option in options {
+        match option {
+            TxnOption::TxnScope(txn_scope) => {
+                txn_options = txn_options.txn_scope(txn_scope);
+            }
+            TxnOption::StartTs(version) => {
+                start_ts = Some(crate::Timestamp::from_version(version));
+            }
+            TxnOption::DefaultPipelinedTxn => {
+                txn_options = txn_options.pipelined();
+            }
+            TxnOption::PipelinedTxn(options) => {
+                txn_options = txn_options.pipelined_txn(options);
+            }
+        }
+    }
+
+    Ok((txn_options, start_ts))
+}
 
 #[doc(inline)]
 pub use crate::config::retry::bo_pd_rpc;
@@ -267,4 +367,34 @@ pub fn codec_v2_prefixes() -> &'static [&'static [u8]] {
 #[doc(alias = "CodecV1ExcludePrefixes")]
 pub fn codec_v1_exclude_prefixes() -> &'static [&'static [u8]] {
     codec_v2_prefixes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_begin_options_tracks_explicit_start_ts_and_txn_scope() {
+        let (options, start_ts) =
+            build_begin_options([with_txn_scope("dc1"), with_start_ts(42)]).expect("valid opts");
+
+        assert_eq!(options.txn_scope_as_deref(), Some("dc1"));
+        assert_eq!(start_ts, Some(crate::Timestamp::from_version(42)));
+    }
+
+    #[test]
+    fn build_begin_options_keeps_client_go_begin_optimistic_for_pipelined_txns() {
+        let custom = with_pipelined_txn(4, 2, 0.25).expect("custom pipeline");
+        let (options, _) =
+            build_begin_options([with_default_pipelined_txn(), custom]).expect("valid opts");
+
+        assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn with_pipelined_txn_reuses_pipelined_option_validation() {
+        assert!(with_pipelined_txn(0, 1, 0.0).is_err());
+        assert!(with_pipelined_txn(1, 0, 0.0).is_err());
+        assert!(with_pipelined_txn(1, 1, 1.0).is_err());
+    }
 }

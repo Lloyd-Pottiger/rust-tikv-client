@@ -565,6 +565,31 @@ impl<PdC: PdClient> Client<PdC> {
         Ok(self.new_transaction(timestamp, options))
     }
 
+    /// Creates a new transaction using the default client-go-style begin behavior.
+    ///
+    /// This mirrors client-go `tikv.KVStore.Begin()` with no options.
+    pub async fn begin(&self) -> Result<Transaction<PdC>> {
+        self.begin_with_tikv_options(std::iter::empty()).await
+    }
+
+    /// Creates a new transaction from client-go-style [`tikv::TxnOption`](crate::tikv::TxnOption)
+    /// values.
+    ///
+    /// This mirrors client-go `tikv.KVStore.Begin(opts...)`.
+    pub async fn begin_with_tikv_options(
+        &self,
+        options: impl IntoIterator<Item = crate::tikv::TxnOption>,
+    ) -> Result<Transaction<PdC>> {
+        let (options, start_ts) = crate::tikv::build_begin_options(options)?;
+        match start_ts {
+            Some(start_ts) => {
+                options.validate()?;
+                Ok(self.begin_with_start_timestamp(start_ts, options))
+            }
+            None => self.begin_with_options(options).await,
+        }
+    }
+
     /// Create a new customized [`Transaction`].
     ///
     /// # Examples

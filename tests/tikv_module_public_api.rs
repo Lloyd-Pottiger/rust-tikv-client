@@ -7,6 +7,7 @@ use tikv_client::tikv;
 fn tikv_module_exports_kvstore_and_backoffer() {
     let _: Option<tikv::KVStore> = None;
     let _: Option<tikv::KVTxn> = None;
+    let _: Option<tikv::TxnOption> = None;
     let _ = tikv::Backoffer::no_backoff();
     let _: Option<tikv::BinlogWriteResult> = None;
     let _: Option<tikv::GcOptions> = None;
@@ -42,6 +43,19 @@ fn tikv_module_exports_backoff_helpers() {
     let _ = tikv::bo_tiflash_rpc();
     let _ = tikv::bo_txn_lock();
     let _ = tikv::bo_pd_rpc();
+}
+
+#[test]
+fn tikv_module_exports_begin_txn_option_helpers() {
+    let _: fn(&str) -> tikv::TxnOption = tikv::with_txn_scope;
+    let _: fn(u64) -> tikv::TxnOption = tikv::with_start_ts;
+    let _: fn() -> tikv::TxnOption = tikv::with_default_pipelined_txn;
+    let _: fn(usize, usize, f64) -> tikv_client::Result<tikv::TxnOption> = tikv::with_pipelined_txn;
+
+    let _ = tikv::with_txn_scope("dc1");
+    let _ = tikv::with_start_ts(42);
+    let _ = tikv::with_default_pipelined_txn();
+    assert!(tikv::with_pipelined_txn(8, 4, 0.25).is_ok());
 }
 
 #[test]

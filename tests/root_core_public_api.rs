@@ -2,7 +2,7 @@ use std::convert::TryFrom;
 use std::time::Duration;
 
 use tikv_client::{
-    Backoff, BoundRange, ColumnFamily, IntoOwnedRange, Key, KvPair, PdRpcClient, RawChecksum,
+    tikv, Backoff, BoundRange, ColumnFamily, IntoOwnedRange, Key, KvPair, PdRpcClient, RawChecksum,
     RawClient, Snapshot, SyncSnapshot, SyncTransaction, SyncTransactionClient, Timestamp,
     TimestampExt, Transaction, TransactionClient, TransactionOptions, Value,
 };
@@ -59,6 +59,21 @@ async fn transaction_current_timestamp_entry(
     client: &TransactionClient,
 ) -> tikv_client::Result<Timestamp> {
     client.current_timestamp().await
+}
+
+async fn transaction_begin_entry(client: &TransactionClient) -> tikv_client::Result<Transaction> {
+    client.begin().await
+}
+
+async fn transaction_begin_with_tikv_options_entry(
+    client: &TransactionClient,
+) -> tikv_client::Result<Transaction> {
+    client
+        .begin_with_tikv_options([
+            tikv::with_txn_scope("bj"),
+            tikv::with_default_pipelined_txn(),
+        ])
+        .await
 }
 
 async fn transaction_current_timestamp_with_txn_scope_entry(
@@ -228,6 +243,18 @@ fn sync_transaction_current_timestamp_entry(
     client.current_timestamp()
 }
 
+fn sync_transaction_begin_entry(
+    client: &SyncTransactionClient,
+) -> tikv_client::Result<SyncTransaction> {
+    client.begin()
+}
+
+fn sync_transaction_begin_with_tikv_options_entry(
+    client: &SyncTransactionClient,
+) -> tikv_client::Result<SyncTransaction> {
+    client.begin_with_tikv_options([tikv::with_start_ts(42)])
+}
+
 fn sync_transaction_current_timestamp_with_txn_scope_entry(
     client: &SyncTransactionClient,
     txn_scope: &str,
@@ -393,6 +420,8 @@ fn crate_root_exports_transaction_and_snapshot_aliases() {
 
     let _ = transaction_get_entry;
     let _ = transaction_put_entry;
+    let _ = transaction_begin_entry;
+    let _ = transaction_begin_with_tikv_options_entry;
     let _ = snapshot_get_entry;
     let _ = snapshot_batch_get_entry;
 
@@ -418,6 +447,8 @@ fn crate_root_exports_transaction_client_timestamp_helpers() {
     let _ = transaction_stale_timestamp_with_txn_scope_entry;
 
     let _ = sync_transaction_current_timestamp_entry;
+    let _ = sync_transaction_begin_entry;
+    let _ = sync_transaction_begin_with_tikv_options_entry;
     let _ = sync_transaction_current_timestamp_with_txn_scope_entry;
     let _ = sync_transaction_current_all_tso_keyspace_group_min_ts_entry;
     let _ = sync_transaction_external_timestamp_entry;

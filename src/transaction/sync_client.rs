@@ -225,6 +225,27 @@ impl SyncTransactionClient {
         Ok(SyncTransaction::new(inner, Arc::clone(&self.runtime)))
     }
 
+    /// Creates a new transaction using the default client-go-style begin behavior.
+    ///
+    /// This is a synchronous version of [`TransactionClient::begin`](crate::TransactionClient::begin).
+    pub fn begin(&self) -> Result<SyncTransaction> {
+        let inner = safe_block_on(&self.runtime, self.client.begin())?;
+        Ok(SyncTransaction::new(inner, Arc::clone(&self.runtime)))
+    }
+
+    /// Creates a new transaction from client-go-style [`tikv::TxnOption`](crate::tikv::TxnOption)
+    /// values.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::begin_with_tikv_options`](crate::TransactionClient::begin_with_tikv_options).
+    pub fn begin_with_tikv_options(
+        &self,
+        options: impl IntoIterator<Item = crate::tikv::TxnOption>,
+    ) -> Result<SyncTransaction> {
+        let inner = safe_block_on(&self.runtime, self.client.begin_with_tikv_options(options))?;
+        Ok(SyncTransaction::new(inner, Arc::clone(&self.runtime)))
+    }
+
     /// Create a new customized [`SyncTransaction`].
     ///
     /// This is a synchronous version of [`TransactionClient::begin_with_options`](crate::TransactionClient::begin_with_options).
