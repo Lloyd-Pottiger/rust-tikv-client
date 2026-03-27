@@ -9232,4 +9232,59 @@ mod test {
             ["request_wait", "response_wait"]
         );
     }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_dispatch_keeps_resource_control_hook_for_internal_others_requests() {
+        let _reset = ResourceControlReset;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        crate::set_resource_control_interceptor(Arc::new(
+            MetadataAssertingResourceControlInterceptor {
+                calls: Arc::clone(&calls),
+                expected_label: "kv_get",
+                expected_cmd_type: crate::CmdType::Get,
+                expected_write_bytes: 0,
+                expected_replica_number: 0,
+                expected_access_location_type: crate::AccessLocationType::Unknown,
+                expected_bypass: true,
+                expected_read_bytes: 0,
+                expected_kv_cpu: Duration::ZERO,
+            },
+        ));
+        crate::enable_resource_control();
+
+        let kv_client = MockKvClient::with_dispatch_hook(|req| {
+            let req = req
+                .downcast_ref::<crate::proto::kvrpcpb::GetRequest>()
+                .unwrap();
+            assert_eq!(req.key, b"k".to_vec());
+            Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()))
+        });
+
+        let request = crate::proto::kvrpcpb::GetRequest {
+            key: b"k".to_vec(),
+            context: Some(crate::proto::kvrpcpb::Context {
+                request_source: "xxx_internal_others".to_owned(),
+                resource_control_context: Some(crate::proto::kvrpcpb::ResourceControlContext {
+                    resource_group_name: "rg-rc-test".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let plan = Dispatch {
+            request,
+            kv_client: Some(Arc::new(kv_client)),
+            resource_control_request_metadata: None,
+        };
+
+        plan.execute().await.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["request_wait", "response_wait"]
+        );
+    }
 }

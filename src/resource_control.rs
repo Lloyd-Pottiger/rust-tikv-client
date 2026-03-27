@@ -259,8 +259,6 @@ pub(crate) struct ResourceControlHook {
     interceptor: Arc<dyn ResourceGroupKvInterceptor>,
 }
 
-const INTERNAL_OTHERS_REQUEST_SOURCE_MARKER: &str = "internal_others";
-
 pub(crate) fn hook_for_context(
     context: Option<&crate::proto::kvrpcpb::Context>,
 ) -> Option<ResourceControlHook> {
@@ -280,11 +278,9 @@ pub(crate) fn hook_for_context(
         .map(|rc| rc.resource_group_name.as_str())
         .filter(|name| !name.is_empty())?;
 
+    // Keep the hook for `internal_others` requests so dispatch can surface `bypass=true`,
+    // matching client-go's "hook runs, interceptor decides to skip accounting/waits" behavior.
     let request_source = ctx.request_source.as_str();
-    if request_source.contains(INTERNAL_OTHERS_REQUEST_SOURCE_MARKER) {
-        return None;
-    }
-
     if interceptor.is_background_request(resource_group_name, request_source) {
         return None;
     }
