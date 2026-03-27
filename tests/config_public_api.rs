@@ -187,3 +187,32 @@ fn config_module_exports_scope_and_liveness_builders() {
     assert_eq!(config::get_txn_scope_from_global_config(), "bj");
     restore.restore();
 }
+
+#[test]
+fn config_module_exposes_validate_and_combined_custom_dns_builder() {
+    let dns_server = SocketAddr::from(([8, 8, 8, 8], 53));
+    let config = config::Config::default().with_grpc_custom_dns(dns_server, "cluster.local");
+
+    let _: fn(&config::Config) -> tikv_client::Result<()> = config::Config::validate;
+    assert_eq!(config.grpc_custom_dns_server, Some(dns_server));
+    assert_eq!(
+        config.grpc_custom_dns_domain.as_deref(),
+        Some("cluster.local")
+    );
+    config.validate().expect("valid custom dns config");
+}
+
+#[test]
+fn config_module_validate_rejects_custom_dns_server_without_port() {
+    let config =
+        config::Config::default().with_grpc_custom_dns(SocketAddr::from(([127, 0, 0, 1], 0)), "");
+
+    assert_eq!(config.grpc_custom_dns_domain, None);
+
+    let err = config.validate().expect_err("port 0 should be rejected");
+    assert!(matches!(
+        err,
+        tikv_client::Error::StringError(message)
+            if message.contains("grpc-custom-dns-server port should be greater than 0")
+    ));
+}
