@@ -5,6 +5,7 @@ use std::sync::RwLock;
 ///
 /// This mirrors client-go `util.TSSet`. The backing set is lazily allocated on first insertion to
 /// avoid allocations in the common case where the set is unused.
+#[doc(alias = "TSSet")]
 #[derive(Debug, Default)]
 pub struct TsSet {
     inner: RwLock<Option<HashSet<u64>>>,

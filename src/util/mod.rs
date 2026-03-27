@@ -94,6 +94,7 @@ pub use rate_limit::new_rate_limit;
 pub use rate_limit::RateLimit;
 pub use rate_limit::RateLimitError;
 pub use rate_limit::RateLimitPermit;
+pub use ts_set::TsSet as TSSet;
 pub use ts_set::TsSet;
 
 pub(crate) use exec_details::record_task_local_backoff;
