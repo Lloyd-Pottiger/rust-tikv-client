@@ -43,14 +43,19 @@ macro_rules! impl_inner_shardable {
     };
 }
 
+/// A request that can be split into region- or store-scoped shards before dispatch.
 pub trait Shardable {
+    /// Metadata that identifies one shard of the logical request.
     type Shard: Debug + Clone + Send + Sync;
 
+    /// Produces the shards that should be dispatched, paired with the region/store metadata
+    /// PD resolved for each shard.
     fn shards(
         &self,
         pd_client: &Arc<impl PdClient>,
     ) -> BoxStream<'static, Result<(Self::Shard, RegionWithLeader)>>;
 
+    /// Rewrites the request so it targets the provided shard.
     fn apply_shard(&mut self, shard: Self::Shard);
 
     /// Implementation can skip unnecessary fields clone if fields will be overwritten by `apply_shard`.
@@ -63,12 +68,19 @@ pub trait Shardable {
         cloned
     }
 
+    /// Binds the store-specific context needed to send the already-sharded request.
     fn apply_store(&mut self, store: &RegionStore) -> Result<()>;
 }
 
+/// A helper for request types that need to group per-item payloads into size-bounded batches.
 pub trait Batchable {
+    /// Item type that is grouped into batches.
     type Item;
 
+    /// Groups `items` into batches whose estimated sizes stay below `batch_size`.
+    ///
+    /// Implementations provide [`item_size`](Self::item_size) so callers can keep request bodies
+    /// under a target limit while preserving input order.
     fn batches(items: Vec<Self::Item>, batch_size: u64) -> Vec<Vec<Self::Item>> {
         let mut batches: Vec<Vec<Self::Item>> = Vec::new();
         let mut batch: Vec<Self::Item> = Vec::new();
@@ -90,17 +102,23 @@ pub trait Batchable {
         batches
     }
 
+    /// Returns the estimated encoded size for one item when computing batches.
     fn item_size(item: &Self::Item) -> u64;
 }
 
 // Use to iterate in a region for scan requests that have batch size limit.
 // HasNextBatch use to get the next batch according to previous response.
+/// A response that can describe the continuation range for another scan batch.
 pub trait HasNextBatch {
+    /// Returns the next `(start_key, end_key)` range to scan, or `None` when the current shard is
+    /// fully consumed.
     fn has_next_batch(&self) -> Option<(Vec<u8>, Vec<u8>)>;
 }
 
 // NextBatch use to change start key of request by result of `has_next_batch`.
+/// A request that can be advanced to the continuation range returned by [`HasNextBatch`].
 pub trait NextBatch {
+    /// Rewrites the request so the next execution scans `range`.
     fn next_batch(&mut self, _range: (Vec<u8>, Vec<u8>));
 }
 
@@ -385,7 +403,12 @@ macro_rules! shardable_keys {
     };
 }
 
+/// A request whose shard boundaries come from a key range.
 pub trait RangeRequest: Request {
+    /// Returns `true` when the request interprets its range in reverse order.
+    ///
+    /// Reverse requests still shard through PD using the forward range; the start/end keys are
+    /// swapped back when applying each shard to the request.
     fn is_reverse(&self) -> bool {
         false
     }

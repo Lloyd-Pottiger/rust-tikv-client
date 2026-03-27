@@ -64,6 +64,11 @@ pub struct Targetted;
 impl PlanBuilderPhase for Targetted {}
 
 impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
+    /// Creates a new dispatch plan and injects request context derived from the keyspace and PD.
+    ///
+    /// This sets the request API version unconditionally. If the request carries a TiKV
+    /// `Context`, the builder also fills in the cluster ID and keyspace metadata before any
+    /// targeting or retry adapters are applied.
     pub fn new(pd_client: Arc<PdC>, keyspace: Keyspace, mut request: Req) -> Self {
         request.set_api_version(keyspace.api_version());
         if let Some(ctx) = request.context_mut() {
@@ -262,6 +267,11 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         }
     }
 
+    /// Like [`resolve_lock`](Self::resolve_lock), but lets callers opt into pessimistic-region
+    /// retry behavior during lock resolution.
+    ///
+    /// Set `pessimistic_region_resolve` to `true` when the follow-up lock cleanup should retry
+    /// the extra region-error cases used by pessimistic transactions.
     pub fn resolve_lock_with_pessimistic_region(
         self,
         timestamp: Timestamp,
@@ -287,6 +297,11 @@ impl<PdC: PdClient, P: Plan, Ph: PlanBuilderPhase> PlanBuilder<PdC, P, Ph> {
         }
     }
 
+    /// Wraps the plan in the scan-and-cleanup lock flow used by `NextBatch`-capable requests.
+    ///
+    /// The returned plan keeps the shared resolve-lock context across retries, advances the inner
+    /// request with [`NextBatch`], and issues cleanup RPCs in the same keyspace until the shard is
+    /// fully drained.
     pub fn cleanup_locks(
         self,
         ctx: ResolveLocksContext,
@@ -597,6 +612,10 @@ impl<PdC: PdClient, P: Plan + StoreRequest> PlanBuilder<PdC, P, NoTarget>
 where
     P::Result: HasKeyErrors + HasRegionError,
 {
+    /// Retries the store-scoped plan against every TiKV store currently returned by PD.
+    ///
+    /// Use this for store-level requests that should fan out to the whole cluster instead of a
+    /// caller-supplied store subset.
     pub fn all_stores(
         self,
         backoff: Backoff,
@@ -612,6 +631,7 @@ where
         }
     }
 
+    /// Retries the store-scoped plan against the explicit store list supplied by the caller.
     pub fn stores(
         self,
         stores: Vec<Store>,
@@ -633,6 +653,10 @@ impl<PdC: PdClient, P: Plan + Shardable> PlanBuilder<PdC, P, NoTarget>
 where
     P::Result: HasKeyErrors,
 {
+    /// Preserves each shard and pairs it back with the corresponding response.
+    ///
+    /// This is useful when later merge/process stages need shard metadata that TiKV does not
+    /// echo in the response body.
     pub fn preserve_shard(self) -> PlanBuilder<PdC, PreserveShard<P>, NoTarget> {
         PlanBuilder {
             pd_client: self.pd_client.clone(),
@@ -649,6 +673,10 @@ impl<PdC: PdClient, P: Plan> PlanBuilder<PdC, P, Targetted>
 where
     P::Result: HasKeyErrors + HasRegionErrors,
 {
+    /// Promotes embedded key and region errors in the response into `Err`.
+    ///
+    /// After this adapter is applied, downstream merge/process stages only see successful
+    /// responses in `Ok(...)`.
     pub fn extract_error(self) -> PlanBuilder<PdC, ExtractError<P>, Targetted> {
         PlanBuilder {
             pd_client: self.pd_client,
@@ -674,6 +702,7 @@ fn set_single_region_store<PdC: PdClient, R: KvRequest>(
 
 /// Indicates that a request operates on a single key.
 pub trait SingleKey {
+    /// Returns the encoded key used to locate the request's target region.
     #[allow(clippy::ptr_arg)]
     fn key(&self) -> &Vec<u8>;
 }
