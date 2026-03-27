@@ -33,3 +33,48 @@ fn util_exec_details_public_api_exposes_constructor_helpers() {
         std::time::Duration::from_millis(3)
     );
 }
+
+#[test]
+fn util_exec_details_public_api_exposes_types_and_format_helper() {
+    let _: util::CommitDetails = Default::default();
+    let _: util::LockKeysDetails = Default::default();
+    let _: util::TimeDetail = Default::default();
+    let _: util::ScanDetail = Default::default();
+    let _: util::WriteDetail = Default::default();
+
+    let traffic = util::TrafficDetails::default();
+    traffic.add_kv_bytes(11, 22, 3, 4);
+    assert_eq!(traffic.unpacked_bytes_sent_kv_total(), 11);
+    assert_eq!(traffic.unpacked_bytes_received_kv_total(), 22);
+    assert_eq!(traffic.unpacked_bytes_sent_kv_cross_zone(), 3);
+    assert_eq!(traffic.unpacked_bytes_received_kv_cross_zone(), 4);
+
+    assert_eq!(
+        util::format_duration(std::time::Duration::from_nanos(999)),
+        "999ns"
+    );
+    assert_eq!(
+        util::format_duration(std::time::Duration::from_nanos(1000)),
+        "1us"
+    );
+}
+
+#[tokio::test]
+async fn util_exec_details_public_api_exposes_exec_details_scope_helper() {
+    let exec_details = std::sync::Arc::new(util::ExecDetails::new());
+
+    util::with_exec_details(exec_details.clone(), async {
+        let current = util::exec_details().expect("exec details should be scoped");
+        current.add_wait_pd_response(std::time::Duration::from_millis(5));
+        assert_eq!(
+            current.wait_pd_resp_duration(),
+            std::time::Duration::from_millis(5)
+        );
+    })
+    .await;
+
+    assert_eq!(
+        exec_details.wait_pd_resp_duration(),
+        std::time::Duration::from_millis(5)
+    );
+}
