@@ -32,6 +32,26 @@ fn util_exec_details_public_api_exposes_constructor_helpers() {
         ru_details.ru_wait_duration(),
         std::time::Duration::from_millis(3)
     );
+
+    let _: fn(
+        &util::RUDetails,
+        Option<&tikv_client::ProtoResourceConsumption>,
+        std::time::Duration,
+    ) = util::RUDetails::record;
+
+    let consumption = tikv_client::ProtoResourceConsumption {
+        r_r_u: 0.5,
+        w_r_u: 1.25,
+        ..Default::default()
+    };
+    ru_details.record(Some(&consumption), std::time::Duration::from_millis(4));
+    ru_details.record(None, std::time::Duration::from_millis(9));
+    assert_eq!(ru_details.rru(), 2.0);
+    assert_eq!(ru_details.wru(), 3.75);
+    assert_eq!(
+        ru_details.ru_wait_duration(),
+        std::time::Duration::from_millis(7)
+    );
 }
 
 #[test]

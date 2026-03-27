@@ -58,7 +58,20 @@ fn kv_module_exports_get_and_batch_get_option_types() {
     opts.apply(&[kv::with_return_commit_ts()]);
     assert!(opts.return_commit_ts());
 
-    let _ = kv::ValueEntry::new(Some(b"v".to_vec()), 42);
+    let value = kv::ValueEntry::new(Some(b"v".to_vec()), 42);
+    assert!(value.exists());
+    assert!(!value.is_value_empty());
+    assert_eq!(value.size(), std::mem::size_of::<kv::ValueEntry>() + 1);
+
+    let empty_value = kv::ValueEntry::new(Some(Vec::new()), 7);
+    assert!(empty_value.exists());
+    assert!(empty_value.is_value_empty());
+    assert_eq!(empty_value.size(), std::mem::size_of::<kv::ValueEntry>());
+
+    let missing = kv::ValueEntry::new(None, 0);
+    assert!(!missing.exists());
+    assert!(missing.is_value_empty());
+    assert_eq!(missing.size(), std::mem::size_of::<kv::ValueEntry>());
 }
 
 #[test]
