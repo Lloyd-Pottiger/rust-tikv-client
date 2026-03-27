@@ -19,6 +19,7 @@ fn tikv_module_exports_backoff_helpers() {
     let _ = tikv::new_backoffer_with_vars(100, None);
     let _ = tikv::new_gc_resolve_lock_max_backoffer();
     let _ = tikv::new_noop_backoff();
+    let _ = tikv::txn_start_key();
 
     let _ = tikv::bo_region_miss();
     let _ = tikv::bo_tikv_rpc();

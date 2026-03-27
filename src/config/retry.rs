@@ -7,6 +7,8 @@
 //! bounded number of attempts. The helpers in this module provide best-effort presets and
 //! constructors that are convenient when implementing custom retry loops.
 
+use std::future::Future;
+
 use crate::Backoff;
 use crate::Variables;
 
@@ -24,6 +26,41 @@ pub type Config = Backoff;
 
 const DEFAULT_MAX_ATTEMPTS: u32 = 16;
 const DEFAULT_NO_JITTER_MAX_ATTEMPTS: u32 = 10;
+
+tokio::task_local! {
+    static TASK_TXN_START_TS: u64;
+}
+
+/// Marker type used as a key for storing transaction start ts in task-local context.
+///
+/// This mirrors client-go `retry.TxnStartKey`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TxnStartKey;
+
+/// Returns the marker key for storing transaction start ts in task-local context.
+///
+/// This mirrors client-go `tikv.TxnStartKey`.
+#[doc(alias = "TxnStartKey")]
+#[must_use]
+pub fn txn_start_key() -> TxnStartKey {
+    TxnStartKey
+}
+
+/// Runs `future` with a task-local transaction start ts.
+///
+/// This mirrors the client-go pattern: `context.WithValue(ctx, TxnStartKey, startTS)`.
+pub fn with_txn_start_ts<T, F>(start_ts: u64, future: F) -> impl Future<Output = T>
+where
+    F: Future<Output = T>,
+{
+    TASK_TXN_START_TS.scope(start_ts, future)
+}
+
+/// Returns the task-local transaction start ts, if present.
+#[must_use]
+pub fn txn_start_ts() -> Option<u64> {
+    TASK_TXN_START_TS.try_with(|ts| *ts).ok()
+}
 
 /// Create a backoffer with an upper bound in milliseconds and optional variables.
 ///
@@ -346,5 +383,24 @@ mod tests {
     #[test]
     fn gc_resolve_lock_backoffer_uses_client_go_max_sleep_default() {
         assert_eq!(new_gc_resolve_lock_max_backoffer(), new_backoffer(100_000));
+    }
+
+    #[tokio::test]
+    async fn txn_start_ts_task_local_scope_restores_outer_value() {
+        assert_eq!(txn_start_ts(), None);
+
+        with_txn_start_ts(7, async {
+            assert_eq!(txn_start_ts(), Some(7));
+
+            with_txn_start_ts(9, async {
+                assert_eq!(txn_start_ts(), Some(9));
+            })
+            .await;
+
+            assert_eq!(txn_start_ts(), Some(7));
+        })
+        .await;
+
+        assert_eq!(txn_start_ts(), None);
     }
 }

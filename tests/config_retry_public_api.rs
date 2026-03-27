@@ -4,6 +4,7 @@ use tikv_client::config;
 fn config_retry_module_exports_backoff_helpers() {
     let _ = config::retry::Backoffer::no_backoff();
     let _ = config::retry::Config::no_backoff();
+    let _ = config::retry::txn_start_key();
 
     let _ = config::retry::new_backoffer(100);
     let _ = config::retry::new_backoffer_with_vars(100, None);
@@ -29,4 +30,16 @@ fn config_retry_module_exports_backoff_helpers() {
     let _ = config::retry::bo_is_witness();
     let _ = config::retry::bo_txn_lock_fast();
     let _ = config::retry::bo_txn_lock_fast_with_vars(&tikv_client::Variables::default());
+}
+
+#[tokio::test]
+async fn config_retry_module_exposes_task_local_txn_start_ts() {
+    assert_eq!(config::retry::txn_start_ts(), None);
+
+    config::retry::with_txn_start_ts(42, async {
+        assert_eq!(config::retry::txn_start_ts(), Some(42));
+    })
+    .await;
+
+    assert_eq!(config::retry::txn_start_ts(), None);
 }
