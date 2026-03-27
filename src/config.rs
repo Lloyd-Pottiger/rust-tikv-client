@@ -9,6 +9,9 @@ use lazy_static::lazy_static;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
 
+/// Client-go style `config/retry` module.
+pub mod retry;
+
 /// Parsed result of [`parse_path`].
 ///
 /// This mirrors the output of client-go `config.ParsePath`.

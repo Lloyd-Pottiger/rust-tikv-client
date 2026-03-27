@@ -12,6 +12,30 @@ pub use crate::TransactionClient as KVStore;
 #[doc(inline)]
 pub use crate::Variables;
 
+/// Client-go style backoff config type.
+///
+/// This mirrors client-go `tikv.BackoffConfig` (alias of `retry.Config`).
+pub type BackoffConfig = crate::config::retry::Config;
+
+#[doc(inline)]
+pub use crate::config::retry::bo_pd_rpc;
+#[doc(inline)]
+pub use crate::config::retry::bo_region_miss;
+#[doc(inline)]
+pub use crate::config::retry::bo_tiflash_rpc;
+#[doc(inline)]
+pub use crate::config::retry::bo_tikv_rpc;
+#[doc(inline)]
+pub use crate::config::retry::bo_txn_lock;
+#[doc(inline)]
+pub use crate::config::retry::new_backoffer;
+#[doc(inline)]
+pub use crate::config::retry::new_backoffer_with_vars;
+#[doc(inline)]
+pub use crate::config::retry::new_gc_resolve_lock_max_backoffer;
+#[doc(inline)]
+pub use crate::config::retry::new_noop_backoff;
+
 #[doc(inline)]
 pub use crate::change_pd_region_meta_circuit_breaker_settings;
 #[doc(inline)]

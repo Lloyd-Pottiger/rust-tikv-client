@@ -12,6 +12,22 @@ fn tikv_module_exports_kvstore_and_backoffer() {
 }
 
 #[test]
+fn tikv_module_exports_backoff_helpers() {
+    let _: Option<tikv::BackoffConfig> = None;
+
+    let _ = tikv::new_backoffer(100);
+    let _ = tikv::new_backoffer_with_vars(100, None);
+    let _ = tikv::new_gc_resolve_lock_max_backoffer();
+    let _ = tikv::new_noop_backoff();
+
+    let _ = tikv::bo_region_miss();
+    let _ = tikv::bo_tikv_rpc();
+    let _ = tikv::bo_tiflash_rpc();
+    let _ = tikv::bo_txn_lock();
+    let _ = tikv::bo_pd_rpc();
+}
+
+#[test]
 fn tikv_module_exports_region_ver_id_constructor() {
     let _: fn(u64, u64, u64) -> tikv::RegionVerId = tikv::new_region_ver_id;
 
