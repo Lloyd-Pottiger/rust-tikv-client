@@ -165,15 +165,16 @@ impl Backoff {
     ///
     /// Each retry picks a random delay in `0..=min(max_delay_ms, current_delay)` and then doubles
     /// the next deterministic cap until `max_delay_ms` is reached.
+    ///
+    /// `base_delay_ms` and `max_delay_ms` are clamped to at least `1` millisecond so callers do
+    /// not accidentally construct a policy that panics when sampled.
     pub fn full_jitter_backoff(
         base_delay_ms: u64,
         max_delay_ms: u64,
         max_attempts: u32,
     ) -> Backoff {
-        assert!(
-            base_delay_ms > 0 && max_delay_ms > 0,
-            "Both base_delay_ms and max_delay_ms must be positive"
-        );
+        let base_delay_ms = base_delay_ms.max(1);
+        let max_delay_ms = max_delay_ms.max(1);
 
         Backoff {
             kind: BackoffKind::FullJitter,
@@ -189,15 +190,16 @@ impl Backoff {
     ///
     /// Each retry picks a random delay in the upper half of the current exponential window, which
     /// preserves some minimum slowdown while still spreading concurrent retries.
+    ///
+    /// `base_delay_ms` and `max_delay_ms` are clamped to at least `2` milliseconds so callers do
+    /// not accidentally construct a policy that panics when sampled.
     pub const fn equal_jitter_backoff(
         base_delay_ms: u64,
         max_delay_ms: u64,
         max_attempts: u32,
     ) -> Backoff {
-        assert!(
-            base_delay_ms > 1 && max_delay_ms > 1,
-            "Both base_delay_ms and max_delay_ms must be greater than 1"
-        );
+        let base_delay_ms = if base_delay_ms < 2 { 2 } else { base_delay_ms };
+        let max_delay_ms = if max_delay_ms < 2 { 2 } else { max_delay_ms };
 
         Backoff {
             kind: BackoffKind::EqualJitter,
@@ -213,12 +215,16 @@ impl Backoff {
     ///
     /// Each retry samples from `base_delay_ms..=(previous_delay * 3)` and clamps the result to
     /// `max_delay_ms`, which helps avoid synchronized retry waves while still adapting upward.
+    ///
+    /// `base_delay_ms` and `max_delay_ms` are clamped to at least `1` millisecond so callers do
+    /// not accidentally construct a policy that panics when sampled.
     pub fn decorrelated_jitter_backoff(
         base_delay_ms: u64,
         max_delay_ms: u64,
         max_attempts: u32,
     ) -> Backoff {
-        assert!(base_delay_ms > 0, "base_delay_ms must be positive");
+        let base_delay_ms = base_delay_ms.max(1);
+        let max_delay_ms = max_delay_ms.max(1);
 
         Backoff {
             kind: BackoffKind::DecorrelatedJitter,
@@ -274,6 +280,24 @@ mod tests {
         let backoff = Backoff::no_jitter_backoff(0, 0, 5).scaled_max_attempts(0);
         assert_eq!(backoff.max_attempts, 5);
     }
+
+    #[test]
+    fn jitter_constructors_clamp_invalid_delays() {
+        let full = Backoff::full_jitter_backoff(0, 0, 3);
+        assert_eq!(full.base_delay_ms, 1);
+        assert_eq!(full.current_delay_ms, 1);
+        assert_eq!(full.max_delay_ms, 1);
+
+        let equal = Backoff::equal_jitter_backoff(1, 1, 3);
+        assert_eq!(equal.base_delay_ms, 2);
+        assert_eq!(equal.current_delay_ms, 2);
+        assert_eq!(equal.max_delay_ms, 2);
+
+        let decorr = Backoff::decorrelated_jitter_backoff(0, 0, 3);
+        assert_eq!(decorr.base_delay_ms, 1);
+        assert_eq!(decorr.current_delay_ms, 1);
+        assert_eq!(decorr.max_delay_ms, 1);
+    }
 }
 
 #[cfg(test)]
@@ -314,15 +338,19 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Both base_delay_ms and max_delay_ms must be positive")]
     fn test_full_jitter_backoff_with_invalid_base_delay_ms() {
-        Backoff::full_jitter_backoff(0, 7, 3);
+        let backoff = Backoff::full_jitter_backoff(0, 7, 3);
+        assert_eq!(backoff.base_delay_ms, 1);
+        assert_eq!(backoff.current_delay_ms, 1);
+        assert_eq!(backoff.max_delay_ms, 7);
     }
 
     #[test]
-    #[should_panic(expected = "Both base_delay_ms and max_delay_ms must be positive")]
     fn test_full_jitter_backoff_with_invalid_max_delay_ms() {
-        Backoff::full_jitter_backoff(2, 0, 3);
+        let backoff = Backoff::full_jitter_backoff(2, 0, 3);
+        assert_eq!(backoff.base_delay_ms, 2);
+        assert_eq!(backoff.current_delay_ms, 2);
+        assert_eq!(backoff.max_delay_ms, 1);
     }
 
     #[test]
@@ -345,15 +373,19 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Both base_delay_ms and max_delay_ms must be greater than 1")]
     fn test_equal_jitter_backoff_with_invalid_base_delay_ms() {
-        Backoff::equal_jitter_backoff(1, 7, 3);
+        let backoff = Backoff::equal_jitter_backoff(1, 7, 3);
+        assert_eq!(backoff.base_delay_ms, 2);
+        assert_eq!(backoff.current_delay_ms, 2);
+        assert_eq!(backoff.max_delay_ms, 7);
     }
 
     #[test]
-    #[should_panic(expected = "Both base_delay_ms and max_delay_ms must be greater than 1")]
     fn test_equal_jitter_backoff_with_invalid_max_delay_ms() {
-        Backoff::equal_jitter_backoff(2, 1, 3);
+        let backoff = Backoff::equal_jitter_backoff(2, 1, 3);
+        assert_eq!(backoff.base_delay_ms, 2);
+        assert_eq!(backoff.current_delay_ms, 2);
+        assert_eq!(backoff.max_delay_ms, 2);
     }
 
     #[test]
@@ -378,8 +410,18 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "base_delay_ms must be positive")]
     fn test_decorrelated_jitter_backoff_with_invalid_base_delay_ms() {
-        Backoff::decorrelated_jitter_backoff(0, 7, 3);
+        let backoff = Backoff::decorrelated_jitter_backoff(0, 7, 3);
+        assert_eq!(backoff.base_delay_ms, 1);
+        assert_eq!(backoff.current_delay_ms, 1);
+        assert_eq!(backoff.max_delay_ms, 7);
+    }
+
+    #[test]
+    fn test_decorrelated_jitter_backoff_with_invalid_max_delay_ms() {
+        let backoff = Backoff::decorrelated_jitter_backoff(2, 0, 3);
+        assert_eq!(backoff.base_delay_ms, 2);
+        assert_eq!(backoff.current_delay_ms, 2);
+        assert_eq!(backoff.max_delay_ms, 1);
     }
 }
