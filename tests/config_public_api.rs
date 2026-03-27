@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tikv_client::config;
 
@@ -215,4 +216,26 @@ fn config_module_validate_rejects_custom_dns_server_without_port() {
         tikv_client::Error::StringError(message)
             if message.contains("grpc-custom-dns-server port should be greater than 0")
     ));
+}
+
+#[test]
+fn security_materialization_helpers_are_publicly_usable() {
+    config::Config::default()
+        .security_manager()
+        .expect("default config should materialize an insecure security manager");
+    config::Security::default()
+        .security_manager()
+        .expect("empty standalone security should also materialize");
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+    let missing = std::env::temp_dir().join(format!("tikv-client-missing-security-{nonce}.pem"));
+
+    let err = match tikv_client::SecurityManager::load(&missing, &missing, missing.clone()) {
+        Ok(_) => panic!("loading a security manager from missing PEM files should fail"),
+        Err(err) => err,
+    };
+    assert!(!err.to_string().is_empty());
 }
