@@ -4,11 +4,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use tikv_client::{
-    proto::kvrpcpb, transaction, AssertionLevel, BoundLockResolver, CheckLevel, DeleteRangeTask,
-    Lock, LockResolver, LockWaitTimeout, PdRpcClient, RangeTaskHandler, RangeTaskRunner,
-    RangeTaskStat, ResolveLockDetail, ResolveLocksContext, ResolveLocksForReadResult,
-    ResolveLocksOptions, ResolveLocksResult, SchemaVer, Timestamp, TimestampExt, TransactionClient,
-    TxnStatus,
+    proto::kvrpcpb, transaction, AssertionLevel, BinlogExecutor, BoundLockResolver, CheckLevel,
+    DeleteRangeTask, Error, LifecycleHooks, Lock, LockResolver, LockWaitTimeout, PdRpcClient,
+    RangeTaskHandler, RangeTaskRunner, RangeTaskStat, ResolveLockDetail, ResolveLocksContext,
+    ResolveLocksForReadResult, ResolveLocksOptions, ResolveLocksResult, SchemaVer, SyncTransaction,
+    Timestamp, TimestampExt, TransactionClient, TxnStatus,
 };
 
 async fn run_on_range_entry(
@@ -31,6 +31,14 @@ impl RangeTaskHandler for TestRangeTaskHandler {
 }
 
 fn assert_range_task_handler<T: RangeTaskHandler>() {}
+
+fn set_commit_callback_entry(txn: &mut SyncTransaction) {
+    txn.set_commit_callback(|_stage, _err: Option<&Error>| {});
+}
+
+fn set_commit_ts_upper_bound_check_entry(txn: &mut SyncTransaction) {
+    txn.set_commit_ts_upper_bound_check(|ts| ts > 0);
+}
 
 #[test]
 fn crate_root_exports_transaction_advanced_alias_types_and_methods() {
@@ -89,6 +97,27 @@ fn crate_root_exports_transaction_advanced_alias_types_and_methods() {
     };
     let _: fn(&DeleteRangeTask) -> bool = DeleteRangeTask::notify_only;
     let _: fn(&DeleteRangeTask) -> usize = DeleteRangeTask::completed_regions;
+}
+
+#[test]
+fn crate_root_exports_sync_transaction_commit_control_methods() {
+    let _ = set_commit_callback_entry;
+    let _: fn(&mut SyncTransaction) = SyncTransaction::clear_commit_callback;
+    let _: fn(&mut SyncTransaction, Arc<dyn BinlogExecutor>) = SyncTransaction::set_binlog_executor;
+    let _: fn(&mut SyncTransaction) = SyncTransaction::clear_binlog_executor;
+    let _: fn(&mut SyncTransaction, LifecycleHooks) =
+        SyncTransaction::set_background_task_lifecycle_hooks;
+    let _: fn(&mut SyncTransaction) = SyncTransaction::clear_background_task_lifecycle_hooks;
+    let _: fn(&mut SyncTransaction, u64) = SyncTransaction::set_commit_wait_until_tso;
+    let _: fn(&SyncTransaction) -> u64 = SyncTransaction::commit_wait_until_tso;
+    let _: fn(&mut SyncTransaction, Duration) = SyncTransaction::set_commit_wait_until_tso_timeout;
+    let _: fn(&SyncTransaction) -> Duration = SyncTransaction::commit_wait_until_tso_timeout;
+    let _: fn(&mut SyncTransaction, bool) -> tikv_client::Result<()> =
+        SyncTransaction::set_pessimistic;
+    let _: fn(&mut SyncTransaction) -> tikv_client::Result<u64> =
+        SyncTransaction::get_timestamp_for_commit;
+    let _ = set_commit_ts_upper_bound_check_entry;
+    let _: fn(&mut SyncTransaction) = SyncTransaction::clear_commit_ts_upper_bound_check;
 }
 
 #[test]
