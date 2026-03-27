@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use tikv_client::util::r#async::{Callback, Executor, Pool, RunLoop, Task};
+use tikv_client::util::r#async::{
+    new_callback, new_run_loop, Callback, Executor, Pool, RunLoop, Task,
+};
 
 #[derive(Default)]
 struct RecordingExecutor {
@@ -21,16 +23,19 @@ impl Executor for RecordingExecutor {
 
 #[test]
 fn util_async_public_api_exposes_runloop_and_callback() {
-    let run_loop = RunLoop::new();
+    let _: fn() -> RunLoop = new_run_loop;
+
+    let run_loop = new_run_loop();
     assert_eq!(run_loop.num_runnable(), 0);
 
     let executor = Arc::new(RecordingExecutor::default());
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen_callback = seen.clone();
-    let callback = Callback::new(executor.clone(), move |value: i32, err: Option<()>| {
-        assert!(err.is_none());
-        seen_callback.lock().unwrap().push(value);
-    });
+    let callback: Callback<i32, ()> =
+        new_callback(executor.clone(), move |value: i32, err: Option<()>| {
+            assert!(err.is_none());
+            seen_callback.lock().unwrap().push(value);
+        });
 
     callback.schedule(7, None);
     let task = executor.tasks.lock().unwrap().pop().unwrap();
