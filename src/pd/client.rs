@@ -72,6 +72,8 @@ pub(crate) const BROADCAST_TXN_STATUS_MAX_CONCURRENCY: usize = 10;
 /// So if we use transactional APIs, keys in PD are encoded and PD does not know about the encoding stuff.
 #[async_trait]
 pub trait PdClient: Send + Sync + 'static {
+    /// KV client type produced when the PD client maps a region/store to a concrete TiKV
+    /// connection.
     type KvClient: KvClient + Send + Sync + 'static;
 
     /// Returns whether the client has been explicitly closed.
@@ -116,8 +118,12 @@ pub trait PdClient: Send + Sync + 'static {
         Err(Error::Unimplemented)
     }
 
+    /// Allocates a fresh TSO timestamp from PD.
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp>;
 
+    /// Allocates a fresh TSO timestamp from the specified PD local TSO/DC location.
+    ///
+    /// Implementations that do not support local TSO may fall back to [`PdClient::get_timestamp`].
     async fn get_timestamp_with_dc_location(
         self: Arc<Self>,
         dc_location: String,
@@ -204,6 +210,10 @@ pub trait PdClient: Send + Sync + 'static {
         Err(Error::Unimplemented)
     }
 
+    /// Updates the cluster-wide GC safe point in PD.
+    ///
+    /// On success, returns the effective safe point that PD accepted after applying monotonicity
+    /// checks.
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
     /// Update the PD "service GC safe point" for a given service.
@@ -257,6 +267,7 @@ pub trait PdClient: Send + Sync + 'static {
         Err(Error::Unimplemented)
     }
 
+    /// Loads keyspace metadata for `keyspace` from PD.
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
 
     /// In transactional API, `key` is in raw format
@@ -265,11 +276,16 @@ pub trait PdClient: Send + Sync + 'static {
         self.map_region_to_store(region).await
     }
 
+    /// In transactional API, `id` identifies a decoded region and the returned store is ready for
+    /// requests against that region.
     async fn store_for_id(self: Arc<Self>, id: RegionId) -> Result<RegionStore> {
         let region = self.region_for_id(id).await?;
         self.map_region_to_store(region).await
     }
 
+    /// Returns all stores that should participate in ordinary request routing.
+    ///
+    /// The returned [`Store`] values include ready-to-use KV clients.
     async fn all_stores(&self) -> Result<Vec<Store>>;
 
     /// Returns the list of stores to use for safe-ts maintenance.
@@ -678,6 +694,7 @@ pub trait PdClient: Send + Sync + 'static {
         .boxed()
     }
 
+    /// Decodes a region boundary pair into client-visible keys when codec support is enabled.
     fn decode_region(mut region: RegionWithLeader, enable_codec: bool) -> Result<RegionWithLeader> {
         if enable_codec {
             codec::decode_bytes_in_place(&mut region.region.start_key, false)?;
@@ -686,10 +703,13 @@ pub trait PdClient: Send + Sync + 'static {
         Ok(region)
     }
 
+    /// Updates the cached leader peer for the given region version.
     async fn update_leader(&self, ver_id: RegionVerId, leader: metapb::Peer) -> Result<()>;
 
+    /// Invalidates any cached mapping for `ver_id` so the next lookup reloads it from PD/TiKV.
     async fn invalidate_region_cache(&self, ver_id: RegionVerId);
 
+    /// Invalidates any cached store metadata or KV client pool for `store_id`.
     async fn invalidate_store_cache(&self, store_id: StoreId);
 
     /// Add or refresh a region in the local region cache.
@@ -785,6 +805,10 @@ impl<C> KvClientPool<C> {
     }
 }
 
+/// Default PD-backed implementation used by the public clients in this crate.
+///
+/// It owns the retrying PD connection, region cache, and TiKV KV-client pools needed to turn PD
+/// metadata into executable requests.
 pub struct PdRpcClient<KvC: KvConnect + Send + Sync + 'static = TikvConnect, Cl = Cluster> {
     pd: Arc<RetryClient<Cl>>,
     security_mgr: Arc<SecurityManager>,
@@ -1637,6 +1661,11 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
 }
 
 impl PdRpcClient<TikvConnect, Cluster> {
+    /// Connects to a PD cluster with the default TiKV transport implementation.
+    ///
+    /// `pd_endpoints` seeds the initial PD membership discovery, `config` provides both PD and
+    /// TiKV transport options, and `enable_codec` controls whether region keys are decoded back
+    /// into client-visible keys for transactional mode.
     pub async fn connect(
         pd_endpoints: &[String],
         config: Config,
@@ -1703,6 +1732,11 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
             .clone()
     }
 
+    /// Constructs a PD RPC client from caller-provided PD and TiKV connection factories.
+    ///
+    /// This is the extension point used by tests and alternative transports. The method validates
+    /// `config`, builds the security manager once, then uses it to create both the retrying PD
+    /// client and the KV connector.
     pub async fn new<PdFut, MakeKvC, MakePd>(
         config: Config,
         kv_connect: MakeKvC,
@@ -1794,6 +1828,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
 }
 
 impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC> {
+    /// Allocates a fresh TSO timestamp for a specific PD local TSO/DC location.
     pub async fn get_timestamp_with_dc_location(
         self: Arc<Self>,
         dc_location: impl Into<String>,

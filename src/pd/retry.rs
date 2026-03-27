@@ -34,9 +34,14 @@ const MAX_REQUEST_COUNT: usize = 5;
 const LEADER_CHANGE_RETRY: usize = 10;
 
 #[async_trait]
+/// Low-level PD RPC surface that adds reconnect-and-retry semantics around raw PD requests.
+///
+/// Unlike [`crate::PdClient`], this trait works with PD-native protobuf types and leaves any key
+/// encoding/decoding to the caller.
 pub trait RetryClientTrait {
     // These get_* functions will try multiple times to make a request, reconnecting as necessary.
     // It does not know about encoding. Caller should take care of it.
+    /// Loads the region containing `key` from PD.
     async fn get_region(self: Arc<Self>, key: Vec<u8>) -> Result<RegionWithLeader>;
 
     /// Retrieve region metadata from PD along with its buckets, if available.
@@ -73,6 +78,7 @@ pub trait RetryClientTrait {
         Ok((region, None))
     }
 
+    /// Loads region metadata by region id from PD.
     async fn get_region_by_id(self: Arc<Self>, region_id: RegionId) -> Result<RegionWithLeader>;
 
     /// Retrieve region metadata by id from PD along with its buckets, if available.
@@ -86,6 +92,7 @@ pub trait RetryClientTrait {
         Ok((region, None))
     }
 
+    /// Scans region metadata over the half-open range `[start_key, end_key)`.
     async fn scan_regions(
         self: Arc<Self>,
         start_key: Vec<u8>,
@@ -96,6 +103,7 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    /// Batch-scans region metadata for multiple ranges in one PD request.
     async fn batch_scan_regions(
         self: Arc<Self>,
         ranges: Vec<pdpb::KeyRange>,
@@ -106,12 +114,18 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    /// Loads raw store metadata for a single store id from PD.
     async fn get_store(self: Arc<Self>, id: StoreId) -> Result<metapb::Store>;
 
+    /// Loads raw store metadata for all stores visible to PD.
     async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>>;
 
+    /// Allocates a fresh TSO timestamp from PD.
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp>;
 
+    /// Allocates a fresh TSO timestamp from the specified PD local TSO/DC location.
+    ///
+    /// Implementations that do not support local TSO may fall back to [`Self::get_timestamp`].
     async fn get_timestamp_with_dc_location(
         self: Arc<Self>,
         dc_location: String,
@@ -120,19 +134,23 @@ pub trait RetryClientTrait {
         self.get_timestamp().await
     }
 
+    /// Retrieves the minimum TSO across all PD keyspace groups, when supported.
     async fn get_min_ts(self: Arc<Self>) -> Result<Timestamp> {
         Err(Error::Unimplemented)
     }
 
+    /// Reads the external consistency timestamp maintained by PD, when supported.
     async fn get_external_timestamp(self: Arc<Self>) -> Result<u64> {
         Err(Error::Unimplemented)
     }
 
+    /// Updates PD's external consistency timestamp, when supported.
     async fn set_external_timestamp(self: Arc<Self>, timestamp: u64) -> Result<()> {
         let _ = timestamp;
         Err(Error::Unimplemented)
     }
 
+    /// Requests PD to scatter the specified regions, optionally within a scheduling group.
     async fn scatter_regions(
         self: Arc<Self>,
         region_ids: Vec<u64>,
@@ -142,20 +160,24 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    /// Reads the current PD operator status for `region_id`.
     async fn get_operator(self: Arc<Self>, region_id: u64) -> Result<pdpb::GetOperatorResponse> {
         let _ = region_id;
         Err(Error::Unimplemented)
     }
 
+    /// Returns the cluster-wide GC safe point from PD.
     async fn get_gc_safe_point(self: Arc<Self>) -> Result<u64> {
         Err(Error::Unimplemented)
     }
 
+    /// Returns the GC safe point for a specific keyspace from PD.
     async fn get_gc_safe_point_v2(self: Arc<Self>, keyspace_id: u32) -> Result<u64> {
         let _ = keyspace_id;
         Err(Error::Unimplemented)
     }
 
+    /// Updates PD's service GC safe point for `service_id`.
     async fn update_service_gc_safe_point(
         self: Arc<Self>,
         service_id: String,
@@ -166,6 +188,7 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    /// Updates PD's keyspace-scoped service GC safe point for `service_id`.
     async fn update_service_safe_point_v2(
         self: Arc<Self>,
         keyspace_id: u32,
@@ -177,6 +200,7 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    /// Updates the PD GC safe point for a specific keyspace.
     async fn update_gc_safe_point_v2(
         self: Arc<Self>,
         keyspace_id: u32,
@@ -186,8 +210,12 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    /// Updates the cluster-wide GC safe point in PD.
+    ///
+    /// On success, returns the effective safe point that PD accepted after monotonicity checks.
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64>;
 
+    /// Loads keyspace metadata for `keyspace` from PD.
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
 }
 /// Client for communication with a PD cluster. Has the facility to reconnect to the cluster.
@@ -286,6 +314,10 @@ macro_rules! retry {
 }
 
 impl RetryClient<Cluster> {
+    /// Connects to a PD cluster and prepares the retrying/reconnecting wrapper.
+    ///
+    /// `endpoints` seeds initial PD discovery, `security_mgr` configures TLS, `timeout` is used
+    /// for PD RPCs, and `tso_max_pending_count` tunes TSO request batching/backpressure.
     pub async fn connect(
         endpoints: &[String],
         security_mgr: Arc<SecurityManager>,
