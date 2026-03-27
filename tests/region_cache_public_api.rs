@@ -27,6 +27,50 @@ fn region(id: u64, start_key: Vec<u8>, end_key: Vec<u8>) -> RegionWithLeader {
     }
 }
 
+fn region_with_leader(
+    id: u64,
+    start_key: Vec<u8>,
+    end_key: Vec<u8>,
+    store_id: u64,
+) -> RegionWithLeader {
+    RegionWithLeader {
+        region: metapb::Region {
+            id,
+            start_key,
+            end_key,
+            region_epoch: Some(metapb::RegionEpoch {
+                conf_ver: 1,
+                version: 1,
+            }),
+            peers: vec![metapb::Peer {
+                id: store_id + 100,
+                store_id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        leader: Some(metapb::Peer {
+            id: store_id + 100,
+            store_id,
+            ..Default::default()
+        }),
+    }
+}
+
+fn store_with_labels(id: u64, labels: Vec<metapb::StoreLabel>, tombstone: bool) -> metapb::Store {
+    metapb::Store {
+        id,
+        address: format!("store-{id}"),
+        labels,
+        state: if tombstone {
+            metapb::StoreState::Tombstone as i32
+        } else {
+            metapb::StoreState::Up as i32
+        },
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn region_cache_exports_buckets_query_api() {
     struct DummyClient;
@@ -430,6 +474,104 @@ async fn region_cache_exports_cache_maintenance_read_through_apis() -> Result<()
     let reloaded_after_clear = cache.get_region_by_key(&Key::from(vec![5])).await?;
     assert_eq!(reloaded_after_clear.id(), 9);
     assert_eq!(client.region_loads.load(Ordering::SeqCst), 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn region_cache_exports_preload_and_all_stores_read_through_apis() -> Result<()> {
+    struct DummyClient;
+
+    #[async_trait]
+    impl RetryClientTrait for DummyClient {
+        async fn get_region(self: Arc<Self>, _key: Vec<u8>) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn scan_regions(
+            self: Arc<Self>,
+            start_key: Vec<u8>,
+            _end_key: Vec<u8>,
+            _limit: i32,
+        ) -> Result<Vec<RegionWithLeader>> {
+            if start_key >= vec![10] {
+                return Ok(Vec::new());
+            }
+            Ok(vec![
+                region_with_leader(1, vec![], vec![10], 11),
+                region(2, vec![10], vec![20]),
+            ])
+        }
+
+        async fn get_store(self: Arc<Self>, _id: u64) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_region_by_id(self: Arc<Self>, _region_id: u64) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Ok(vec![
+                store_with_labels(1, Vec::new(), false),
+                store_with_labels(
+                    2,
+                    vec![metapb::StoreLabel {
+                        key: tikv_client::tikvrpc::ENGINE_LABEL_KEY.to_owned(),
+                        value: tikv_client::tikvrpc::ENGINE_LABEL_TIFLASH.to_owned(),
+                    }],
+                    false,
+                ),
+                store_with_labels(
+                    3,
+                    vec![metapb::StoreLabel {
+                        key: tikv_client::tikvrpc::ENGINE_LABEL_KEY.to_owned(),
+                        value: tikv_client::tikvrpc::ENGINE_LABEL_TIFLASH_COMPUTE.to_owned(),
+                    }],
+                    false,
+                ),
+                store_with_labels(4, Vec::new(), true),
+            ])
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    let cache = RegionCache::new_with_ttl(Arc::new(DummyClient), Duration::ZERO, Duration::ZERO);
+
+    let warmed = cache
+        .preload_region_index(Key::from(vec![]), Key::from(vec![25]), 4)
+        .await?;
+    assert_eq!(warmed, 1);
+    assert_eq!(
+        cache
+            .try_locate_key(Key::from(vec![5]))
+            .await
+            .map(|loc| loc.region.id),
+        Some(1)
+    );
+    assert!(cache.try_locate_key(Key::from(vec![15])).await.is_none());
+
+    let all_stores = cache.read_through_all_stores().await?;
+    let all_store_ids = all_stores.iter().map(|store| store.id).collect::<Vec<_>>();
+    assert_eq!(all_store_ids, vec![1]);
+
+    let safe_ts_stores = cache.read_through_all_stores_for_safe_ts().await?;
+    let safe_ts_store_ids = safe_ts_stores
+        .iter()
+        .map(|store| store.id)
+        .collect::<Vec<_>>();
+    assert_eq!(safe_ts_store_ids, vec![1, 2]);
 
     Ok(())
 }
