@@ -956,6 +956,39 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Ok(locations)
     }
 
+    async fn locate_key_range_from_cache_with_opts(
+        &self,
+        mut start_key: Key,
+        end_key: Key,
+        options: BatchLocateKeyRangesOptions,
+    ) -> Option<Vec<KeyLocation>> {
+        if !end_key.is_empty() && start_key >= end_key {
+            return Some(Vec::new());
+        }
+
+        let mut locations = Vec::new();
+        loop {
+            let region = self.try_get_region_by_key_from_cache(&start_key).await?;
+            let location = self.key_location_for_region(region.clone()).await;
+            if options.need_buckets && location.buckets.is_none() {
+                return None;
+            }
+
+            let location_end = location.end_key.clone();
+            let covers_end = location.covers_end_key(&end_key);
+            if !options.need_region_has_leader_peer || region.leader.is_some() {
+                locations.push(location);
+            }
+
+            if covers_end || location_end == start_key {
+                break;
+            }
+            start_key = location_end;
+        }
+
+        Some(locations)
+    }
+
     /// Locate the region containing `key`.
     ///
     /// This low-level API operates on the region cache's key encoding. Higher-level callers that
@@ -1066,6 +1099,77 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     ) -> Result<Vec<KeyLocation>> {
         self.batch_locate_key_ranges_with_opts(ranges, std::iter::empty())
             .await
+    }
+
+    async fn batch_scan_regions_fallback(
+        &self,
+        key_ranges: Vec<crate::kv::KeyRange>,
+        limit: i32,
+        options: BatchLocateKeyRangesOptions,
+    ) -> Result<Vec<(RegionWithLeader, Option<metapb::Buckets>)>> {
+        if limit <= 0 || key_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut remaining_limit = limit;
+        let mut last_end_key: Option<Key> = None;
+        let mut regions = Vec::new();
+
+        for mut key_range in key_ranges {
+            if remaining_limit <= 0 {
+                break;
+            }
+
+            if let Some(end_key) = &last_end_key {
+                if end_key.is_empty() {
+                    break;
+                }
+                if !key_range.end_key.is_empty() && end_key >= &key_range.end_key {
+                    continue;
+                }
+                if end_key > &key_range.start_key {
+                    key_range.start_key = end_key.clone();
+                }
+            }
+
+            let mut retried_leaderless_scan = false;
+            loop {
+                let scanned = self
+                    .pd_region_meta_circuit_breaker
+                    .execute(|| {
+                        let inner = self.inner_client.clone();
+                        let start_key: Vec<u8> = key_range.start_key.clone().into();
+                        let end_key: Vec<u8> = key_range.end_key.clone().into();
+                        async move {
+                            inner
+                                .scan_regions(start_key, end_key, remaining_limit)
+                                .await
+                        }
+                    })
+                    .await?;
+
+                if scanned.is_empty() {
+                    break;
+                }
+
+                let all_regions_missing_leader = options.need_region_has_leader_peer
+                    && scanned.iter().all(|region| region.leader.is_none());
+                if all_regions_missing_leader {
+                    stats::inc_stale_region_from_pd_counter();
+                    if !retried_leaderless_scan {
+                        retried_leaderless_scan = true;
+                        continue;
+                    }
+                }
+
+                remaining_limit -= scanned.len() as i32;
+                last_end_key = scanned.last().map(RegionWithLeader::end_key);
+                regions.extend(scanned.into_iter().map(|region| (region, None)));
+                break;
+            }
+        }
+
+        Ok(regions)
     }
 
     /// Locate multiple key ranges and merge adjacent duplicates from the same region, with extra
@@ -1183,69 +1287,20 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                     })
                     .await;
 
-                match result {
+                let regions = match result {
                     Ok(regions) => {
                         retried_error_batch = false;
-                        if regions.is_empty() {
-                            stats::inc_stale_region_from_pd_counter();
-                            if !retried_empty_batch {
-                                retried_empty_batch = true;
-                                continue;
-                            }
-                            break;
-                        }
-                        retried_empty_batch = false;
-
-                        if regions_have_gap_in_ranges(
-                            &remaining_ranges,
-                            &regions,
-                            DEFAULT_REGIONS_PER_BATCH as isize,
-                        ) {
-                            stats::inc_stale_region_from_pd_counter();
-                            if !retried_gap_batch {
-                                retried_gap_batch = true;
-                                continue;
-                            }
-                            break;
-                        }
-                        retried_gap_batch = false;
-
-                        let some_regions_missing_leader = options.need_region_has_leader_peer
-                            && regions.iter().any(|(region, _)| region.leader.is_none());
-                        if some_regions_missing_leader {
-                            stats::inc_stale_region_from_pd_counter();
-                            if !retried_leaderless_batch {
-                                retried_leaderless_batch = true;
-                                continue;
-                            }
-                            break;
-                        }
-                        retried_leaderless_batch = false;
-
-                        let split_key = regions
-                            .last()
-                            .map(|(region, _)| region.end_key())
-                            .unwrap_or_default();
-
-                        for (region, buckets) in regions {
-                            self.add_region_with_buckets(region, buckets).await;
-                        }
-
-                        // `end_key == ""` means the last region extends to +inf.
-                        if split_key.is_empty() {
-                            break;
-                        }
-                        // Defensive guard against non-progressing PD responses.
-                        if split_key <= remaining_ranges[0].start_key {
-                            break;
-                        }
-
-                        remaining_ranges = ranges_after_key(remaining_ranges, &split_key);
-                        if remaining_ranges.is_empty() {
-                            break;
-                        }
+                        regions
                     }
-                    Err(Error::Unimplemented) => break,
+                    Err(Error::Unimplemented) => {
+                        retried_error_batch = false;
+                        self.batch_scan_regions_fallback(
+                            remaining_ranges.clone(),
+                            DEFAULT_REGIONS_PER_BATCH,
+                            options,
+                        )
+                        .await?
+                    }
                     Err(_) => {
                         // Mirror the stale-response retries above: give the same PD batch one more
                         // chance before abandoning preheat and falling back to per-range locate.
@@ -1255,6 +1310,64 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                         }
                         break;
                     }
+                };
+
+                if regions.is_empty() {
+                    stats::inc_stale_region_from_pd_counter();
+                    if !retried_empty_batch {
+                        retried_empty_batch = true;
+                        continue;
+                    }
+                    break;
+                }
+                retried_empty_batch = false;
+
+                if regions_have_gap_in_ranges(
+                    &remaining_ranges,
+                    &regions,
+                    DEFAULT_REGIONS_PER_BATCH as isize,
+                ) {
+                    stats::inc_stale_region_from_pd_counter();
+                    if !retried_gap_batch {
+                        retried_gap_batch = true;
+                        continue;
+                    }
+                    break;
+                }
+                retried_gap_batch = false;
+
+                let all_regions_missing_leader = options.need_region_has_leader_peer
+                    && regions.iter().all(|(region, _)| region.leader.is_none());
+                if all_regions_missing_leader {
+                    stats::inc_stale_region_from_pd_counter();
+                    if !retried_leaderless_batch {
+                        retried_leaderless_batch = true;
+                        continue;
+                    }
+                }
+                retried_leaderless_batch = false;
+
+                let split_key = regions
+                    .last()
+                    .map(|(region, _)| region.end_key())
+                    .unwrap_or_default();
+
+                for (region, buckets) in regions {
+                    self.add_region_with_buckets(region, buckets).await;
+                }
+
+                // `end_key == ""` means the last region extends to +inf.
+                if split_key.is_empty() {
+                    break;
+                }
+                // Defensive guard against non-progressing PD responses.
+                if split_key <= remaining_ranges[0].start_key {
+                    break;
+                }
+
+                remaining_ranges = ranges_after_key(remaining_ranges, &split_key);
+                if remaining_ranges.is_empty() {
+                    break;
                 }
             }
         }
@@ -1285,6 +1398,19 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             }
 
             if start_key.is_empty() || (!end_key.is_empty() && start_key >= end_key) {
+                continue;
+            }
+
+            if let Some(cached_locations) = self
+                .locate_key_range_from_cache_with_opts(start_key.clone(), end_key.clone(), options)
+                .await
+            {
+                for location in cached_locations {
+                    if locations.last() == Some(&location) {
+                        continue;
+                    }
+                    locations.push(location);
+                }
                 continue;
             }
 
@@ -2954,40 +3080,81 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_region_cache_batch_locate_key_ranges_with_opts_retries_pd_batch_scan_when_some_regions_have_no_leader(
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_keeps_valid_regions_when_some_regions_have_no_leader(
     ) -> Result<()> {
         let retry_client = Arc::new(MockRetryClient::default());
         let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
 
         let region1 = region_with_leader(1, vec![], vec![10], 42);
         let leaderless_region2 = region(2, vec![10], vec![20]);
-        let leaderful_region2 = region_with_leader(2, vec![10], vec![20], 42);
+        let region3 = region_with_leader(3, vec![20], vec![30], 42);
         retry_client.regions.lock().await.insert(1, region1.clone());
         retry_client
             .regions
             .lock()
             .await
-            .insert(2, leaderful_region2.clone());
+            .insert(2, leaderless_region2.clone());
+        retry_client.regions.lock().await.insert(3, region3.clone());
         retry_client
             .batch_scan_regions_results
             .lock()
             .await
-            .extend([
-                vec![(region1.clone(), None), (leaderless_region2, None)],
-                vec![(region1, None), (leaderful_region2, None)],
+            .push_back(vec![
+                (region1, None),
+                (leaderless_region2, None),
+                (region3, None),
             ]);
 
         let locations = cache
             .batch_locate_key_ranges_with_opts(
-                vec![crate::kv::KeyRange::new(vec![1], vec![18])],
+                vec![crate::kv::KeyRange::new(vec![1], vec![28])],
                 [with_need_region_has_leader_peer()],
             )
             .await?;
 
         assert_eq!(locations.len(), 2);
         assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[1].region.id, 3);
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 1);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_falls_back_to_scan_regions_when_pd_batch_scan_is_unimplemented(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(1, region_with_leader(1, vec![], vec![10], 42));
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(2, region_with_leader(2, vec![10], vec![], 42));
+        retry_client
+            .batch_scan_regions_failures
+            .lock()
+            .await
+            .push_back(Error::Unimplemented);
+
+        let locations = cache
+            .batch_locate_key_ranges_with_opts(
+                vec![crate::kv::KeyRange::new(vec![1], vec![25])],
+                std::iter::empty(),
+            )
+            .await?;
+
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].region.id, 1);
         assert_eq!(locations[1].region.id, 2);
-        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 2);
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 1);
+        assert_eq!(retry_client.scan_regions_count.load(SeqCst), 1);
         assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
 
         Ok(())
