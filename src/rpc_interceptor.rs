@@ -16,7 +16,9 @@ pub(crate) type RpcInterceptors = Arc<Vec<Arc<dyn RpcInterceptor>>>;
 /// The outcome of an intercepted RPC call.
 #[derive(Clone, Copy, Debug)]
 pub enum RpcCallResult<'a> {
+    /// The RPC completed without returning a client error.
     Ok,
+    /// The RPC finished with the provided client error.
     Err(&'a Error),
 }
 

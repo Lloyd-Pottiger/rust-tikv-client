@@ -5,18 +5,22 @@
 //! Some items in this module intentionally mirror client-go `util` APIs.
 
 pub mod r#async;
+/// Byte-formatting helpers used by debugging and logging code.
 pub mod bytes;
 pub mod codec;
 mod exec_details;
 mod failpoint;
+/// GC time parsing helpers that mirror TiKV's GC worker timestamp format.
 pub mod gc_time;
 pub mod israce;
 #[doc(hidden)]
 pub mod iter;
 mod misc;
 mod option;
+/// Async concurrency limiting helpers.
 pub mod rate_limit;
 pub mod redact;
+/// Timestamp-set helpers used by transaction bookkeeping.
 pub mod ts_set;
 
 pub use crate::request_context::build_request_source;

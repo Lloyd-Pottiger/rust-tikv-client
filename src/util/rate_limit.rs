@@ -60,6 +60,7 @@ pub fn new_rate_limit(capacity: usize) -> RateLimit {
 /// Errors returned by [`RateLimit`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RateLimitError {
+    /// The underlying semaphore has been closed and can no longer issue permits.
     #[error("rate limit is closed")]
     Closed,
 }

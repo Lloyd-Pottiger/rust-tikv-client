@@ -48,6 +48,7 @@ use crate::store::{HasKeyErrors, Store};
 use crate::transaction::HasLocks;
 
 mod keyspace;
+/// Public request-plan building blocks and plan wrappers.
 pub mod plan;
 mod plan_builder;
 mod shard;

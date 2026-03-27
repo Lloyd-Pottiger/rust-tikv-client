@@ -101,6 +101,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 pub mod async_util;
+/// Exponential-backoff helpers and default retry profiles used across the client.
 pub mod backoff;
 #[doc(hidden)]
 pub mod coprocessor;

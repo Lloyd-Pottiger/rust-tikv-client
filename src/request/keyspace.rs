@@ -12,11 +12,15 @@ pub const RAW_KEY_PREFIX: u8 = b'r';
 pub const TXN_KEY_PREFIX: u8 = b'x';
 pub const KEYSPACE_PREFIX_LEN: usize = 4;
 
+/// Keyspace mode applied when encoding or decoding TiKV keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Keyspace {
+    /// Use API V1 semantics and leave keys unchanged.
     Disable,
+    /// Use API V2 semantics and prefix keys with the configured logical keyspace.
     Enable {
+        /// Logical keyspace identifier encoded into API V2 keys.
         keyspace_id: u32,
     },
     /// Use API V2 without adding or removing the API V2 keyspace/key-mode prefix.
@@ -27,13 +31,17 @@ pub enum Keyspace {
     ApiV2NoPrefix,
 }
 
+/// Which TiKV key family should be encoded inside an API V2 keyspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeyMode {
+    /// Raw KV keys (`r` prefix in API V2).
     Raw,
+    /// Transactional MVCC keys (`x` prefix in API V2).
     Txn,
 }
 
 impl Keyspace {
+    /// Returns the TiKV API version implied by this keyspace mode.
     pub fn api_version(&self) -> kvrpcpb::ApiVersion {
         match self {
             Keyspace::Disable => kvrpcpb::ApiVersion::V1,
@@ -53,11 +61,15 @@ impl Keyspace {
     }
 }
 
+/// Encodes keys, ranges, or request payloads with the requested keyspace prefix.
 pub trait EncodeKeyspace {
+    /// Returns `self` after applying the requested keyspace and key-family encoding.
     fn encode_keyspace(self, keyspace: Keyspace, key_mode: KeyMode) -> Self;
 }
 
+/// Removes the API V2 keyspace prefix from values returned by TiKV when needed.
 pub trait TruncateKeyspace {
+    /// Returns `self` with any enabled keyspace prefix removed from contained keys.
     fn truncate_keyspace(self, keyspace: Keyspace) -> Self;
 }
 

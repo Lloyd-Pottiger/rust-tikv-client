@@ -294,7 +294,9 @@ pub trait Plan: Sized + Clone + Sync + Send + 'static {
 /// The simplest plan which just dispatches a request to a specific kv server.
 #[derive(Clone)]
 pub struct Dispatch<Req: KvRequest> {
+    /// The concrete TiKV request to send.
     pub request: Req,
+    /// Preconnected KV client for the target store, filled in by higher-level plan builders.
     pub kv_client: Option<Arc<dyn KvClient + Send + Sync>>,
     pub(crate) resource_control_request_metadata: Option<ResourceControlRequestMetadata>,
 }
@@ -565,10 +567,14 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
 /// interceptors (client-go `KVTxn.SetRPCInterceptor` / `KVSnapshot.SetRPCInterceptor` parity).
 #[derive(Clone)]
 pub struct DispatchWithInterceptor<Req: KvRequest> {
+    /// The concrete TiKV request to send.
     pub request: Req,
+    /// Preconnected KV client for the target store, filled in by higher-level plan builders.
     pub kv_client: Option<Arc<dyn KvClient + Send + Sync>>,
+    /// Best-effort address string for the target store, passed to interceptors for observability.
     pub store_address: Option<String>,
     pub(crate) resource_control_request_metadata: Option<ResourceControlRequestMetadata>,
+    /// Interceptors to run around the dispatch in onion order.
     pub rpc_interceptors: RpcInterceptors,
 }
 
@@ -2255,9 +2261,12 @@ impl ReplicaReadState {
     }
 }
 
+/// Retries a sharded request across all affected regions until each shard finishes or backoff is exhausted.
 pub struct RetryableMultiRegion<P: Plan, PdC: PdClient> {
     pub(super) inner: P,
+    /// PD client used to refresh region metadata after region-level retryable errors.
     pub pd_client: Arc<PdC>,
+    /// Backoff policy used between region-refresh and retry attempts.
     pub backoff: Backoff,
     pub(super) killed: Option<Arc<AtomicU32>>,
 
@@ -3391,9 +3400,12 @@ where
     }
 }
 
+/// Retries a store-scoped plan once per store returned by PD.
 pub struct RetryableAllStores<P: Plan, PdC: PdClient> {
     pub(super) inner: P,
+    /// PD client used to enumerate stores before each retry round.
     pub pd_client: Arc<PdC>,
+    /// Backoff policy used between retry rounds.
     pub backoff: Backoff,
 }
 
@@ -3499,9 +3511,12 @@ where
     }
 }
 
+/// Retries a store-scoped plan against an explicit set of stores.
 pub struct RetryableStores<P: Plan> {
     pub(super) inner: P,
+    /// Stores to iterate over for this retry plan.
     pub stores: Arc<Vec<Store>>,
+    /// Backoff policy used between retry rounds.
     pub backoff: Backoff,
 }
 
@@ -3604,15 +3619,21 @@ where
 
 /// A technique for merging responses into a single result (with type `Out`).
 pub trait Merge<In>: Sized + Clone + Send + Sync + 'static {
+    /// The merged output type produced after all shard responses are combined.
     type Out: Send;
 
+    /// Combines per-shard results into one higher-level value.
     fn merge(&self, input: Vec<Result<In>>) -> Result<Self::Out>;
 }
 
+/// Plan adapter that merges a `Vec<Result<_>>` response into a single result.
 #[derive(Clone)]
 pub struct MergeResponse<P: Plan, In, M: Merge<In>> {
+    /// Inner plan that produces one result per shard.
     pub inner: P,
+    /// Merge strategy applied to the inner results.
     pub merge: M,
+    /// Marker tying the adapter to the shard result type.
     pub phantom: PhantomData<In>,
 }
 
@@ -3679,14 +3700,19 @@ impl<T: Send> Merge<T> for CollectError {
 
 /// Process data into another kind of data.
 pub trait Process<In>: Sized + Clone + Send + Sync + 'static {
+    /// The transformed output type.
     type Out: Send;
 
+    /// Converts one plan result into another representation.
     fn process(&self, input: Result<In>) -> Result<Self::Out>;
 }
 
+/// Plan adapter that post-processes the inner plan result.
 #[derive(Clone)]
 pub struct ProcessResponse<P: Plan, Pr: Process<P::Result>> {
+    /// Inner plan to execute first.
     pub inner: P,
+    /// Processor applied to the inner result.
     pub processor: Pr,
 }
 
@@ -3704,14 +3730,22 @@ impl<P: Plan, Pr: Process<P::Result>> Plan for ProcessResponse<P, Pr> {
 }
 
 #[derive(Clone, Copy, Debug)]
+/// Identity processor that returns the inner plan result unchanged.
 pub struct DefaultProcessor;
 
+/// Plan adapter that resolves lock errors and retries the inner plan.
 pub struct ResolveLock<P: Plan, PdC: PdClient> {
+    /// Inner plan that may surface lock errors.
     pub inner: P,
+    /// Read or start timestamp used when resolving encountered locks.
     pub timestamp: Timestamp,
+    /// PD client used by the lock resolver.
     pub pd_client: Arc<PdC>,
+    /// Backoff policy used while retrying lock resolution.
     pub backoff: Backoff,
+    /// Keyspace mode used when encoding follow-up lock resolution requests.
     pub keyspace: Keyspace,
+    /// Whether pessimistic transactions should retry certain region errors during lock resolution.
     pub pessimistic_region_resolve: bool,
 }
 
@@ -4132,9 +4166,13 @@ where
 }
 
 #[derive(Debug, Default)]
+/// Aggregated result returned by [`CleanupLocks`].
 pub struct CleanupLocksResult {
+    /// Region error extracted from the cleanup response, if any.
     pub region_error: Option<errorpb::Error>,
+    /// Key errors extracted from the cleanup response, if any.
     pub key_error: Option<Vec<Error>>,
+    /// Number of locks successfully resolved by the cleanup pass.
     pub resolved_locks: usize,
 }
 
@@ -4174,12 +4212,19 @@ impl Merge<CleanupLocksResult> for Collect {
     }
 }
 
+/// Plan adapter that runs the lock-cleanup path for `NextBatch`-capable requests.
 pub struct CleanupLocks<P: Plan, PdC: PdClient> {
+    /// Inner plan to retry after resolving locks.
     pub inner: P,
+    /// Shared resolve-lock context carried across retries.
     pub ctx: ResolveLocksContext,
+    /// Lock-resolution tuning knobs used for the cleanup run.
     pub options: ResolveLocksOptions,
+    /// Store selected for the cleanup RPC; must be filled before execution.
     pub store: Option<RegionStore>,
+    /// PD client used by the lock resolver.
     pub pd_client: Arc<PdC>,
+    /// Keyspace mode used when encoding cleanup requests.
     pub keyspace: Keyspace,
 }
 
@@ -4318,6 +4363,7 @@ where
 /// The errors come from two places: `Err` from inner plans, and `Ok(response)`
 /// where `response` contains unresolved errors (`error` and `region_error`).
 pub struct ExtractError<P: Plan> {
+    /// Inner plan whose embedded key/region errors should be promoted into `Err`.
     pub inner: P,
 }
 
@@ -4359,7 +4405,9 @@ where
 /// It's useful when the information of shard are lost in the response but needed
 /// for processing.
 pub struct PreserveShard<P: Plan + Shardable> {
+    /// Inner plan to execute.
     pub inner: P,
+    /// Cloned shard metadata to pair back with the response.
     pub shard: Option<P::Shard>,
 }
 
@@ -4396,7 +4444,7 @@ where
     }
 }
 
-// contains a response and the corresponding shards
+/// Response paired with the shard metadata it came from.
 #[derive(Debug, Clone)]
 pub struct ResponseWithShard<Resp, Shard>(pub Resp, pub Shard);
 

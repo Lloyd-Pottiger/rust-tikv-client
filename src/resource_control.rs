@@ -51,6 +51,7 @@ pub fn unset_resource_control_interceptor() {
 }
 
 #[derive(Clone, Debug, Default)]
+/// Timing metadata returned by a resource-control interceptor before dispatch.
 pub struct ResourceControlRequestWaitResult {
     /// Resource-unit consumption reported by the interceptor before the request is sent.
     pub consumption: Option<crate::ProtoResourceConsumption>,
@@ -63,6 +64,7 @@ pub struct ResourceControlRequestWaitResult {
 }
 
 #[derive(Clone, Debug, Default)]
+/// Timing metadata returned by a resource-control interceptor after a response arrives.
 pub struct ResourceControlResponseWaitResult {
     /// Resource-unit consumption reported by the interceptor after the response is received.
     pub consumption: Option<crate::ProtoResourceConsumption>,

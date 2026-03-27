@@ -41,7 +41,9 @@ pub enum CommandPriority {
     /// Normal is the default value.
     #[default]
     Normal = 0,
+    /// Lower-priority work that can yield to normal traffic.
     Low = 1,
+    /// Higher-priority work that should preempt normal traffic.
     High = 2,
 }
 
