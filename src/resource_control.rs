@@ -73,6 +73,7 @@ pub struct ResourceControlRequestInfo {
     cmd_type: crate::CmdType,
     request_size: u64,
     store_id: u64,
+    write_bytes: u64,
 }
 
 impl ResourceControlRequestInfo {
@@ -83,7 +84,14 @@ impl ResourceControlRequestInfo {
             cmd_type: crate::CmdType::from_label(label),
             request_size,
             store_id,
+            write_bytes: 0,
         }
+    }
+
+    #[must_use]
+    pub(crate) const fn with_write_bytes(mut self, write_bytes: u64) -> Self {
+        self.write_bytes = write_bytes;
+        self
     }
 
     /// A stable request label (for example, `"kv_get"` or `"kv_commit"`).
@@ -109,24 +117,66 @@ impl ResourceControlRequestInfo {
     pub const fn store_id(self) -> u64 {
         self.store_id
     }
+
+    /// The actual bytes written by this request when it is a transactional write request.
+    ///
+    /// Returns `0` for read requests or when the client cannot determine the write payload size.
+    #[must_use]
+    pub const fn write_bytes(self) -> u64 {
+        self.write_bytes
+    }
 }
 
 /// A lightweight view of a TiKV RPC response for resource control.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ResourceControlResponseInfo {
     response_size: u64,
+    read_bytes: u64,
+    kv_cpu: Duration,
 }
 
 impl ResourceControlResponseInfo {
     #[must_use]
     pub const fn new(response_size: u64) -> Self {
-        Self { response_size }
+        Self {
+            response_size,
+            read_bytes: 0,
+            kv_cpu: Duration::ZERO,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn with_read_bytes(mut self, read_bytes: u64) -> Self {
+        self.read_bytes = read_bytes;
+        self
+    }
+
+    #[must_use]
+    pub(crate) const fn with_kv_cpu(mut self, kv_cpu: Duration) -> Self {
+        self.kv_cpu = kv_cpu;
+        self
     }
 
     /// The size of the response message (in bytes), as received over gRPC.
     #[must_use]
     pub const fn response_size(self) -> u64 {
         self.response_size
+    }
+
+    /// The bytes read on the TiKV side when execution details expose scan statistics.
+    ///
+    /// Returns `0` when TiKV does not report scan details for this response type.
+    #[must_use]
+    pub const fn read_bytes(self) -> u64 {
+        self.read_bytes
+    }
+
+    /// The TiKV-side processing CPU/wall time reported by execution details.
+    ///
+    /// Returns `Duration::ZERO` when TiKV does not report execution timing for this response.
+    #[must_use]
+    pub const fn kv_cpu(self) -> Duration {
+        self.kv_cpu
     }
 }
 

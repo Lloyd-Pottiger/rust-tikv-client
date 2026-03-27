@@ -61,6 +61,23 @@ fn tikv_module_exports_global_helpers() {
 }
 
 #[test]
+fn tikv_module_exports_resource_control_info_accessors() {
+    let _: fn(tikv_client::ResourceControlRequestInfo) -> u64 =
+        tikv_client::ResourceControlRequestInfo::write_bytes;
+    let _: fn(tikv_client::ResourceControlResponseInfo) -> u64 =
+        tikv_client::ResourceControlResponseInfo::read_bytes;
+    let _: fn(tikv_client::ResourceControlResponseInfo) -> Duration =
+        tikv_client::ResourceControlResponseInfo::kv_cpu;
+
+    let request = tikv_client::ResourceControlRequestInfo::new("kv_commit", 123, 7);
+    assert_eq!(request.write_bytes(), 0);
+
+    let response = tikv_client::ResourceControlResponseInfo::new(456);
+    assert_eq!(response.read_bytes(), 0);
+    assert_eq!(response.kv_cpu(), Duration::ZERO);
+}
+
+#[test]
 fn tikv_module_exports_codec_prefix_helpers() {
     let _: u8 = tikv::CODEC_V2_RAW_KEYSPACE_PREFIX;
     let _: u8 = tikv::CODEC_V2_TXN_KEYSPACE_PREFIX;

@@ -396,13 +396,7 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
 
         let request_info = {
             let request_ref = request.as_ref().unwrap_or(&self.request);
-            let request_size = u64::try_from(request_ref.encoded_len()).unwrap_or(u64::MAX);
-            let store_id = request_ref
-                .context()
-                .and_then(|ctx| ctx.peer.as_ref())
-                .map(|peer| peer.store_id)
-                .unwrap_or(0);
-            crate::resource_control::ResourceControlRequestInfo::new(label, request_size, store_id)
+            make_resource_control_request_info(label, request_ref)
         };
 
         if let (Some(resource_control), Some(request)) =
@@ -448,10 +442,7 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
 
         if let Some(resource_control) = resource_control.as_ref() {
             if let Ok(resp) = result.as_ref() {
-                let response_size =
-                    u64::try_from(response_encoded_len(resp as &dyn Any)).unwrap_or(u64::MAX);
-                let response_info =
-                    crate::resource_control::ResourceControlResponseInfo::new(response_size);
+                let response_info = make_resource_control_response_info(resp as &dyn Any);
                 let wait_result = match resource_control
                     .on_response_wait(&request_info, &response_info)
                     .await
@@ -673,17 +664,7 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
 
             let request_info = {
                 let request_ref = request.as_ref().unwrap_or(&self.request);
-                let request_size = u64::try_from(request_ref.encoded_len()).unwrap_or(u64::MAX);
-                let store_id = request_ref
-                    .context()
-                    .and_then(|ctx| ctx.peer.as_ref())
-                    .map(|peer| peer.store_id)
-                    .unwrap_or(0);
-                crate::resource_control::ResourceControlRequestInfo::new(
-                    label,
-                    request_size,
-                    store_id,
-                )
+                make_resource_control_request_info(label, request_ref)
             };
 
             if let (Some(resource_control), Some(request)) =
@@ -728,10 +709,7 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
 
             if let Some(resource_control) = resource_control.as_ref() {
                 if let Ok(resp) = result.as_ref() {
-                    let response_size =
-                        u64::try_from(response_encoded_len(resp as &dyn Any)).unwrap_or(u64::MAX);
-                    let response_info =
-                        crate::resource_control::ResourceControlResponseInfo::new(response_size);
+                    let response_info = make_resource_control_response_info(resp as &dyn Any);
                     let wait_result = match resource_control
                         .on_response_wait(&request_info, &response_info)
                         .await
@@ -916,15 +894,7 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         {
             resource_control = None;
         }
-        let request_info = crate::resource_control::ResourceControlRequestInfo::new(
-            label,
-            u64::try_from(request.encoded_len()).unwrap_or(u64::MAX),
-            request
-                .context()
-                .and_then(|ctx| ctx.peer.as_ref())
-                .map(|peer| peer.store_id)
-                .unwrap_or(0),
-        );
+        let request_info = make_resource_control_request_info(label, &request);
         if let Some(resource_control) = resource_control.as_ref() {
             let wait_result = match resource_control.on_request_wait(&request_info).await {
                 Ok(result) => result,
@@ -964,10 +934,7 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
 
         if let Some(resource_control) = resource_control.as_ref() {
             if let Ok(resp) = result.as_ref() {
-                let response_size =
-                    u64::try_from(response_encoded_len(resp as &dyn Any)).unwrap_or(u64::MAX);
-                let response_info =
-                    crate::resource_control::ResourceControlResponseInfo::new(response_size);
+                let response_info = make_resource_control_response_info(resp as &dyn Any);
                 let wait_result = match resource_control
                     .on_response_wait(&request_info, &response_info)
                     .await
@@ -1238,6 +1205,67 @@ fn exec_details_v2_from_response(resp: &dyn Any) -> Option<&kvrpcpb::ExecDetails
         return resp.exec_details_v2.as_ref();
     }
     None
+}
+
+fn make_resource_control_request_info(
+    label: &'static str,
+    request: &dyn crate::store::Request,
+) -> crate::resource_control::ResourceControlRequestInfo {
+    let request_size = u64::try_from(request.encoded_len()).unwrap_or(u64::MAX);
+    let store_id = request
+        .context()
+        .and_then(|ctx| ctx.peer.as_ref())
+        .map(|peer| peer.store_id)
+        .unwrap_or(0);
+    crate::resource_control::ResourceControlRequestInfo::new(label, request_size, store_id)
+        .with_write_bytes(transaction_write_bytes(request.as_any()))
+}
+
+fn transaction_write_bytes(request: &dyn Any) -> u64 {
+    fn len_as_u64(bytes: &[u8]) -> u64 {
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+    }
+
+    if let Some(request) = request.downcast_ref::<kvrpcpb::PrewriteRequest>() {
+        let mut write_bytes = 0_u64;
+        for mutation in &request.mutations {
+            write_bytes = write_bytes
+                .saturating_add(len_as_u64(&mutation.key))
+                .saturating_add(len_as_u64(&mutation.value));
+        }
+        write_bytes = write_bytes.saturating_add(len_as_u64(&request.primary_lock));
+        for secondary in &request.secondaries {
+            write_bytes = write_bytes.saturating_add(len_as_u64(secondary));
+        }
+        return write_bytes;
+    }
+
+    if let Some(request) = request.downcast_ref::<kvrpcpb::CommitRequest>() {
+        let mut write_bytes = 0_u64;
+        for key in &request.keys {
+            write_bytes = write_bytes.saturating_add(len_as_u64(key));
+        }
+        return write_bytes;
+    }
+
+    0
+}
+
+fn make_resource_control_response_info(
+    resp: &dyn Any,
+) -> crate::resource_control::ResourceControlResponseInfo {
+    let response_size = u64::try_from(response_encoded_len(resp)).unwrap_or(u64::MAX);
+    let mut info = crate::resource_control::ResourceControlResponseInfo::new(response_size);
+    if let Some(details) = exec_details_v2_from_response(resp) {
+        let details = crate::util::TiKVExecDetails::from_proto(Some(details));
+        info = info
+            .with_read_bytes(details.scan_detail.processed_keys_size)
+            .with_kv_cpu(details.time_detail.process_time);
+    }
+    if info.read_bytes() == 0 && resp.downcast_ref::<kvrpcpb::ScanResponse>().is_some() {
+        info = info.with_read_bytes(response_size);
+    }
+    info
 }
 
 fn response_encoded_len(resp: &dyn Any) -> i64 {
@@ -8496,6 +8524,16 @@ mod test {
         calls: Arc<Mutex<Vec<&'static str>>>,
     }
 
+    #[derive(Clone)]
+    struct MetadataAssertingResourceControlInterceptor {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        expected_label: &'static str,
+        expected_cmd_type: crate::CmdType,
+        expected_write_bytes: u64,
+        expected_read_bytes: u64,
+        expected_kv_cpu: Duration,
+    }
+
     #[async_trait::async_trait]
     impl crate::ResourceGroupKvInterceptor for TestResourceControlInterceptor {
         async fn on_request_wait(
@@ -8545,6 +8583,43 @@ mod test {
                 }),
                 wait_duration: Duration::from_millis(6),
             })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ResourceGroupKvInterceptor for MetadataAssertingResourceControlInterceptor {
+        async fn on_request_wait(
+            &self,
+            resource_group_name: &str,
+            request: &crate::resource_control::ResourceControlRequestInfo,
+        ) -> crate::Result<crate::ResourceControlRequestWaitResult> {
+            if resource_group_name != "rg-rc-test" {
+                return Ok(crate::ResourceControlRequestWaitResult::default());
+            }
+
+            self.calls.lock().unwrap().push("request_wait");
+            assert_eq!(request.label(), self.expected_label);
+            assert_eq!(request.cmd_type(), self.expected_cmd_type);
+            assert_eq!(request.write_bytes(), self.expected_write_bytes);
+            Ok(crate::ResourceControlRequestWaitResult::default())
+        }
+
+        async fn on_response_wait(
+            &self,
+            resource_group_name: &str,
+            request: &crate::resource_control::ResourceControlRequestInfo,
+            response: &crate::resource_control::ResourceControlResponseInfo,
+        ) -> crate::Result<crate::ResourceControlResponseWaitResult> {
+            if resource_group_name != "rg-rc-test" {
+                return Ok(crate::ResourceControlResponseWaitResult::default());
+            }
+
+            self.calls.lock().unwrap().push("response_wait");
+            assert_eq!(request.label(), self.expected_label);
+            assert_eq!(request.cmd_type(), self.expected_cmd_type);
+            assert_eq!(response.read_bytes(), self.expected_read_bytes);
+            assert_eq!(response.kv_cpu(), self.expected_kv_cpu);
+            Ok(crate::ResourceControlResponseWaitResult::default())
         }
     }
 
@@ -8800,6 +8875,130 @@ mod test {
             kv_client: Some(Arc::new(kv_client)),
             store_address: Some("mock://tikv".to_owned()),
             rpc_interceptors,
+        };
+
+        plan.execute().await.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["request_wait", "response_wait"]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_dispatch_exposes_resource_control_write_bytes_for_prewrite_requests() {
+        let _reset = ResourceControlReset;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        crate::set_resource_control_interceptor(Arc::new(
+            MetadataAssertingResourceControlInterceptor {
+                calls: Arc::clone(&calls),
+                expected_label: "kv_prewrite",
+                expected_cmd_type: crate::CmdType::Prewrite,
+                expected_write_bytes: 16,
+                expected_read_bytes: 0,
+                expected_kv_cpu: Duration::ZERO,
+            },
+        ));
+        crate::enable_resource_control();
+
+        let kv_client = MockKvClient::with_dispatch_hook(|req| {
+            let req = req
+                .downcast_ref::<crate::proto::kvrpcpb::PrewriteRequest>()
+                .unwrap();
+            assert_eq!(req.primary_lock, b"primary".to_vec());
+            Ok(Box::new(crate::proto::kvrpcpb::PrewriteResponse::default()))
+        });
+
+        let request = crate::proto::kvrpcpb::PrewriteRequest {
+            mutations: vec![crate::proto::kvrpcpb::Mutation {
+                op: crate::proto::kvrpcpb::Op::Put.into(),
+                key: b"k1".to_vec(),
+                value: b"value".to_vec(),
+                ..Default::default()
+            }],
+            primary_lock: b"primary".to_vec(),
+            secondaries: vec![b"s1".to_vec()],
+            context: Some(crate::proto::kvrpcpb::Context {
+                request_source: "external_test".to_owned(),
+                resource_control_context: Some(crate::proto::kvrpcpb::ResourceControlContext {
+                    resource_group_name: "rg-rc-test".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let plan = Dispatch {
+            request,
+            kv_client: Some(Arc::new(kv_client)),
+        };
+
+        plan.execute().await.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["request_wait", "response_wait"]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_dispatch_exposes_resource_control_response_metadata() {
+        let _reset = ResourceControlReset;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        crate::set_resource_control_interceptor(Arc::new(
+            MetadataAssertingResourceControlInterceptor {
+                calls: Arc::clone(&calls),
+                expected_label: "kv_get",
+                expected_cmd_type: crate::CmdType::Get,
+                expected_write_bytes: 0,
+                expected_read_bytes: 123,
+                expected_kv_cpu: Duration::from_nanos(456),
+            },
+        ));
+        crate::enable_resource_control();
+
+        let kv_client = MockKvClient::with_dispatch_hook(|req| {
+            let req = req
+                .downcast_ref::<crate::proto::kvrpcpb::GetRequest>()
+                .unwrap();
+            assert_eq!(req.key, b"k".to_vec());
+
+            let response = crate::proto::kvrpcpb::GetResponse {
+                exec_details_v2: Some(crate::proto::kvrpcpb::ExecDetailsV2 {
+                    time_detail_v2: Some(crate::proto::kvrpcpb::TimeDetailV2 {
+                        process_wall_time_ns: 456,
+                        ..Default::default()
+                    }),
+                    scan_detail_v2: Some(crate::proto::kvrpcpb::ScanDetailV2 {
+                        processed_versions_size: 123,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            Ok(Box::new(response))
+        });
+
+        let request = crate::proto::kvrpcpb::GetRequest {
+            key: b"k".to_vec(),
+            context: Some(crate::proto::kvrpcpb::Context {
+                request_source: "external_test".to_owned(),
+                resource_control_context: Some(crate::proto::kvrpcpb::ResourceControlContext {
+                    resource_group_name: "rg-rc-test".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let plan = Dispatch {
+            request,
+            kv_client: Some(Arc::new(kv_client)),
         };
 
         plan.execute().await.unwrap();
