@@ -1860,6 +1860,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_atomic_batch_put_with_ttl_propagates_for_cas_and_replicated_ttls() -> Result<()> {
+        let seen_keys = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let seen_keys_captured = seen_keys.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req: &kvrpcpb::RawBatchPutRequest =
+                    req.downcast_ref().expect("expected raw batch put request");
+                assert!(req.for_cas);
+                assert_eq!(
+                    req.ttls.len(),
+                    req.pairs.len(),
+                    "ttls must be replicated per pair before dispatch"
+                );
+                assert!(req.ttls.iter().all(|ttl| *ttl == 7));
+                assert_eq!(req.cf, "write");
+
+                let mut keys = seen_keys_captured.lock().unwrap();
+                keys.extend(req.pairs.iter().map(|pair| pair.key.clone()));
+
+                Ok(Box::new(kvrpcpb::RawBatchPutResponse::default()) as Box<dyn Any>)
+            },
+        )));
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Write),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
+            keyspace: Keyspace::Disable,
+        }
+        .with_atomic_for_cas();
+
+        let pairs = vec![
+            KvPair(vec![1].into(), vec![1]),
+            KvPair(vec![11].into(), vec![2]),
+            KvPair(vec![251].into(), vec![3]),
+        ];
+        client.batch_put_with_ttl(pairs, std::iter::once(7)).await?;
+
+        let mut keys = seen_keys.lock().unwrap().clone();
+        keys.sort();
+        assert_eq!(keys, vec![vec![1], vec![11], vec![251]]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_batch_put_with_ttl_rejects_mismatched_ttl_count() -> Result<()> {
         let dispatch_calls = Arc::new(AtomicUsize::new(0));
         let dispatch_calls_cloned = dispatch_calls.clone();
