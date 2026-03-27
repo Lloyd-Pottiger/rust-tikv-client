@@ -7,11 +7,15 @@ use std::time::Duration;
 use rand::thread_rng;
 use rand::Rng;
 
+/// Default no-jitter retry policy for region-cache refreshes and similar metadata work.
 pub const DEFAULT_REGION_BACKOFF: Backoff = Backoff::no_jitter_backoff(2, 500, 10);
+/// Default no-jitter retry policy for store-level retries that can wait slightly longer.
 pub const DEFAULT_STORE_BACKOFF: Backoff = Backoff::no_jitter_backoff(2, 1000, 10);
 // Match client-go `BoTxnLockFast` defaults (base 2ms, cap 3000ms, equal jitter).
 // `max_attempts` is chosen to cover typical lock TTL durations without timing out too early.
+/// Equal-jitter retry policy used for optimistic transaction lock contention paths.
 pub const OPTIMISTIC_BACKOFF: Backoff = Backoff::equal_jitter_backoff(2, 3000, 16);
+/// Equal-jitter retry policy used for pessimistic transaction lock contention paths.
 pub const PESSIMISTIC_BACKOFF: Backoff = Backoff::equal_jitter_backoff(2, 3000, 16);
 
 /// When a request is retried, we can backoff for some time to avoid saturating the network.
@@ -28,7 +32,10 @@ pub struct Backoff {
 }
 
 impl Backoff {
-    // Returns the delay period for next retry. If the maximum retry count is hit returns None.
+    /// Returns the delay for the next retry attempt.
+    ///
+    /// Returns `None` once the configured retry budget is exhausted. For
+    /// [`Backoff::no_backoff`], this also returns `None` immediately.
     pub fn next_delay_duration(&mut self) -> Option<Duration> {
         if self.current_attempts >= self.max_attempts {
             return None;
@@ -76,12 +83,12 @@ impl Backoff {
         }
     }
 
-    /// True if we should not backoff at all (usually indicates that we should not retry a request).
+    /// Returns whether this policy disables sleeping between retries.
     pub fn is_none(&self) -> bool {
         self.kind == BackoffKind::None
     }
 
-    /// Returns the number of attempts
+    /// Returns how many retry attempts have already been handed out by this backoff.
     pub fn current_attempts(&self) -> u32 {
         self.current_attempts
     }
@@ -118,7 +125,7 @@ impl Backoff {
         self
     }
 
-    /// Don't wait. Usually indicates that we should not retry a request.
+    /// Returns a policy that never sleeps and yields no retry delays.
     pub const fn no_backoff() -> Backoff {
         Backoff {
             kind: BackoffKind::None,
@@ -130,11 +137,10 @@ impl Backoff {
         }
     }
 
-    // Exponential backoff means that the retry delay should multiply a constant
-    // after each attempt, up to a maximum value. After each attempt, the new retry
-    // delay should be:
-    //
-    // new_delay = min(max_delay, base_delay * 2 ** attempts)
+    /// Returns a deterministic exponential backoff without jitter.
+    ///
+    /// Each delay doubles from `base_delay_ms` until it reaches `max_delay_ms`, and the policy
+    /// stops after `max_attempts` calls to [`Backoff::next_delay_duration`].
     pub const fn no_jitter_backoff(
         base_delay_ms: u64,
         max_delay_ms: u64,
@@ -155,6 +161,10 @@ impl Backoff {
     //
     // temp = min(max_delay, base_delay * 2 ** attempts)
     // new_delay = random_between(0, temp)
+    /// Returns an exponential backoff with full jitter.
+    ///
+    /// Each retry picks a random delay in `0..=min(max_delay_ms, current_delay)` and then doubles
+    /// the next deterministic cap until `max_delay_ms` is reached.
     pub fn full_jitter_backoff(
         base_delay_ms: u64,
         max_delay_ms: u64,
@@ -175,11 +185,10 @@ impl Backoff {
         }
     }
 
-    // Equal Jitter limits the random value should be equal or greater than half of
-    // the calculated exponential backoff:
-    //
-    // temp = min(max_delay, base_delay * 2 ** attempts)
-    // new_delay = random_between(temp / 2, temp)
+    /// Returns an exponential backoff with equal jitter.
+    ///
+    /// Each retry picks a random delay in the upper half of the current exponential window, which
+    /// preserves some minimum slowdown while still spreading concurrent retries.
     pub const fn equal_jitter_backoff(
         base_delay_ms: u64,
         max_delay_ms: u64,
@@ -200,11 +209,10 @@ impl Backoff {
         }
     }
 
-    // Decorrelated Jitter is always calculated with the previous backoff
-    // (the initial value is base_delay):
-    //
-    // temp = random_between(base_delay, previous_delay * 3)
-    // new_delay = min(max_delay, temp)
+    /// Returns a decorrelated-jitter backoff.
+    ///
+    /// Each retry samples from `base_delay_ms..=(previous_delay * 3)` and clamps the result to
+    /// `max_delay_ms`, which helps avoid synchronized retry waves while still adapting upward.
     pub fn decorrelated_jitter_backoff(
         base_delay_ms: u64,
         max_delay_ms: u64,
