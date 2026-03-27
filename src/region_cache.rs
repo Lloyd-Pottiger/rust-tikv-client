@@ -301,6 +301,103 @@ impl BatchLocateKeyRangesOptions {
     }
 }
 
+fn regions_have_gap_in_ranges(
+    ranges: &[crate::kv::KeyRange],
+    regions: &[(RegionWithLeader, Option<metapb::Buckets>)],
+    limit: isize,
+) -> bool {
+    if ranges.is_empty() {
+        return false;
+    }
+    if regions.is_empty() {
+        return true;
+    }
+
+    let mut check_idx = 0usize;
+    let mut check_key = ranges[0].start_key.clone();
+
+    for (region, _) in regions {
+        let start_key = region.start_key();
+        if start_key > check_key {
+            return true;
+        }
+
+        let end_key = region.end_key();
+        if end_key.is_empty() {
+            return false;
+        }
+        check_key = end_key;
+
+        while check_idx < ranges.len()
+            && !ranges[check_idx].end_key.is_empty()
+            && check_key >= ranges[check_idx].end_key
+        {
+            check_idx += 1;
+            if check_idx >= ranges.len() {
+                return false;
+            }
+        }
+
+        if check_key < ranges[check_idx].start_key {
+            check_key = ranges[check_idx].start_key.clone();
+        }
+    }
+
+    if limit >= 0 && regions.len() >= limit as usize {
+        return false;
+    }
+    if check_idx < ranges.len() - 1 {
+        return true;
+    }
+    if check_key.is_empty() {
+        return false;
+    }
+    if ranges[check_idx].end_key.is_empty() {
+        return true;
+    }
+
+    check_key < ranges[check_idx].end_key
+}
+
+// Drop ranges that are fully covered by `split_key` and continue from there.
+//
+// This mirrors client-go `rangesAfterKey` but is best-effort (linear scan) because callers may
+// pass overlapping or otherwise irregular range lists.
+fn ranges_after_key(
+    mut key_ranges: Vec<crate::kv::KeyRange>,
+    split_key: &Key,
+) -> Vec<crate::kv::KeyRange> {
+    if key_ranges.is_empty() {
+        return Vec::new();
+    }
+    if split_key.is_empty() {
+        return Vec::new();
+    }
+
+    let last_end = &key_ranges[key_ranges.len() - 1].end_key;
+    if !last_end.is_empty() && split_key >= last_end {
+        return Vec::new();
+    }
+
+    let mut idx = 0usize;
+    while idx < key_ranges.len() {
+        let end = &key_ranges[idx].end_key;
+        if end.is_empty() || split_key < end {
+            break;
+        }
+        idx += 1;
+    }
+    if idx >= key_ranges.len() {
+        return Vec::new();
+    }
+
+    let mut rest = key_ranges.split_off(idx);
+    if split_key > &rest[0].start_key {
+        rest[0].start_key = split_key.clone();
+    }
+    rest
+}
+
 struct RegionCacheMap {
     /// RegionVerID -> Region. It stores the concrete region caches.
     /// RegionVerID is the unique identifier of a region *across time*.
@@ -1056,103 +1153,6 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
             let mut remaining_ranges = uncached_ranges;
 
-            fn regions_have_gap_in_ranges(
-                ranges: &[crate::kv::KeyRange],
-                regions: &[(RegionWithLeader, Option<metapb::Buckets>)],
-                limit: usize,
-            ) -> bool {
-                if ranges.is_empty() {
-                    return false;
-                }
-                if regions.is_empty() {
-                    return true;
-                }
-
-                let mut check_idx = 0usize;
-                let mut check_key = ranges[0].start_key.clone();
-
-                for (region, _) in regions {
-                    let start_key = region.start_key();
-                    if start_key > check_key {
-                        return true;
-                    }
-
-                    let end_key = region.end_key();
-                    if end_key.is_empty() {
-                        return false;
-                    }
-                    check_key = end_key;
-
-                    while check_idx < ranges.len()
-                        && !ranges[check_idx].end_key.is_empty()
-                        && check_key >= ranges[check_idx].end_key
-                    {
-                        check_idx += 1;
-                        if check_idx >= ranges.len() {
-                            return false;
-                        }
-                    }
-
-                    if check_key < ranges[check_idx].start_key {
-                        check_key = ranges[check_idx].start_key.clone();
-                    }
-                }
-
-                if regions.len() >= limit {
-                    return false;
-                }
-                if check_idx < ranges.len() - 1 {
-                    return true;
-                }
-                if check_key.is_empty() {
-                    return false;
-                }
-                if ranges[check_idx].end_key.is_empty() {
-                    return true;
-                }
-
-                check_key < ranges[check_idx].end_key
-            }
-
-            // Drop ranges that are fully covered by `split_key` and continue from there.
-            //
-            // This mirrors client-go `rangesAfterKey` but is best-effort (linear scan) because
-            // callers may pass overlapping or otherwise irregular range lists.
-            fn ranges_after_key(
-                mut key_ranges: Vec<crate::kv::KeyRange>,
-                split_key: &Key,
-            ) -> Vec<crate::kv::KeyRange> {
-                if key_ranges.is_empty() {
-                    return Vec::new();
-                }
-                if split_key.is_empty() {
-                    return Vec::new();
-                }
-
-                let last_end = &key_ranges[key_ranges.len() - 1].end_key;
-                if !last_end.is_empty() && split_key >= last_end {
-                    return Vec::new();
-                }
-
-                let mut idx = 0usize;
-                while idx < key_ranges.len() {
-                    let end = &key_ranges[idx].end_key;
-                    if end.is_empty() || split_key < end {
-                        break;
-                    }
-                    idx += 1;
-                }
-                if idx >= key_ranges.len() {
-                    return Vec::new();
-                }
-
-                let mut rest = key_ranges.split_off(idx);
-                if split_key > &rest[0].start_key {
-                    rest[0].start_key = split_key.clone();
-                }
-                rest
-            }
-
             let mut retried_empty_batch = false;
             let mut retried_gap_batch = false;
             let mut retried_leaderless_batch = false;
@@ -1199,7 +1199,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                         if regions_have_gap_in_ranges(
                             &remaining_ranges,
                             &regions,
-                            DEFAULT_REGIONS_PER_BATCH as usize,
+                            DEFAULT_REGIONS_PER_BATCH as isize,
                         ) {
                             stats::inc_stale_region_from_pd_counter();
                             if !retried_gap_batch {
@@ -1761,6 +1761,8 @@ mod test {
     use serial_test::serial;
     use tokio::sync::Mutex;
 
+    use super::ranges_after_key;
+    use super::regions_have_gap_in_ranges;
     use super::with_need_buckets;
     use super::with_need_region_has_leader_peer;
     use super::BucketLocation;
@@ -2473,6 +2475,348 @@ mod test {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_batch_locate_regions_have_gap_in_ranges_matches_client_go_table() {
+        fn key_ranges(bounds: &[&str]) -> Vec<crate::kv::KeyRange> {
+            bounds
+                .chunks_exact(2)
+                .map(|pair| crate::kv::KeyRange {
+                    start_key: Key::from(pair[0].as_bytes().to_vec()),
+                    end_key: Key::from(pair[1].as_bytes().to_vec()),
+                })
+                .collect()
+        }
+
+        fn regions(bounds: &[&str]) -> Vec<(RegionWithLeader, Option<metapb::Buckets>)> {
+            bounds
+                .chunks_exact(2)
+                .enumerate()
+                .map(|(idx, pair)| {
+                    (
+                        region(
+                            idx as u64 + 1,
+                            pair[0].as_bytes().to_vec(),
+                            pair[1].as_bytes().to_vec(),
+                        ),
+                        None,
+                    )
+                })
+                .collect()
+        }
+
+        let bound_cases = [
+            vec!["a", "c"],
+            vec!["a", "b", "b", "c"],
+            vec!["a", "a1", "a1", "b", "b", "b1", "b1", "c"],
+        ];
+        for bounds in bound_cases {
+            let ranges = key_ranges(&bounds);
+
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", "c"]),
+                -1
+            ));
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", ""]),
+                -1
+            ));
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "c"]),
+                -1
+            ));
+
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", "b"]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["b", "c"]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["b", ""]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "b"]),
+                -1
+            ));
+
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", "b", "b", "c"]),
+                -1
+            ));
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "b", "b", "c"]),
+                -1
+            ));
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", "b", "b", ""]),
+                -1
+            ));
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "b", "b", ""]),
+                -1
+            ));
+
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", "b", "b1", "c"]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "b", "b1", "c"]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", "b", "b1", ""]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "b", "b1", ""]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(&ranges, &[], -1));
+        }
+
+        let non_continuous_cases = [
+            vec!["a", "b", "c", "d"],
+            vec!["a", "b1", "b1", "b", "c", "d"],
+            vec!["a", "b", "c", "c1", "c1", "d"],
+            vec!["a", "b1", "b1", "b", "c", "c1", "c1", "d"],
+        ];
+        for bounds in non_continuous_cases {
+            let ranges = key_ranges(&bounds);
+
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", "d"]),
+                -1
+            ));
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "d"]),
+                -1
+            ));
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", ""]),
+                -1
+            ));
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", ""]),
+                -1
+            ));
+
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", "b"]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["b", "c"]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["c", "d"]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "b"]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["c", ""]),
+                -1
+            ));
+        }
+
+        let unbound_cases = [
+            vec!["", ""],
+            vec!["", "b", "b", ""],
+            vec!["", "a1", "a1", "b", "b", "b1", "b1", ""],
+        ];
+        for bounds in unbound_cases {
+            let ranges = key_ranges(&bounds);
+
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", ""]),
+                -1
+            ));
+
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", "c"]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", ""]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "c"]),
+                -1
+            ));
+
+            assert!(!regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "b", "b", ""]),
+                -1
+            ));
+
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "b", "b1", ""]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["a", "b", "b", ""]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(
+                &ranges,
+                &regions(&["", "b", "b", "c"]),
+                -1
+            ));
+            assert!(regions_have_gap_in_ranges(&ranges, &[], -1));
+        }
+
+        let half_bounded = key_ranges(&["", "b"]);
+        assert!(regions_have_gap_in_ranges(
+            &half_bounded,
+            &regions(&["", "a"]),
+            -1
+        ));
+        assert!(!regions_have_gap_in_ranges(
+            &half_bounded,
+            &regions(&["", "a"]),
+            1
+        ));
+        assert!(regions_have_gap_in_ranges(
+            &half_bounded,
+            &regions(&["", "a"]),
+            2
+        ));
+
+        let tail_unbounded = key_ranges(&["a", ""]);
+        assert!(regions_have_gap_in_ranges(
+            &tail_unbounded,
+            &regions(&["b", ""]),
+            -1
+        ));
+        assert!(regions_have_gap_in_ranges(
+            &tail_unbounded,
+            &regions(&["b", ""]),
+            1
+        ));
+        assert!(regions_have_gap_in_ranges(
+            &tail_unbounded,
+            &regions(&["b", "c"]),
+            1
+        ));
+        assert!(!regions_have_gap_in_ranges(
+            &tail_unbounded,
+            &regions(&["a", ""]),
+            -1
+        ));
+    }
+
+    #[test]
+    fn test_batch_locate_ranges_after_key_matches_client_go_table() {
+        fn key_ranges(bounds: &[&str]) -> Vec<crate::kv::KeyRange> {
+            bounds
+                .chunks_exact(2)
+                .map(|pair| crate::kv::KeyRange {
+                    start_key: Key::from(pair[0].as_bytes().to_vec()),
+                    end_key: Key::from(pair[1].as_bytes().to_vec()),
+                })
+                .collect()
+        }
+
+        fn as_bounds(ranges: Vec<crate::kv::KeyRange>) -> Vec<(Vec<u8>, Vec<u8>)> {
+            ranges
+                .into_iter()
+                .map(|range| {
+                    (
+                        <Vec<u8>>::from(range.start_key),
+                        <Vec<u8>>::from(range.end_key),
+                    )
+                })
+                .collect()
+        }
+
+        let cases = [
+            (vec!["a", "c"], "a", vec![(b"a".to_vec(), b"c".to_vec())]),
+            (vec!["b", "c"], "a", vec![(b"b".to_vec(), b"c".to_vec())]),
+            (vec!["a", "c"], "b", vec![(b"b".to_vec(), b"c".to_vec())]),
+            (vec!["a", "c"], "c", Vec::new()),
+            (vec!["a", "c"], "", Vec::new()),
+            (vec!["a", ""], "b", vec![(b"b".to_vec(), Vec::new())]),
+            (vec!["a", ""], "", Vec::new()),
+            (
+                vec!["a", "b", "c", "f"],
+                "a1",
+                vec![
+                    (b"a1".to_vec(), b"b".to_vec()),
+                    (b"c".to_vec(), b"f".to_vec()),
+                ],
+            ),
+            (
+                vec!["a", "b", "c", "f"],
+                "b",
+                vec![(b"c".to_vec(), b"f".to_vec())],
+            ),
+            (
+                vec!["a", "b", "c", "f"],
+                "b1",
+                vec![(b"c".to_vec(), b"f".to_vec())],
+            ),
+            (
+                vec!["a", "b", "c", "f"],
+                "c",
+                vec![(b"c".to_vec(), b"f".to_vec())],
+            ),
+            (
+                vec!["a", "b", "c", "f"],
+                "d",
+                vec![(b"d".to_vec(), b"f".to_vec())],
+            ),
+        ];
+
+        for (range_bounds, split_key, expected) in cases {
+            assert_eq!(
+                as_bounds(ranges_after_key(
+                    key_ranges(&range_bounds),
+                    &Key::from(split_key.as_bytes().to_vec()),
+                )),
+                expected
+            );
+        }
     }
 
     #[tokio::test]
