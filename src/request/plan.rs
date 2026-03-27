@@ -151,6 +151,43 @@ pub(crate) fn kv_cmd_from_label(label: &'static str) -> String {
     }
 }
 
+const COPROCESSOR_REQ_TP_ANALYZE: i64 = 104;
+
+fn should_bypass_resource_control_for_request(request: &dyn crate::store::Request) -> bool {
+    let Some(ctx) = request.context() else {
+        return false;
+    };
+
+    // client-go bypasses internal analyze requests in its resource control interceptor
+    // (`internal/resourcecontrol.shouldBypass`). We replicate the same behavior so these
+    // internal, potentially heavyweight requests don't contend for RU with user traffic.
+    let request_source = ctx.request_source.as_str();
+    if !request_source.starts_with(crate::request_context::INTERNAL_REQUEST_PREFIX)
+        || !request_source.contains(crate::request_context::INTERNAL_TXN_STATS)
+    {
+        return false;
+    }
+
+    let tp = request
+        .as_any()
+        .downcast_ref::<crate::proto::coprocessor::Request>()
+        .map(|req| req.tp)
+        .or_else(|| {
+            request
+                .as_any()
+                .downcast_ref::<crate::proto::coprocessor::BatchRequest>()
+                .map(|req| req.tp)
+        })
+        .or_else(|| {
+            request
+                .as_any()
+                .downcast_ref::<crate::coprocessor::CoprocessorStreamRequest>()
+                .map(|req| req.inner().tp)
+        });
+
+    tp == Some(COPROCESSOR_REQ_TP_ANALYZE)
+}
+
 fn kv_request_trace_fields(
     label: &'static str,
     cmd: &str,
@@ -346,7 +383,15 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
             None
         };
 
-        let resource_control = crate::resource_control::hook_for_context(self.request.context());
+        let mut resource_control =
+            crate::resource_control::hook_for_context(self.request.context());
+        if resource_control.is_some()
+            && should_bypass_resource_control_for_request(
+                &self.request as &dyn crate::store::Request,
+            )
+        {
+            resource_control = None;
+        }
         let mut request = resource_control.as_ref().map(|_| self.request.clone());
 
         let request_info = {
@@ -604,8 +649,15 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
                 None
             };
 
-            let resource_control =
+            let mut resource_control =
                 crate::resource_control::hook_for_context(self.request.context());
+            if resource_control.is_some()
+                && should_bypass_resource_control_for_request(
+                    &self.request as &dyn crate::store::Request,
+                )
+            {
+                resource_control = None;
+            }
             let mut request = resource_control.as_ref().map(|_| self.request.clone());
 
             let request_info = {
@@ -836,7 +888,12 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
             None
         };
 
-        let resource_control = crate::resource_control::hook_for_context(request.context());
+        let mut resource_control = crate::resource_control::hook_for_context(request.context());
+        if resource_control.is_some()
+            && should_bypass_resource_control_for_request(&request as &dyn crate::store::Request)
+        {
+            resource_control = None;
+        }
         let request_info = crate::resource_control::ResourceControlRequestInfo::new(
             label,
             u64::try_from(request.encoded_len()).unwrap_or(u64::MAX),
@@ -8493,6 +8550,109 @@ mod test {
             calls.lock().unwrap().as_slice(),
             ["request_wait", "response_wait"]
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_dispatch_bypasses_resource_control_for_internal_analyze_requests() {
+        let _reset = ResourceControlReset;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        crate::set_resource_control_interceptor(Arc::new(TestResourceControlInterceptor {
+            calls: Arc::clone(&calls),
+        }));
+        crate::enable_resource_control();
+
+        let kv_client = MockKvClient::with_dispatch_hook(|req| {
+            let req = req
+                .downcast_ref::<crate::proto::coprocessor::Request>()
+                .unwrap();
+            let ctx = req.context.as_ref().unwrap();
+            let rc = ctx.resource_control_context.as_ref().unwrap();
+
+            assert_eq!(ctx.request_source, "internal_stats");
+            assert_eq!(req.tp, COPROCESSOR_REQ_TP_ANALYZE);
+            assert_eq!(rc.resource_group_name, "rg-rc-test");
+            assert_eq!(rc.override_priority, 0);
+            assert!(rc.penalty.is_none());
+            Ok(Box::new(crate::proto::coprocessor::Response::default()))
+        });
+
+        let request = crate::proto::coprocessor::Request {
+            tp: COPROCESSOR_REQ_TP_ANALYZE,
+            context: Some(crate::proto::kvrpcpb::Context {
+                request_source: "internal_stats".to_owned(),
+                resource_control_context: Some(crate::proto::kvrpcpb::ResourceControlContext {
+                    resource_group_name: "rg-rc-test".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let plan = Dispatch {
+            request,
+            kv_client: Some(Arc::new(kv_client)),
+        };
+
+        plan.execute().await.unwrap();
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_dispatch_with_interceptor_bypasses_resource_control_for_internal_analyze_requests(
+    ) {
+        let _reset = ResourceControlReset;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        crate::set_resource_control_interceptor(Arc::new(TestResourceControlInterceptor {
+            calls: Arc::clone(&calls),
+        }));
+        crate::enable_resource_control();
+
+        let kv_client = MockKvClient::with_dispatch_hook(|req| {
+            let req = req
+                .downcast_ref::<crate::proto::coprocessor::Request>()
+                .unwrap();
+            let ctx = req.context.as_ref().unwrap();
+            let rc = ctx.resource_control_context.as_ref().unwrap();
+
+            assert_eq!(ctx.request_source, "internal_stats");
+            assert_eq!(req.tp, COPROCESSOR_REQ_TP_ANALYZE);
+            assert_eq!(rc.resource_group_name, "rg-rc-test");
+            assert_eq!(rc.override_priority, 0);
+            assert!(rc.penalty.is_none());
+            Ok(Box::new(crate::proto::coprocessor::Response::default()))
+        });
+
+        let request = crate::proto::coprocessor::Request {
+            tp: COPROCESSOR_REQ_TP_ANALYZE,
+            context: Some(crate::proto::kvrpcpb::Context {
+                request_source: "internal_stats".to_owned(),
+                resource_control_context: Some(crate::proto::kvrpcpb::ResourceControlContext {
+                    resource_group_name: "rg-rc-test".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let rpc_interceptors: crate::rpc_interceptor::RpcInterceptors = Arc::new(vec![Arc::new(
+            crate::FnRpcInterceptor::new("noop").on_before(|_| {}),
+        )]);
+
+        let plan = DispatchWithInterceptor {
+            request,
+            kv_client: Some(Arc::new(kv_client)),
+            store_address: Some("mock://tikv".to_owned()),
+            rpc_interceptors,
+        };
+
+        plan.execute().await.unwrap();
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
