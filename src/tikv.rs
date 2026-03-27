@@ -5,12 +5,23 @@
 
 use std::sync::Arc;
 
+#[doc(inline)]
+pub use crate::kv::Getter;
 pub use crate::Backoff as Backoffer;
 #[doc(inline)]
+pub use crate::BinlogWriteResult;
+#[doc(inline)]
 pub use crate::Store;
+#[doc(inline)]
+pub use crate::Transaction as KVTxn;
 pub use crate::TransactionClient as KVStore;
 #[doc(inline)]
 pub use crate::Variables;
+
+/// Client-go style in-memory mutation buffer type.
+///
+/// This mirrors client-go `tikv.MemBuffer`.
+pub type MemBuffer = crate::transaction::Buffer;
 
 /// Client-go style backoff config type.
 ///

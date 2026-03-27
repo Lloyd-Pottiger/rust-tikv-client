@@ -1,5 +1,8 @@
 use tikv_client::util;
 
+type DecodeIntFn = fn(&[u8]) -> tikv_client::Result<(&[u8], i64)>;
+type DecodeUintFn = fn(&[u8]) -> tikv_client::Result<(&[u8], u64)>;
+
 #[test]
 fn util_codec_module_reexports_kv_codec_helpers() {
     let mut encoded = Vec::new();
@@ -31,12 +34,12 @@ fn util_codec_module_exposes_fixed_width_integer_helpers() {
     let _: fn(u64) -> i64 = util::codec::decode_cmp_uint_to_int;
     let _: fn(&mut Vec<u8>, i64) = util::codec::encode_int;
     let _: fn(&mut Vec<u8>, i64) = util::codec::encode_int_desc;
-    let _: fn(&[u8]) -> tikv_client::Result<(&[u8], i64)> = util::codec::decode_int;
-    let _: fn(&[u8]) -> tikv_client::Result<(&[u8], i64)> = util::codec::decode_int_desc;
+    let _: DecodeIntFn = util::codec::decode_int;
+    let _: DecodeIntFn = util::codec::decode_int_desc;
     let _: fn(&mut Vec<u8>, u64) = util::codec::encode_uint;
     let _: fn(&mut Vec<u8>, u64) = util::codec::encode_uint_desc;
-    let _: fn(&[u8]) -> tikv_client::Result<(&[u8], u64)> = util::codec::decode_uint;
-    let _: fn(&[u8]) -> tikv_client::Result<(&[u8], u64)> = util::codec::decode_uint_desc;
+    let _: DecodeUintFn = util::codec::decode_uint;
+    let _: DecodeUintFn = util::codec::decode_uint_desc;
 
     assert_eq!(
         util::codec::decode_cmp_uint_to_int(util::codec::encode_int_to_cmp_uint(-42)),

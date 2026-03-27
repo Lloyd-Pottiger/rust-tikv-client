@@ -8,6 +8,7 @@
 //!
 //! **Warning:** It is not advisable to use both raw and transactional functionality in the same keyspace.
 
+pub use buffer::Buffer;
 pub use client::Client;
 pub use client::ProtoCompactResponse;
 pub use client::ProtoLockInfo;

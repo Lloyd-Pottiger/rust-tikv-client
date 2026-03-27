@@ -6,7 +6,11 @@ use tikv_client::tikv;
 #[test]
 fn tikv_module_exports_kvstore_and_backoffer() {
     let _: Option<tikv::KVStore> = None;
+    let _: Option<tikv::KVTxn> = None;
     let _ = tikv::Backoffer::no_backoff();
+    let _: Option<tikv::BinlogWriteResult> = None;
+    let _: Option<&dyn tikv::Getter> = None;
+    let _: Option<tikv::MemBuffer> = None;
     let _: Option<tikv::Store> = None;
     let _: Option<tikv::Variables> = None;
 }
