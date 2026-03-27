@@ -381,6 +381,14 @@ pub struct Config {
     ///   implement feedback-based auto-adjust, so `0` is currently treated as disabled.
     /// - `i64::MAX` (the default) disables the limiter, matching client-go `DefMaxConcurrencyRequestLimit`.
     pub max_concurrency_request_limit: i64,
+    /// Whether to enable the replica selector v2.
+    ///
+    /// This mirrors client-go `TiKVClient.EnableReplicaSelectorV2`, which is deprecated and
+    /// defaults to `true`.
+    ///
+    /// Note: the Rust client does not provide a v1 selector implementation, so this flag is
+    /// currently kept for configuration parity only.
+    pub enable_replica_selector_v2: bool,
     /// Maximum concurrency for 2PC committer multi-region requests.
     ///
     /// This limits the number of region shards executed concurrently for the prewrite, secondary
@@ -696,6 +704,7 @@ impl Default for Config {
             enable_chunk_rpc: true,
             store_limit: 0,
             max_concurrency_request_limit: DEFAULT_MAX_CONCURRENCY_REQUEST_LIMIT,
+            enable_replica_selector_v2: true,
             committer_concurrency: DEFAULT_COMMITTER_CONCURRENCY,
             max_txn_ttl: DEFAULT_MAX_TXN_TTL,
             tso_max_pending_count: DEFAULT_TSO_MAX_PENDING_COUNT,
@@ -974,6 +983,17 @@ impl Config {
     #[must_use]
     pub fn with_max_concurrency_request_limit(mut self, limit: i64) -> Self {
         self.max_concurrency_request_limit = limit;
+        self
+    }
+
+    /// Enable or disable the replica selector v2 (client-go `EnableReplicaSelectorV2`).
+    ///
+    /// This flag is preserved for API parity only. The Rust client does not provide a v1 selector
+    /// implementation.
+    #[doc(alias = "EnableReplicaSelectorV2")]
+    #[must_use]
+    pub fn with_enable_replica_selector_v2(mut self, enable: bool) -> Self {
+        self.enable_replica_selector_v2 = enable;
         self
     }
 

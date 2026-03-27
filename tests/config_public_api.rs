@@ -22,8 +22,12 @@ fn config_module_exports_types_and_global_helpers() {
 
     let _ = config::Config::default()
         .with_timeout(Duration::from_secs(1))
+        .with_enable_replica_selector_v2(true)
         .with_grpc_custom_dns_server("8.8.8.8:53".parse::<SocketAddr>().unwrap())
         .with_grpc_custom_dns_domain("cluster.local");
+
+    let config = config::Config::default().with_enable_replica_selector_v2(false);
+    assert!(!config.enable_replica_selector_v2);
 
     let parsed = config::parse_path("tikv://127.0.0.1:2379?disableGC=true&keyspaceName=test")
         .expect("parse_path");
