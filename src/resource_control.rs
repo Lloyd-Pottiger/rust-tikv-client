@@ -153,6 +153,12 @@ impl ResourceControlRequestInfo {
         self.write_bytes
     }
 
+    /// Whether this request is treated as a write request for resource control accounting.
+    #[must_use]
+    pub const fn is_write(self) -> bool {
+        self.write_bytes > 0
+    }
+
     /// The number of voter/learner replicas in the target region when known.
     #[must_use]
     pub const fn replica_number(self) -> u64 {
@@ -374,5 +380,14 @@ mod test {
         };
 
         assert!(hook_for_context(Some(&ctx)).is_some());
+    }
+
+    #[test]
+    fn request_info_is_write_follows_write_bytes() {
+        let read = ResourceControlRequestInfo::new("kv_get", 16, 7);
+        let write = ResourceControlRequestInfo::new("kv_prewrite", 64, 7).with_write_bytes(8);
+
+        assert!(!read.is_write());
+        assert!(write.is_write());
     }
 }

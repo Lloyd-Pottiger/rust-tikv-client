@@ -61,6 +61,15 @@ fn tikv_module_exports_global_helpers() {
 }
 
 #[test]
+fn tikv_module_resource_control_request_info_exports_is_write() {
+    let _: fn(tikv_client::ResourceControlRequestInfo) -> bool =
+        tikv_client::ResourceControlRequestInfo::is_write;
+
+    let request = tikv_client::ResourceControlRequestInfo::new("kv_get", 16, 42);
+    assert!(!request.is_write());
+}
+
+#[test]
 fn tikv_module_exports_resource_control_info_accessors() {
     let _: fn(tikv_client::ResourceControlRequestInfo) -> u64 =
         tikv_client::ResourceControlRequestInfo::write_bytes;
