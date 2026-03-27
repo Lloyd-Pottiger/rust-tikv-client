@@ -327,15 +327,15 @@ impl<P: Plan + Shardable, PdC: PdClient> Shardable for CleanupLocks<P, PdC> {
 #[macro_export]
 macro_rules! shardable_key {
     ($type_: ty) => {
-        impl Shardable for $type_ {
+        impl $crate::request::Shardable for $type_ {
             type Shard = Vec<Vec<u8>>;
 
             fn shards(
                 &self,
-                pd_client: &std::sync::Arc<impl $crate::pd::PdClient>,
+                pd_client: &std::sync::Arc<impl $crate::PdClient>,
             ) -> futures::stream::BoxStream<
                 'static,
-                $crate::Result<(Self::Shard, $crate::region::RegionWithLeader)>,
+                $crate::Result<(Self::Shard, $crate::RegionWithLeader)>,
             > {
                 $crate::store::region_stream_for_keys(
                     std::iter::once(self.key.clone()),
@@ -359,15 +359,15 @@ macro_rules! shardable_key {
 #[macro_export]
 macro_rules! shardable_keys {
     ($type_: ty) => {
-        impl Shardable for $type_ {
+        impl $crate::request::Shardable for $type_ {
             type Shard = Vec<Vec<u8>>;
 
             fn shards(
                 &self,
-                pd_client: &std::sync::Arc<impl $crate::pd::PdClient>,
+                pd_client: &std::sync::Arc<impl $crate::PdClient>,
             ) -> futures::stream::BoxStream<
                 'static,
-                $crate::Result<(Self::Shard, $crate::region::RegionWithLeader)>,
+                $crate::Result<(Self::Shard, $crate::RegionWithLeader)>,
             > {
                 let mut keys = self.keys.clone();
                 keys.sort();
@@ -395,7 +395,7 @@ pub trait RangeRequest: Request {
 #[macro_export]
 macro_rules! range_request {
     ($type_: ty) => {
-        impl RangeRequest for $type_ {}
+        impl $crate::request::RangeRequest for $type_ {}
     };
 }
 
@@ -403,7 +403,7 @@ macro_rules! range_request {
 #[macro_export]
 macro_rules! reversible_range_request {
     ($type_: ty) => {
-        impl RangeRequest for $type_ {
+        impl $crate::request::RangeRequest for $type_ {
             fn is_reverse(&self) -> bool {
                 self.reverse
             }
@@ -415,14 +415,16 @@ macro_rules! reversible_range_request {
 #[macro_export]
 macro_rules! shardable_range {
     ($type_: ty) => {
-        impl Shardable for $type_ {
+        impl $crate::request::Shardable for $type_ {
             type Shard = (Vec<u8>, Vec<u8>);
 
             fn shards(
                 &self,
-                pd_client: &Arc<impl $crate::pd::PdClient>,
-            ) -> BoxStream<'static, $crate::Result<(Self::Shard, $crate::region::RegionWithLeader)>>
-            {
+                pd_client: &std::sync::Arc<impl $crate::PdClient>,
+            ) -> futures::stream::BoxStream<
+                'static,
+                $crate::Result<(Self::Shard, $crate::RegionWithLeader)>,
+            > {
                 let mut start_key = self.start_key.clone().into();
                 let mut end_key = self.end_key.clone().into();
                 // In a reverse range request, the range is in the meaning of [end_key, start_key), i.e. end_key <= x < start_key.
