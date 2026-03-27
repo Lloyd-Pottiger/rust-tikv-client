@@ -55,6 +55,78 @@ async fn run_on_range_entry(
     runner.run_on_range(range).await
 }
 
+fn set_request_source_type_entry(txn: &mut transaction::Transaction, source_type: String) {
+    txn.set_request_source_type(source_type);
+}
+
+fn set_explicit_request_source_type_entry(txn: &mut transaction::Transaction, explicit: String) {
+    txn.set_explicit_request_source_type(explicit);
+}
+
+fn is_in_aggressive_locking_stage_entry(txn: &transaction::Transaction, key: &Key) -> bool {
+    txn.is_in_aggressive_locking_stage(key)
+}
+
+fn set_memory_footprint_change_hook_entry(txn: &mut transaction::Transaction) {
+    txn.set_memory_footprint_change_hook(|_| {});
+}
+
+async fn get_for_share_entry(
+    txn: &mut transaction::Transaction,
+    key: Vec<u8>,
+) -> tikv_client::Result<Option<tikv_client::Value>> {
+    txn.get_for_share(key).await
+}
+
+async fn batch_get_for_share_entry(
+    txn: &mut transaction::Transaction,
+    keys: Vec<Vec<u8>>,
+) -> tikv_client::Result<Vec<tikv_client::KvPair>> {
+    txn.batch_get_for_share(keys).await
+}
+
+async fn lock_keys_with_wait_timeout_entry(
+    txn: &mut transaction::Transaction,
+    keys: Vec<Vec<u8>>,
+    wait_timeout: transaction::LockWaitTimeout,
+) -> tikv_client::Result<()> {
+    txn.lock_keys_with_wait_timeout(keys, wait_timeout).await
+}
+
+async fn lock_keys_in_share_mode_entry(
+    txn: &mut transaction::Transaction,
+    keys: Vec<Vec<u8>>,
+) -> tikv_client::Result<()> {
+    txn.lock_keys_in_share_mode(keys).await
+}
+
+async fn lock_keys_in_share_mode_with_wait_timeout_entry(
+    txn: &mut transaction::Transaction,
+    keys: Vec<Vec<u8>>,
+    wait_timeout: transaction::LockWaitTimeout,
+) -> tikv_client::Result<()> {
+    txn.lock_keys_in_share_mode_with_wait_timeout(keys, wait_timeout)
+        .await
+}
+
+async fn retry_aggressive_locking_entry(
+    txn: &mut transaction::Transaction,
+) -> tikv_client::Result<()> {
+    txn.retry_aggressive_locking().await
+}
+
+async fn done_aggressive_locking_entry(
+    txn: &mut transaction::Transaction,
+) -> tikv_client::Result<()> {
+    txn.done_aggressive_locking().await
+}
+
+async fn cancel_aggressive_locking_entry(
+    txn: &mut transaction::Transaction,
+) -> tikv_client::Result<()> {
+    txn.cancel_aggressive_locking().await
+}
+
 #[test]
 fn transaction_module_exports_core_types_and_constants() {
     let _: Option<transaction::Client> = None;
@@ -277,6 +349,67 @@ fn transaction_module_exports_pipelined_and_request_metadata_option_builders() {
         .with(TraceControlFlags::TIKV_CATEGORY_REQUEST);
     assert_ne!(base.clone(), base.clone().trace_control_flags(flags));
     assert_ne!(base.clone(), base.sync_log(true));
+}
+
+#[test]
+fn transaction_module_exports_transaction_instance_method_entrypoints() {
+    let _: fn(&mut transaction::Transaction) =
+        transaction::Transaction::clear_replica_read_adjuster;
+    let _: fn(&mut transaction::Transaction, bool) =
+        transaction::Transaction::set_request_source_internal;
+    let _ = set_request_source_type_entry;
+    let _ = set_explicit_request_source_type_entry;
+    let _: fn(&mut transaction::Transaction) = transaction::Transaction::clear_disk_full_opt;
+    let _: fn(&mut transaction::Transaction, u64) = transaction::Transaction::set_session_id;
+    let _: fn(&mut transaction::Transaction, Arc<dyn transaction::KvFilter>) =
+        transaction::Transaction::set_kv_filter;
+    let _: fn(&mut transaction::Transaction) = transaction::Transaction::clear_kv_filter;
+    let _: fn(&mut transaction::Transaction) = transaction::Transaction::enable_force_sync_log;
+    let _: fn(&mut transaction::Transaction, Duration) =
+        transaction::Transaction::set_max_write_execution_duration;
+    let _: fn(&mut transaction::Transaction, i64) = transaction::Transaction::set_schema_ver;
+    let _: fn(&mut transaction::Transaction) = transaction::Transaction::clear_schema_ver;
+    let _: fn(&mut transaction::Transaction, Arc<dyn transaction::SchemaLeaseChecker>) =
+        transaction::Transaction::set_schema_lease_checker;
+    let _: fn(&mut transaction::Transaction) = transaction::Transaction::clear_schema_lease_checker;
+    let _: fn(&mut transaction::Transaction, bool) =
+        transaction::Transaction::set_enable_async_commit;
+    let _: fn(&mut transaction::Transaction, bool) = transaction::Transaction::set_enable_one_pc;
+    let _: fn(&mut transaction::Transaction, bool) =
+        transaction::Transaction::set_causal_consistency;
+    let _: fn(&transaction::Transaction) -> bool = transaction::Transaction::is_causal_consistency;
+    let _: fn(&mut transaction::Transaction, transaction::AssertionLevel) =
+        transaction::Transaction::set_assertion_level;
+    let _: fn(&mut transaction::Transaction, transaction::PrewriteEncounterLockPolicy) =
+        transaction::Transaction::set_prewrite_encounter_lock_policy;
+    let _: fn(&transaction::Transaction) -> Option<Timestamp> =
+        transaction::Transaction::commit_timestamp;
+    let _: fn(&transaction::Transaction) -> bool = transaction::Transaction::is_read_only;
+    let _: fn(&mut transaction::Transaction) -> tikv_client::Result<u64> =
+        transaction::Transaction::staging;
+    let _: fn(&mut transaction::Transaction, u64) -> tikv_client::Result<()> =
+        transaction::Transaction::release_staging;
+    let _: fn(&mut transaction::Transaction, u64) -> tikv_client::Result<()> =
+        transaction::Transaction::cleanup_staging;
+    let _ = set_memory_footprint_change_hook_entry;
+    let _: fn(&mut transaction::Transaction) =
+        transaction::Transaction::clear_memory_footprint_change_hook;
+    let _: fn(&transaction::Transaction) -> bool = transaction::Transaction::mem_hook_set;
+    let _: fn(&transaction::Transaction) -> bool = transaction::Transaction::is_pipelined;
+    let _ = is_in_aggressive_locking_stage_entry;
+
+    let _ = get_for_share_entry;
+    let _ = batch_get_for_share_entry;
+    let _ = lock_keys_with_wait_timeout_entry;
+    let _ = lock_keys_in_share_mode_entry;
+    let _ = lock_keys_in_share_mode_with_wait_timeout_entry;
+    let _: fn(&mut transaction::Transaction) -> tikv_client::Result<()> =
+        transaction::Transaction::start_aggressive_locking;
+    let _: fn(&transaction::Transaction) -> bool =
+        transaction::Transaction::is_in_aggressive_locking_mode;
+    let _ = retry_aggressive_locking_entry;
+    let _ = done_aggressive_locking_entry;
+    let _ = cancel_aggressive_locking_entry;
 }
 
 #[test]
