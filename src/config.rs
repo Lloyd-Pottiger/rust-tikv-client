@@ -180,8 +180,10 @@ fn from_hex_digit(digit: u8) -> crate::Result<u8> {
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum GrpcCompressionType {
+    /// Disable request and response compression.
     #[default]
     None,
+    /// Use gzip compression for gRPC payloads.
     Gzip,
 }
 
@@ -298,8 +300,15 @@ fn normalize_optional_path(path: impl Into<PathBuf>) -> Option<PathBuf> {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub struct Config {
+    /// Path to the PEM-encoded certificate authority bundle used to verify TiKV and PD servers.
+    ///
+    /// Leave this as `None` to use an insecure transport, matching client-go's default behavior.
     pub ca_path: Option<PathBuf>,
+    /// Path to the PEM-encoded client certificate presented during TLS handshakes.
+    ///
+    /// This is only used when [`Config::ca_path`] enables TLS.
     pub cert_path: Option<PathBuf>,
+    /// Path to the PEM-encoded private key paired with [`Config::cert_path`].
     pub key_path: Option<PathBuf>,
     /// Timeout applied to commit RPC requests.
     ///
@@ -336,6 +345,9 @@ pub struct Config {
     ///
     /// Defaults to 500ms (client-go default).
     pub async_commit_allowed_clock_drift: Duration,
+    /// Default timeout applied to TiKV gRPC requests that do not override it explicitly.
+    ///
+    /// This maps to client-go `TiKVClient.ApiTimeout`.
     pub timeout: Duration,
     /// Timeout applied to PD requests (client-go `config.PDClient.PDServerTimeout`).
     ///
@@ -414,6 +426,9 @@ pub struct Config {
     /// When exhausted, new timestamp requests will apply backpressure until pending requests are
     /// drained.
     pub tso_max_pending_count: usize,
+    /// Maximum inbound gRPC message size accepted from TiKV, in bytes.
+    ///
+    /// This maps to client-go `MaxCallRecvMsgSize`.
     pub grpc_max_decoding_message_size: usize,
     /// The maximum number of gRPC connections established with each TiKV server (client-go
     /// `GrpcConnectionCount`).
@@ -522,7 +537,15 @@ pub struct Config {
     ///
     /// Set to `0` to use `tonic`/`hyper`'s defaults.
     pub grpc_initial_conn_window_size: u32,
+    /// Optional keyspace name attached to requests sent through this client.
+    ///
+    /// When present, the client resolves the name to a keyspace ID during connect time and prefixes
+    /// user keys accordingly.
     pub keyspace: Option<String>,
+    /// Maximum lock count for the lightweight resolve-lock path.
+    ///
+    /// When the server reports more locks than this threshold, the client falls back to the
+    /// regular lock-resolution flow instead of the lighter single-batch path.
     pub resolve_lock_lite_threshold: u64,
     /// Transaction size threshold for starting the automatic transaction heartbeat loop.
     ///

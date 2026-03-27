@@ -97,9 +97,13 @@ impl fmt::Display for Config {
 /// This is a Rust-friendly mirror of client-go `config/retry` jitter constants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BackoffJitter {
+    /// Apply no jitter and use the raw exponential delay.
     NoJitter,
+    /// Randomize uniformly between zero and the current exponential delay.
     FullJitter,
+    /// Keep half of the exponential delay and randomize the other half.
     EqualJitter,
+    /// Randomize based on the previous sleep to avoid synchronized retries.
     DecorrJitter,
 }
 
@@ -122,8 +126,11 @@ pub const DECORR_JITTER: BackoffJitter = BackoffJitter::DecorrJitter;
 /// to convert this into a Rust [`Backoff`] schedule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BackoffFnCfg {
+    /// Initial delay, in milliseconds, before applying the jitter policy.
     pub base_delay_ms: u64,
+    /// Upper bound, in milliseconds, for any single computed delay.
     pub max_delay_ms: u64,
+    /// Jitter strategy used when expanding delays between retry attempts.
     pub jitter: BackoffJitter,
 }
 
