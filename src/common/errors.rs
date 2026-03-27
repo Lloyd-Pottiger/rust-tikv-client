@@ -623,7 +623,12 @@ pub enum Error {
     ///
     /// This mirrors client-go `tikverr.ErrTxnAbortedByGC`.
     #[error("transaction aborted by gc (start_ts={start_ts}, safe_point={safe_point})")]
-    TxnAbortedByGc { start_ts: u64, safe_point: u64 },
+    TxnAbortedByGc {
+        /// Transaction start timestamp that fell behind GC.
+        start_ts: u64,
+        /// GC safe point that made the transaction invalid.
+        safe_point: u64,
+    },
     /// We tried to use 1pc for a transaction, but it didn't work. Probably should have used 2pc.
     #[error("1PC transaction could not be committed.")]
     OnePcFailure,
@@ -635,8 +640,10 @@ pub enum Error {
         "The operation is not supported in current mode, please consider using RawClient with or without atomic mode"
     )]
     UnsupportedMode,
+    /// `EpochNotMatch` did not include any replacement regions.
     #[error("There is no current_regions in the EpochNotMatch error")]
     NoCurrentRegions,
+    /// The requested entry was missing from the local region cache.
     #[error("The specified entry is not found in the region cache")]
     EntryNotFoundInRegionCache,
     /// Wraps a `std::io::Error`.
@@ -675,7 +682,10 @@ pub enum Error {
     /// This mirrors client-go `ErrWriteConflictInLatch` and indicates that the transaction should
     /// be retried with a new start timestamp.
     #[error("write conflict in latch (start_ts={start_ts})")]
-    WriteConflictInLatch { start_ts: u64 },
+    WriteConflictInLatch {
+        /// Transaction start timestamp that lost the latch race.
+        start_ts: u64,
+    },
     /// Assertion failed detected when committing or prewriting a transaction.
     #[error("{0}")]
     AssertionFailed(AssertionFailedError),
@@ -696,25 +706,52 @@ pub enum Error {
     JoinError(#[from] tokio::task::JoinError),
     /// No region is found for the given key.
     #[error("Region is not found for key: {:?}", key)]
-    RegionForKeyNotFound { key: Vec<u8> },
+    RegionForKeyNotFound {
+        /// Encoded key that could not be mapped to a region.
+        key: Vec<u8>,
+    },
+    /// No region is found for the given range.
     #[error("Region is not found for range: {:?}", range)]
-    RegionForRangeNotFound { range: BoundRange },
+    RegionForRangeNotFound {
+        /// Range that could not be mapped to any region.
+        range: BoundRange,
+    },
     /// No region is found for the given id. note: distinguish it with the RegionNotFound error in errorpb.
     #[error("Region {} is not found in the response", region_id)]
-    RegionNotFoundInResponse { region_id: u64 },
+    RegionNotFoundInResponse {
+        /// Region id that was expected in the response.
+        region_id: u64,
+    },
     /// No leader is found for the given id.
     #[error("Leader of region {} is not found", region.id)]
-    LeaderNotFound { region: RegionVerId },
+    LeaderNotFound {
+        /// Region whose leader metadata was missing.
+        region: RegionVerId,
+    },
     /// Scan limit exceeds the maximum
     #[error("Limit {} exceeds max scan limit {}", limit, max_limit)]
-    MaxScanLimitExceeded { limit: u32, max_limit: u32 },
+    MaxScanLimitExceeded {
+        /// Scan limit requested by the caller.
+        limit: u32,
+        /// Maximum limit accepted by the client/server contract.
+        max_limit: u32,
+    },
+    /// Wraps an invalid semantic-version string.
     #[error("Invalid Semver string: {0:?}")]
     InvalidSemver(#[from] semver::Error),
     /// A string error returned by TiKV server
     #[error("Kv error. {}", message)]
-    KvError { message: String },
+    KvError {
+        /// Error message returned by TiKV.
+        message: String,
+    },
+    /// Internal client error used for invariant violations and unexpected states.
     #[error("{}", message)]
-    InternalError { message: String },
+    InternalError {
+        /// Human-readable description of the internal failure.
+        message: String,
+    },
+    /// Opaque string-based error preserved for compatibility with existing call sites.
     #[error("{0}")]
     StringError(String),
     /// A read timestamp is in the future.
@@ -731,7 +768,10 @@ pub enum Error {
     ///
     /// This mirrors client-go `tikverr.ErrCommitTSLag`.
     #[error("{message}")]
-    CommitTsLag { message: String },
+    CommitTsLag {
+        /// Server-provided description of the commit-ts lag condition.
+        message: String,
+    },
     /// Store token is up to the limit.
     ///
     /// This mirrors client-go `tikverr.ErrTokenLimit`.
@@ -751,13 +791,18 @@ pub enum Error {
     /// Commit timestamp is required but not returned.
     #[error("commit timestamp is required but not returned")]
     CommitTsRequiredButNotReturned,
+    /// Pessimistic-lock RPC returned partial success together with an error.
     #[error("PessimisticLock error: {:?}", inner)]
     PessimisticLockError {
+        /// Underlying pessimistic-lock error.
         inner: Box<Error>,
+        /// Keys that were locked successfully before the error occurred.
         success_keys: Vec<Vec<u8>>,
     },
+    /// Requested keyspace does not exist in PD metadata.
     #[error("Keyspace not found: {0}")]
     KeyspaceNotFound(String),
+    /// Transaction metadata lookup reported a missing transaction.
     #[error("Transaction not found error: {:?}", _0)]
     TxnNotFound(kvrpcpb::TxnNotFound),
     /// Attempted to create or use the sync client (including calling its methods) from within a Tokio async runtime context
