@@ -6,6 +6,16 @@ use tikv_client::config;
 #[test]
 fn config_module_exports_types_and_global_helpers() {
     let _ = config::GrpcCompressionType::None;
+    let _: Duration = config::DEF_STORE_LIVENESS_TIMEOUT;
+    let _: u32 = config::DEF_GRPC_INITIAL_WINDOW_SIZE;
+    let _: u32 = config::DEF_GRPC_INITIAL_CONN_WINDOW_SIZE;
+    let _: i64 = config::DEF_MAX_CONCURRENCY_REQUEST_LIMIT;
+    let _: &str = config::DEF_BATCH_POLICY;
+    let _: &str = config::BATCH_POLICY_BASIC;
+    let _: &str = config::BATCH_POLICY_STANDARD;
+    let _: &str = config::BATCH_POLICY_POSITIVE;
+    let _: &str = config::BATCH_POLICY_CUSTOM;
+    assert_eq!(config::DEF_BATCH_POLICY, config::BATCH_POLICY_STANDARD);
 
     let security = config::Security::new("ca", "cert", "key", std::iter::empty::<&str>());
     let _ = security.apply_to_config(config::Config::default());

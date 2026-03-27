@@ -622,6 +622,62 @@ pub(crate) const DEFAULT_TTL_REFRESHED_TXN_SIZE: u64 = 32 * 1024 * 1024;
 const DEFAULT_REGION_CACHE_TTL: Duration = Duration::from_secs(600);
 const DEFAULT_REGION_CACHE_TTL_JITTER: Duration = Duration::from_secs(60);
 
+/// Default store liveness timeout.
+///
+/// This mirrors client-go `config.DefStoreLivenessTimeout` (value: `1s`).
+#[doc(alias = "DefStoreLivenessTimeout")]
+pub const DEF_STORE_LIVENESS_TIMEOUT: Duration = DEFAULT_STORE_LIVENESS_TIMEOUT;
+
+/// Default gRPC initial window size.
+///
+/// This mirrors client-go `config.DefGrpcInitialWindowSize`.
+#[doc(alias = "DefGrpcInitialWindowSize")]
+pub const DEF_GRPC_INITIAL_WINDOW_SIZE: u32 = DEFAULT_GRPC_INITIAL_WINDOW_SIZE;
+
+/// Default gRPC initial connection window size.
+///
+/// This mirrors client-go `config.DefGrpcInitialConnWindowSize`.
+#[doc(alias = "DefGrpcInitialConnWindowSize")]
+pub const DEF_GRPC_INITIAL_CONN_WINDOW_SIZE: u32 = DEFAULT_GRPC_INITIAL_CONN_WINDOW_SIZE;
+
+/// Default max concurrency request limit.
+///
+/// This mirrors client-go `config.DefMaxConcurrencyRequestLimit`.
+#[doc(alias = "DefMaxConcurrencyRequestLimit")]
+pub const DEF_MAX_CONCURRENCY_REQUEST_LIMIT: i64 = DEFAULT_MAX_CONCURRENCY_REQUEST_LIMIT;
+
+/// Batch policy string: basic.
+///
+/// This mirrors client-go `config.BatchPolicyBasic`.
+#[doc(alias = "BatchPolicyBasic")]
+pub const BATCH_POLICY_BASIC: &str = "basic";
+
+/// Batch policy string: standard.
+///
+/// This mirrors client-go `config.BatchPolicyStandard`.
+#[doc(alias = "BatchPolicyStandard")]
+pub const BATCH_POLICY_STANDARD: &str = "standard";
+
+/// Batch policy string: positive.
+///
+/// This mirrors client-go `config.BatchPolicyPositive`.
+#[doc(alias = "BatchPolicyPositive")]
+pub const BATCH_POLICY_POSITIVE: &str = "positive";
+
+/// Batch policy string: custom.
+///
+/// This mirrors client-go `config.BatchPolicyCustom`.
+///
+/// Note: the Rust client accepts `"custom {json}"` as a best-effort extension.
+#[doc(alias = "BatchPolicyCustom")]
+pub const BATCH_POLICY_CUSTOM: &str = "custom";
+
+/// Default batch policy.
+///
+/// This mirrors client-go `config.DefBatchPolicy`.
+#[doc(alias = "DefBatchPolicy")]
+pub const DEF_BATCH_POLICY: &str = BATCH_POLICY_STANDARD;
+
 impl Default for Config {
     fn default() -> Self {
         Config {
