@@ -421,6 +421,10 @@ impl<Client> RegionCache<Client> {
         self.pd_region_meta_circuit_breaker.clone()
     }
 
+    /// Remove all cached region and store metadata.
+    ///
+    /// This is primarily useful for tests, diagnostics, or callers that need to force subsequent
+    /// lookups down the normal read-through path.
     pub async fn clear(&self) {
         let mut region_cache = self.region_cache.write().await;
         *region_cache = RegionCacheMap::new();
@@ -1525,6 +1529,9 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         true
     }
 
+    /// Update the cached leader peer for a known region version.
+    ///
+    /// If the region is no longer cached, this is a no-op.
     pub async fn update_leader(
         &self,
         ver_id: crate::region::RegionVerId,
@@ -1539,6 +1546,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Ok(())
     }
 
+    /// Remove a single cached region entry and any associated bucket metadata.
     pub async fn invalidate_region_cache(&self, ver_id: crate::region::RegionVerId) {
         stats::region_cache_operation("invalidate_region_from_cache", true);
         trace::trace_if_enabled(
@@ -1568,12 +1576,17 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         }
     }
 
+    /// Drop one cached store entry so the next lookup reloads it from PD.
     pub async fn invalidate_store_cache(&self, store_id: StoreId) {
         stats::region_cache_operation("invalidate_store_regions", true);
         let mut cache = self.store_cache.write().await;
         cache.remove(&store_id);
     }
 
+    /// Reload all valid TiKV stores from PD and refresh the local store cache.
+    ///
+    /// TiFlash and tombstone stores are filtered out to match the regular TiKV store view used by
+    /// request dispatch.
     pub async fn read_through_all_stores(&self) -> Result<Vec<Store>> {
         let stores = self
             .inner_client
@@ -1592,6 +1605,9 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Ok(stores)
     }
 
+    /// Reload all stores relevant to safe-ts observation from PD.
+    ///
+    /// This keeps TiFlash stores, but still filters out tombstone and TiFlash compute-only stores.
     pub async fn read_through_all_stores_for_safe_ts(&self) -> Result<Vec<Store>> {
         let stores = self
             .inner_client
