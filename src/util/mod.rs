@@ -90,6 +90,7 @@ pub use misc::SessionID;
 pub use option::none;
 pub use option::some;
 pub use option::Option;
+pub use rate_limit::new_rate_limit;
 pub use rate_limit::RateLimit;
 pub use rate_limit::RateLimitError;
 pub use rate_limit::RateLimitPermit;

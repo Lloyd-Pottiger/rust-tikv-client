@@ -48,6 +48,15 @@ impl RateLimit {
     }
 }
 
+/// Create a new limiter with `capacity` concurrent permits.
+///
+/// This mirrors client-go `util.NewRateLimit` while reusing [`RateLimit::new`].
+#[doc(alias = "NewRateLimit")]
+#[must_use]
+pub fn new_rate_limit(capacity: usize) -> RateLimit {
+    RateLimit::new(capacity)
+}
+
 /// Errors returned by [`RateLimit`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RateLimitError {
@@ -107,5 +116,14 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(1));
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
+    }
+
+    #[test]
+    fn test_new_rate_limit_delegates_to_inherent_constructor() {
+        let helper = new_rate_limit(2);
+        let direct = RateLimit::new(2);
+
+        assert_eq!(helper.capacity(), direct.capacity());
+        assert!(helper.try_acquire().unwrap().is_some());
     }
 }
