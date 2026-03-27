@@ -162,7 +162,10 @@ pub enum RunLoopExecError {
     AlreadyExecuting,
     /// Execution was cancelled after the given number of tasks had already run.
     #[error("runloop: cancelled")]
-    Cancelled { executed: usize },
+    Cancelled {
+        /// The number of queued tasks that completed before cancellation was observed.
+        executed: usize,
+    },
 }
 
 impl RunLoopExecError {

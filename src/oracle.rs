@@ -31,10 +31,12 @@ pub const GLOBAL_TXN_SCOPE: &str = "global";
 /// This mirrors client-go `oracle.Option`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OracleOption {
+    /// The transaction scope to send when requesting timestamps from PD.
     pub txn_scope: String,
 }
 
 impl OracleOption {
+    /// Create default oracle options using [`GLOBAL_TXN_SCOPE`].
     pub fn new() -> OracleOption {
         OracleOption::default()
     }
@@ -188,8 +190,10 @@ pub fn extract_logical(ts: u64) -> i64 {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TimeConversionError {
     #[error("duration overflow")]
+    /// The elapsed duration cannot be represented in the target integer range.
     DurationOverflow,
     #[error("time overflow")]
+    /// The converted timestamp or wall-clock time would overflow the target type.
     TimeOverflow,
 }
 
@@ -283,7 +287,9 @@ pub fn until_expired_ms(lock_ts: u64, ttl_ms: u64, current_ts: u64) -> i64 {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("cannot set read timestamp to a future time, readTS: {read_ts}, currentTS: {current_ts}")]
 pub struct ErrFutureTsRead {
+    /// The requested read timestamp that lies in the future.
     pub read_ts: u64,
+    /// The current timestamp observed when validating the request.
     pub current_ts: u64,
 }
 

@@ -14,7 +14,9 @@ use crate::proto::kvrpcpb;
 /// This mirrors the client-go `util/redact` surface at a high level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RedactMode {
+    /// Leave keys and other sensitive values unredacted.
     Disable = 0,
+    /// Replace sensitive values with redacted representations.
     Enable = 1,
 }
 
