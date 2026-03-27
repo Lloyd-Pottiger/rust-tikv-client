@@ -125,12 +125,15 @@ impl<Req: KvRequest + Shardable> Shardable for Dispatch<Req> {
         Dispatch {
             request: self.request.clone_then_apply_shard(shard),
             kv_client: self.kv_client.clone(),
+            resource_control_request_metadata: self.resource_control_request_metadata,
         }
     }
 
     fn apply_store(&mut self, store: &RegionStore) -> Result<()> {
         let is_retry_request = self.kv_client.is_some();
         self.kv_client = Some(store.client.clone());
+        self.resource_control_request_metadata =
+            Some(super::plan::resource_control_request_metadata_for_region_store(store));
         self.request.apply_store(store)?;
         if is_retry_request {
             self.request.set_is_retry_request(true);
@@ -161,6 +164,7 @@ impl<Req: KvRequest + Shardable> Shardable for DispatchWithInterceptor<Req> {
             request: self.request.clone_then_apply_shard(shard),
             kv_client: self.kv_client.clone(),
             store_address: self.store_address.clone(),
+            resource_control_request_metadata: self.resource_control_request_metadata,
             rpc_interceptors: self.rpc_interceptors.clone(),
         }
     }
@@ -169,6 +173,8 @@ impl<Req: KvRequest + Shardable> Shardable for DispatchWithInterceptor<Req> {
         let is_retry_request = self.kv_client.is_some();
         self.kv_client = Some(store.client.clone());
         self.store_address = Some(store.store_address.clone());
+        self.resource_control_request_metadata =
+            Some(super::plan::resource_control_request_metadata_for_region_store(store));
         self.request.apply_store(store)?;
         if is_retry_request {
             self.request.set_is_retry_request(true);

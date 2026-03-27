@@ -36,11 +36,34 @@ use crate::BoundRange;
 use crate::Key;
 use crate::Result;
 
-#[derive(new, Clone)]
+#[derive(Clone)]
 pub struct RegionStore {
     pub region_with_leader: RegionWithLeader,
     pub client: Arc<dyn KvClient + Send + Sync>,
     pub store_address: String,
+    pub target_store: Option<metapb::Store>,
+}
+
+impl RegionStore {
+    #[must_use]
+    pub fn new(
+        region_with_leader: RegionWithLeader,
+        client: Arc<dyn KvClient + Send + Sync>,
+        store_address: String,
+    ) -> Self {
+        Self {
+            region_with_leader,
+            client,
+            store_address,
+            target_store: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_store_meta(mut self, target_store: metapb::Store) -> Self {
+        self.target_store = Some(target_store);
+        self
+    }
 }
 
 #[derive(new, Clone)]

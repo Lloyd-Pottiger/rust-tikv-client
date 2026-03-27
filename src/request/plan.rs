@@ -296,6 +296,7 @@ pub trait Plan: Sized + Clone + Sync + Send + 'static {
 pub struct Dispatch<Req: KvRequest> {
     pub request: Req,
     pub kv_client: Option<Arc<dyn KvClient + Send + Sync>>,
+    pub(crate) resource_control_request_metadata: Option<ResourceControlRequestMetadata>,
 }
 
 #[async_trait]
@@ -396,7 +397,11 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
 
         let request_info = {
             let request_ref = request.as_ref().unwrap_or(&self.request);
-            make_resource_control_request_info(label, request_ref)
+            make_resource_control_request_info(
+                label,
+                request_ref,
+                self.resource_control_request_metadata,
+            )
         };
 
         if let (Some(resource_control), Some(request)) =
@@ -563,6 +568,7 @@ pub struct DispatchWithInterceptor<Req: KvRequest> {
     pub request: Req,
     pub kv_client: Option<Arc<dyn KvClient + Send + Sync>>,
     pub store_address: Option<String>,
+    pub(crate) resource_control_request_metadata: Option<ResourceControlRequestMetadata>,
     pub rpc_interceptors: RpcInterceptors,
 }
 
@@ -664,7 +670,11 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
 
             let request_info = {
                 let request_ref = request.as_ref().unwrap_or(&self.request);
-                make_resource_control_request_info(label, request_ref)
+                make_resource_control_request_info(
+                    label,
+                    request_ref,
+                    self.resource_control_request_metadata,
+                )
             };
 
             if let (Some(resource_control), Some(request)) =
@@ -894,7 +904,11 @@ impl<Req: KvRequest> Plan for DispatchWithInterceptor<Req> {
         {
             resource_control = None;
         }
-        let request_info = make_resource_control_request_info(label, &request);
+        let request_info = make_resource_control_request_info(
+            label,
+            &request,
+            self.resource_control_request_metadata,
+        );
         if let Some(resource_control) = resource_control.as_ref() {
             let wait_result = match resource_control.on_request_wait(&request_info).await {
                 Ok(result) => result,
@@ -1207,9 +1221,25 @@ fn exec_details_v2_from_response(resp: &dyn Any) -> Option<&kvrpcpb::ExecDetails
     None
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResourceControlRequestMetadata {
+    replica_number: u64,
+    access_location_type: crate::AccessLocationType,
+}
+
+impl Default for ResourceControlRequestMetadata {
+    fn default() -> Self {
+        Self {
+            replica_number: 0,
+            access_location_type: crate::AccessLocationType::Unknown,
+        }
+    }
+}
+
 fn make_resource_control_request_info(
     label: &'static str,
     request: &dyn crate::store::Request,
+    metadata: Option<ResourceControlRequestMetadata>,
 ) -> crate::resource_control::ResourceControlRequestInfo {
     let request_size = u64::try_from(request.encoded_len()).unwrap_or(u64::MAX);
     let store_id = request
@@ -1217,8 +1247,17 @@ fn make_resource_control_request_info(
         .and_then(|ctx| ctx.peer.as_ref())
         .map(|peer| peer.store_id)
         .unwrap_or(0);
+    let bypass = request
+        .context()
+        .map(|ctx| ctx.request_source.contains("internal_others"))
+        .unwrap_or(false)
+        || should_bypass_resource_control_for_request(request);
+    let metadata = metadata.unwrap_or_default();
     crate::resource_control::ResourceControlRequestInfo::new(label, request_size, store_id)
         .with_write_bytes(transaction_write_bytes(request.as_any()))
+        .with_replica_number(metadata.replica_number)
+        .with_access_location_type(metadata.access_location_type)
+        .with_bypass(bypass)
 }
 
 fn transaction_write_bytes(request: &dyn Any) -> u64 {
@@ -1249,6 +1288,43 @@ fn transaction_write_bytes(request: &dyn Any) -> u64 {
     }
 
     0
+}
+
+pub(crate) fn resource_control_request_metadata_for_region_store(
+    store: &RegionStore,
+) -> ResourceControlRequestMetadata {
+    let replica_number = if store.region_with_leader.region.peers.is_empty() {
+        1
+    } else {
+        u64::try_from(
+            store
+                .region_with_leader
+                .region
+                .peers
+                .iter()
+                .filter(|peer| {
+                    peer.role == metapb::PeerRole::Voter as i32
+                        || peer.role == metapb::PeerRole::Learner as i32
+                })
+                .count(),
+        )
+        .unwrap_or(u64::MAX)
+    };
+    let access_location_type = store
+        .target_store
+        .as_ref()
+        .map(|target_store| {
+            crate::store_vars::access_location_type(
+                crate::config::get_global_config().zone_label.as_deref(),
+                &target_store.labels,
+            )
+        })
+        .unwrap_or(crate::AccessLocationType::Unknown);
+
+    ResourceControlRequestMetadata {
+        replica_number,
+        access_location_type,
+    }
 }
 
 fn make_resource_control_response_info(
@@ -2601,14 +2677,14 @@ where
         let (region_store, send_store_id) = match (async {
             if should_forward {
                 let leader_store_id = leader_store_id.unwrap_or_default();
-                let leader_address = match pd_client.store_meta_by_id_cached(leader_store_id) {
-                    Some(store) => store.address,
-                    None => pd_client
-                        .store_meta_by_id(leader_store_id)
-                        .await
-                        .map(|store| store.address)
-                        .unwrap_or_default(),
+                let leader_store_meta = match pd_client.store_meta_by_id_cached(leader_store_id) {
+                    Some(store) => Some(store),
+                    None => pd_client.store_meta_by_id(leader_store_id).await.ok(),
                 };
+                let leader_address = leader_store_meta
+                    .as_ref()
+                    .map(|store| store.address.clone())
+                    .unwrap_or_default();
 
                 if !leader_address.is_empty() {
                     let mut proxy_peer = None;
@@ -2644,11 +2720,18 @@ where
                                 proxy_store.client.clone(),
                                 proxy_store_id,
                                 leader_store_id,
-                                leader_address,
+                                leader_address.clone(),
                             ));
 
                         let region_store =
-                            RegionStore::new(region, client, proxy_store.store_address);
+                            RegionStore::new(region, client, proxy_store.store_address)
+                                .with_store_meta(leader_store_meta.clone().unwrap_or_else(|| {
+                                    metapb::Store {
+                                        id: leader_store_id,
+                                        address: leader_address.clone(),
+                                        ..Default::default()
+                                    }
+                                }));
                         plan.apply_store(&region_store)?;
                         if let Some(replica_read_type) = replica_read_type {
                             if let Some(ctx) = plan.kv_context_mut() {
@@ -4553,6 +4636,7 @@ mod test {
         let plan = Dispatch {
             request: SourceMetricTestRequest { context: Some(ctx) },
             kv_client: Some(kv),
+            resource_control_request_metadata: None,
         };
 
         let result = plan.execute().await;
@@ -4605,6 +4689,7 @@ mod test {
         let plan = Dispatch {
             request: TraceTestRequest,
             kv_client: Some(kv),
+            resource_control_request_metadata: None,
         };
 
         crate::util::with_exec_details(details.clone(), async move {
@@ -4640,6 +4725,7 @@ mod test {
         let plan = DispatchWithInterceptor {
             request: TraceTestRequest,
             kv_client: Some(std::sync::Arc::new(kv)),
+            resource_control_request_metadata: None,
             store_address: Some("test-store".to_owned()),
             rpc_interceptors,
         };
@@ -4703,6 +4789,7 @@ mod test {
         let plan = Dispatch {
             request: TraceTestRequest,
             kv_client: None,
+            resource_control_request_metadata: None,
         };
         let permits = std::sync::Arc::new(Semaphore::new(1));
         let match_store_ids = std::sync::Arc::new(Vec::new());
@@ -4812,6 +4899,7 @@ mod test {
         let plan = Dispatch {
             request,
             kv_client: None,
+            resource_control_request_metadata: None,
         };
 
         let permits = std::sync::Arc::new(Semaphore::new(1));
@@ -4938,6 +5026,7 @@ mod test {
         let plan = Dispatch {
             request,
             kv_client: None,
+            resource_control_request_metadata: None,
         };
         let permits = Arc::new(Semaphore::new(1));
         let match_store_ids = Arc::new(Vec::new());
@@ -5031,6 +5120,7 @@ mod test {
         let plan = Dispatch {
             request,
             kv_client: None,
+            resource_control_request_metadata: None,
         };
 
         let permits = std::sync::Arc::new(Semaphore::new(1));
@@ -5128,6 +5218,7 @@ mod test {
         let plan = Dispatch {
             request,
             kv_client: None,
+            resource_control_request_metadata: None,
         };
 
         let permits = std::sync::Arc::new(Semaphore::new(1));
@@ -5250,6 +5341,7 @@ mod test {
             inner: Dispatch {
                 request: MultiShardTrafficRequest,
                 kv_client: None,
+                resource_control_request_metadata: None,
             },
             pd_client,
             backoff: Backoff::no_backoff(),
@@ -5322,6 +5414,7 @@ mod test {
             let plan = Dispatch {
                 request: TraceTestRequest,
                 kv_client: Some(std::sync::Arc::new(kv)),
+                resource_control_request_metadata: None,
             };
 
             let _ = plan.execute().await.unwrap();
@@ -5444,6 +5537,7 @@ mod test {
             let plan = Dispatch {
                 request,
                 kv_client: Some(std::sync::Arc::new(kv)),
+                resource_control_request_metadata: None,
             };
 
             let _ = plan.execute().await.unwrap();
@@ -5531,6 +5625,7 @@ mod test {
             let plan = Dispatch {
                 request,
                 kv_client: Some(std::sync::Arc::new(kv)),
+                resource_control_request_metadata: None,
             };
 
             let _ = plan.execute().await.unwrap();
@@ -5606,6 +5701,7 @@ mod test {
         let plan = Dispatch {
             request: TraceTestRequest,
             kv_client: Some(std::sync::Arc::new(kv)),
+            resource_control_request_metadata: None,
         };
 
         crate::trace::with_trace_id(trace_id, async {
@@ -5699,6 +5795,7 @@ mod test {
         let plan = DispatchWithInterceptor {
             request: req,
             kv_client: Some(std::sync::Arc::new(kv)),
+            resource_control_request_metadata: None,
             store_address: Some("test-store".to_owned()),
             rpc_interceptors,
         };
@@ -5811,6 +5908,7 @@ mod test {
         let plan = Dispatch {
             request: req,
             kv_client: Some(std::sync::Arc::new(kv)),
+            resource_control_request_metadata: None,
         };
         crate::trace::with_trace_id(trace_id, async {
             let _ = plan.execute().await.unwrap();
@@ -5892,6 +5990,7 @@ mod test {
         let plan = Dispatch {
             request: req,
             kv_client: Some(std::sync::Arc::new(kv)),
+            resource_control_request_metadata: None,
         };
         crate::trace::with_trace_id(trace_id, async {
             let _ = plan.execute().await.unwrap();
@@ -8097,6 +8196,7 @@ mod test {
         let plan = Dispatch {
             request,
             kv_client: None,
+            resource_control_request_metadata: None,
         };
         let permits = Arc::new(Semaphore::new(1));
         let match_store_ids = Arc::new(Vec::new());
@@ -8215,6 +8315,7 @@ mod test {
         let plan = Dispatch {
             request: kvrpcpb::GetRequest::default(),
             kv_client: None,
+            resource_control_request_metadata: None,
         };
 
         let err = plan.execute().await.unwrap_err();
@@ -8233,6 +8334,7 @@ mod test {
         let plan = Dispatch {
             request: kvrpcpb::GetRequest::default(),
             kv_client: Some(kv_client),
+            resource_control_request_metadata: None,
         };
 
         let err = plan.execute().await.unwrap_err();
@@ -8530,6 +8632,9 @@ mod test {
         expected_label: &'static str,
         expected_cmd_type: crate::CmdType,
         expected_write_bytes: u64,
+        expected_replica_number: u64,
+        expected_access_location_type: crate::AccessLocationType,
+        expected_bypass: bool,
         expected_read_bytes: u64,
         expected_kv_cpu: Duration,
     }
@@ -8601,6 +8706,12 @@ mod test {
             assert_eq!(request.label(), self.expected_label);
             assert_eq!(request.cmd_type(), self.expected_cmd_type);
             assert_eq!(request.write_bytes(), self.expected_write_bytes);
+            assert_eq!(request.replica_number(), self.expected_replica_number);
+            assert_eq!(
+                request.access_location_type(),
+                self.expected_access_location_type
+            );
+            assert_eq!(request.bypass(), self.expected_bypass);
             Ok(crate::ResourceControlRequestWaitResult::default())
         }
 
@@ -8663,6 +8774,7 @@ mod test {
         let plan = Dispatch {
             request,
             kv_client: Some(Arc::new(kv_client)),
+            resource_control_request_metadata: None,
         };
 
         plan.execute().await.unwrap();
@@ -8711,6 +8823,7 @@ mod test {
         let plan = Dispatch {
             request,
             kv_client: Some(Arc::new(kv_client)),
+            resource_control_request_metadata: None,
         };
 
         let ru_details = Arc::new(crate::util::RUDetails::new());
@@ -8770,6 +8883,7 @@ mod test {
         let plan = Dispatch {
             request,
             kv_client: Some(Arc::new(kv_client)),
+            resource_control_request_metadata: None,
         };
 
         plan.execute().await.unwrap();
@@ -8823,6 +8937,7 @@ mod test {
         let plan = DispatchWithInterceptor {
             request,
             kv_client: Some(Arc::new(kv_client)),
+            resource_control_request_metadata: None,
             store_address: Some("mock://tikv".to_owned()),
             rpc_interceptors,
         };
@@ -8873,6 +8988,7 @@ mod test {
         let plan = DispatchWithInterceptor {
             request,
             kv_client: Some(Arc::new(kv_client)),
+            resource_control_request_metadata: None,
             store_address: Some("mock://tikv".to_owned()),
             rpc_interceptors,
         };
@@ -8896,6 +9012,9 @@ mod test {
                 expected_label: "kv_prewrite",
                 expected_cmd_type: crate::CmdType::Prewrite,
                 expected_write_bytes: 16,
+                expected_replica_number: 0,
+                expected_access_location_type: crate::AccessLocationType::Unknown,
+                expected_bypass: false,
                 expected_read_bytes: 0,
                 expected_kv_cpu: Duration::ZERO,
             },
@@ -8933,6 +9052,7 @@ mod test {
         let plan = Dispatch {
             request,
             kv_client: Some(Arc::new(kv_client)),
+            resource_control_request_metadata: None,
         };
 
         plan.execute().await.unwrap();
@@ -8954,6 +9074,9 @@ mod test {
                 expected_label: "kv_get",
                 expected_cmd_type: crate::CmdType::Get,
                 expected_write_bytes: 0,
+                expected_replica_number: 0,
+                expected_access_location_type: crate::AccessLocationType::Unknown,
+                expected_bypass: false,
                 expected_read_bytes: 123,
                 expected_kv_cpu: Duration::from_nanos(456),
             },
@@ -8999,7 +9122,109 @@ mod test {
         let plan = Dispatch {
             request,
             kv_client: Some(Arc::new(kv_client)),
+            resource_control_request_metadata: None,
         };
+
+        plan.execute().await.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["request_wait", "response_wait"]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_dispatch_exposes_resource_control_region_metadata() {
+        let _lock = crate::config::GLOBAL_CONFIG_TEST_LOCK.lock().await;
+        let _guard = set_global_config_scoped(crate::Config::default().with_zone_label("zone-a"));
+        let _reset = ResourceControlReset;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        crate::set_resource_control_interceptor(Arc::new(
+            MetadataAssertingResourceControlInterceptor {
+                calls: Arc::clone(&calls),
+                expected_label: "kv_get",
+                expected_cmd_type: crate::CmdType::Get,
+                expected_write_bytes: 0,
+                expected_replica_number: 3,
+                expected_access_location_type: crate::AccessLocationType::CrossZone,
+                expected_bypass: false,
+                expected_read_bytes: 0,
+                expected_kv_cpu: Duration::ZERO,
+            },
+        ));
+        crate::enable_resource_control();
+
+        let kv_client = MockKvClient::with_dispatch_hook(|req| {
+            let req = req
+                .downcast_ref::<crate::proto::kvrpcpb::GetRequest>()
+                .unwrap();
+            assert_eq!(req.key, b"k".to_vec());
+            Ok(Box::new(crate::proto::kvrpcpb::GetResponse::default()))
+        });
+
+        let request = crate::proto::kvrpcpb::GetRequest {
+            key: b"k".to_vec(),
+            context: Some(crate::proto::kvrpcpb::Context {
+                request_source: "external_test".to_owned(),
+                resource_control_context: Some(crate::proto::kvrpcpb::ResourceControlContext {
+                    resource_group_name: "rg-rc-test".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut plan = Dispatch {
+            request,
+            kv_client: None,
+            resource_control_request_metadata: None,
+        };
+        let store = RegionStore::new(
+            RegionWithLeader {
+                region: crate::proto::metapb::Region {
+                    peers: vec![
+                        crate::proto::metapb::Peer {
+                            id: 11,
+                            store_id: 7,
+                            role: crate::proto::metapb::PeerRole::Voter.into(),
+                            ..Default::default()
+                        },
+                        crate::proto::metapb::Peer {
+                            id: 12,
+                            store_id: 8,
+                            role: crate::proto::metapb::PeerRole::Voter.into(),
+                            ..Default::default()
+                        },
+                        crate::proto::metapb::Peer {
+                            id: 13,
+                            store_id: 9,
+                            role: crate::proto::metapb::PeerRole::Learner.into(),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                leader: Some(crate::proto::metapb::Peer {
+                    id: 11,
+                    store_id: 7,
+                    role: crate::proto::metapb::PeerRole::Voter.into(),
+                    ..Default::default()
+                }),
+            },
+            Arc::new(kv_client),
+            "mock://tikv".to_owned(),
+        )
+        .with_store_meta(crate::proto::metapb::Store {
+            id: 7,
+            labels: vec![StoreLabel {
+                key: "zone".to_owned(),
+                value: "zone-b".to_owned(),
+            }],
+            ..Default::default()
+        });
+        plan.apply_store(&store).unwrap();
 
         plan.execute().await.unwrap();
         assert_eq!(

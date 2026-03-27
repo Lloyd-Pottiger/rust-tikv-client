@@ -668,11 +668,21 @@ impl PdClient for MockPdClient {
             .get(&store_id)
             .cloned()
             .unwrap_or_else(|| self.client.clone());
-        Ok(RegionStore::new(
-            region,
-            Arc::new(client),
-            format!("mock://{store_id}"),
-        ))
+        let store_meta = self
+            .store_metas
+            .read()
+            .await
+            .get(&store_id)
+            .cloned()
+            .unwrap_or_else(|| metapb::Store {
+                id: store_id,
+                address: format!("mock://{store_id}"),
+                ..Default::default()
+            });
+        Ok(
+            RegionStore::new(region, Arc::new(client), format!("mock://{store_id}"))
+                .with_store_meta(store_meta),
+        )
     }
 
     async fn store_meta_by_id(&self, store_id: StoreId) -> Result<metapb::Store> {

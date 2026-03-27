@@ -64,6 +64,12 @@ fn tikv_module_exports_global_helpers() {
 fn tikv_module_exports_resource_control_info_accessors() {
     let _: fn(tikv_client::ResourceControlRequestInfo) -> u64 =
         tikv_client::ResourceControlRequestInfo::write_bytes;
+    let _: fn(tikv_client::ResourceControlRequestInfo) -> u64 =
+        tikv_client::ResourceControlRequestInfo::replica_number;
+    let _: fn(tikv_client::ResourceControlRequestInfo) -> tikv_client::AccessLocationType =
+        tikv_client::ResourceControlRequestInfo::access_location_type;
+    let _: fn(tikv_client::ResourceControlRequestInfo) -> bool =
+        tikv_client::ResourceControlRequestInfo::bypass;
     let _: fn(tikv_client::ResourceControlResponseInfo) -> u64 =
         tikv_client::ResourceControlResponseInfo::read_bytes;
     let _: fn(tikv_client::ResourceControlResponseInfo) -> Duration =
@@ -71,6 +77,12 @@ fn tikv_module_exports_resource_control_info_accessors() {
 
     let request = tikv_client::ResourceControlRequestInfo::new("kv_commit", 123, 7);
     assert_eq!(request.write_bytes(), 0);
+    assert_eq!(request.replica_number(), 0);
+    assert_eq!(
+        request.access_location_type(),
+        tikv_client::AccessLocationType::Unknown
+    );
+    assert!(!request.bypass());
 
     let response = tikv_client::ResourceControlResponseInfo::new(456);
     assert_eq!(response.read_bytes(), 0);

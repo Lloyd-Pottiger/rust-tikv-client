@@ -1161,7 +1161,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         self.ensure_open()?;
         let store_id = region.get_store_id()?;
         let store = self.region_cache.get_store_by_id(store_id).await?;
-        let metapb::Store { address, .. } = store;
+        let address = store.address.clone();
         let kv_client = self.kv_client(&address).await?;
         let mut client: Arc<dyn KvClient + Send + Sync> = Arc::new(kv_client);
         let effective_store_limit = if self.store_limit > 0 {
@@ -1179,7 +1179,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
                 token_count,
             ));
         }
-        Ok(RegionStore::new(region, client, address))
+        Ok(RegionStore::new(region, client, address).with_store_meta(store))
     }
 
     async fn region_for_key(&self, key: &Key) -> Result<RegionWithLeader> {

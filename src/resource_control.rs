@@ -74,6 +74,9 @@ pub struct ResourceControlRequestInfo {
     request_size: u64,
     store_id: u64,
     write_bytes: u64,
+    replica_number: u64,
+    access_location_type: crate::AccessLocationType,
+    bypass: bool,
 }
 
 impl ResourceControlRequestInfo {
@@ -85,12 +88,36 @@ impl ResourceControlRequestInfo {
             request_size,
             store_id,
             write_bytes: 0,
+            replica_number: 0,
+            access_location_type: crate::AccessLocationType::Unknown,
+            bypass: false,
         }
     }
 
     #[must_use]
     pub(crate) const fn with_write_bytes(mut self, write_bytes: u64) -> Self {
         self.write_bytes = write_bytes;
+        self
+    }
+
+    #[must_use]
+    pub(crate) const fn with_replica_number(mut self, replica_number: u64) -> Self {
+        self.replica_number = replica_number;
+        self
+    }
+
+    #[must_use]
+    pub(crate) const fn with_access_location_type(
+        mut self,
+        access_location_type: crate::AccessLocationType,
+    ) -> Self {
+        self.access_location_type = access_location_type;
+        self
+    }
+
+    #[must_use]
+    pub(crate) const fn with_bypass(mut self, bypass: bool) -> Self {
+        self.bypass = bypass;
         self
     }
 
@@ -124,6 +151,24 @@ impl ResourceControlRequestInfo {
     #[must_use]
     pub const fn write_bytes(self) -> u64 {
         self.write_bytes
+    }
+
+    /// The number of voter/learner replicas in the target region when known.
+    #[must_use]
+    pub const fn replica_number(self) -> u64 {
+        self.replica_number
+    }
+
+    /// Whether the request targets the local zone or crosses zones.
+    #[must_use]
+    pub const fn access_location_type(self) -> crate::AccessLocationType {
+        self.access_location_type
+    }
+
+    /// Whether this request should bypass resource control accounting/waits.
+    #[must_use]
+    pub const fn bypass(self) -> bool {
+        self.bypass
     }
 }
 

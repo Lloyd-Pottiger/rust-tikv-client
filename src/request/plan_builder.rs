@@ -80,6 +80,7 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
             plan: Dispatch {
                 request,
                 kv_client: None,
+                resource_control_request_metadata: None,
             },
             phantom: PhantomData,
         }
@@ -122,6 +123,7 @@ impl<PdC: PdClient, Req: KvRequest> PlanBuilder<PdC, Dispatch<Req>, NoTarget> {
                 request,
                 kv_client: None,
                 store_address: None,
+                resource_control_request_metadata: None,
                 rpc_interceptors,
             },
             phantom: PhantomData,
