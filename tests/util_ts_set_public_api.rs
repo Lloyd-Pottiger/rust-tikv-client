@@ -10,6 +10,10 @@ fn util_ts_set_public_api_exposes_gc_time_helpers_and_ts_set_alias() {
         .expect("gc time should parse");
     assert_eq!(parsed, UNIX_EPOCH + Duration::from_secs(1_545_134_017),);
 
+    let err: util::GcTimeParseError =
+        util::compatible_parse_gc_time("not-a-gc-time").expect_err("invalid gc time");
+    assert_eq!(err.value(), "not-a-gc-time");
+
     let _: Option<util::TSSet> = None;
 
     let set = util::TSSet::new();
