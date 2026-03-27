@@ -1,11 +1,99 @@
+use std::any::Any;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use tikv_client::proto::{keyspacepb, metapb};
+use tikv_client::store::{self, RegionStore};
 use tikv_client::{
-    Config, PdClient, PdRpcClient, RawClient, RegionCache, SyncTransactionClient, TransactionClient,
+    Config, Error, Key, PdClient, PdRpcClient, RawClient, RegionCache, RegionVerId,
+    RegionWithLeader, Result, Store, StoreId, SyncTransactionClient, Timestamp, TransactionClient,
 };
 
 fn assert_pd_client_trait<T: PdClient>() {}
 fn assert_retry_client_trait<T: tikv_client::RetryClientTrait>() {}
+
+#[derive(Clone, Default)]
+struct FakeKvClient;
+
+#[async_trait]
+impl store::KvClient for FakeKvClient {
+    async fn dispatch(&self, _req: &dyn store::Request) -> Result<Box<dyn Any>> {
+        Err(Error::Unimplemented)
+    }
+}
+
+#[derive(Default)]
+struct FakePdClient;
+
+#[async_trait]
+impl PdClient for FakePdClient {
+    type KvClient = FakeKvClient;
+
+    async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
+        Ok(RegionStore::new(
+            region,
+            Arc::new(FakeKvClient),
+            "fake-store".to_owned(),
+        ))
+    }
+
+    async fn region_for_key(&self, _key: &Key) -> Result<RegionWithLeader> {
+        Ok(test_region(1, 101))
+    }
+
+    async fn region_for_id(&self, id: u64) -> Result<RegionWithLeader> {
+        Ok(test_region(id, 101))
+    }
+
+    async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+        Ok(Timestamp::default())
+    }
+
+    async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {
+        Ok(safepoint)
+    }
+
+    async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+        Ok(keyspacepb::KeyspaceMeta {
+            name: keyspace.to_owned(),
+            ..Default::default()
+        })
+    }
+
+    async fn all_stores(&self) -> Result<Vec<Store>> {
+        Ok(vec![])
+    }
+
+    async fn update_leader(&self, _ver_id: RegionVerId, _leader: metapb::Peer) -> Result<()> {
+        Ok(())
+    }
+
+    async fn invalidate_region_cache(&self, _ver_id: RegionVerId) {}
+
+    async fn invalidate_store_cache(&self, _store_id: StoreId) {}
+
+    fn cluster_id(&self) -> u64 {
+        11
+    }
+}
+
+fn test_region(id: u64, store_id: u64) -> RegionWithLeader {
+    RegionWithLeader::new(
+        metapb::Region {
+            id,
+            region_epoch: Some(metapb::RegionEpoch {
+                conf_ver: 1,
+                version: 1,
+            }),
+            ..Default::default()
+        },
+        Some(metapb::Peer {
+            id: store_id + 1,
+            store_id,
+            ..Default::default()
+        }),
+    )
+}
 
 async fn update_service_gc_safe_point_entry(
     client: &TransactionClient,
@@ -202,4 +290,16 @@ fn crate_root_exports_gc_safe_point_and_visibility_entrypoints() {
     let _ = sync_get_gc_safe_point_entry;
     let _ = sync_get_gc_safe_point_v2_entry;
     let _ = sync_check_visibility_entry;
+}
+
+#[tokio::test]
+async fn pd_client_trait_exposes_doc_hidden_cache_hooks() {
+    let client = FakePdClient;
+
+    client.add_region_to_cache(test_region(7, 707)).await;
+    client
+        .on_bucket_version_not_match(RegionVerId::default(), 88, vec![b"bucket".to_vec()])
+        .await;
+
+    assert_eq!(client.buckets_version(RegionVerId::default()).await, 0);
 }
