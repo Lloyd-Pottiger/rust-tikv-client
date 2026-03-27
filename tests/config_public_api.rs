@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tikv_client::config;
 
 #[test]
 fn config_module_exports_types_and_global_helpers() {
+    let _: Option<config::ParsedTikvPath> = None;
     let _ = config::GrpcCompressionType::None;
     let _: Duration = config::DEF_STORE_LIVENESS_TIMEOUT;
     let _: u32 = config::DEF_GRPC_INITIAL_WINDOW_SIZE;
@@ -92,4 +94,96 @@ fn config_module_exposes_recent_parity_builders_and_fields() {
     assert!(config.grpc_shared_buffer_pool);
     assert_eq!(config.max_concurrency_request_limit, 42);
     assert_eq!(config.resolve_lock_lite_threshold, 24);
+}
+
+#[test]
+fn config_module_exports_extended_builder_knobs() {
+    let config = config::Config::default()
+        .with_security("ca.pem", "cert.pem", "key.pem")
+        .with_store_limit(8)
+        .with_committer_concurrency(12)
+        .with_max_txn_ttl(Duration::from_secs(90))
+        .with_tso_max_pending_count(99)
+        .with_grpc_max_decoding_message_size(1024 * 1024)
+        .with_grpc_connection_count(4)
+        .with_grpc_compression_type(config::GrpcCompressionType::Gzip)
+        .with_enable_batch_rpc(false)
+        .with_enable_forwarding(true)
+        .with_batch_rpc_max_batch_size(256)
+        .with_grpc_connect_timeout(Duration::from_secs(2))
+        .with_grpc_keepalive_time(Duration::from_secs(3))
+        .with_grpc_keepalive_timeout(Duration::from_secs(4))
+        .with_grpc_initial_window_size(32)
+        .with_grpc_initial_conn_window_size(64)
+        .with_default_keyspace()
+        .with_resolve_lock_lite_threshold(31)
+        .with_ttl_refreshed_txn_size(2048)
+        .with_region_cache_ttl(Duration::from_secs(11))
+        .with_region_cache_ttl_jitter(Duration::from_secs(2))
+        .with_enable_region_cache_preload(true);
+
+    assert_eq!(config.ca_path, Some(PathBuf::from("ca.pem")));
+    assert_eq!(config.cert_path, Some(PathBuf::from("cert.pem")));
+    assert_eq!(config.key_path, Some(PathBuf::from("key.pem")));
+    assert_eq!(config.store_limit, 8);
+    assert_eq!(config.committer_concurrency, 12);
+    assert_eq!(config.max_txn_ttl, Duration::from_secs(90));
+    assert_eq!(config.tso_max_pending_count, 99);
+    assert_eq!(config.grpc_max_decoding_message_size, 1024 * 1024);
+    assert_eq!(config.grpc_connection_count, 4);
+    assert_eq!(
+        config.grpc_compression_type,
+        config::GrpcCompressionType::Gzip
+    );
+    assert!(!config.enable_batch_rpc);
+    assert!(config.enable_forwarding);
+    assert_eq!(config.batch_rpc_max_batch_size, 256);
+    assert_eq!(config.grpc_connect_timeout, Duration::from_secs(2));
+    assert_eq!(config.grpc_keepalive_time, Duration::from_secs(3));
+    assert_eq!(config.grpc_keepalive_timeout, Duration::from_secs(4));
+    assert_eq!(config.grpc_initial_window_size, 32);
+    assert_eq!(config.grpc_initial_conn_window_size, 64);
+    assert_eq!(config.keyspace.as_deref(), Some("DEFAULT"));
+    assert_eq!(config.resolve_lock_lite_threshold, 31);
+    assert_eq!(config.ttl_refreshed_txn_size, 2048);
+    assert_eq!(config.region_cache_ttl, Duration::from_secs(11));
+    assert_eq!(config.region_cache_ttl_jitter, Duration::from_secs(2));
+    assert!(config.enable_region_cache_preload);
+
+    let _: fn(&config::Config) -> tikv_client::Result<tikv_client::SecurityManager> =
+        config::Config::security_manager;
+    let _: fn(&config::Security) -> tikv_client::Result<tikv_client::SecurityManager> =
+        config::Security::security_manager;
+}
+
+#[test]
+fn config_module_exports_scope_and_liveness_builders() {
+    let config = config::Config::default()
+        .with_keyspace("tenant-a")
+        .with_zone_label("zone-a")
+        .with_txn_scope("sh")
+        .with_health_feedback_update_interval(Duration::from_secs(5))
+        .with_store_liveness_update_interval(Duration::from_secs(7))
+        .with_store_liveness_timeout(Duration::from_secs(9))
+        .with_txn_local_latches_capacity(128);
+
+    assert_eq!(config.keyspace.as_deref(), Some("tenant-a"));
+    assert_eq!(config.zone_label.as_deref(), Some("zone-a"));
+    assert_eq!(config.txn_scope.as_deref(), Some("sh"));
+    assert_eq!(
+        config.health_feedback_update_interval,
+        Duration::from_secs(5)
+    );
+    assert_eq!(
+        config.store_liveness_update_interval,
+        Duration::from_secs(7)
+    );
+    assert_eq!(config.store_liveness_timeout, Duration::from_secs(9));
+    assert_eq!(config.txn_local_latches_capacity, 128);
+
+    let restore = config::update_global_config(|cfg| {
+        *cfg = cfg.clone().with_txn_scope("bj");
+    });
+    assert_eq!(config::get_txn_scope_from_global_config(), "bj");
+    restore.restore();
 }
