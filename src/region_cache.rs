@@ -1093,6 +1093,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             let mut retried_empty_batch = false;
             let mut retried_gap_batch = false;
             let mut retried_leaderless_batch = false;
+            let mut retried_error_batch = false;
             loop {
                 let pd_ranges: Vec<pdpb::KeyRange> = remaining_ranges
                     .iter()
@@ -1121,6 +1122,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
                 match result {
                     Ok(regions) => {
+                        retried_error_batch = false;
                         if regions.is_empty() {
                             stats::inc_stale_region_from_pd_counter();
                             if !retried_empty_batch {
@@ -1181,7 +1183,15 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                         }
                     }
                     Err(Error::Unimplemented) => break,
-                    Err(_) => break,
+                    Err(_) => {
+                        // Mirror the stale-response retries above: give the same PD batch one more
+                        // chance before abandoning preheat and falling back to per-range locate.
+                        if !retried_error_batch {
+                            retried_error_batch = true;
+                            continue;
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -1747,6 +1757,7 @@ mod test {
         pub scan_regions_calls: Mutex<Vec<ScanRegionsCall>>,
         pub batch_scan_regions_count: AtomicU64,
         pub batch_scan_regions_calls: Mutex<Vec<BatchScanRegionsCall>>,
+        pub batch_scan_regions_failures: Mutex<VecDeque<Error>>,
         pub batch_scan_regions_results:
             Mutex<VecDeque<Vec<(RegionWithLeader, Option<metapb::Buckets>)>>>,
     }
@@ -1859,6 +1870,9 @@ mod test {
                 .await
                 .push((ranges.clone(), limit, need_buckets));
 
+            if let Some(err) = self.batch_scan_regions_failures.lock().await.pop_front() {
+                return Err(err);
+            }
             if let Some(result) = self.batch_scan_regions_results.lock().await.pop_front() {
                 return Ok(result);
             }
@@ -2594,6 +2608,44 @@ mod test {
         assert_eq!(locations[0].region.id, 1);
         assert_eq!(locations[1].region.id, 2);
         assert_eq!(locations[2].region.id, 3);
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 2);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_retries_pd_batch_scan_after_transient_error(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let region1 = region_with_leader(1, vec![], vec![10], 42);
+        let region2 = region_with_leader(2, vec![10], vec![], 42);
+
+        retry_client.regions.lock().await.insert(1, region1.clone());
+        retry_client.regions.lock().await.insert(2, region2.clone());
+        retry_client
+            .batch_scan_regions_failures
+            .lock()
+            .await
+            .push_back(Error::StringError("transient pd failure".to_owned()));
+        retry_client
+            .batch_scan_regions_results
+            .lock()
+            .await
+            .push_back(vec![(region1, None), (region2, None)]);
+
+        let locations = cache
+            .batch_locate_key_ranges_with_opts(
+                vec![crate::kv::KeyRange::new(vec![1], vec![25])],
+                std::iter::empty(),
+            )
+            .await?;
+
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[1].region.id, 2);
         assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 2);
         assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
 
