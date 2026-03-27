@@ -14,6 +14,7 @@ fn oracle_module_exposes_constants_and_helpers() {
     let now = SystemTime::now();
     let ts = oracle::ts_from_system_time(now).expect("system time converts to ts");
     let _ = oracle::system_time_from_ts(ts).expect("ts converts to system time");
+    let _ = oracle::physical_ms_from_system_time(now).expect("system time converts to millis");
 
     let _ = oracle::lower_limit_start_ts(now, 1).expect("lower limit start ts");
     let _ = oracle::is_expired(ts, 1, ts);
@@ -35,4 +36,6 @@ fn oracle_module_exposes_oracle_traits_and_errors() {
         current_ts: 2,
     };
     let _ = oracle::ErrLatestStaleRead;
+    let _ = oracle::TimeConversionError::DurationOverflow;
+    let _ = oracle::TimeConversionError::TimeOverflow;
 }
