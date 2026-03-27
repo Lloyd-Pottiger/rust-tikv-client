@@ -3,7 +3,10 @@
 //! This module mirrors client-go's public `txnkv` package layout. It mainly provides a stable
 //! namespace for the transactional client types.
 
+pub use crate::transaction::new_lock;
 pub use crate::transaction::Client;
+pub use crate::transaction::Lock;
+pub use crate::transaction::LockResolver;
 pub use crate::transaction::Snapshot;
 pub use crate::transaction::Transaction;
 pub use crate::transaction::TransactionOptions;

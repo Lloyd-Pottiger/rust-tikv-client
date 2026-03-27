@@ -3,6 +3,8 @@ use tikv_client::txnkv;
 #[test]
 fn txnkv_module_exports_types() {
     let _: Option<txnkv::Client> = None;
+    let _: Option<txnkv::Lock> = None;
+    let _: Option<txnkv::LockResolver> = None;
     let _: Option<txnkv::Snapshot> = None;
     let _: Option<txnkv::Transaction> = None;
     let _: Option<txnkv::TransactionOptions> = None;
@@ -33,4 +35,15 @@ fn txnkv_module_exports_types() {
     let _: Option<std::sync::Arc<dyn txnkv::rangetask::RangeTaskHandler>> = None;
 
     let _: Option<txnkv::txnutil::TxnStatus> = None;
+
+    let _: fn(tikv_client::proto::kvrpcpb::LockInfo) -> txnkv::Lock = txnkv::new_lock;
+
+    let proto = tikv_client::proto::kvrpcpb::LockInfo {
+        key: b"txnkv-lock".to_vec(),
+        primary_lock: b"txnkv-primary".to_vec(),
+        lock_version: 3,
+        ..Default::default()
+    };
+    let lock = txnkv::new_lock(proto.clone());
+    assert_eq!(lock.as_proto(), &proto);
 }
