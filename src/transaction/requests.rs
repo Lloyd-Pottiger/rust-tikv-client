@@ -102,6 +102,7 @@ macro_rules! error_locks {
     };
 }
 
+/// Builds a point-read request for `key` at the provided MVCC `timestamp`.
 pub fn new_get_request(key: Vec<u8>, timestamp: u64) -> kvrpcpb::GetRequest {
     let mut req = kvrpcpb::GetRequest::default();
     req.key = key;
@@ -134,6 +135,7 @@ impl Process<kvrpcpb::GetResponse> for DefaultProcessor {
     }
 }
 
+/// Builds a batch point-read request for `keys` at the provided MVCC `timestamp`.
 pub fn new_batch_get_request(keys: Vec<Vec<u8>>, timestamp: u64) -> kvrpcpb::BatchGetRequest {
     let mut req = kvrpcpb::BatchGetRequest::default();
     req.keys = keys;
@@ -158,6 +160,7 @@ impl Merge<kvrpcpb::BatchGetResponse> for Collect {
     }
 }
 
+/// Builds a buffered batch-get request for `keys` at the provided MVCC `timestamp`.
 pub fn new_buffer_batch_get_request(
     keys: Vec<Vec<u8>>,
     timestamp: u64,
@@ -185,6 +188,7 @@ impl Merge<kvrpcpb::BufferBatchGetResponse> for Collect {
     }
 }
 
+/// Builds a scan request over `[start_key, end_key)` at the provided MVCC `timestamp`.
 pub fn new_scan_request(
     start_key: Vec<u8>,
     end_key: Vec<u8>,
@@ -226,6 +230,7 @@ impl Merge<kvrpcpb::ScanResponse> for Collect {
     }
 }
 
+/// Builds a resolve-lock request for a single transaction status outcome.
 pub fn new_resolve_lock_request(
     start_version: u64,
     commit_version: u64,
@@ -238,6 +243,7 @@ pub fn new_resolve_lock_request(
     req
 }
 
+/// Builds a resolve-lock request carrying per-transaction commit information.
 pub fn new_batch_resolve_lock_request(txn_infos: Vec<TxnInfo>) -> kvrpcpb::ResolveLockRequest {
     let mut req = kvrpcpb::ResolveLockRequest::default();
     req.txn_infos = txn_infos;
@@ -435,6 +441,7 @@ impl Shardable for ResolveLockKeysRequest {
     }
 }
 
+/// Builds a normal prewrite request for the provided mutations.
 pub fn new_prewrite_request(
     mutations: Vec<kvrpcpb::Mutation>,
     primary_lock: Vec<u8>,
@@ -451,6 +458,7 @@ pub fn new_prewrite_request(
     req
 }
 
+/// Builds a pessimistic prewrite request for the provided mutations.
 pub fn new_pessimistic_prewrite_request(
     mutations: Vec<kvrpcpb::Mutation>,
     primary_lock: Vec<u8>,
@@ -471,6 +479,7 @@ impl KvRequest for kvrpcpb::PrewriteRequest {
     type Response = kvrpcpb::PrewriteResponse;
 }
 
+/// Builds a pipelined-DML flush request for the provided buffered mutations.
 pub fn new_flush_request(
     mutations: Vec<kvrpcpb::Mutation>,
     primary_key: Vec<u8>,
@@ -495,6 +504,7 @@ impl KvRequest for kvrpcpb::FlushRequest {
     type Response = kvrpcpb::FlushResponse;
 }
 
+/// Region-local shard payload produced when a `FlushRequest` is split by region.
 #[derive(Debug, Clone)]
 pub struct FlushRequestShard {
     mutations: Vec<kvrpcpb::Mutation>,
@@ -580,6 +590,7 @@ impl Shardable for kvrpcpb::FlushRequest {
     }
 }
 
+/// Region-local shard payload produced when a `PrewriteRequest` is split by region.
 #[derive(Debug, Clone)]
 pub struct PrewriteRequestShard {
     mutations: Vec<kvrpcpb::Mutation>,
@@ -768,6 +779,7 @@ impl Batchable for kvrpcpb::PrewriteRequest {
     }
 }
 
+/// Builds a commit request for the provided keys and timestamps.
 pub fn new_commit_request(
     keys: Vec<Vec<u8>>,
     start_version: u64,
@@ -825,6 +837,7 @@ impl Batchable for kvrpcpb::CommitRequest {
     }
 }
 
+/// Builds a batch-rollback request for the provided keys.
 pub fn new_batch_rollback_request(
     keys: Vec<Vec<u8>>,
     start_version: u64,
@@ -842,6 +855,7 @@ impl KvRequest for kvrpcpb::BatchRollbackRequest {
 
 shardable_keys!(kvrpcpb::BatchRollbackRequest);
 
+/// Builds a pessimistic-rollback request for the provided keys.
 pub fn new_pessimistic_rollback_request(
     keys: Vec<Vec<u8>>,
     start_version: u64,
@@ -861,6 +875,7 @@ impl KvRequest for kvrpcpb::PessimisticRollbackRequest {
 
 shardable_keys!(kvrpcpb::PessimisticRollbackRequest);
 
+/// Builds a pessimistic-lock request for the provided mutations.
 pub fn new_pessimistic_lock_request(
     mutations: Vec<kvrpcpb::Mutation>,
     primary_lock: Vec<u8>,
@@ -1029,6 +1044,7 @@ impl Merge<ResponseWithShard<kvrpcpb::PessimisticLockResponse, Vec<kvrpcpb::Muta
     }
 }
 
+/// Builds a lock scan request that returns locks with `lock_version <= max_version`.
 pub fn new_scan_lock_request(
     start_key: Vec<u8>,
     end_key: Vec<u8>,
@@ -1100,6 +1116,7 @@ impl Merge<kvrpcpb::ScanLockResponse> for Collect {
     }
 }
 
+/// Builds a transaction-heartbeat request for the primary lock.
 pub fn new_heart_beat_request(
     start_ts: u64,
     primary_lock: Vec<u8>,
@@ -1153,6 +1170,7 @@ impl Process<kvrpcpb::TxnHeartBeatResponse> for DefaultProcessor {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Builds a check-transaction-status request for the primary lock.
 pub fn new_check_txn_status_request(
     primary_key: Vec<u8>,
     lock_ts: u64,
@@ -1216,11 +1234,17 @@ impl Process<kvrpcpb::CheckTxnStatusResponse> for DefaultProcessor {
     }
 }
 
+/// High-level interpretation of a `CheckTxnStatusResponse`.
 #[derive(Debug, Clone)]
 pub struct TransactionStatus {
+    /// The transaction's current state.
     pub kind: TransactionStatusKind,
+    /// The action TiKV took while evaluating the status request.
     pub action: kvrpcpb::Action,
-    pub is_expired: bool, // Available only when kind is Locked.
+    /// Whether the observed lock has expired according to [`TransactionStatus::check_ttl`].
+    ///
+    /// This is meaningful only when [`TransactionStatus::kind`] is `Locked`.
+    pub is_expired: bool,
 }
 
 impl TryFrom<kvrpcpb::CheckTxnStatusResponse> for TransactionStatus {
@@ -1245,14 +1269,19 @@ impl TryFrom<kvrpcpb::CheckTxnStatusResponse> for TransactionStatus {
     }
 }
 
+/// Transaction state decoded from `CheckTxnStatusResponse`.
 #[derive(Debug, Clone)]
 pub enum TransactionStatusKind {
+    /// The transaction has already committed at the returned commit timestamp.
     Committed(Timestamp),
+    /// The transaction has already rolled back.
     RolledBack,
-    Locked(u64, kvrpcpb::LockInfo), // None of ttl means expired.
+    /// The transaction is still locked with the returned TTL and lock metadata.
+    Locked(u64, kvrpcpb::LockInfo),
 }
 
 impl TransactionStatus {
+    /// Recomputes whether a locked transaction is expired at `current`.
     pub fn check_ttl(&mut self, current: Timestamp) {
         if let TransactionStatusKind::Locked(ref ttl, ref lock_info) = self.kind {
             if current.physical - Timestamp::from_version(lock_info.lock_version).physical
@@ -1263,10 +1292,10 @@ impl TransactionStatus {
         }
     }
 
-    // Match client-go `TxnStatus.StatusCacheable`: cache only when final status is determined.
-    // Committed is always determined. RolledBack is determined only for rollback actions
-    // (`NoAction`, `LockNotExistRollback`, `TtlExpireRollback`); other actions like
-    // `LockNotExistDoNothing` are not cacheable.
+    /// Returns whether this status can be cached for future lock-resolution decisions.
+    ///
+    /// This matches client-go `TxnStatus.StatusCacheable`: committed status is always cacheable,
+    /// while rolled-back status is cacheable only for rollback actions that prove a final outcome.
     pub fn is_cacheable(&self) -> bool {
         match &self.kind {
             TransactionStatusKind::Committed(..) => true,
@@ -1297,6 +1326,7 @@ fn transaction_status_kind_from_parts(
     }
 }
 
+/// Builds a request that checks the status of secondary locks for a transaction.
 pub fn new_check_secondary_locks_request(
     keys: Vec<Vec<u8>>,
     start_version: u64,
@@ -1364,12 +1394,19 @@ impl Merge<kvrpcpb::CheckSecondaryLocksResponse> for Collect {
     }
 }
 
+/// Aggregated status returned from `CheckSecondaryLocksResponse`.
 pub struct SecondaryLocksStatus {
+    /// The commit timestamp if TiKV has already committed the transaction.
     pub commit_ts: Option<Timestamp>,
+    /// The minimum commit timestamp reported by TiKV.
     pub min_commit_ts: u64,
+    /// Whether the transaction must fall back from async commit to 2PC.
     pub fallback_2pc: bool,
+    /// The number of secondary locks TiKV still reports as present.
     pub locked_keys: usize,
+    /// Whether any queried secondary lock was missing.
     pub missing_lock: bool,
+    /// Keys that should be resolved by the caller.
     pub resolve_keys: Vec<Vec<u8>>,
 }
 
@@ -1433,6 +1470,7 @@ impl HasLocks for kvrpcpb::FlushResponse {
     }
 }
 
+/// Builds a delete-range request over `[start_key, end_key)`.
 pub fn new_delete_range_request(
     start_key: Vec<u8>,
     end_key: Vec<u8>,
@@ -1463,6 +1501,7 @@ impl Merge<kvrpcpb::DeleteRangeResponse> for Collect {
     }
 }
 
+/// Builds a request that prepares a range for flashback to `version`.
 pub fn new_prepare_flashback_to_version_request(
     start_key: Vec<u8>,
     end_key: Vec<u8>,
@@ -1498,6 +1537,7 @@ impl Merge<kvrpcpb::PrepareFlashbackToVersionResponse> for Collect {
     }
 }
 
+/// Builds a request that flashbacks a range to `version`.
 pub fn new_flashback_to_version_request(
     start_key: Vec<u8>,
     end_key: Vec<u8>,
@@ -1534,6 +1574,7 @@ impl Merge<kvrpcpb::FlashbackToVersionResponse> for Collect {
 
 const SPLIT_REGION_BATCH_LIMIT: usize = 2048;
 
+/// Builds a region split request for the provided split keys.
 pub fn new_split_region_request(
     split_keys: Vec<Vec<u8>>,
     is_raw_kv: bool,
@@ -1619,6 +1660,7 @@ impl Merge<kvrpcpb::SplitRegionResponse> for Collect {
     }
 }
 
+/// Builds an unsafe-destroy-range request over `[start_key, end_key)`.
 pub fn new_unsafe_destroy_range_request(
     start_key: Vec<u8>,
     end_key: Vec<u8>,
@@ -1669,6 +1711,7 @@ impl Merge<kvrpcpb::UnsafeDestroyRangeResponse> for Collect {
     }
 }
 
+/// Builds a manual compaction request starting at `start_key`.
 pub fn new_compact_request(
     start_key: Vec<u8>,
     physical_table_id: i64,
@@ -1701,6 +1744,7 @@ impl Merge<kvrpcpb::CompactResponse> for Collect {
     }
 }
 
+/// Builds a TiFlash system-table query request for the provided SQL string.
 pub fn new_get_ti_flash_system_table_request(sql: String) -> kvrpcpb::TiFlashSystemTableRequest {
     let mut req = kvrpcpb::TiFlashSystemTableRequest::default();
     req.sql = sql;
@@ -1725,6 +1769,7 @@ impl Merge<kvrpcpb::TiFlashSystemTableResponse> for Collect {
     }
 }
 
+/// Builds a request that registers a lock observer at the provided max timestamp.
 pub fn new_register_lock_observer_request(max_ts: u64) -> kvrpcpb::RegisterLockObserverRequest {
     let mut req = kvrpcpb::RegisterLockObserverRequest::default();
     req.max_ts = max_ts;
@@ -1758,6 +1803,7 @@ impl Merge<kvrpcpb::RegisterLockObserverResponse> for Collect {
     }
 }
 
+/// Builds a request that checks whether a registered lock observer has observed locks.
 pub fn new_check_lock_observer_request(max_ts: u64) -> kvrpcpb::CheckLockObserverRequest {
     let mut req = kvrpcpb::CheckLockObserverRequest::default();
     req.max_ts = max_ts;
@@ -1799,6 +1845,7 @@ impl Merge<kvrpcpb::CheckLockObserverResponse> for Collect {
     }
 }
 
+/// Builds a request that unregisters a lock observer identified by `max_ts`.
 pub fn new_remove_lock_observer_request(max_ts: u64) -> kvrpcpb::RemoveLockObserverRequest {
     let mut req = kvrpcpb::RemoveLockObserverRequest::default();
     req.max_ts = max_ts;
@@ -1829,6 +1876,7 @@ impl Merge<kvrpcpb::RemoveLockObserverResponse> for Collect {
     }
 }
 
+/// Builds a request that scans locks from `start_key`, returning at most `limit` entries.
 pub fn new_physical_scan_lock_request(
     max_ts: u64,
     start_key: Vec<u8>,
@@ -1874,6 +1922,7 @@ impl Merge<kvrpcpb::PhysicalScanLockResponse> for Collect {
     }
 }
 
+/// Builds a request that fetches the current lock-wait graph entries from TiKV.
 pub fn new_get_lock_wait_info_request() -> kvrpcpb::GetLockWaitInfoRequest {
     kvrpcpb::GetLockWaitInfoRequest::default()
 }
@@ -1904,6 +1953,7 @@ impl Merge<kvrpcpb::GetLockWaitInfoResponse> for Collect {
     }
 }
 
+/// Builds a request that fetches the recorded lock-wait history entries from TiKV.
 pub fn new_get_lock_wait_history_request() -> kvrpcpb::GetLockWaitHistoryRequest {
     kvrpcpb::GetLockWaitHistoryRequest::default()
 }

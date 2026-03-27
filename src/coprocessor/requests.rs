@@ -27,6 +27,11 @@ impl KvRequest for coprocessor_pb::Request {
     type Response = coprocessor_pb::Response;
 }
 
+/// Wrapper around a coprocessor protobuf request that implements the crate request traits.
+///
+/// Use this when you need to dispatch a streaming coprocessor request through the same
+/// region-aware request pipeline as other `tikv-client` requests, while still being able to
+/// inspect or mutate the underlying protobuf payload directly.
 #[derive(Clone, Debug)]
 pub struct CoprocessorStreamRequest {
     inner: coprocessor_pb::Request,

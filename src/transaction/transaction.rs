@@ -279,16 +279,19 @@ pub struct KvFilterKeyFlags {
 }
 
 impl KvFilterKeyFlags {
+    /// Creates key metadata for [`KvFilter::is_unnecessary_key_value_with_flags`].
     #[must_use]
     pub const fn new(op: KvFilterMutationOp, locked: bool) -> Self {
         Self { op, locked }
     }
 
+    /// Returns the mutation operation associated with the key.
     #[must_use]
     pub const fn op(self) -> KvFilterMutationOp {
         self.op
     }
 
+    /// Returns whether the key is currently marked as pessimistic-locked.
     #[must_use]
     pub const fn is_locked(self) -> bool {
         self.locked
@@ -298,17 +301,24 @@ impl KvFilterKeyFlags {
 /// KV mutation operation type passed to [`KvFilterKeyFlags`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KvFilterMutationOp {
+    /// A normal put/update mutation.
     Put,
+    /// A delete mutation.
     Delete,
+    /// An insert-only mutation.
     Insert,
+    /// An existence check encoded as a write constraint.
     CheckNotExists,
 }
 
 /// KV mutation operation type passed to [`KvFilter`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KvFilterOp {
+    /// A normal put/update mutation.
     Put,
+    /// A delete mutation.
     Delete,
+    /// An insert-only mutation.
     Insert,
 }
 
@@ -349,44 +359,6 @@ pub enum PrewriteEncounterLockPolicy {
     NoResolve,
 }
 
-/// An undo-able set of actions on the dataset.
-///
-/// Create a transaction using a [`TransactionClient`](crate::TransactionClient), then run actions
-/// (such as `get`, or `put`) on the transaction. Reads are executed immediately, writes are
-/// buffered locally. Once complete, `commit` the transaction. Behind the scenes, the client will
-/// perform a two phase commit and return success as soon as the writes are guaranteed to be
-/// committed (some finalisation may continue in the background after the return, but no data can be
-/// lost).
-///
-/// TiKV transactions use multi-version concurrency control. All reads logically happen at the start
-/// of the transaction (at the start timestamp, `start_ts`). Once a transaction is commited, a
-/// its writes atomically become visible to other transactions at (logically) the commit timestamp.
-///
-/// In other words, a transaction can read data that was committed at `commit_ts` < its `start_ts`,
-/// and its writes are readable by transactions with `start_ts` >= its `commit_ts`.
-///
-/// Mutations are buffered locally and sent to the TiKV cluster at the time of commit.
-/// In a pessimistic transaction, all write operations and `xxx_for_update` operations will immediately
-/// acquire locks from TiKV. Such a lock blocks other transactions from writing to that key.
-/// A lock exists until the transaction is committed or rolled back, or the lock reaches its time to
-/// live (TTL).
-///
-/// For details, the [SIG-Transaction](https://github.com/tikv/sig-transaction)
-/// provides materials explaining designs and implementations of TiKV transactions.
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// # use tikv_client::{Config, TransactionClient};
-/// # use futures::prelude::*;
-/// # futures::executor::block_on(async {
-/// let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
-/// let mut txn = client.begin_optimistic().await.unwrap();
-/// let foo = txn.get("foo".to_owned()).await.unwrap().unwrap();
-/// txn.put("bar".to_owned(), foo).await.unwrap();
-/// txn.commit().await.unwrap();
-/// # });
-/// ```
 #[derive(Debug)]
 struct AggressiveLockingState {
     primary_key_at_start: Option<Key>,
@@ -406,6 +378,44 @@ struct PessimisticLockRequestResult {
     max_locked_with_conflict_ts: u64,
 }
 
+/// An undo-able set of actions on the dataset.
+///
+/// Create a transaction using a [`TransactionClient`](crate::TransactionClient), then run actions
+/// (such as `get`, or `put`) on the transaction. Reads are executed immediately, writes are
+/// buffered locally. Once complete, `commit` the transaction. Behind the scenes, the client will
+/// perform a two phase commit and return success as soon as the writes are guaranteed to be
+/// committed (some finalisation may continue in the background after the return, but no data can be
+/// lost).
+///
+/// TiKV transactions use multi-version concurrency control. All reads logically happen at the start
+/// of the transaction (at the start timestamp, `start_ts`). Once a transaction is commited, a
+/// its writes atomically become visible to other transactions at (logically) the commit timestamp.
+///
+/// In other words, a transaction can read data that was committed at `commit_ts` < its `start_ts`,
+/// and its writes are readable by transactions with `start_ts` >= its `commit_ts`.
+///
+/// Mutations are buffered locally and sent to the TiKV cluster at the time of commit.
+/// In a pessimistic transaction, all write operations and `xxx_for_update` operations will
+/// immediately acquire locks from TiKV. Such a lock blocks other transactions from writing to that
+/// key. A lock exists until the transaction is committed or rolled back, or the lock reaches its
+/// time to live (TTL).
+///
+/// For details, the [SIG-Transaction](https://github.com/tikv/sig-transaction) provides materials
+/// explaining designs and implementations of TiKV transactions.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use tikv_client::{Config, TransactionClient};
+/// # use futures::prelude::*;
+/// # futures::executor::block_on(async {
+/// let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
+/// let mut txn = client.begin_optimistic().await.unwrap();
+/// let foo = txn.get("foo".to_owned()).await.unwrap().unwrap();
+/// txn.put("bar".to_owned(), foo).await.unwrap();
+/// txn.commit().await.unwrap();
+/// # });
+/// ```
 pub struct Transaction<PdC: PdClient = PdRpcClient> {
     status: Arc<AtomicU8>,
     timestamp: Timestamp,
@@ -6331,14 +6341,20 @@ impl PipelinedTxnOptions {
         })
     }
 
+    /// Returns the maximum number of concurrent flush workers.
+    #[must_use]
     pub fn flush_concurrency(&self) -> usize {
         self.flush_concurrency
     }
 
+    /// Returns the concurrency used when resolving locks for pipelined flushes.
+    #[must_use]
     pub fn resolve_lock_concurrency(&self) -> usize {
         self.resolve_lock_concurrency
     }
 
+    /// Returns the write throttle ratio used by pipelined flush scheduling.
+    #[must_use]
     pub fn write_throttle_ratio(&self) -> f64 {
         self.write_throttle_ratio
     }
@@ -6354,9 +6370,12 @@ impl Default for PipelinedTxnOptions {
     }
 }
 
+/// Controls whether a transaction automatically sends lock heartbeats while it is open.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum HeartbeatOption {
+    /// Disable automatic lock heartbeats for the transaction.
     NoHeartbeat,
+    /// Send automatic lock heartbeats on the provided fixed interval.
     FixedTime(Duration),
 }
 
@@ -6925,12 +6944,16 @@ impl TransactionOptions {
     }
 
     #[must_use]
+    /// Sets how the transaction should issue automatic lock heartbeats.
+    ///
+    /// This only affects pessimistic transactions that keep locks alive while they remain open.
     pub fn heartbeat_option(mut self, heartbeat_option: HeartbeatOption) -> TransactionOptions {
         self.heartbeat_option = heartbeat_option;
         self
     }
 
-    // Returns true if these options describe a pessimistic transaction.
+    /// Returns whether these options describe a pessimistic transaction.
+    #[must_use]
     pub fn is_pessimistic(&self) -> bool {
         match self.kind {
             TransactionKind::Pessimistic(_) => true,
@@ -6956,18 +6979,25 @@ pub enum CheckLevel {
 }
 
 impl HeartbeatOption {
+    /// Returns whether this option enables automatic lock heartbeats.
+    #[must_use]
     pub fn is_auto_heartbeat(&self) -> bool {
         !matches!(self, HeartbeatOption::NoHeartbeat)
     }
 }
 
+/// A buffered transactional mutation ready to be written by `batch_mutate`.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Mutation {
+    /// Put `Value` for the given `Key`.
     Put(Key, Value),
+    /// Delete the given `Key`.
     Delete(Key),
 }
 
 impl Mutation {
+    /// Returns the key touched by this mutation.
+    #[must_use]
     pub fn key(&self) -> &Key {
         match self {
             Mutation::Put(key, _) => key,

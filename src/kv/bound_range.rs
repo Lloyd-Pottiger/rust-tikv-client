@@ -134,7 +134,7 @@ impl BoundRange {
     ///     BoundRange::from(range).into_keys(),
     ///     (Key::from("".to_owned()), None),
     /// );
-    // ```
+    /// ```
     pub fn into_keys(self) -> (Key, Option<Key>) {
         let start = match self.from {
             Bound::Included(v) => v,
