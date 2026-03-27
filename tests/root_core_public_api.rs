@@ -2,9 +2,9 @@ use std::convert::TryFrom;
 use std::time::Duration;
 
 use tikv_client::{
-    BoundRange, ColumnFamily, IntoOwnedRange, Key, KvPair, PdRpcClient, RawChecksum, RawClient,
-    Snapshot, SyncSnapshot, SyncTransaction, SyncTransactionClient, Timestamp, TimestampExt,
-    Transaction, TransactionClient, TransactionOptions, Value,
+    Backoff, BoundRange, ColumnFamily, IntoOwnedRange, Key, KvPair, PdRpcClient, RawChecksum,
+    RawClient, Snapshot, SyncSnapshot, SyncTransaction, SyncTransactionClient, Timestamp,
+    TimestampExt, Transaction, TransactionClient, TransactionOptions, Value,
 };
 
 async fn raw_get_entry(client: &RawClient, key: Vec<u8>) -> tikv_client::Result<Option<Value>> {
@@ -145,6 +145,83 @@ async fn transaction_stale_timestamp_with_txn_scope_entry(
         .await
 }
 
+async fn transaction_gc_safepoint_entry(
+    client: &TransactionClient,
+    safepoint: Timestamp,
+) -> tikv_client::Result<u64> {
+    client.gc_safepoint(safepoint).await
+}
+
+async fn transaction_prepare_flashback_to_version_entry(
+    client: &TransactionClient,
+    range: std::ops::Range<Vec<u8>>,
+    start_ts: u64,
+    version: u64,
+    concurrency: usize,
+) -> tikv_client::Result<usize> {
+    client
+        .prepare_flashback_to_version(range, start_ts, version, concurrency)
+        .await
+}
+
+async fn transaction_flashback_to_version_entry(
+    client: &TransactionClient,
+    range: std::ops::Range<Vec<u8>>,
+    version: u64,
+    start_ts: u64,
+    commit_ts: u64,
+    concurrency: usize,
+) -> tikv_client::Result<usize> {
+    client
+        .flashback_to_version(range, version, start_ts, commit_ts, concurrency)
+        .await
+}
+
+async fn transaction_split_regions_entry(
+    client: &TransactionClient,
+    split_keys: Vec<Vec<u8>>,
+    scatter: bool,
+    table_id: Option<i64>,
+) -> tikv_client::Result<Vec<u64>> {
+    client.split_regions(split_keys, scatter, table_id).await
+}
+
+async fn transaction_wait_scatter_region_finish_entry(
+    client: &TransactionClient,
+    region_id: u64,
+    backoff: Backoff,
+) -> tikv_client::Result<()> {
+    client.wait_scatter_region_finish(region_id, backoff).await
+}
+
+async fn transaction_check_region_in_scattering_entry(
+    client: &TransactionClient,
+    region_id: u64,
+) -> tikv_client::Result<bool> {
+    client.check_region_in_scattering(region_id).await
+}
+
+async fn transaction_unsafe_destroy_range_entry(
+    client: &TransactionClient,
+    range: std::ops::Range<Vec<u8>>,
+) -> tikv_client::Result<()> {
+    client.unsafe_destroy_range(range).await
+}
+
+async fn transaction_register_lock_observer_entry(
+    client: &TransactionClient,
+    max_ts: u64,
+) -> tikv_client::Result<()> {
+    client.register_lock_observer(max_ts).await
+}
+
+async fn transaction_remove_lock_observer_entry(
+    client: &TransactionClient,
+    max_ts: u64,
+) -> tikv_client::Result<()> {
+    client.remove_lock_observer(max_ts).await
+}
+
 fn sync_transaction_current_timestamp_entry(
     client: &SyncTransactionClient,
 ) -> tikv_client::Result<Timestamp> {
@@ -229,6 +306,58 @@ fn sync_transaction_stale_timestamp_with_txn_scope_entry(
     client.stale_timestamp_with_txn_scope(txn_scope, prev_seconds)
 }
 
+fn sync_transaction_gc_safepoint_entry(
+    client: &SyncTransactionClient,
+    safepoint: Timestamp,
+) -> tikv_client::Result<u64> {
+    client.gc_safepoint(safepoint)
+}
+
+fn sync_transaction_split_regions_entry(
+    client: &SyncTransactionClient,
+    split_keys: Vec<Vec<u8>>,
+    scatter: bool,
+    table_id: Option<i64>,
+) -> tikv_client::Result<Vec<u64>> {
+    client.split_regions(split_keys, scatter, table_id)
+}
+
+fn sync_transaction_wait_scatter_region_finish_entry(
+    client: &SyncTransactionClient,
+    region_id: u64,
+    backoff: Backoff,
+) -> tikv_client::Result<()> {
+    client.wait_scatter_region_finish(region_id, backoff)
+}
+
+fn sync_transaction_check_region_in_scattering_entry(
+    client: &SyncTransactionClient,
+    region_id: u64,
+) -> tikv_client::Result<bool> {
+    client.check_region_in_scattering(region_id)
+}
+
+fn sync_transaction_unsafe_destroy_range_entry(
+    client: &SyncTransactionClient,
+    range: std::ops::Range<Vec<u8>>,
+) -> tikv_client::Result<()> {
+    client.unsafe_destroy_range(range)
+}
+
+fn sync_transaction_register_lock_observer_entry(
+    client: &SyncTransactionClient,
+    max_ts: u64,
+) -> tikv_client::Result<()> {
+    client.register_lock_observer(max_ts)
+}
+
+fn sync_transaction_remove_lock_observer_entry(
+    client: &SyncTransactionClient,
+    max_ts: u64,
+) -> tikv_client::Result<()> {
+    client.remove_lock_observer(max_ts)
+}
+
 #[test]
 fn crate_root_exports_core_client_constructor_and_method_surface() {
     let _ = RawClient::<PdRpcClient>::new::<String>;
@@ -300,6 +429,27 @@ fn crate_root_exports_transaction_client_timestamp_helpers() {
     let _ = sync_transaction_low_resolution_timestamp_with_txn_scope_entry;
     let _ = sync_transaction_stale_timestamp_entry;
     let _ = sync_transaction_stale_timestamp_with_txn_scope_entry;
+}
+
+#[test]
+fn crate_root_exports_transaction_client_gc_and_admin_helpers() {
+    let _ = transaction_gc_safepoint_entry;
+    let _ = transaction_prepare_flashback_to_version_entry;
+    let _ = transaction_flashback_to_version_entry;
+    let _ = transaction_split_regions_entry;
+    let _ = transaction_wait_scatter_region_finish_entry;
+    let _ = transaction_check_region_in_scattering_entry;
+    let _ = transaction_unsafe_destroy_range_entry;
+    let _ = transaction_register_lock_observer_entry;
+    let _ = transaction_remove_lock_observer_entry;
+
+    let _ = sync_transaction_gc_safepoint_entry;
+    let _ = sync_transaction_split_regions_entry;
+    let _ = sync_transaction_wait_scatter_region_finish_entry;
+    let _ = sync_transaction_check_region_in_scattering_entry;
+    let _ = sync_transaction_unsafe_destroy_range_entry;
+    let _ = sync_transaction_register_lock_observer_entry;
+    let _ = sync_transaction_remove_lock_observer_entry;
 }
 
 #[test]
