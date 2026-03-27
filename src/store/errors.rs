@@ -4,17 +4,21 @@ use crate::proto::coprocessor;
 use crate::proto::kvrpcpb;
 use crate::Error;
 
-// Those that can have a single region error
+/// Implemented by responses that can carry at most one region error.
 pub trait HasRegionError {
+    /// Extracts and consumes the response's region error, if present.
     fn region_error(&mut self) -> Option<crate::proto::errorpb::Error>;
 }
 
-// Those that can have multiple region errors
+/// Implemented by responses that can carry multiple region errors.
 pub trait HasRegionErrors {
+    /// Extracts and consumes all region errors carried by the response, if present.
     fn region_errors(&mut self) -> Option<Vec<crate::proto::errorpb::Error>>;
 }
 
+/// Implemented by responses that can carry one or more key-level errors.
 pub trait HasKeyErrors {
+    /// Extracts and consumes all key errors carried by the response, if present.
     fn key_errors(&mut self) -> Option<Vec<Error>>;
 }
 

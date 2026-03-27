@@ -37,11 +37,14 @@ use crate::SecurityManager;
 /// A trait for connecting to TiKV stores.
 #[async_trait]
 pub trait KvConnect: Sized + Send + Sync + 'static {
+    /// Concrete RPC client type produced by this connector.
     type KvClient: KvClient + Clone + Send + Sync + 'static;
 
+    /// Opens a client connection to the TiKV store at `address`.
     async fn connect(&self, address: &str) -> Result<Self::KvClient>;
 }
 
+/// Default connector used by the client to open gRPC channels to TiKV stores.
 #[derive(Clone)]
 pub struct TikvConnect {
     security_mgr: Arc<SecurityManager>,
@@ -62,6 +65,7 @@ pub struct TikvConnect {
 
 impl TikvConnect {
     #[allow(clippy::too_many_arguments)]
+    /// Creates a connector with the provided transport and batch-RPC settings.
     pub fn new(
         security_mgr: Arc<SecurityManager>,
         timeout: Duration,
@@ -91,21 +95,25 @@ impl TikvConnect {
         }
     }
 
+    /// Overrides the batch-RPC scheduling policy string sent to TiKV.
     pub fn with_batch_rpc_policy(mut self, policy: impl Into<String>) -> Self {
         self.batch_rpc_policy = policy.into();
         self
     }
 
+    /// Overrides the overload threshold used by TiKV batch-RPC.
     pub fn with_batch_rpc_overload_threshold(mut self, threshold: u64) -> Self {
         self.batch_rpc_overload_threshold = threshold;
         self
     }
 
+    /// Sets the per-store in-flight request token limit.
     pub fn with_max_concurrency_request_limit(mut self, limit: i64) -> Self {
         self.max_concurrency_request_limit = limit;
         self
     }
 
+    /// Enables or updates the coprocessor cache using the provided configuration.
     pub fn with_copr_cache_config(mut self, config: CoprocessorCacheConfig) -> Self {
         if config.capacity_mb > 0 && config.admission_max_result_mb == 0 {
             warn!("invalid coprocessor cache config: admission_max_result_mb=0, disabling cache");
@@ -196,13 +204,17 @@ impl KvConnect for TikvConnect {
 }
 
 #[async_trait]
+/// Erased request dispatcher used by higher-level region/store abstractions.
 pub trait KvClient {
+    /// Dispatches a store request and returns the erased response payload.
     async fn dispatch(&self, req: &dyn Request) -> Result<Box<dyn Any>>;
 
+    /// Returns the default request timeout used by this client.
     fn timeout(&self) -> Duration {
         Duration::ZERO
     }
 
+    /// Returns the connected store address when the client knows it.
     fn store_address(&self) -> Option<&str> {
         None
     }
