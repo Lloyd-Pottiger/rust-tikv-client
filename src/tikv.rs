@@ -11,6 +11,8 @@ pub use crate::Backoff as Backoffer;
 #[doc(inline)]
 pub use crate::BinlogWriteResult;
 #[doc(inline)]
+pub use crate::GcOptions;
+#[doc(inline)]
 pub use crate::KvFilter as KVFilter;
 #[doc(inline)]
 pub use crate::SchemaLeaseChecker;

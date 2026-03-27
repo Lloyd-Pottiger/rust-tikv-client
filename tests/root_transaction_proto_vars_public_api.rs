@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use tikv_client::{
-    ProtoCompactResponse, ProtoLockInfo, ProtoTiFlashSystemTableResponse, ProtoWaitForEntry,
-    Timestamp, TransactionClient, Variables, MAX_TXN_TIME_USE,
+    GcOptions, ProtoCompactResponse, ProtoLockInfo, ProtoTiFlashSystemTableResponse,
+    ProtoWaitForEntry, Timestamp, TransactionClient, Variables, MAX_TXN_TIME_USE,
 };
 
 async fn scan_locks_entry(
@@ -85,6 +85,10 @@ fn crate_root_exports_transaction_proto_aliases_and_store_level_helpers() {
 #[test]
 fn crate_root_exports_transaction_vars_alias_and_constants() {
     assert_eq!(MAX_TXN_TIME_USE, 24 * 60 * 60 * 1000);
+
+    let gc_options = GcOptions::new().with_concurrency(4);
+    assert_eq!(gc_options.concurrency, 4);
+    assert_eq!(GcOptions::default().concurrency, 8);
 
     let vars = Variables::default();
     assert_eq!(vars.backoff_lock_fast_ms, 10);

@@ -110,6 +110,45 @@ pub struct Client<PdC: PdClient = PdRpcClient> {
     txn_latches: Option<Arc<TxnLocalLatches>>,
 }
 
+const DEFAULT_GC_CONCURRENCY: usize = 8;
+
+/// Options for transactional GC requests.
+///
+/// This mirrors the configurable part of client-go `tikv.GC(..., WithConcurrency(...))` while
+/// keeping a Rust-style named options struct.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct GcOptions {
+    /// Maximum number of regions whose lock cleanup can be processed concurrently during GC.
+    ///
+    /// The default is `8`, matching client-go's GC range-task runner concurrency.
+    pub concurrency: usize,
+}
+
+impl GcOptions {
+    /// Create GC options with client-go-compatible defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the lock-cleanup concurrency used by [`Client::gc_with_options`].
+    ///
+    /// Passing `0` is rejected by the GC entrypoints.
+    #[doc(alias = "WithConcurrency")]
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency;
+        self
+    }
+}
+
+impl Default for GcOptions {
+    fn default() -> Self {
+        Self {
+            concurrency: DEFAULT_GC_CONCURRENCY,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct LastTso {
     tso: Timestamp,
@@ -911,8 +950,13 @@ impl<PdC: PdClient> Client<PdC> {
     /// This is a simplified version of [GC in TiDB](https://docs.pingcap.com/tidb/stable/garbage-collection-overview).
     /// We skip the second step "delete ranges" which is an optimization for TiDB.
     pub async fn gc(&self, safepoint: Timestamp) -> Result<bool> {
+        self.gc_with_options(safepoint, GcOptions::default()).await
+    }
+
+    /// Request garbage collection (GC) of the TiKV cluster with explicit GC options.
+    pub async fn gc_with_options(&self, safepoint: Timestamp, options: GcOptions) -> Result<bool> {
         let requested = safepoint.version();
-        let new_safe_point = self.gc_safepoint(safepoint).await?;
+        let new_safe_point = self.gc_safepoint_with_options(safepoint, options).await?;
         Ok(new_safe_point == requested)
     }
 
@@ -921,10 +965,28 @@ impl<PdC: PdClient> Client<PdC> {
     /// This is identical to [`Client::gc`] except it returns PD's `new_safe_point` (mirroring
     /// client-go GC behavior, which may return a safepoint lower than requested).
     pub async fn gc_safepoint(&self, safepoint: Timestamp) -> Result<u64> {
+        self.gc_safepoint_with_options(safepoint, GcOptions::default())
+            .await
+    }
+
+    /// Request garbage collection (GC) of the TiKV cluster with explicit GC options and return the
+    /// effective safepoint.
+    pub async fn gc_safepoint_with_options(
+        &self,
+        safepoint: Timestamp,
+        options: GcOptions,
+    ) -> Result<u64> {
         debug!("invoking transactional gc request");
 
-        let options = ResolveLocksOptions::default();
-        self.cleanup_locks(.., &safepoint, options).await?;
+        if options.concurrency == 0 {
+            return Err(crate::Error::StringError(
+                "gc concurrency must be greater than 0".to_owned(),
+            ));
+        }
+
+        let lock_options = ResolveLocksOptions::default();
+        self.cleanup_locks_with_concurrency(.., &safepoint, lock_options, options.concurrency)
+            .await?;
 
         // update safepoint to PD
         let requested = safepoint.version();
@@ -969,6 +1031,31 @@ impl<PdC: PdClient> Client<PdC> {
         Ok(new_safe_point)
     }
 
+    async fn cleanup_locks_with_concurrency(
+        &self,
+        range: impl Into<BoundRange>,
+        safepoint: &Timestamp,
+        options: ResolveLocksOptions,
+        concurrency: usize,
+    ) -> Result<CleanupLocksResult> {
+        debug!(
+            "invoking cleanup locks (async_commit_only={})",
+            options.async_commit_only
+        );
+        let ctx = self.resolve_locks_ctx.clone();
+        let backoff = Backoff::equal_jitter_backoff(100, 10000, 50);
+        let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
+        let req = new_scan_lock_request(range, safepoint, options.batch_size);
+        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
+            .preserve_shard()
+            .cleanup_locks(ctx.clone(), options, self.keyspace)
+            .retry_multi_region_with_concurrency(backoff, concurrency)
+            .extract_error()
+            .merge(crate::request::Collect)
+            .plan();
+        plan.execute().await
+    }
+
     /// Clean up locks in the given key range up to the provided `safepoint`.
     ///
     /// This is primarily intended for GC-like workflows. When `options.async_commit_only` is set,
@@ -979,23 +1066,13 @@ impl<PdC: PdClient> Client<PdC> {
         safepoint: &Timestamp,
         options: ResolveLocksOptions,
     ) -> Result<CleanupLocksResult> {
-        debug!(
-            "invoking cleanup locks (async_commit_only={})",
-            options.async_commit_only
-        );
-        // scan all locks with ts <= safepoint
-        let ctx = self.resolve_locks_ctx.clone();
-        let backoff = Backoff::equal_jitter_backoff(100, 10000, 50);
-        let range = range.into().encode_keyspace(self.keyspace, KeyMode::Txn);
-        let req = new_scan_lock_request(range, safepoint, options.batch_size);
-        let plan = crate::request::PlanBuilder::new(self.pd.clone(), self.keyspace, req)
-            .preserve_shard()
-            .cleanup_locks(ctx.clone(), options, self.keyspace)
-            .retry_multi_region(backoff)
-            .extract_error()
-            .merge(crate::request::Collect)
-            .plan();
-        plan.execute().await
+        self.cleanup_locks_with_concurrency(
+            range,
+            safepoint,
+            options,
+            crate::request::plan::DEFAULT_MULTI_REGION_CONCURRENCY,
+        )
+        .await
     }
 
     // Note: `batch_size` must be >= expected number of locks.
@@ -1550,6 +1627,7 @@ mod tests {
     use crate::timestamp::TimestampExt;
     use crate::transaction::lock::ResolveLocksOptions;
     use crate::transaction::DeleteRangeTask;
+    use crate::transaction::GcOptions;
     use crate::transaction::HeartbeatOption;
     use crate::transaction::ResolveLocksContext;
     use crate::Backoff;
@@ -2434,6 +2512,45 @@ mod tests {
         assert!(matches!(
             err,
             crate::Error::StringError(msg) if msg.contains("concurrency must be greater than 0")
+        ));
+        assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_gc_with_options_rejects_zero_concurrency() {
+        let keyspace = Keyspace::Disable;
+
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls_cloned = dispatch_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |_req: &dyn Any| {
+                dispatch_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                Err(crate::Error::Unimplemented)
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), keyspace),
+            gc_safe_point: GcSafePointCache::new(pd_client.clone(), keyspace),
+            pd: pd_client.clone(),
+            keyspace,
+            resolve_locks_ctx: ResolveLocksContext::default(),
+            last_tsos: Default::default(),
+            low_resolution_ts_update_interval_ms:
+                super::default_low_resolution_ts_update_interval_ms(),
+            txn_latches: None,
+        };
+
+        let err = client
+            .gc_with_options(
+                Timestamp::from_version(123),
+                GcOptions::new().with_concurrency(0),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::StringError(msg) if msg.contains("gc concurrency must be greater than 0")
         ));
         assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
     }

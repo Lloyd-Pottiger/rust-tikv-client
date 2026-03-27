@@ -10,6 +10,7 @@
 
 pub use buffer::Buffer;
 pub use client::Client;
+pub use client::GcOptions;
 pub use client::ProtoCompactResponse;
 pub use client::ProtoLockInfo;
 pub use client::ProtoTiFlashSystemTableResponse;

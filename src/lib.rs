@@ -338,6 +338,8 @@ pub use crate::transaction::Client as TransactionClient;
 #[doc(inline)]
 pub use crate::transaction::DeleteRangeTask;
 #[doc(inline)]
+pub use crate::transaction::GcOptions;
+#[doc(inline)]
 pub use crate::transaction::KvFilter;
 #[doc(inline)]
 pub use crate::transaction::KvFilterOp;

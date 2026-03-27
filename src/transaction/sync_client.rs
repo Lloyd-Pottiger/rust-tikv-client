@@ -500,12 +500,43 @@ impl SyncTransactionClient {
         safe_block_on(&self.runtime, self.client.gc(safepoint))
     }
 
+    /// Request garbage collection (GC) of the TiKV cluster with explicit GC options.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::gc_with_options`](crate::TransactionClient::gc_with_options).
+    pub fn gc_with_options(
+        &self,
+        safepoint: Timestamp,
+        options: crate::transaction::GcOptions,
+    ) -> Result<bool> {
+        safe_block_on(
+            &self.runtime,
+            self.client.gc_with_options(safepoint, options),
+        )
+    }
+
     /// Request garbage collection (GC) of the TiKV cluster and return the effective safepoint.
     ///
     /// This is a synchronous version of
     /// [`TransactionClient::gc_safepoint`](crate::TransactionClient::gc_safepoint).
     pub fn gc_safepoint(&self, safepoint: Timestamp) -> Result<u64> {
         safe_block_on(&self.runtime, self.client.gc_safepoint(safepoint))
+    }
+
+    /// Request garbage collection (GC) of the TiKV cluster with explicit GC options and return the
+    /// effective safepoint.
+    ///
+    /// This is a synchronous version of
+    /// [`TransactionClient::gc_safepoint_with_options`](crate::TransactionClient::gc_safepoint_with_options).
+    pub fn gc_safepoint_with_options(
+        &self,
+        safepoint: Timestamp,
+        options: crate::transaction::GcOptions,
+    ) -> Result<u64> {
+        safe_block_on(
+            &self.runtime,
+            self.client.gc_safepoint_with_options(safepoint, options),
+        )
     }
 
     /// Clean up all locks in the specified range.

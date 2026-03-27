@@ -32,6 +32,33 @@ async fn scan_locks_entry(
     client.scan_locks(safepoint, range, batch_size).await
 }
 
+async fn gc_entry(client: &transaction::Client, safepoint: Timestamp) -> tikv_client::Result<bool> {
+    client.gc(safepoint).await
+}
+
+async fn gc_safepoint_entry(
+    client: &transaction::Client,
+    safepoint: Timestamp,
+) -> tikv_client::Result<u64> {
+    client.gc_safepoint(safepoint).await
+}
+
+async fn gc_with_options_entry(
+    client: &transaction::Client,
+    safepoint: Timestamp,
+    options: transaction::GcOptions,
+) -> tikv_client::Result<bool> {
+    client.gc_with_options(safepoint, options).await
+}
+
+async fn gc_safepoint_with_options_entry(
+    client: &transaction::Client,
+    safepoint: Timestamp,
+    options: transaction::GcOptions,
+) -> tikv_client::Result<u64> {
+    client.gc_safepoint_with_options(safepoint, options).await
+}
+
 async fn delete_range_entry(
     client: &transaction::Client,
     range: std::ops::Range<Vec<u8>>,
@@ -189,6 +216,10 @@ fn transaction_module_exports_client_and_runner_entrypoints() {
     let _ = transaction::Client::<tikv_client::PdRpcClient>::lock_resolver;
     let _ = transaction::Client::<tikv_client::PdRpcClient>::bound_lock_resolver;
     let _ = transaction::Client::<tikv_client::PdRpcClient>::snapshot;
+    let _ = gc_entry;
+    let _ = gc_safepoint_entry;
+    let _ = gc_with_options_entry;
+    let _ = gc_safepoint_with_options_entry;
     let _ = cleanup_locks_entry;
     let _ = scan_locks_entry;
     let _ = transaction::Client::<tikv_client::PdRpcClient>::resolve_locks;
@@ -203,6 +234,8 @@ fn transaction_module_exports_client_and_runner_entrypoints() {
     let _ = transaction::SyncTransactionClient::begin_with_options;
     let _ = transaction::SyncTransactionClient::begin_with_start_timestamp;
     let _ = transaction::SyncTransactionClient::snapshot;
+    let _ = transaction::SyncTransactionClient::gc_with_options;
+    let _ = transaction::SyncTransactionClient::gc_safepoint_with_options;
     let _ = |identifier: String, pd_client: Arc<tikv_client::PdRpcClient>, concurrency: usize| {
         transaction::RangeTaskRunner::<tikv_client::PdRpcClient>::new(
             identifier,
@@ -237,6 +270,14 @@ fn transaction_module_exports_client_and_runner_entrypoints() {
     let _: fn(&transaction::DeleteRangeTask) -> bool = transaction::DeleteRangeTask::notify_only;
     let _: fn(&transaction::DeleteRangeTask) -> usize =
         transaction::DeleteRangeTask::completed_regions;
+}
+
+#[test]
+fn transaction_module_exports_gc_options() {
+    let options = transaction::GcOptions::new().with_concurrency(8);
+    let _: usize = options.concurrency;
+    assert_eq!(options.concurrency, 8);
+    assert_eq!(transaction::GcOptions::default().concurrency, 8);
 }
 
 #[test]
