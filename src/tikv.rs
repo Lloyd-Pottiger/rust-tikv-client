@@ -11,12 +11,20 @@ pub use crate::Backoff as Backoffer;
 #[doc(inline)]
 pub use crate::BinlogWriteResult;
 #[doc(inline)]
+pub use crate::KvFilter as KVFilter;
+#[doc(inline)]
+pub use crate::SchemaLeaseChecker;
+#[doc(inline)]
+pub use crate::SchemaVer;
+#[doc(inline)]
 pub use crate::Store;
 #[doc(inline)]
 pub use crate::Transaction as KVTxn;
 pub use crate::TransactionClient as KVStore;
 #[doc(inline)]
 pub use crate::Variables;
+#[doc(alias = "MaxTxnTimeUse")]
+pub const MAX_TXN_TIME_USE: i64 = crate::MAX_TXN_TIME_USE;
 
 /// Client-go style in-memory mutation buffer type.
 ///

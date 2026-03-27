@@ -384,6 +384,8 @@ pub use crate::transaction::RpcRuntimeStats;
 #[doc(inline)]
 pub use crate::transaction::SchemaLeaseChecker;
 #[doc(inline)]
+pub use crate::transaction::SchemaVer;
+#[doc(inline)]
 pub use crate::transaction::Snapshot;
 #[doc(inline)]
 pub use crate::transaction::SnapshotCacheEntry;
@@ -407,6 +409,8 @@ pub use crate::transaction::TransactionOptions;
 pub use crate::transaction::TxnStatus;
 #[doc(inline)]
 pub use crate::transaction::Variables;
+#[doc(inline)]
+pub use crate::transaction::MAX_TXN_TIME_USE;
 
 /// Protobuf-generated store label metadata returned by PD.
 ///

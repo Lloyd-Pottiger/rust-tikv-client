@@ -188,6 +188,16 @@ pub trait SchemaLeaseChecker: Send + Sync {
     fn check_by_schema_ver(&self, txn_ts: Timestamp, start_schema_ver: i64) -> Result<()>;
 }
 
+/// The schema version type used by schema validity checks during commit.
+///
+/// This mirrors client-go `transaction.SchemaVer`.
+pub type SchemaVer = i64;
+
+/// The maximum time a transaction may use, in milliseconds, from begin to commit.
+///
+/// This mirrors client-go `transaction.MaxTxnTimeUse`.
+pub const MAX_TXN_TIME_USE: i64 = 24 * 60 * 60 * 1000;
+
 /// Result returned by [`BinlogExecutor::prewrite`].
 ///
 /// This mirrors client-go's `BinlogWriteResult` interface. When `skipped` is true, the executor
