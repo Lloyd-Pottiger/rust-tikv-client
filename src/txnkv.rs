@@ -31,13 +31,16 @@ pub mod txnsnapshot {
 /// Mirrors client-go `txnkv/txnlock`.
 pub mod txnlock {
     pub use crate::transaction::Lock;
+    pub use crate::transaction::LockProbe;
     pub use crate::transaction::LockResolver;
+    pub use crate::transaction::LockResolverProbe;
     pub use crate::transaction::ResolveLockDetail;
     pub use crate::transaction::ResolveLocksContext;
     pub use crate::transaction::ResolveLocksForReadResult;
     pub use crate::transaction::ResolveLocksOptions;
     pub use crate::transaction::ResolveLocksResult;
     pub use crate::transaction::ResolvingLock;
+    pub use crate::transaction::TxnStatus;
 }
 
 /// Mirrors client-go `txnkv/rangetask`.
