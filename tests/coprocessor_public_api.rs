@@ -66,12 +66,13 @@ fn coprocessor_public_api_exposes_lowering_helpers() {
 fn coprocessor_public_api_exposes_stream_request_accessors() {
     let start_ts = <Timestamp as TimestampExt>::from_version(64);
 
-    let mut request = lowering::new_coprocessor_stream_request(
-        5,
-        b"stream".to_vec(),
-        vec!["k1".to_owned().."k9".to_owned()],
-        start_ts,
-    );
+    let mut request: coprocessor::CoprocessorStreamRequest =
+        lowering::new_coprocessor_stream_request(
+            5,
+            b"stream".to_vec(),
+            vec!["k1".to_owned().."k9".to_owned()],
+            start_ts,
+        );
     assert_eq!(request.inner().tp, 5);
     assert_eq!(request.inner().start_ts, 64);
 
