@@ -13,9 +13,17 @@ pub use crate::Backoff as Backoffer;
 #[doc(inline)]
 pub use crate::BinlogWriteResult;
 #[doc(inline)]
+pub use crate::BoundLockResolver;
+#[doc(inline)]
 pub use crate::GcOptions;
 #[doc(inline)]
 pub use crate::KvFilter as KVFilter;
+#[doc(inline)]
+pub use crate::LockResolver;
+#[doc(inline)]
+pub use crate::ResolveLocksContext;
+#[doc(inline)]
+pub use crate::ResolveLocksOptions;
 #[doc(inline)]
 pub use crate::SchemaLeaseChecker;
 #[doc(inline)]
@@ -37,6 +45,12 @@ pub const MAX_TXN_TIME_USE: i64 = crate::MAX_TXN_TIME_USE;
 ///
 /// This mirrors client-go `tikv.MemBuffer`.
 pub type MemBuffer = crate::transaction::Buffer;
+
+/// Client-go style transactional storage handle.
+///
+/// This mirrors client-go `tikv.Storage`, while reusing the Rust client's concrete
+/// [`KVStore`] type rather than a separate interface object.
+pub type Storage = KVStore;
 
 /// Client-go style backoff config type.
 ///

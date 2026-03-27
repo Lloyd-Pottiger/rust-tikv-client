@@ -46,6 +46,22 @@ fn tikv_module_exports_kvstore_and_backoffer() {
 }
 
 #[test]
+fn tikv_module_exports_storage_and_lock_resolver_facade() {
+    let _: Option<tikv::Storage> = None;
+    let _: Option<tikv::LockResolver> = None;
+    let _: Option<tikv::ResolveLocksContext> = None;
+    let _: Option<tikv::ResolveLocksOptions> = None;
+    let _: Option<tikv::BoundLockResolver<tikv_client::PdRpcClient>> = None;
+
+    let _: fn(tikv::ResolveLocksContext) -> tikv::LockResolver = tikv::LockResolver::new;
+    let _: fn(
+        Arc<tikv_client::PdRpcClient>,
+        tikv_client::request::Keyspace,
+        tikv::ResolveLocksContext,
+    ) -> tikv::BoundLockResolver<tikv_client::PdRpcClient> = tikv::BoundLockResolver::new;
+}
+
+#[test]
 fn tikv_module_exports_gc_options_builder() {
     let options = tikv::GcOptions::new().with_concurrency(6);
     assert_eq!(options.concurrency, 6);
