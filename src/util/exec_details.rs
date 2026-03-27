@@ -107,6 +107,16 @@ impl TiKVExecDetails {
     }
 }
 
+/// Build execution details from a TiKV `ExecDetailsV2` protobuf message.
+///
+/// This mirrors client-go `util.NewTiKVExecDetails` while reusing
+/// [`TiKVExecDetails::from_proto`] under the hood.
+#[doc(alias = "NewTiKVExecDetails")]
+#[must_use]
+pub fn new_tikv_exec_details(details: Option<&kvrpcpb::ExecDetailsV2>) -> TiKVExecDetails {
+    TiKVExecDetails::from_proto(details)
+}
+
 impl From<&kvrpcpb::ExecDetailsV2> for TiKVExecDetails {
     fn from(details: &kvrpcpb::ExecDetailsV2) -> Self {
         Self::from_proto(Some(details))
@@ -1316,6 +1326,24 @@ impl RUDetails {
     }
 }
 
+/// Create an empty RU detail accumulator.
+///
+/// This mirrors client-go `util.NewRUDetails` while reusing [`RUDetails::new`].
+#[doc(alias = "NewRUDetails")]
+#[must_use]
+pub fn new_ru_details() -> RUDetails {
+    RUDetails::new()
+}
+
+/// Create an RU detail accumulator with the provided initial values.
+///
+/// This mirrors client-go `util.NewRUDetailsWith` while reusing [`RUDetails::new_with`].
+#[doc(alias = "NewRUDetailsWith")]
+#[must_use]
+pub fn new_ru_details_with(read_ru: f64, write_ru: f64, wait_duration: Duration) -> RUDetails {
+    RUDetails::new_with(read_ru, write_ru, wait_duration)
+}
+
 impl fmt::Display for RUDetails {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2038,6 +2066,28 @@ mod tests {
         assert!(details.to_string().contains("time_detail: {"));
         assert!(details.to_string().contains("scan_detail: {"));
         assert!(details.to_string().contains("write_detail: {"));
+    }
+
+    #[test]
+    fn test_constructor_helpers_delegate_to_existing_exec_details_builders() {
+        let exec_details = kvrpcpb::ExecDetailsV2 {
+            time_detail_v2: Some(kvrpcpb::TimeDetailV2 {
+                wait_wall_time_ns: 1_000_000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            new_tikv_exec_details(Some(&exec_details)),
+            TiKVExecDetails::from_proto(Some(&exec_details))
+        );
+        assert_eq!(new_tikv_exec_details(None), TiKVExecDetails::default());
+        assert_eq!(new_ru_details(), RUDetails::new());
+        assert_eq!(
+            new_ru_details_with(1.5, 2.5, Duration::from_millis(3)),
+            RUDetails::new_with(1.5, 2.5, Duration::from_millis(3))
+        );
     }
 
     #[test]
