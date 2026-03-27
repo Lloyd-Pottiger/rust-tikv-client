@@ -12,10 +12,22 @@ use tikv_client::{
 #[derive(Clone, Default)]
 struct FakeKvClient;
 
+#[derive(Clone, Default)]
+struct FakeKvConnect;
+
 #[async_trait]
 impl store::KvClient for FakeKvClient {
     async fn dispatch(&self, _req: &dyn store::Request) -> Result<Box<dyn Any>> {
         Err(tikv_client::Error::Unimplemented)
+    }
+}
+
+#[async_trait]
+impl store::KvConnect for FakeKvConnect {
+    type KvClient = FakeKvClient;
+
+    async fn connect(&self, _address: &str) -> Result<Self::KvClient> {
+        Ok(FakeKvClient)
     }
 }
 
@@ -150,6 +162,15 @@ fn store_module_exports_dispatch_traits() {
 fn store_module_exports_kv_client_trait() {
     fn assert_kv_client_trait_object(_client: &dyn store::KvClient) {}
     let _: fn(&dyn store::KvClient) = assert_kv_client_trait_object;
+
+    fn assert_kv_connect_impl<T: store::KvConnect<KvClient = FakeKvClient>>() {}
+    assert_kv_connect_impl::<FakeKvConnect>();
+}
+
+#[test]
+fn store_module_exports_region_error_traits() {
+    fn assert_has_region_errors_impl<T: store::HasRegionErrors>() {}
+    assert_has_region_errors_impl::<kvrpcpb::GetResponse>();
 }
 
 #[test]
