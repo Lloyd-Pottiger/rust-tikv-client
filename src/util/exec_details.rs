@@ -19,6 +19,26 @@ tokio::task_local! {
     static TASK_TRACE_EXEC_DETAILS_ENABLED: bool;
 }
 
+/// Marker keys for execution details stored in task-local context.
+///
+/// These mirror the exported `context.Context` keys in client-go `util/execdetails.go`. The Rust
+/// client uses Tokio task-locals instead of `context.Context`, but these marker types are kept to
+/// make it easier to port client-go code that passes keys around.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CommitDetailCtxKey;
+
+/// Marker key for lock-keys details.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LockKeysDetailCtxKey;
+
+/// Marker key for exec details.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ExecDetailsKey;
+
+/// Marker key for RU details.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RUDetailsCtxKey;
+
 #[derive(Clone, Copy, Debug, Default)]
 struct TaskTrafficKind {
     is_mpp: bool,
