@@ -1955,6 +1955,48 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_raw_coprocessor_rejects_invalid_version_requirement() -> Result<()> {
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls_cloned = dispatch_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                req.downcast_ref::<kvrpcpb::RawCoprocessorRequest>()
+                    .expect("expected raw coprocessor request");
+                dispatch_calls_cloned.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(kvrpcpb::RawCoprocessorResponse::default()) as Box<dyn Any>)
+            },
+        )));
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
+            keyspace: Keyspace::Disable,
+        };
+
+        let err = client
+            .coprocessor(
+                "example",
+                "definitely not a semver req",
+                vec![vec![1]..vec![2]],
+                |_region, _ranges| Vec::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidSemver(_)),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
+
+        Ok(())
+    }
+
     #[test]
     fn test_pd_client_getter_returns_handle() {
         let pd_client = Arc::new(MockPdClient::new(MockKvClient::default()));
