@@ -58,6 +58,7 @@ pub trait StoreRequest {
     fn apply_store(&mut self, store: &Store);
 }
 
+/// Retry backoff settings applied to region errors and lock conflicts.
 #[derive(Clone, Debug, new, Eq, PartialEq)]
 pub struct RetryOptions {
     /// How to retry when there is a region error and we need to resolve regions with PD.
@@ -67,6 +68,10 @@ pub struct RetryOptions {
 }
 
 impl RetryOptions {
+    /// Returns the default retry policy for optimistic transactions and general read requests.
+    ///
+    /// This keeps the standard region-error backoff while using the optimistic lock backoff
+    /// profile for lock conflicts.
     pub const fn default_optimistic() -> RetryOptions {
         RetryOptions {
             region_backoff: DEFAULT_REGION_BACKOFF,
@@ -74,6 +79,10 @@ impl RetryOptions {
         }
     }
 
+    /// Returns the default retry policy for pessimistic transactions.
+    ///
+    /// This keeps the standard region-error backoff while using the longer pessimistic lock
+    /// backoff profile for lock conflicts.
     pub const fn default_pessimistic() -> RetryOptions {
         RetryOptions {
             region_backoff: DEFAULT_REGION_BACKOFF,
@@ -81,6 +90,7 @@ impl RetryOptions {
         }
     }
 
+    /// Returns a retry policy that disables both region and lock retries.
     pub const fn none() -> RetryOptions {
         RetryOptions {
             region_backoff: Backoff::no_backoff(),
