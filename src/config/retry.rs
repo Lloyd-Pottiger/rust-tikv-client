@@ -7,7 +7,9 @@
 //! bounded number of attempts. The helpers in this module provide best-effort presets and
 //! constructors that are convenient when implementing custom retry loops.
 
+use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 
 use crate::Backoff;
 use crate::Variables;
@@ -19,13 +21,76 @@ pub type Backoffer = Backoff;
 
 /// Client-go style backoff configuration.
 ///
-/// In client-go, `retry.Config` is immutable and the backoffer holds per-config state (attempts,
-/// last sleep). In the Rust client, [`crate::Backoff`] includes both the configuration and the
-/// attempt counter, so this is an alias.
-pub type Config = Backoff;
+/// Unlike [`Backoffer`], this is a lightweight descriptor that can be turned into a concrete
+/// [`crate::Backoff`] schedule on demand. This keeps the public API close to client-go
+/// `retry.Config` while preserving the Rust client's existing schedule implementation.
+#[derive(Clone, Debug)]
+pub struct Config {
+    name: String,
+    backoff_fn_cfg: Option<BackoffFnCfg>,
+    error: Option<Arc<crate::Error>>,
+}
 
 const DEFAULT_MAX_ATTEMPTS: u32 = 16;
 const DEFAULT_NO_JITTER_MAX_ATTEMPTS: u32 = 10;
+const TXN_LOCK_FAST_NAME: &str = "txnLockFast";
+
+impl Config {
+    /// Create a config that never sleeps.
+    #[must_use]
+    pub fn no_backoff() -> Self {
+        Self {
+            name: String::new(),
+            backoff_fn_cfg: None,
+            error: None,
+        }
+    }
+
+    /// Convert this config into a concrete [`Backoff`] schedule.
+    #[must_use]
+    pub fn to_backoff(&self) -> Backoff {
+        self.to_backoff_with_vars(&Variables::default())
+    }
+
+    /// Convert this config into a concrete [`Backoff`] schedule using transaction variables.
+    #[must_use]
+    pub fn to_backoff_with_vars(&self, vars: &Variables) -> Backoff {
+        let Some(mut backoff_fn_cfg) = self.backoff_fn_cfg else {
+            return Backoff::no_backoff();
+        };
+
+        if self.name.eq_ignore_ascii_case(TXN_LOCK_FAST_NAME) {
+            backoff_fn_cfg.base_delay_ms = vars.backoff_lock_fast_ms.max(2);
+        }
+
+        backoff_fn_cfg.to_backoff(default_max_attempts(backoff_fn_cfg.jitter))
+    }
+
+    /// Returns the configured base delay in milliseconds.
+    #[doc(alias = "Base")]
+    #[must_use]
+    pub fn base(&self) -> u64 {
+        self.backoff_fn_cfg.map_or(0, |cfg| cfg.base_delay_ms)
+    }
+
+    /// Replace the stored detailed error.
+    #[doc(alias = "SetErrors")]
+    pub fn set_errors(&mut self, err: crate::Error) {
+        self.error = Some(Arc::new(err));
+    }
+
+    /// Replace the backoff function configuration.
+    #[doc(alias = "SetBackoffFnCfg")]
+    pub fn set_backoff_fn_cfg(&mut self, fn_cfg: BackoffFnCfg) {
+        self.backoff_fn_cfg = Some(fn_cfg);
+    }
+}
+
+impl fmt::Display for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name)
+    }
+}
 
 /// Jitter type for exponential backoff.
 ///
@@ -105,6 +170,41 @@ pub fn new_backoff_fn_cfg(
         base_delay_ms,
         max_delay_ms,
         jitter,
+    }
+}
+
+fn default_max_attempts(jitter: BackoffJitter) -> u32 {
+    match jitter {
+        BackoffJitter::NoJitter => DEFAULT_NO_JITTER_MAX_ATTEMPTS,
+        BackoffJitter::FullJitter | BackoffJitter::EqualJitter | BackoffJitter::DecorrJitter => {
+            DEFAULT_MAX_ATTEMPTS
+        }
+    }
+}
+
+fn preset_config(name: &str, backoff_fn_cfg: BackoffFnCfg) -> Config {
+    Config {
+        name: name.to_owned(),
+        backoff_fn_cfg: Some(backoff_fn_cfg),
+        error: None,
+    }
+}
+
+/// Create a named backoff config.
+///
+/// The stored error is kept for migration/public-API parity with client-go `retry.Config`; the
+/// current Rust retry helpers only consume the backoff parameters.
+#[doc(alias = "NewConfig")]
+#[must_use]
+pub fn new_config(
+    name: impl Into<String>,
+    backoff_fn_cfg: BackoffFnCfg,
+    err: crate::Error,
+) -> Config {
+    Config {
+        name: name.into(),
+        backoff_fn_cfg: Some(backoff_fn_cfg),
+        error: Some(Arc::new(err)),
     }
 }
 
@@ -196,7 +296,7 @@ pub fn new_noop_backoff() -> Backoffer {
 #[doc(alias = "BoRegionMiss")]
 #[must_use]
 pub fn bo_region_miss() -> Config {
-    crate::backoff::DEFAULT_REGION_BACKOFF
+    preset_config("regionMiss", new_backoff_fn_cfg(2, 500, NO_JITTER))
 }
 
 /// Default backoff config for region scheduling.
@@ -205,7 +305,7 @@ pub fn bo_region_miss() -> Config {
 #[doc(alias = "BoRegionScheduling")]
 #[must_use]
 pub fn bo_region_scheduling() -> Config {
-    crate::backoff::DEFAULT_REGION_BACKOFF
+    preset_config("regionScheduling", new_backoff_fn_cfg(2, 500, NO_JITTER))
 }
 
 /// Default backoff config for TiKV RPC.
@@ -214,7 +314,7 @@ pub fn bo_region_scheduling() -> Config {
 #[doc(alias = "BoTiKVRPC")]
 #[must_use]
 pub fn bo_tikv_rpc() -> Config {
-    Backoff::equal_jitter_backoff(100, 2000, DEFAULT_MAX_ATTEMPTS)
+    preset_config("tikvRPC", new_backoff_fn_cfg(100, 2000, EQUAL_JITTER))
 }
 
 /// Default backoff config for TiFlash RPC.
@@ -223,7 +323,7 @@ pub fn bo_tikv_rpc() -> Config {
 #[doc(alias = "BoTiFlashRPC")]
 #[must_use]
 pub fn bo_tiflash_rpc() -> Config {
-    Backoff::equal_jitter_backoff(100, 2000, DEFAULT_MAX_ATTEMPTS)
+    preset_config("tiflashRPC", new_backoff_fn_cfg(100, 2000, EQUAL_JITTER))
 }
 
 /// Default backoff config for transaction lock resolution.
@@ -232,7 +332,7 @@ pub fn bo_tiflash_rpc() -> Config {
 #[doc(alias = "BoTxnLock")]
 #[must_use]
 pub fn bo_txn_lock() -> Config {
-    Backoff::equal_jitter_backoff(100, 3000, DEFAULT_MAX_ATTEMPTS)
+    preset_config("txnLock", new_backoff_fn_cfg(100, 3000, EQUAL_JITTER))
 }
 
 /// Default backoff config for PD RPC.
@@ -241,7 +341,7 @@ pub fn bo_txn_lock() -> Config {
 #[doc(alias = "BoPDRPC")]
 #[must_use]
 pub fn bo_pd_rpc() -> Config {
-    Backoff::equal_jitter_backoff(500, 3000, DEFAULT_MAX_ATTEMPTS)
+    preset_config("pdRPC", new_backoff_fn_cfg(500, 3000, EQUAL_JITTER))
 }
 
 /// Default backoff config for TiKV server busy errors.
@@ -250,7 +350,10 @@ pub fn bo_pd_rpc() -> Config {
 #[doc(alias = "BoTiKVServerBusy")]
 #[must_use]
 pub fn bo_tikv_server_busy() -> Config {
-    Backoff::equal_jitter_backoff(2000, 10_000, DEFAULT_MAX_ATTEMPTS)
+    preset_config(
+        "tikvServerBusy",
+        new_backoff_fn_cfg(2000, 10_000, EQUAL_JITTER),
+    )
 }
 
 /// Default backoff config for TiFlash server busy errors.
@@ -259,7 +362,10 @@ pub fn bo_tikv_server_busy() -> Config {
 #[doc(alias = "BoTiFlashServerBusy")]
 #[must_use]
 pub fn bo_tiflash_server_busy() -> Config {
-    Backoff::equal_jitter_backoff(2000, 10_000, DEFAULT_MAX_ATTEMPTS)
+    preset_config(
+        "tiflashServerBusy",
+        new_backoff_fn_cfg(2000, 10_000, EQUAL_JITTER),
+    )
 }
 
 /// Default backoff config for TiKV disk full errors.
@@ -268,7 +374,7 @@ pub fn bo_tiflash_server_busy() -> Config {
 #[doc(alias = "BoTiKVDiskFull")]
 #[must_use]
 pub fn bo_tikv_disk_full() -> Config {
-    Backoff::no_jitter_backoff(500, 5000, DEFAULT_NO_JITTER_MAX_ATTEMPTS)
+    preset_config("tikvDiskFull", new_backoff_fn_cfg(500, 5000, NO_JITTER))
 }
 
 /// Default backoff config when region recovery is in progress.
@@ -277,7 +383,10 @@ pub fn bo_tikv_disk_full() -> Config {
 #[doc(alias = "BoRegionRecoveryInProgress")]
 #[must_use]
 pub fn bo_region_recovery_in_progress() -> Config {
-    Backoff::equal_jitter_backoff(100, 10_000, DEFAULT_MAX_ATTEMPTS)
+    preset_config(
+        "regionRecoveryInProgress",
+        new_backoff_fn_cfg(100, 10_000, EQUAL_JITTER),
+    )
 }
 
 /// Default backoff config when a transaction is not found.
@@ -286,7 +395,7 @@ pub fn bo_region_recovery_in_progress() -> Config {
 #[doc(alias = "BoTxnNotFound")]
 #[must_use]
 pub fn bo_txn_not_found() -> Config {
-    crate::backoff::DEFAULT_REGION_BACKOFF
+    preset_config("txnNotFound", new_backoff_fn_cfg(2, 500, NO_JITTER))
 }
 
 /// Default backoff config for stale commands.
@@ -295,7 +404,7 @@ pub fn bo_txn_not_found() -> Config {
 #[doc(alias = "BoStaleCmd")]
 #[must_use]
 pub fn bo_stale_cmd() -> Config {
-    Backoff::no_jitter_backoff(2, 1000, DEFAULT_NO_JITTER_MAX_ATTEMPTS)
+    preset_config("staleCommand", new_backoff_fn_cfg(2, 1000, NO_JITTER))
 }
 
 /// Default backoff config when max timestamp is not synced.
@@ -304,7 +413,7 @@ pub fn bo_stale_cmd() -> Config {
 #[doc(alias = "BoMaxTsNotSynced")]
 #[must_use]
 pub fn bo_max_ts_not_synced() -> Config {
-    crate::backoff::DEFAULT_REGION_BACKOFF
+    preset_config("maxTsNotSynced", new_backoff_fn_cfg(2, 500, NO_JITTER))
 }
 
 /// Default backoff config when commit ts lags behind TSO.
@@ -313,7 +422,7 @@ pub fn bo_max_ts_not_synced() -> Config {
 #[doc(alias = "BoCommitTSLag")]
 #[must_use]
 pub fn bo_commit_ts_lag() -> Config {
-    crate::backoff::DEFAULT_REGION_BACKOFF
+    preset_config("commitTsLag", new_backoff_fn_cfg(2, 500, NO_JITTER))
 }
 
 /// Default backoff config when the region is not initialized.
@@ -322,7 +431,10 @@ pub fn bo_commit_ts_lag() -> Config {
 #[doc(alias = "BoMaxRegionNotInitialized")]
 #[must_use]
 pub fn bo_region_not_initialized() -> Config {
-    Backoff::no_jitter_backoff(2, 1000, DEFAULT_NO_JITTER_MAX_ATTEMPTS)
+    preset_config(
+        "regionNotInitialized",
+        new_backoff_fn_cfg(2, 1000, NO_JITTER),
+    )
 }
 
 /// Default backoff config when store is a witness.
@@ -331,7 +443,7 @@ pub fn bo_region_not_initialized() -> Config {
 #[doc(alias = "BoIsWitness")]
 #[must_use]
 pub fn bo_is_witness() -> Config {
-    Backoff::equal_jitter_backoff(1000, 10_000, DEFAULT_MAX_ATTEMPTS)
+    preset_config("isWitness", new_backoff_fn_cfg(1000, 10_000, EQUAL_JITTER))
 }
 
 /// Default backoff config for lock-fast style retries.
@@ -340,16 +452,16 @@ pub fn bo_is_witness() -> Config {
 #[doc(alias = "BoTxnLockFast")]
 #[must_use]
 pub fn bo_txn_lock_fast() -> Config {
-    bo_txn_lock_fast_with_vars(&Variables::default())
+    preset_config(
+        TXN_LOCK_FAST_NAME,
+        new_backoff_fn_cfg(2, 3000, EQUAL_JITTER),
+    )
 }
 
 /// Default backoff config for lock-fast style retries using the provided variables.
 #[must_use]
-pub fn bo_txn_lock_fast_with_vars(vars: &Variables) -> Config {
-    // client-go loads the base delay from `Variables.BackoffLockFast` when creating the backoff
-    // function. Keep the same clamping behavior to avoid invalid jitter ranges.
-    let base_delay_ms = vars.backoff_lock_fast_ms.max(2);
-    Backoff::equal_jitter_backoff(base_delay_ms, 3000, DEFAULT_MAX_ATTEMPTS)
+pub fn bo_txn_lock_fast_with_vars(vars: &Variables) -> Backoffer {
+    bo_txn_lock_fast().to_backoff_with_vars(vars)
 }
 
 #[cfg(test)]
@@ -381,64 +493,100 @@ mod tests {
     }
 
     #[test]
-    fn bo_presets_match_expected_backoff_parameters() {
-        assert_eq!(bo_region_miss(), crate::backoff::DEFAULT_REGION_BACKOFF);
+    fn config_mutators_and_display_work() {
+        let mut cfg = new_config(
+            "tikvRPC",
+            new_backoff_fn_cfg(2, 7, NO_JITTER),
+            crate::Error::Unimplemented,
+        );
+        assert_eq!(cfg.base(), 2);
+        assert_eq!(cfg.to_string(), "tikvRPC");
+        assert!(cfg.error.is_some());
+        assert_eq!(cfg.to_backoff(), Backoff::no_jitter_backoff(2, 7, 10));
+
+        cfg.set_backoff_fn_cfg(new_backoff_fn_cfg(3, 9, FULL_JITTER));
+        assert_eq!(cfg.base(), 3);
+        assert_eq!(cfg.to_backoff(), Backoff::full_jitter_backoff(3, 9, 16));
+
+        cfg.set_errors(crate::Error::InternalError {
+            message: "override".to_owned(),
+        });
         assert_eq!(
-            bo_region_scheduling(),
+            cfg.error.as_deref().map(ToString::to_string).as_deref(),
+            Some("override")
+        );
+    }
+
+    #[test]
+    fn bo_presets_match_expected_backoff_parameters() {
+        assert_eq!(bo_region_miss().to_string(), "regionMiss");
+        assert_eq!(
+            bo_region_miss().to_backoff(),
             crate::backoff::DEFAULT_REGION_BACKOFF
         );
         assert_eq!(
-            bo_tikv_rpc(),
+            bo_region_scheduling().to_backoff(),
+            crate::backoff::DEFAULT_REGION_BACKOFF
+        );
+        assert_eq!(
+            bo_tikv_rpc().to_backoff(),
             Backoff::equal_jitter_backoff(100, 2000, DEFAULT_MAX_ATTEMPTS)
         );
         assert_eq!(
-            bo_tiflash_rpc(),
+            bo_tiflash_rpc().to_backoff(),
             Backoff::equal_jitter_backoff(100, 2000, DEFAULT_MAX_ATTEMPTS)
         );
         assert_eq!(
-            bo_txn_lock(),
+            bo_txn_lock().to_backoff(),
             Backoff::equal_jitter_backoff(100, 3000, DEFAULT_MAX_ATTEMPTS)
         );
         assert_eq!(
-            bo_pd_rpc(),
+            bo_pd_rpc().to_backoff(),
             Backoff::equal_jitter_backoff(500, 3000, DEFAULT_MAX_ATTEMPTS)
         );
         assert_eq!(
-            bo_tikv_server_busy(),
+            bo_tikv_server_busy().to_backoff(),
             Backoff::equal_jitter_backoff(2000, 10_000, DEFAULT_MAX_ATTEMPTS)
         );
         assert_eq!(
-            bo_tiflash_server_busy(),
+            bo_tiflash_server_busy().to_backoff(),
             Backoff::equal_jitter_backoff(2000, 10_000, DEFAULT_MAX_ATTEMPTS)
         );
         assert_eq!(
-            bo_tikv_disk_full(),
+            bo_tikv_disk_full().to_backoff(),
             Backoff::no_jitter_backoff(500, 5000, DEFAULT_NO_JITTER_MAX_ATTEMPTS)
         );
         assert_eq!(
-            bo_region_recovery_in_progress(),
+            bo_region_recovery_in_progress().to_backoff(),
             Backoff::equal_jitter_backoff(100, 10_000, DEFAULT_MAX_ATTEMPTS)
         );
-        assert_eq!(bo_txn_not_found(), crate::backoff::DEFAULT_REGION_BACKOFF);
         assert_eq!(
-            bo_stale_cmd(),
-            Backoff::no_jitter_backoff(2, 1000, DEFAULT_NO_JITTER_MAX_ATTEMPTS)
-        );
-        assert_eq!(
-            bo_max_ts_not_synced(),
+            bo_txn_not_found().to_backoff(),
             crate::backoff::DEFAULT_REGION_BACKOFF
         );
-        assert_eq!(bo_commit_ts_lag(), crate::backoff::DEFAULT_REGION_BACKOFF);
         assert_eq!(
-            bo_region_not_initialized(),
+            bo_stale_cmd().to_backoff(),
             Backoff::no_jitter_backoff(2, 1000, DEFAULT_NO_JITTER_MAX_ATTEMPTS)
         );
         assert_eq!(
-            bo_is_witness(),
-            Backoff::equal_jitter_backoff(1000, 10_000, DEFAULT_MAX_ATTEMPTS)
+            bo_max_ts_not_synced().to_backoff(),
+            crate::backoff::DEFAULT_REGION_BACKOFF
         );
         assert_eq!(
-            bo_txn_lock_fast(),
+            bo_commit_ts_lag().to_backoff(),
+            crate::backoff::DEFAULT_REGION_BACKOFF
+        );
+        assert_eq!(
+            bo_region_not_initialized().to_backoff(),
+            Backoff::no_jitter_backoff(2, 1000, DEFAULT_NO_JITTER_MAX_ATTEMPTS)
+        );
+        assert_eq!(
+            bo_is_witness().to_backoff(),
+            Backoff::equal_jitter_backoff(1000, 10_000, DEFAULT_MAX_ATTEMPTS)
+        );
+        assert_eq!(bo_txn_lock_fast().base(), 2);
+        assert_eq!(
+            bo_txn_lock_fast().to_backoff(),
             Backoff::equal_jitter_backoff(10, 3000, DEFAULT_MAX_ATTEMPTS)
         );
     }
