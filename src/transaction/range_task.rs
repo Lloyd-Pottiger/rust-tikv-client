@@ -22,7 +22,9 @@ type RegionRangesStream = futures::stream::BoxStream<
 /// This mirrors client-go `rangetask.TaskStat`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RangeTaskStat {
+    /// Number of sub-ranges that completed successfully.
     pub completed_regions: usize,
+    /// Number of sub-ranges whose handler returned an error.
     pub failed_regions: usize,
 }
 
@@ -32,6 +34,7 @@ pub struct RangeTaskStat {
 /// runner can aggregate stats even when a task fails.
 #[async_trait]
 pub trait RangeTaskHandler: Send + Sync + 'static {
+    /// Handles one region-aligned sub-range produced by [`RangeTaskRunner`].
     async fn handle(&self, range: BoundRange) -> (RangeTaskStat, Result<()>);
 }
 

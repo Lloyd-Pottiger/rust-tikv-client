@@ -62,15 +62,24 @@ pub struct SnapshotTimeDetail {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SnapshotScanDetail {
+    /// Total number of MVCC versions TiKV reports as processed.
     pub total_process_keys: u64,
+    /// Total size, in bytes, of processed MVCC versions.
     pub total_process_keys_size: u64,
+    /// Total number of keys TiKV reports scanning.
     pub total_keys: u64,
+    /// Time spent obtaining RocksDB snapshots on the TiKV side.
     pub get_snapshot_time: Duration,
 
+    /// Number of delete tombstones skipped during RocksDB iteration.
     pub rocksdb_delete_skipped_count: u64,
+    /// Number of internal RocksDB keys skipped during iteration.
     pub rocksdb_key_skipped_count: u64,
+    /// Number of RocksDB block-cache hits reported by TiKV.
     pub rocksdb_block_cache_hit_count: u64,
+    /// Number of RocksDB block reads reported by TiKV.
     pub rocksdb_block_read_count: u64,
+    /// Total bytes read from RocksDB blocks.
     pub rocksdb_block_read_byte: u64,
 }
 
