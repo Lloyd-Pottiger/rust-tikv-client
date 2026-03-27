@@ -58,6 +58,19 @@ fn tikv_module_exports_kvstore_and_backoffer() {
     let _: Option<tikv::Variables> = None;
 }
 
+#[tokio::test]
+async fn tikv_module_exposes_task_local_txn_start_ts_helpers() {
+    let _: fn() -> tikv_client::config::retry::TxnStartKey = tikv::txn_start_key;
+    let _: fn() -> Option<u64> = tikv::txn_start_ts;
+
+    assert_eq!(tikv::txn_start_ts(), None);
+    tikv::with_txn_start_ts(42, async {
+        assert_eq!(tikv::txn_start_ts(), Some(42));
+    })
+    .await;
+    assert_eq!(tikv::txn_start_ts(), None);
+}
+
 #[test]
 fn tikv_module_exports_storage_and_lock_resolver_facade() {
     let _: Option<tikv::Storage> = None;

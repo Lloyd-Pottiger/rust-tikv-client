@@ -267,6 +267,10 @@ pub use crate::config::retry::new_gc_resolve_lock_max_backoffer;
 pub use crate::config::retry::new_noop_backoff;
 #[doc(inline)]
 pub use crate::config::retry::txn_start_key;
+#[doc(inline)]
+pub use crate::config::retry::txn_start_ts;
+#[doc(inline)]
+pub use crate::config::retry::with_txn_start_ts;
 
 #[doc(inline)]
 pub use crate::change_pd_region_meta_circuit_breaker_settings;
