@@ -2090,6 +2090,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_atomic_mode_propagates_for_cas_to_put_and_delete() -> Result<()> {
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls_captured = dispatch_calls.clone();
+
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawPutRequest>() {
+                    assert_eq!(req.key, vec![42]);
+                    assert_eq!(req.value, vec![100]);
+                    assert_eq!(req.ttl, 0);
+                    assert_eq!(req.cf, "write");
+                    assert!(req.for_cas);
+                    dispatch_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::RawPutResponse::default()) as Box<dyn Any>);
+                }
+
+                if let Some(req) = req.downcast_ref::<kvrpcpb::RawDeleteRequest>() {
+                    assert_eq!(req.key, vec![42]);
+                    assert_eq!(req.cf, "write");
+                    assert!(req.for_cas);
+                    dispatch_calls_captured.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Box::new(kvrpcpb::RawDeleteResponse::default()) as Box<dyn Any>);
+                }
+
+                unreachable!("unexpected request type");
+            },
+        )));
+
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Write),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
+            keyspace: Keyspace::Disable,
+        }
+        .with_atomic_for_cas();
+
+        client.put(vec![42], vec![100]).await?;
+        client.delete(vec![42]).await?;
+
+        assert_eq!(dispatch_calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_compare_and_swap_requires_atomic_mode() {
         let dispatch_calls = Arc::new(AtomicUsize::new(0));
         let dispatch_calls_captured = dispatch_calls.clone();
