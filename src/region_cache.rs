@@ -562,6 +562,51 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         Ok((region, location))
     }
 
+    async fn try_get_region_by_key_from_cache(&self, key: &Key) -> Option<RegionWithLeader> {
+        let cache = self.region_cache.read().await;
+        let candidate = cache
+            .key_to_ver_id
+            .range(..=key)
+            .next_back()
+            .map(|(_, ver_id)| ver_id.clone())?;
+        let region = cache.ver_id_to_region.get(&candidate)?;
+        if !region.contains(key) {
+            return None;
+        }
+        if !self.cached_region_is_fresh(
+            &cache,
+            &candidate,
+            region.id(),
+            "region_cache.try_locate_key.cache_hit",
+        ) {
+            return None;
+        }
+
+        Some(region.clone())
+    }
+
+    async fn upgrade_region_from_cache_if_newer(
+        &self,
+        region: RegionWithLeader,
+    ) -> RegionWithLeader {
+        let cache = self.region_cache.read().await;
+        let region_id = region.id();
+        let region_ver_id = region.ver_id();
+        let Some(current_ver_id) = cache.id_to_ver_id.get(&region_id) else {
+            return region;
+        };
+        if current_ver_id.ver < region_ver_id.ver
+            || current_ver_id.conf_ver < region_ver_id.conf_ver
+        {
+            return region;
+        }
+        cache
+            .ver_id_to_region
+            .get(current_ver_id)
+            .cloned()
+            .unwrap_or(region)
+    }
+
     async fn try_locate_prev_region_by_end_key(&self, key: &Key) -> Option<KeyLocation> {
         let cache = self.region_cache.read().await;
         let candidate = cache
@@ -961,18 +1006,24 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
         // preheat only the uncached tail ranges to reduce per-key PD lookups in the main locate
         // path.
         let mut uncached_ranges = Vec::new();
-        for range in ranges.iter().take(to_send) {
+        let mut cached_prefix_regions = Vec::with_capacity(ranges.len());
+        for (idx, range) in ranges.iter().enumerate() {
             let mut start_key = range.start_key.clone();
             let end_key = range.end_key.clone();
+            let mut cached_prefix = Vec::new();
 
             loop {
-                let Some(location) = self.try_locate_key(start_key.clone()).await else {
-                    uncached_ranges.push(crate::kv::KeyRange {
-                        start_key,
-                        end_key: end_key.clone(),
-                    });
+                let Some(region) = self.try_get_region_by_key_from_cache(&start_key).await else {
+                    if idx < to_send {
+                        uncached_ranges.push(crate::kv::KeyRange {
+                            start_key,
+                            end_key: end_key.clone(),
+                        });
+                    }
                     break;
                 };
+                let location = self.key_location_for_region(region.clone()).await;
+                cached_prefix.push(region);
 
                 let next_start_key = location.end_key;
                 if next_start_key.is_empty() {
@@ -983,15 +1034,19 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 }
                 // Defensive guard against non-progressing cached locations.
                 if next_start_key <= start_key {
-                    uncached_ranges.push(crate::kv::KeyRange {
-                        start_key,
-                        end_key: end_key.clone(),
-                    });
+                    if idx < to_send {
+                        uncached_ranges.push(crate::kv::KeyRange {
+                            start_key,
+                            end_key: end_key.clone(),
+                        });
+                    }
                     break;
                 }
 
                 start_key = next_start_key;
             }
+
+            cached_prefix_regions.push(cached_prefix);
         }
 
         if !uncached_ranges.is_empty() {
@@ -1206,9 +1261,35 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
         let mut locations = Vec::new();
 
-        for range in ranges {
+        for (range, cached_prefix) in ranges.into_iter().zip(cached_prefix_regions) {
+            let mut start_key = range.start_key;
+            let end_key = range.end_key;
+
+            for cached_region in cached_prefix {
+                let cached_region = self.upgrade_region_from_cache_if_newer(cached_region).await;
+                let (cached_region, location) = self
+                    .key_location_for_region_with_opts(&start_key, cached_region, options)
+                    .await?;
+                let location_end = location.end_key.clone();
+                let covers_end = location.covers_end_key(&end_key);
+                if (!options.need_region_has_leader_peer || cached_region.leader.is_some())
+                    && locations.last() != Some(&location)
+                {
+                    locations.push(location);
+                }
+                if covers_end || location_end == start_key {
+                    start_key = location_end;
+                    break;
+                }
+                start_key = location_end;
+            }
+
+            if start_key.is_empty() || (!end_key.is_empty() && start_key >= end_key) {
+                continue;
+            }
+
             for location in self
-                .locate_key_range_with_opts(range.start_key, range.end_key, opts.clone())
+                .locate_key_range_with_opts(start_key, end_key, opts.clone())
                 .await?
             {
                 if locations.last() == Some(&location) {
@@ -2927,6 +3008,58 @@ mod test {
         );
         assert_eq!(locations[0].start_key, Key::from(b"a".to_vec()));
         assert_eq!(locations[0].end_key, Key::from(b"c".to_vec()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_keeps_cached_coverage_when_pd_split_only_covers_remaining_ranges(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        cache
+            .add_region(region_with_leader_version(2, b"a", b"c", 2))
+            .await;
+        cache
+            .add_region(region_with_leader_version(6, b"e", b"f", 1))
+            .await;
+
+        for region in [
+            region_with_leader_version(1, b"", b"a", 1),
+            region_with_leader_version(2, b"a", b"c", 2),
+            region_with_leader_version(3, b"c", b"d", 1),
+            region_with_leader_version(4, b"d", b"d2", 2),
+            region_with_leader_version(9, b"d2", b"e1", 1),
+            region_with_leader_version(10, b"e1", b"f", 1),
+            region_with_leader_version(7, b"f", b"g", 1),
+            region_with_leader_version(8, b"g", b"", 1),
+        ] {
+            retry_client
+                .regions
+                .lock()
+                .await
+                .insert(region.id(), region);
+        }
+
+        let locations = cache
+            .batch_locate_key_ranges(vec![
+                crate::kv::KeyRange::new(b"a".to_vec(), b"d3".to_vec()),
+                crate::kv::KeyRange::new(b"e".to_vec(), b"g".to_vec()),
+            ])
+            .await?;
+
+        assert_eq!(
+            locations
+                .iter()
+                .map(|location| location.region.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4, 9, 6, 7]
+        );
+        assert_eq!(locations[4].start_key, Key::from(b"e".to_vec()));
+        assert_eq!(locations[4].end_key, Key::from(b"f".to_vec()));
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 1);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
 
         Ok(())
     }
