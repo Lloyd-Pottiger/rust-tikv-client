@@ -100,6 +100,22 @@ fn crate_root_exports_transaction_advanced_alias_types_and_methods() {
 }
 
 #[test]
+fn crate_root_exports_new_lock_constructor() {
+    let _: fn(kvrpcpb::LockInfo) -> Lock = tikv_client::new_lock;
+
+    let proto = kvrpcpb::LockInfo {
+        key: b"root-lock".to_vec(),
+        primary_lock: b"root-primary".to_vec(),
+        lock_version: 7,
+        lock_ttl: 9,
+        ..Default::default()
+    };
+
+    let lock = tikv_client::new_lock(proto.clone());
+    assert_eq!(lock.as_proto(), &proto);
+}
+
+#[test]
 fn crate_root_exports_sync_transaction_commit_control_methods() {
     let _ = set_commit_callback_entry;
     let _: fn(&mut SyncTransaction) = SyncTransaction::clear_commit_callback;

@@ -323,6 +323,8 @@ pub use crate::timestamp::TimestampExt;
 #[doc(inline)]
 pub use crate::transaction::lowering as transaction_lowering;
 #[doc(inline)]
+pub use crate::transaction::new_lock;
+#[doc(inline)]
 pub use crate::transaction::AssertionLevel;
 #[doc(inline)]
 pub use crate::transaction::BackoffRuntimeStats;
