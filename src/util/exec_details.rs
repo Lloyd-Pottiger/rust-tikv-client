@@ -1268,6 +1268,7 @@ pub fn exec_details() -> Option<Arc<ExecDetails>> {
 }
 
 /// Runs `future` with trace-exec-details enabled for the current Tokio task.
+#[doc(alias = "ContextWithTraceExecDetails")]
 pub fn with_trace_exec_details<T, F>(future: F) -> impl Future<Output = T>
 where
     F: Future<Output = T>,
@@ -1277,6 +1278,7 @@ where
 
 /// Returns whether trace-exec-details is enabled in the current Tokio task.
 #[must_use]
+#[doc(alias = "TraceExecDetailsEnabled")]
 pub fn trace_exec_details_enabled() -> bool {
     TASK_TRACE_EXEC_DETAILS_ENABLED
         .try_with(|enabled| *enabled)

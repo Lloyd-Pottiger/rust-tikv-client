@@ -237,6 +237,7 @@ impl std::fmt::Display for RequestSource {
 
 /// Build a client-go-compatible request source label from its structured parts.
 #[must_use]
+#[doc(alias = "BuildRequestSource")]
 pub fn build_request_source(
     internal: bool,
     source: impl Into<String>,
@@ -264,6 +265,7 @@ where
 }
 
 /// Runs `future` with a client-go-compatible internal request source label.
+#[doc(alias = "WithInternalSourceType")]
 pub fn with_internal_source_type<T, F>(
     source: impl Into<String>,
     future: F,
@@ -278,6 +280,7 @@ where
 }
 
 /// Runs `future` with a client-go-compatible internal request source label plus task type.
+#[doc(alias = "WithInternalSourceAndTaskType")]
 pub fn with_internal_source_and_task_type<T, F>(
     source: impl Into<String>,
     task_name: impl Into<String>,
@@ -291,6 +294,7 @@ where
 
 /// Returns the task-local request source label, if present.
 #[must_use]
+#[doc(alias = "RequestSourceFromCtx")]
 pub fn request_source() -> Option<String> {
     TASK_REQUEST_SOURCE.try_with(Clone::clone).ok()
 }
@@ -299,6 +303,7 @@ pub fn request_source() -> Option<String> {
 ///
 /// This mirrors client-go `util.WithResourceGroupName`, but uses Tokio
 /// task-local storage instead of `context.Context`.
+#[doc(alias = "WithResourceGroupName")]
 pub fn with_resource_group_name<T, F>(
     resource_group_name: impl Into<String>,
     future: F,
@@ -311,6 +316,7 @@ where
 
 /// Returns the task-local resource group name, if present.
 #[must_use]
+#[doc(alias = "ResourceGroupNameFromCtx")]
 pub fn resource_group_name() -> Option<String> {
     TASK_RESOURCE_GROUP_NAME.try_with(Clone::clone).ok()
 }
@@ -343,6 +349,7 @@ where
 ///
 /// This matches client-go's `IsInternalRequest` behavior (checks for the `"internal"` prefix).
 #[must_use]
+#[doc(alias = "IsInternalRequest")]
 pub fn is_internal_request(request_source: &str) -> bool {
     request_source.starts_with(INTERNAL_REQUEST)
 }
