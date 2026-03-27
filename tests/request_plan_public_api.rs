@@ -147,13 +147,106 @@ fn request_plan_public_api_exposes_wrapper_types_and_trait_impls() {
     assert_plan::<plan::RetryableAllStores<StorePlan, PdRpcClient>>();
     assert_plan::<plan::RetryableStores<StorePlan>>();
 
+    let _: plan::CollectWithShard = request::CollectWithShard;
+    let _: plan::CollectError = request::CollectError;
     let _: Option<plan::RetryableMultiRegion<ShardPlan, PdRpcClient>> = None;
     let _: Option<plan::RetryableAllStores<StorePlan, PdRpcClient>> = None;
     let _: Option<plan::RetryableStores<StorePlan>> = None;
     let _: Option<plan::CleanupLocks<ShardPlan, PdRpcClient>> = None;
+    let _: Option<plan::ResolveLock<ShardPlan, PdRpcClient>> = None;
 
     assert_has_request_label::<plan::CleanupLocks<ShardPlan, PdRpcClient>>();
+    assert_has_request_label::<plan::ResolveLock<ShardPlan, PdRpcClient>>();
     assert_has_kv_context::<plan::CleanupLocks<ShardPlan, PdRpcClient>>();
+    assert_has_kv_context::<plan::ResolveLock<ShardPlan, PdRpcClient>>();
+}
+
+#[derive(Clone)]
+struct LabelledValuePlan {
+    value: u32,
+    label: &'static str,
+}
+
+#[async_trait]
+impl request::Plan for LabelledValuePlan {
+    type Result = u32;
+
+    async fn execute(&self) -> Result<Self::Result> {
+        Ok(self.value)
+    }
+}
+
+impl plan::HasRequestLabel for LabelledValuePlan {
+    fn request_label(&self) -> &'static str {
+        self.label
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StringifyProcessor;
+
+impl plan::Process<u32> for StringifyProcessor {
+    type Out = String;
+
+    fn process(&self, input: Result<u32>) -> Result<Self::Out> {
+        input.map(|value| format!("value={value}"))
+    }
+}
+
+#[derive(Default)]
+struct ExtractableResponse {
+    key_errors: Option<Vec<tikv_client::Error>>,
+    region_error: Option<errorpb::Error>,
+}
+
+impl Clone for ExtractableResponse {
+    fn clone(&self) -> Self {
+        Self {
+            key_errors: self.key_errors.as_ref().map(|errors| {
+                errors
+                    .iter()
+                    .map(|error| match error {
+                        tikv_client::Error::Unimplemented => tikv_client::Error::Unimplemented,
+                        other => panic!("unsupported cloned test error variant: {other:?}"),
+                    })
+                    .collect()
+            }),
+            region_error: self.region_error.clone(),
+        }
+    }
+}
+
+impl HasKeyErrors for ExtractableResponse {
+    fn key_errors(&mut self) -> Option<Vec<tikv_client::Error>> {
+        self.key_errors.take()
+    }
+}
+
+impl HasRegionError for ExtractableResponse {
+    fn region_error(&mut self) -> Option<errorpb::Error> {
+        self.region_error.take()
+    }
+}
+
+#[derive(Clone)]
+struct ExtractPlan {
+    response: ExtractableResponse,
+    label: &'static str,
+}
+
+#[async_trait]
+impl request::Plan for ExtractPlan {
+    type Result = ExtractableResponse;
+
+    async fn execute(&self) -> Result<Self::Result> {
+        Ok(self.response.clone())
+    }
+}
+
+impl plan::HasRequestLabel for ExtractPlan {
+    fn request_label(&self) -> &'static str {
+        self.label
+    }
 }
 
 #[tokio::test]
@@ -252,4 +345,118 @@ fn request_plan_public_api_exposes_cleanup_locks_result_behaviour() {
     assert_eq!(merged.resolved_locks, 7);
     assert!(merged.region_error.is_none());
     assert!(merged.key_error.is_none());
+}
+
+#[tokio::test]
+async fn request_plan_public_api_exposes_process_extract_and_response_helpers() {
+    let process_response = plan::ProcessResponse {
+        inner: LabelledValuePlan {
+            value: 11,
+            label: "kv_batch_get",
+        },
+        processor: StringifyProcessor,
+    };
+
+    assert_plan::<plan::ProcessResponse<LabelledValuePlan, StringifyProcessor>>();
+    assert_has_request_label::<plan::ProcessResponse<LabelledValuePlan, StringifyProcessor>>();
+    assert_eq!(
+        plan::HasRequestLabel::request_label(&process_response),
+        "kv_batch_get"
+    );
+    assert_eq!(
+        process_response
+            .execute()
+            .await
+            .expect("process response should execute"),
+        "value=11"
+    );
+
+    let default_processor = request::DefaultProcessor;
+    let raw_value = <request::DefaultProcessor as plan::Process<kvrpcpb::RawGetResponse>>::process(
+        &default_processor,
+        Ok(kvrpcpb::RawGetResponse {
+            value: b"raw".to_vec(),
+            not_found: false,
+            ..Default::default()
+        }),
+    )
+    .expect("default raw-get processor should return the value");
+    assert_eq!(raw_value, Some(b"raw".to_vec()));
+    let missing_txn_value =
+        <request::DefaultProcessor as plan::Process<kvrpcpb::GetResponse>>::process(
+            &default_processor,
+            Ok(kvrpcpb::GetResponse {
+                not_found: true,
+                ..Default::default()
+            }),
+        )
+        .expect("default get processor should map not_found to None");
+    assert_eq!(missing_txn_value, None);
+
+    let collected = request::CollectError
+        .merge(vec![Ok(1_u8), Ok(2_u8), Ok(3_u8)])
+        .expect("collect error should preserve all successful values");
+    assert_eq!(collected, vec![1, 2, 3]);
+    assert!(matches!(
+        request::CollectError.merge(vec![Ok(1_u8), Err(tikv_client::Error::Unimplemented)]),
+        Err(tikv_client::Error::Unimplemented)
+    ));
+
+    let extracted_key_error = plan::ExtractError {
+        inner: ExtractPlan {
+            response: ExtractableResponse {
+                key_errors: Some(vec![tikv_client::Error::Unimplemented]),
+                ..Default::default()
+            },
+            label: "kv_scan",
+        },
+    };
+    assert_plan::<plan::ExtractError<ExtractPlan>>();
+    assert!(matches!(
+        extracted_key_error.execute().await,
+        Err(tikv_client::Error::ExtractedErrors(errors))
+            if errors.len() == 1 && matches!(errors.first(), Some(tikv_client::Error::Unimplemented))
+    ));
+
+    let extracted_region_error = plan::ExtractError {
+        inner: ExtractPlan {
+            response: ExtractableResponse {
+                region_error: Some(errorpb::Error {
+                    message: "region fallback".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            label: "kv_scan",
+        },
+    };
+    assert!(matches!(
+        extracted_region_error.execute().await,
+        Err(tikv_client::Error::ExtractedErrors(errors))
+            if errors.len() == 1
+                && matches!(
+                    errors.first(),
+                    Some(tikv_client::Error::RegionError(region_error))
+                        if region_error.message == "region fallback"
+                )
+    ));
+
+    let mut response = plan::ResponseWithShard(
+        ExtractableResponse {
+            key_errors: Some(vec![tikv_client::Error::Unimplemented]),
+            region_error: Some(errorpb::Error {
+                message: "region retry".to_owned(),
+                ..Default::default()
+            }),
+        },
+        vec![9_u8],
+    );
+    let key_errors = HasKeyErrors::key_errors(&mut response)
+        .expect("response-with-shard should forward key errors");
+    assert_eq!(key_errors.len(), 1);
+    assert!(matches!(key_errors[0], tikv_client::Error::Unimplemented));
+    let region_error = HasRegionError::region_error(&mut response)
+        .expect("response-with-shard should forward region errors");
+    assert_eq!(region_error.message, "region retry");
+    assert_eq!(response.1, vec![9_u8]);
 }
