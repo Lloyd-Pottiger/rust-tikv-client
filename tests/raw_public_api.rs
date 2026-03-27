@@ -353,13 +353,21 @@ fn raw_lowering_helpers_build_expected_requests() {
     assert_eq!(cas.previous_value, b"prev".to_vec());
     assert_eq!(cas.cf, "default");
 
-    let root_get = tikv_client::raw_lowering::new_raw_get_request(Key::from(vec![37]), None);
-    assert_eq!(root_get.key, vec![37]);
+    let cas_if_absent =
+        raw::lowering::new_cas_request(Key::from(vec![37]), b"first".to_vec(), None, None);
+    assert_eq!(cas_if_absent.key, vec![37]);
+    assert_eq!(cas_if_absent.value, b"first".to_vec());
+    assert!(cas_if_absent.previous_not_exist);
+    assert!(cas_if_absent.previous_value.is_empty());
+    assert_eq!(cas_if_absent.cf, "");
+
+    let root_get = tikv_client::raw_lowering::new_raw_get_request(Key::from(vec![38]), None);
+    assert_eq!(root_get.key, vec![38]);
     assert_eq!(root_get.cf, "");
 
     let root_get_key_ttl =
-        tikv_client::raw_lowering::new_raw_get_key_ttl_request(Key::from(vec![38]), None);
-    assert_eq!(root_get_key_ttl.key, vec![38]);
+        tikv_client::raw_lowering::new_raw_get_key_ttl_request(Key::from(vec![39]), None);
+    assert_eq!(root_get_key_ttl.key, vec![39]);
     assert_eq!(root_get_key_ttl.cf, "");
 }
 
@@ -419,14 +427,16 @@ fn raw_coprocessor_request_public_api_builds_and_updates_inner_request() {
     assert_eq!(context.region_id, 7);
     assert_eq!(inner.data, vec![7, 1, 50, 55]);
 
-    let root_request = tikv_client::raw_lowering::new_raw_coprocessor_request(
+    let mut root_request = tikv_client::raw_lowering::new_raw_coprocessor_request(
         "root".to_owned(),
         "v2".to_owned(),
-        vec![(vec![60]..vec![61]).into()].into_iter(),
+        vec![(vec![60]..vec![61]).into(), (vec![61]..vec![63]).into()].into_iter(),
         |region, ranges: Vec<Range<Key>>| {
             let first = ranges.first().expect("at least one range");
+            let last = ranges.last().expect("at least one range");
             let start: Vec<u8> = first.start.clone().into();
-            vec![region.id as u8, ranges.len() as u8, start[0]]
+            let end: Vec<u8> = last.end.clone().into();
+            vec![region.id as u8, ranges.len() as u8, start[0], end[0]]
         },
     );
     assert_raw_coprocessor_request(&root_request);
@@ -436,5 +446,27 @@ fn raw_coprocessor_request_public_api_builds_and_updates_inner_request() {
         .expect("root raw lowering alias should build the same request type");
     assert_eq!(root_inner.copr_name, "root");
     assert_eq!(root_inner.copr_version_req, "v2");
-    assert_eq!(root_inner.ranges.len(), 1);
+    assert_eq!(root_inner.ranges.len(), 2);
+
+    Shardable::apply_shard(
+        &mut root_request,
+        vec![
+            kvrpcpb::KeyRange {
+                start_key: vec![70],
+                end_key: vec![71],
+            },
+            kvrpcpb::KeyRange {
+                start_key: vec![71],
+                end_key: vec![73],
+            },
+        ],
+    );
+    Shardable::apply_store(&mut root_request, &store)
+        .expect("root raw lowering alias should rebuild payload on apply_store");
+    let root_inner = root_request
+        .as_any()
+        .downcast_ref::<kvrpcpb::RawCoprocessorRequest>()
+        .expect("root raw lowering alias should keep exposing its protobuf request");
+    assert_eq!(root_inner.ranges.len(), 2);
+    assert_eq!(root_inner.data, vec![7, 2, 70, 73]);
 }
