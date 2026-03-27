@@ -28,4 +28,5 @@ fn config_retry_module_exports_backoff_helpers() {
     let _ = config::retry::bo_region_not_initialized();
     let _ = config::retry::bo_is_witness();
     let _ = config::retry::bo_txn_lock_fast();
+    let _ = config::retry::bo_txn_lock_fast_with_vars(&tikv_client::Variables::default());
 }

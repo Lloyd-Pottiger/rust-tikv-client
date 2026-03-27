@@ -30,7 +30,11 @@ const DEFAULT_NO_JITTER_MAX_ATTEMPTS: u32 = 10;
 /// This mirrors client-go `retry.NewBackofferWithVars`.
 #[doc(alias = "NewBackofferWithVars")]
 #[must_use]
-pub fn new_backoffer_with_vars(max_sleep_ms: u64, _vars: Option<&Variables>) -> Backoffer {
+pub fn new_backoffer_with_vars(max_sleep_ms: u64, vars: Option<&Variables>) -> Backoffer {
+    let max_sleep_ms = match vars {
+        Some(vars) => max_sleep_ms.saturating_mul(u64::from(vars.backoff_weight_factor())),
+        None => max_sleep_ms,
+    };
     new_backoffer(max_sleep_ms)
 }
 
@@ -218,9 +222,15 @@ pub fn bo_is_witness() -> Config {
 #[doc(alias = "BoTxnLockFast")]
 #[must_use]
 pub fn bo_txn_lock_fast() -> Config {
+    bo_txn_lock_fast_with_vars(&Variables::default())
+}
+
+/// Default backoff config for lock-fast style retries using the provided variables.
+#[must_use]
+pub fn bo_txn_lock_fast_with_vars(vars: &Variables) -> Config {
     // client-go loads the base delay from `Variables.BackoffLockFast` when creating the backoff
-    // function. Here we use the Rust default `Variables` value.
-    let base_delay_ms = Variables::default().backoff_lock_fast_ms.max(2);
+    // function. Keep the same clamping behavior to avoid invalid jitter ranges.
+    let base_delay_ms = vars.backoff_lock_fast_ms.max(2);
     Backoff::equal_jitter_backoff(base_delay_ms, 3000, DEFAULT_MAX_ATTEMPTS)
 }
 
@@ -288,6 +298,30 @@ mod tests {
         assert_eq!(
             bo_txn_lock_fast(),
             Backoff::equal_jitter_backoff(10, 3000, DEFAULT_MAX_ATTEMPTS)
+        );
+    }
+
+    #[test]
+    fn new_backoffer_with_vars_scales_max_sleep_by_backoff_weight() {
+        let vars = Variables {
+            backoff_weight: 3,
+            ..Variables::default()
+        };
+        assert_eq!(
+            new_backoffer_with_vars(100, Some(&vars)),
+            new_backoffer(300)
+        );
+    }
+
+    #[test]
+    fn bo_txn_lock_fast_with_vars_clamps_base_delay_to_two_ms() {
+        let vars = Variables {
+            backoff_lock_fast_ms: 1,
+            ..Variables::default()
+        };
+        assert_eq!(
+            bo_txn_lock_fast_with_vars(&vars),
+            Backoff::equal_jitter_backoff(2, 3000, DEFAULT_MAX_ATTEMPTS)
         );
     }
 
