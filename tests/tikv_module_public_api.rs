@@ -27,6 +27,19 @@ async fn new_pd_client_with_config_entry(
     tikv::new_pd_client_with_config(pd_endpoints, config).await
 }
 
+async fn new_lock_resolver_entry(
+    pd_endpoints: Vec<&str>,
+) -> tikv_client::Result<tikv::BoundLockResolver<tikv_client::PdRpcClient>> {
+    tikv::new_lock_resolver(pd_endpoints).await
+}
+
+async fn new_lock_resolver_with_config_entry(
+    pd_endpoints: Vec<&str>,
+    config: tikv_client::Config,
+) -> tikv_client::Result<tikv::BoundLockResolver<tikv_client::PdRpcClient>> {
+    tikv::new_lock_resolver_with_config(pd_endpoints, config).await
+}
+
 #[test]
 fn tikv_module_exports_kvstore_and_backoffer() {
     let _: Option<tikv::KVStore> = None;
@@ -59,6 +72,9 @@ fn tikv_module_exports_storage_and_lock_resolver_facade() {
         tikv_client::request::Keyspace,
         tikv::ResolveLocksContext,
     ) -> tikv::BoundLockResolver<tikv_client::PdRpcClient> = tikv::BoundLockResolver::new;
+
+    let _ = new_lock_resolver_entry;
+    let _ = new_lock_resolver_with_config_entry;
 }
 
 #[test]

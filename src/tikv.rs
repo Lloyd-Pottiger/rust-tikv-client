@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
+use crate::request::Keyspace;
 use crate::timestamp::TimestampExt;
+use crate::PdClient;
 
 #[doc(inline)]
 pub use crate::kv::Getter;
@@ -97,6 +99,47 @@ pub async fn new_pd_client_with_config<S: Into<String>>(
 ) -> crate::Result<crate::PdRpcClient> {
     let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
     crate::PdRpcClient::connect(&pd_endpoints, config, true).await
+}
+
+/// Create a bound lock resolver using the global config.
+///
+/// This mirrors client-go `tikv.NewLockResolver`, while returning the Rust client's
+/// [`BoundLockResolver`](crate::BoundLockResolver) bound to a PD client and keyspace.
+#[doc(alias = "NewLockResolver")]
+pub async fn new_lock_resolver<S: Into<String>>(
+    pd_endpoints: Vec<S>,
+) -> crate::Result<crate::BoundLockResolver<crate::PdRpcClient>> {
+    new_lock_resolver_with_config(pd_endpoints, crate::config::get_global_config()).await
+}
+
+/// Create a bound lock resolver with an explicit configuration.
+///
+/// When `config.keyspace` is set, the resolver is bound to that API V2 keyspace in the same way
+/// as [`KVStore`](crate::tikv::KVStore) constructors.
+pub async fn new_lock_resolver_with_config<S: Into<String>>(
+    pd_endpoints: Vec<S>,
+    config: crate::Config,
+) -> crate::Result<crate::BoundLockResolver<crate::PdRpcClient>> {
+    let resolve_locks_ctx =
+        crate::ResolveLocksContext::default().with_default_txn_scope(config.txn_scope.clone());
+    let keyspace_name = config.keyspace.clone();
+    let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
+    let pd = Arc::new(crate::PdRpcClient::connect(&pd_endpoints, config, true).await?);
+    let keyspace = match keyspace_name {
+        Some(name) => {
+            let keyspace = pd.load_keyspace(&name).await?;
+            Keyspace::Enable {
+                keyspace_id: keyspace.id,
+            }
+        }
+        None => Keyspace::Disable,
+    };
+
+    Ok(crate::BoundLockResolver::new(
+        pd,
+        keyspace,
+        resolve_locks_ctx,
+    ))
 }
 
 /// Client-go style transaction begin option.
