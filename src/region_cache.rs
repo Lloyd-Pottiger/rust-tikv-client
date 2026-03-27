@@ -993,6 +993,64 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
             let mut remaining_ranges = uncached_ranges;
 
+            fn regions_have_gap_in_ranges(
+                ranges: &[crate::kv::KeyRange],
+                regions: &[(RegionWithLeader, Option<metapb::Buckets>)],
+                limit: usize,
+            ) -> bool {
+                if ranges.is_empty() {
+                    return false;
+                }
+                if regions.is_empty() {
+                    return true;
+                }
+
+                let mut check_idx = 0usize;
+                let mut check_key = ranges[0].start_key.clone();
+
+                for (region, _) in regions {
+                    let start_key = region.start_key();
+                    if start_key > check_key {
+                        return true;
+                    }
+
+                    let end_key = region.end_key();
+                    if end_key.is_empty() {
+                        return false;
+                    }
+                    check_key = end_key;
+
+                    while check_idx < ranges.len()
+                        && !ranges[check_idx].end_key.is_empty()
+                        && check_key >= ranges[check_idx].end_key
+                    {
+                        check_idx += 1;
+                        if check_idx >= ranges.len() {
+                            return false;
+                        }
+                    }
+
+                    if check_key < ranges[check_idx].start_key {
+                        check_key = ranges[check_idx].start_key.clone();
+                    }
+                }
+
+                if regions.len() >= limit {
+                    return false;
+                }
+                if check_idx < ranges.len() - 1 {
+                    return true;
+                }
+                if check_key.is_empty() {
+                    return false;
+                }
+                if ranges[check_idx].end_key.is_empty() {
+                    return true;
+                }
+
+                check_key < ranges[check_idx].end_key
+            }
+
             // Drop ranges that are fully covered by `split_key` and continue from there.
             //
             // This mirrors client-go `rangesAfterKey` but is best-effort (linear scan) because
@@ -1033,6 +1091,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             }
 
             let mut retried_empty_batch = false;
+            let mut retried_gap_batch = false;
             let mut retried_leaderless_batch = false;
             loop {
                 let pd_ranges: Vec<pdpb::KeyRange> = remaining_ranges
@@ -1071,6 +1130,20 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                             break;
                         }
                         retried_empty_batch = false;
+
+                        if regions_have_gap_in_ranges(
+                            &remaining_ranges,
+                            &regions,
+                            DEFAULT_REGIONS_PER_BATCH as usize,
+                        ) {
+                            stats::inc_stale_region_from_pd_counter();
+                            if !retried_gap_batch {
+                                retried_gap_batch = true;
+                                continue;
+                            }
+                            break;
+                        }
+                        retried_gap_batch = false;
 
                         let all_regions_missing_leader = options.need_region_has_leader_peer
                             && regions.iter().all(|(region, _)| region.leader.is_none());
@@ -2442,6 +2515,45 @@ mod test {
         assert_eq!(locations[0].region.id, 1);
         assert_eq!(locations[0].start_key, Key::from(Vec::<u8>::new()));
         assert_eq!(locations[0].end_key, Key::from(vec![10]));
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 2);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_retries_pd_batch_scan_when_pd_response_has_gap(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let region1 = region_with_leader(1, vec![], vec![10], 42);
+        let region2 = region_with_leader(2, vec![10], vec![20], 42);
+        let region3 = region_with_leader(3, vec![20], vec![], 42);
+
+        retry_client.regions.lock().await.insert(1, region1.clone());
+        retry_client.regions.lock().await.insert(2, region2.clone());
+        retry_client.regions.lock().await.insert(3, region3.clone());
+        retry_client
+            .batch_scan_regions_results
+            .lock()
+            .await
+            .extend([
+                vec![(region1.clone(), None), (region3.clone(), None)],
+                vec![(region1, None), (region2, None), (region3, None)],
+            ]);
+
+        let locations = cache
+            .batch_locate_key_ranges_with_opts(
+                vec![crate::kv::KeyRange::new(vec![1], vec![25])],
+                std::iter::empty(),
+            )
+            .await?;
+
+        assert_eq!(locations.len(), 3);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[1].region.id, 2);
+        assert_eq!(locations[2].region.id, 3);
         assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 2);
         assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
 
