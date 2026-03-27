@@ -15,6 +15,7 @@ fn util_ts_set_public_api_exposes_gc_time_helpers_and_ts_set_alias() {
     assert_eq!(err.value(), "not-a-gc-time");
 
     let _: Option<util::TSSet> = None;
+    let _: Option<util::TsSet> = None;
 
     let set = util::TSSet::new();
     set.put([1_u64, 2, 2]);
