@@ -2964,6 +2964,89 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_matches_client_go_basic_table_cases(
+    ) -> Result<()> {
+        fn key_range(start_key: &str, end_key: &str) -> crate::kv::KeyRange {
+            crate::kv::KeyRange::new(start_key.as_bytes().to_vec(), end_key.as_bytes().to_vec())
+        }
+
+        #[derive(Clone)]
+        struct Case {
+            name: &'static str,
+            ranges: Vec<crate::kv::KeyRange>,
+            cached_regions: Vec<(RegionId, &'static [u8], &'static [u8])>,
+            expected_ids: Vec<RegionId>,
+        }
+
+        let cases = vec![
+            Case {
+                name: "cached prefix before first split covers all requested ranges",
+                ranges: vec![
+                    key_range("A", "B"),
+                    key_range("C", "D"),
+                    key_range("E", "F"),
+                ],
+                cached_regions: vec![(1, b"", b"a")],
+                expected_ids: vec![1],
+            },
+            Case {
+                name: "cold cache walks every region in requested range",
+                ranges: vec![key_range("a", "g")],
+                cached_regions: Vec::new(),
+                expected_ids: vec![2, 3, 4, 5, 6, 7],
+            },
+            Case {
+                name: "disjoint ranges merge cached and pd-loaded regions in order",
+                ranges: vec![key_range("a", "d"), key_range("e", "g")],
+                cached_regions: vec![(2, b"a", b"b"), (6, b"e", b"f")],
+                expected_ids: vec![2, 3, 4, 6, 7],
+            },
+        ];
+
+        for case in cases {
+            let retry_client = Arc::new(MockRetryClient::default());
+            let cache =
+                RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+            for region in [
+                region_with_leader_version(1, b"", b"a", 1),
+                region_with_leader_version(2, b"a", b"b", 1),
+                region_with_leader_version(3, b"b", b"c", 1),
+                region_with_leader_version(4, b"c", b"d", 1),
+                region_with_leader_version(5, b"d", b"e", 1),
+                region_with_leader_version(6, b"e", b"f", 1),
+                region_with_leader_version(7, b"f", b"g", 1),
+                region_with_leader_version(8, b"g", b"", 1),
+            ] {
+                retry_client
+                    .regions
+                    .lock()
+                    .await
+                    .insert(region.id(), region);
+            }
+
+            for (id, start_key, end_key) in case.cached_regions {
+                cache
+                    .add_region(region_with_leader_version(id, start_key, end_key, 1))
+                    .await;
+            }
+
+            let locations = cache.batch_locate_key_ranges(case.ranges).await?;
+            assert_eq!(
+                locations
+                    .iter()
+                    .map(|location| location.region.id)
+                    .collect::<Vec<_>>(),
+                case.expected_ids,
+                "{}",
+                case.name
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_region_cache_batch_locate_key_ranges_prefers_newer_pd_merge_over_stale_cache(
     ) -> Result<()> {
         let retry_client = Arc::new(MockRetryClient::default());
