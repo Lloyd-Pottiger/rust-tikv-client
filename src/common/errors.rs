@@ -334,30 +334,37 @@ pub struct DeadlockError {
 }
 
 impl DeadlockError {
+    /// Wraps the PD/TiKV deadlock payload returned by the server.
     pub fn new(deadlock: ProtoDeadlock) -> Self {
         Self { deadlock }
     }
 
+    /// The transaction start timestamp that owns the lock involved in the deadlock.
     pub fn lock_ts(&self) -> u64 {
         self.deadlock.lock_ts
     }
 
+    /// The key that TiKV reports as participating in the deadlock cycle.
     pub fn deadlock_key(&self) -> &[u8] {
         &self.deadlock.deadlock_key
     }
 
+    /// The hash of [`Self::deadlock_key`] reported by TiKV.
     pub fn deadlock_key_hash(&self) -> u64 {
         self.deadlock.deadlock_key_hash
     }
 
+    /// The number of wait-chain entries carried by the underlying deadlock payload.
     pub fn wait_chain_len(&self) -> usize {
         self.deadlock.wait_chain.len()
     }
 
+    /// Borrows the original protobuf payload for callers that need full field access.
     pub fn deadlock(&self) -> &ProtoDeadlock {
         &self.deadlock
     }
 
+    /// Returns the original protobuf payload by value.
     pub fn into_inner(self) -> ProtoDeadlock {
         self.deadlock
     }
@@ -390,44 +397,54 @@ pub struct WriteConflictError {
 }
 
 impl WriteConflictError {
+    /// Wraps the TiKV write-conflict payload and records the conflict metric.
     pub fn new(conflict: ProtoWriteConflict) -> Self {
         crate::stats::inc_txn_write_conflict_counter();
         Self { conflict }
     }
 
+    /// The start timestamp of the transaction that encountered the conflict.
     pub fn start_ts(&self) -> u64 {
         self.conflict.start_ts
     }
 
+    /// The start timestamp of the conflicting transaction/version.
     pub fn conflict_ts(&self) -> u64 {
         self.conflict.conflict_ts
     }
 
+    /// The commit timestamp of the conflicting write when TiKV reports one.
     pub fn conflict_commit_ts(&self) -> u64 {
         self.conflict.conflict_commit_ts
     }
 
+    /// The user key that triggered the write conflict.
     pub fn key(&self) -> &[u8] {
         &self.conflict.key
     }
 
+    /// The primary key of the conflicting transaction.
     pub fn primary(&self) -> &[u8] {
         &self.conflict.primary
     }
 
+    /// The raw protobuf enum value for the conflict reason.
     pub fn reason_i32(&self) -> i32 {
         self.conflict.reason
     }
 
+    /// The decoded conflict reason, or `Unknown` for unrecognized enum values.
     pub fn reason(&self) -> kvrpcpb::write_conflict::Reason {
         kvrpcpb::write_conflict::Reason::try_from(self.reason_i32())
             .unwrap_or(kvrpcpb::write_conflict::Reason::Unknown)
     }
 
+    /// Borrows the original protobuf payload for callers that need full field access.
     pub fn write_conflict(&self) -> &ProtoWriteConflict {
         &self.conflict
     }
 
+    /// Returns the original protobuf payload by value.
     pub fn into_inner(self) -> ProtoWriteConflict {
         self.conflict
     }
@@ -463,38 +480,47 @@ pub struct AssertionFailedError {
 }
 
 impl AssertionFailedError {
+    /// Wraps the TiKV assertion-failure payload returned by the server.
     pub fn new(assertion_failed: ProtoAssertionFailed) -> Self {
         Self { assertion_failed }
     }
 
+    /// The start timestamp of the transaction whose assertion failed.
     pub fn start_ts(&self) -> u64 {
         self.assertion_failed.start_ts
     }
 
+    /// The key whose assertion check failed.
     pub fn key(&self) -> &[u8] {
         &self.assertion_failed.key
     }
 
+    /// The raw protobuf enum value for the asserted condition.
     pub fn assertion_i32(&self) -> i32 {
         self.assertion_failed.assertion
     }
 
+    /// The decoded asserted condition, or `None` for unrecognized enum values.
     pub fn assertion(&self) -> Option<kvrpcpb::Assertion> {
         kvrpcpb::Assertion::try_from(self.assertion_i32()).ok()
     }
 
+    /// The start timestamp of the existing value that violated the assertion.
     pub fn existing_start_ts(&self) -> u64 {
         self.assertion_failed.existing_start_ts
     }
 
+    /// The commit timestamp of the existing value that violated the assertion.
     pub fn existing_commit_ts(&self) -> u64 {
         self.assertion_failed.existing_commit_ts
     }
 
+    /// Borrows the original protobuf payload for callers that need full field access.
     pub fn assertion_failed(&self) -> &ProtoAssertionFailed {
         &self.assertion_failed
     }
 
+    /// Returns the original protobuf payload by value.
     pub fn into_inner(self) -> ProtoAssertionFailed {
         self.assertion_failed
     }
@@ -536,11 +562,13 @@ pub struct TokenLimitError {
 }
 
 impl TokenLimitError {
+    /// Creates a store token-limit error for the given TiKV store ID.
     #[must_use]
     pub fn new(store_id: u64) -> Self {
         Self { store_id }
     }
 
+    /// The TiKV store ID whose token budget was exhausted.
     #[must_use]
     pub fn store_id(&self) -> u64 {
         self.store_id
@@ -557,6 +585,7 @@ pub struct PdServerTimeoutError {
 }
 
 impl PdServerTimeoutError {
+    /// Creates a PD timeout/unavailable error with a caller-provided message.
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
@@ -564,6 +593,7 @@ impl PdServerTimeoutError {
         }
     }
 
+    /// The human-readable timeout/unavailable message.
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
