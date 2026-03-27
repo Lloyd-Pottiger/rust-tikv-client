@@ -27,6 +27,87 @@ pub type Config = Backoff;
 const DEFAULT_MAX_ATTEMPTS: u32 = 16;
 const DEFAULT_NO_JITTER_MAX_ATTEMPTS: u32 = 10;
 
+/// Jitter type for exponential backoff.
+///
+/// This is a Rust-friendly mirror of client-go `config/retry` jitter constants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BackoffJitter {
+    NoJitter,
+    FullJitter,
+    EqualJitter,
+    DecorrJitter,
+}
+
+/// No jitter (strict exponential).
+#[doc(alias = "NoJitter")]
+pub const NO_JITTER: BackoffJitter = BackoffJitter::NoJitter;
+/// Full jitter.
+#[doc(alias = "FullJitter")]
+pub const FULL_JITTER: BackoffJitter = BackoffJitter::FullJitter;
+/// Equal jitter.
+#[doc(alias = "EqualJitter")]
+pub const EQUAL_JITTER: BackoffJitter = BackoffJitter::EqualJitter;
+/// Decorrelated jitter.
+#[doc(alias = "DecorrJitter")]
+pub const DECORR_JITTER: BackoffJitter = BackoffJitter::DecorrJitter;
+
+/// Exponential backoff function configuration.
+///
+/// This mirrors client-go `retry.BackoffFnCfg` at a high level. Use [`BackoffFnCfg::to_backoff`]
+/// to convert this into a Rust [`Backoff`] schedule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BackoffFnCfg {
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub jitter: BackoffJitter,
+}
+
+impl BackoffFnCfg {
+    /// Convert the config into a [`Backoff`] schedule.
+    #[must_use]
+    pub fn to_backoff(self, max_attempts: u32) -> Backoff {
+        let (base_delay_ms, max_delay_ms) = match self.jitter {
+            BackoffJitter::NoJitter => (self.base_delay_ms, self.max_delay_ms),
+            BackoffJitter::FullJitter | BackoffJitter::DecorrJitter => {
+                (self.base_delay_ms.max(1), self.max_delay_ms.max(1))
+            }
+            BackoffJitter::EqualJitter => (self.base_delay_ms.max(2), self.max_delay_ms.max(2)),
+        };
+
+        match self.jitter {
+            BackoffJitter::NoJitter => {
+                Backoff::no_jitter_backoff(base_delay_ms, max_delay_ms, max_attempts)
+            }
+            BackoffJitter::FullJitter => {
+                Backoff::full_jitter_backoff(base_delay_ms, max_delay_ms, max_attempts)
+            }
+            BackoffJitter::EqualJitter => {
+                Backoff::equal_jitter_backoff(base_delay_ms, max_delay_ms, max_attempts)
+            }
+            BackoffJitter::DecorrJitter => {
+                Backoff::decorrelated_jitter_backoff(base_delay_ms, max_delay_ms, max_attempts)
+            }
+        }
+    }
+}
+
+/// Create a new [`BackoffFnCfg`].
+///
+/// This mirrors client-go `retry.NewBackoffFnCfg`.
+#[doc(alias = "NewBackoffFnCfg")]
+#[must_use]
+pub fn new_backoff_fn_cfg(
+    base_delay_ms: u64,
+    max_delay_ms: u64,
+    jitter: BackoffJitter,
+) -> BackoffFnCfg {
+    BackoffFnCfg {
+        base_delay_ms,
+        max_delay_ms,
+        jitter,
+    }
+}
+
 tokio::task_local! {
     static TASK_TXN_START_TS: u64;
 }
@@ -274,6 +355,30 @@ pub fn bo_txn_lock_fast_with_vars(vars: &Variables) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backoff_fn_cfg_to_backoff_maps_jitter_types() {
+        let cfg = new_backoff_fn_cfg(2, 7, NO_JITTER);
+        assert_eq!(cfg.to_backoff(3), Backoff::no_jitter_backoff(2, 7, 3));
+
+        let cfg = new_backoff_fn_cfg(2, 7, FULL_JITTER);
+        assert_eq!(cfg.to_backoff(3), Backoff::full_jitter_backoff(2, 7, 3));
+
+        let cfg = new_backoff_fn_cfg(2, 7, EQUAL_JITTER);
+        assert_eq!(cfg.to_backoff(3), Backoff::equal_jitter_backoff(2, 7, 3));
+
+        let cfg = new_backoff_fn_cfg(2, 7, DECORR_JITTER);
+        assert_eq!(
+            cfg.to_backoff(3),
+            Backoff::decorrelated_jitter_backoff(2, 7, 3)
+        );
+    }
+
+    #[test]
+    fn backoff_fn_cfg_clamps_equal_jitter_to_two_ms() {
+        let cfg = new_backoff_fn_cfg(1, 1, EQUAL_JITTER);
+        assert_eq!(cfg.to_backoff(3), Backoff::equal_jitter_backoff(2, 2, 3));
+    }
 
     #[test]
     fn bo_presets_match_expected_backoff_parameters() {

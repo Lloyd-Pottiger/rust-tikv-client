@@ -6,6 +6,14 @@ fn config_retry_module_exports_backoff_helpers() {
     let _ = config::retry::Config::no_backoff();
     let _ = config::retry::txn_start_key();
 
+    let _: config::retry::BackoffJitter = config::retry::NO_JITTER;
+    let _: config::retry::BackoffJitter = config::retry::FULL_JITTER;
+    let _: config::retry::BackoffJitter = config::retry::EQUAL_JITTER;
+    let _: config::retry::BackoffJitter = config::retry::DECORR_JITTER;
+    let cfg = config::retry::new_backoff_fn_cfg(2, 7, config::retry::NO_JITTER);
+    let _: config::retry::BackoffFnCfg = cfg;
+    let _ = cfg.to_backoff(3);
+
     let _ = config::retry::new_backoffer(100);
     let _ = config::retry::new_backoffer_with_vars(100, None);
     let _ = config::retry::new_gc_resolve_lock_max_backoffer();
