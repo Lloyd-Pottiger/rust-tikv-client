@@ -13,9 +13,20 @@ fn kv_module_exports_basic_types() {
 
 #[test]
 fn kv_module_exports_codec_helpers() {
+    use kv::codec::BytesEncoder as _;
+
     let mut buf = Vec::new();
     kv::codec::encode_comparable_varint(&mut buf, 42);
     kv::codec::encode_comparable_uvarint(&mut buf, 42);
+
+    let input = b"codec-bytes";
+    let cap = kv::codec::max_encoded_bytes_size(input.len());
+    let mut encoded = Vec::with_capacity(cap);
+    encoded.encode_bytes(input, false).expect("encode bytes");
+    assert!(encoded.len() <= cap);
+
+    kv::codec::decode_bytes_in_place(&mut encoded, false).expect("decode bytes");
+    assert_eq!(encoded, input);
 }
 
 #[test]
