@@ -153,9 +153,15 @@ pub struct ResolveLocksResult {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct ResolveLocksForReadResult {
+    /// The minimum remaining TTL, in milliseconds, among any still-live locks.
+    ///
+    /// Returns 0 when there is no live lock or the lock is already expired.
     pub ms_before_txn_expired: i64,
+    /// Locks that are still live after this attempt.
     pub live_locks: Vec<kvrpcpb::LockInfo>,
+    /// Transaction IDs that later reads may place into `Context.resolved_locks`.
     pub resolved_locks: Vec<u64>,
+    /// Transaction IDs that later reads may place into `Context.committed_locks`.
     pub committed_locks: Vec<u64>,
 }
 
@@ -166,6 +172,7 @@ pub struct ResolveLocksForReadResult {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ResolveLockDetail {
+    /// Total wall-clock time spent resolving locks.
     pub resolve_lock_time: Duration,
 }
 
@@ -230,26 +237,31 @@ pub fn new_lock(lock: kvrpcpb::LockInfo) -> Lock {
 }
 
 impl Lock {
+    /// Wraps a protobuf [`kvrpcpb::LockInfo`] in the crate's lock facade.
     #[must_use]
     pub fn new(inner: kvrpcpb::LockInfo) -> Lock {
         Lock { inner }
     }
 
+    /// Returns a shared reference to the underlying protobuf lock record.
     #[must_use]
     pub fn as_proto(&self) -> &kvrpcpb::LockInfo {
         &self.inner
     }
 
+    /// Consumes the wrapper and returns the underlying protobuf lock record.
     #[must_use]
     pub fn into_proto(self) -> kvrpcpb::LockInfo {
         self.inner
     }
 
+    /// Returns the locked key bytes.
     #[must_use]
     pub fn key(&self) -> &[u8] {
         &self.inner.key
     }
 
+    /// Returns the primary lock key for this transaction.
     #[must_use]
     pub fn primary(&self) -> &[u8] {
         &self.inner.primary_lock
@@ -261,41 +273,49 @@ impl Lock {
         self.inner.lock_version
     }
 
+    /// Returns the lock TTL, in milliseconds.
     #[must_use]
     pub fn ttl(&self) -> u64 {
         self.inner.lock_ttl
     }
 
+    /// Returns the transaction size carried on the lock record.
     #[must_use]
     pub fn txn_size(&self) -> u64 {
         self.inner.txn_size
     }
 
+    /// Returns the raw protobuf lock type discriminator.
     #[must_use]
     pub fn lock_type(&self) -> i32 {
         self.inner.lock_type
     }
 
+    /// Returns `true` when the lock uses TiKV's async-commit protocol.
     #[must_use]
     pub fn use_async_commit(&self) -> bool {
         self.inner.use_async_commit
     }
 
+    /// Returns the pessimistic lock's `for_update_ts`, or 0 for non-pessimistic locks.
     #[must_use]
     pub fn lock_for_update_ts(&self) -> u64 {
         self.inner.lock_for_update_ts
     }
 
+    /// Returns the minimum commit timestamp carried by this lock.
     #[must_use]
     pub fn min_commit_ts(&self) -> u64 {
         self.inner.min_commit_ts
     }
 
+    /// Returns the async-commit secondary keys attached to this lock.
     #[must_use]
     pub fn secondaries(&self) -> &[Vec<u8>] {
         &self.inner.secondaries
     }
 
+    /// Returns `true` when the lock belongs to a transaction-file workflow.
     #[must_use]
     pub fn is_txn_file(&self) -> bool {
         self.inner.is_txn_file
@@ -1584,17 +1604,21 @@ struct ResolvingLocksState {
 /// `LockResolver.Resolving`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvingLock {
+    /// Transaction ID currently being checked/resolved by the caller.
     pub txn_id: u64,
+    /// The lock owner's start timestamp as encoded on the lock record.
     pub lock_txn_id: u64,
+    /// The locked key bytes.
     pub key: Vec<u8>,
+    /// The primary lock key bytes.
     pub primary: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug)]
 /// Options for GC-style lock cleanup.
 ///
 /// These options are used by [`TransactionClient::cleanup_locks`](crate::TransactionClient::cleanup_locks)
 /// (and by extension [`TransactionClient::gc`](crate::TransactionClient::gc)).
+#[derive(Clone, Copy, Debug)]
 pub struct ResolveLocksOptions {
     /// When `true`, only async-commit locks are processed.
     ///
@@ -1677,6 +1701,7 @@ impl ResolveLocksContext {
         self.default_txn_scope.as_deref()
     }
 
+    /// Returns the cached resolved status for `txn_id`, if one has been recorded.
     pub async fn get_resolved(&self, txn_id: u64) -> Option<Arc<TransactionStatus>> {
         self.resolved.read().await.get(txn_id)
     }
@@ -1696,10 +1721,12 @@ impl ResolveLocksContext {
         self.resolved.write().await.insert(txn_id, txn_status);
     }
 
+    /// Returns `true` when cleanup for `txn_id` has already been recorded for `region`.
     pub async fn is_region_cleaned(&self, txn_id: u64, region: &RegionVerId) -> bool {
         self.clean_regions.read().await.contains(txn_id, region)
     }
 
+    /// Records that cleanup for `txn_id` has completed for `region`.
     pub async fn save_cleaned_region(&self, txn_id: u64, region: RegionVerId) {
         self.clean_regions.write().await.insert(txn_id, region);
     }
@@ -1709,6 +1736,7 @@ impl ResolveLocksContext {
     }
 }
 
+/// Resolves lock records, caches transaction status, and tracks in-flight lock-resolution state.
 pub struct LockResolver {
     ctx: ResolveLocksContext,
     rpc_context: LockResolverRpcContext,
@@ -2065,6 +2093,9 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Checks the status of the transaction that owns `primary`.
+    ///
+    /// This forwards to [`LockResolver::check_txn_status`] using the bound PD client and keyspace.
     pub async fn check_txn_status(
         &self,
         txn_id: u64,
@@ -2094,6 +2125,7 @@ impl<PdC: PdClient> BoundLockResolver<PdC> {
 }
 
 impl LockResolver {
+    /// Creates a lock resolver with the provided shared cache/bookkeeping context.
     pub fn new(ctx: ResolveLocksContext) -> Self {
         Self {
             ctx,
@@ -2586,6 +2618,11 @@ impl LockResolver {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Checks the status of the transaction that owns `primary`.
+    ///
+    /// The resolver first consults its resolved-status cache, then may query TiKV/PD using the
+    /// supplied caller timestamps and policy flags to determine whether the transaction committed,
+    /// rolled back, or still owns a live lock.
     pub async fn check_txn_status(
         &self,
         pd_client: Arc<impl PdClient>,
@@ -3013,14 +3050,17 @@ impl LockResolver {
     }
 }
 
+/// Response types that can yield lock records to the generic lock-resolution pipeline.
 pub trait HasLocks {
+    /// Removes and returns the lock records carried by this response.
     fn take_locks(&mut self) -> Vec<kvrpcpb::LockInfo> {
         Vec::new()
     }
 }
 
-// Return duration in milliseconds until lock expired.
-// If the lock has expired, return a negative value.
+/// Returns the remaining time, in milliseconds, until the lock expires.
+///
+/// A negative result means the lock is already expired.
 pub fn lock_until_expired_ms(lock_version: u64, ttl: u64, current: Timestamp) -> i64 {
     Timestamp::from_version(lock_version).physical + ttl as i64 - current.physical
 }
