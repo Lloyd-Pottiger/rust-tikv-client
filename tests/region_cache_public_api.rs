@@ -358,3 +358,138 @@ async fn region_cache_exports_locate_range_option_helpers() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn region_cache_exports_cache_maintenance_read_through_apis() -> Result<()> {
+    struct DummyClient {
+        region_loads: AtomicUsize,
+        store_loads: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RetryClientTrait for DummyClient {
+        async fn get_region(self: Arc<Self>, _key: Vec<u8>) -> Result<RegionWithLeader> {
+            self.region_loads.fetch_add(1, Ordering::SeqCst);
+            Ok(region(9, vec![], vec![]))
+        }
+
+        async fn get_store(self: Arc<Self>, id: u64) -> Result<metapb::Store> {
+            self.store_loads.fetch_add(1, Ordering::SeqCst);
+            Ok(metapb::Store {
+                id,
+                address: format!("tikv-{id}"),
+                ..Default::default()
+            })
+        }
+
+        async fn get_region_by_id(self: Arc<Self>, _region_id: u64) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    let client = Arc::new(DummyClient {
+        region_loads: AtomicUsize::new(0),
+        store_loads: AtomicUsize::new(0),
+    });
+    let cache = RegionCache::new_with_ttl(client.clone(), Duration::ZERO, Duration::ZERO);
+    cache.add_region(region(1, vec![], vec![10])).await;
+
+    let cached = cache.get_region_by_key(&Key::from(vec![5])).await?;
+    assert_eq!(cached.id(), 1);
+    assert_eq!(client.region_loads.load(Ordering::SeqCst), 0);
+
+    let reloaded = cache.read_through_region_by_key(Key::from(vec![5])).await?;
+    assert_eq!(reloaded.id(), 9);
+    assert_eq!(client.region_loads.load(Ordering::SeqCst), 1);
+
+    let store = cache.get_store_by_id(7).await?;
+    assert_eq!(store.id, 7);
+    assert_eq!(store.address, "tikv-7");
+    let cached_store = cache.get_store_by_id(7).await?;
+    assert_eq!(cached_store.id, 7);
+    assert_eq!(client.store_loads.load(Ordering::SeqCst), 1);
+
+    cache.clear().await;
+
+    let reloaded_after_clear = cache.get_region_by_key(&Key::from(vec![5])).await?;
+    assert_eq!(reloaded_after_clear.id(), 9);
+    assert_eq!(client.region_loads.load(Ordering::SeqCst), 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn region_cache_exports_leader_update_and_invalidation_apis() -> Result<()> {
+    struct DummyClient;
+
+    #[async_trait]
+    impl RetryClientTrait for DummyClient {
+        async fn get_region(self: Arc<Self>, _key: Vec<u8>) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_store(self: Arc<Self>, _id: u64) -> Result<metapb::Store> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_region_by_id(self: Arc<Self>, _region_id: u64) -> Result<RegionWithLeader> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<pdpb::Timestamp> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn update_safepoint(self: Arc<Self>, _safepoint: u64) -> Result<u64> {
+            Err(Error::Unimplemented)
+        }
+
+        async fn load_keyspace(&self, _keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+            Err(Error::Unimplemented)
+        }
+    }
+
+    let cache = RegionCache::new_with_ttl(Arc::new(DummyClient), Duration::ZERO, Duration::ZERO);
+    let initial = region(3, vec![], vec![10]);
+    let ver_id = initial.ver_id();
+    cache.add_region(initial).await;
+
+    cache
+        .update_leader(
+            ver_id.clone(),
+            metapb::Peer {
+                id: 42,
+                store_id: 7,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let updated = cache.get_region_by_key(&Key::from(vec![5])).await?;
+    assert_eq!(updated.leader.as_ref().map(|peer| peer.store_id), Some(7));
+
+    cache.invalidate_region_cache(ver_id).await;
+    assert!(cache.try_locate_key(Key::from(vec![5])).await.is_none());
+
+    Ok(())
+}
