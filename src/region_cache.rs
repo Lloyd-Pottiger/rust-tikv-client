@@ -1032,6 +1032,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 rest
             }
 
+            let mut retried_empty_batch = false;
             let mut retried_leaderless_batch = false;
             loop {
                 let pd_ranges: Vec<pdpb::KeyRange> = remaining_ranges
@@ -1062,8 +1063,14 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 match result {
                     Ok(regions) => {
                         if regions.is_empty() {
+                            stats::inc_stale_region_from_pd_counter();
+                            if !retried_empty_batch {
+                                retried_empty_batch = true;
+                                continue;
+                            }
                             break;
                         }
+                        retried_empty_batch = false;
 
                         let all_regions_missing_leader = options.need_region_has_leader_peer
                             && regions.iter().all(|(region, _)| region.leader.is_none());
@@ -2397,6 +2404,37 @@ mod test {
             .batch_locate_key_ranges_with_opts(
                 vec![crate::kv::KeyRange::new(vec![1], vec![8])],
                 [with_need_region_has_leader_peer()],
+            )
+            .await?;
+
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[0].start_key, Key::from(Vec::<u8>::new()));
+        assert_eq!(locations[0].end_key, Key::from(vec![10]));
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 2);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_retries_pd_batch_scan_when_pd_returns_empty(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let region = region_with_leader(1, vec![], vec![10], 42);
+        retry_client.regions.lock().await.insert(1, region.clone());
+        retry_client
+            .batch_scan_regions_results
+            .lock()
+            .await
+            .extend([Vec::new(), vec![(region, None)]]);
+
+        let locations = cache
+            .batch_locate_key_ranges_with_opts(
+                vec![crate::kv::KeyRange::new(vec![1], vec![8])],
+                std::iter::empty(),
             )
             .await?;
 
