@@ -57,7 +57,9 @@ fn util_exec_details_public_api_exposes_constructor_helpers() {
 #[test]
 fn util_exec_details_public_api_exposes_types_and_format_helper() {
     let _: util::CommitDetails = Default::default();
+    let _: util::CommitTSLagDetails = Default::default();
     let _: util::LockKeysDetails = Default::default();
+    let _: util::ReqDetailInfo = Default::default();
     let _: util::TimeDetail = Default::default();
     let _: util::ScanDetail = Default::default();
     let _: util::WriteDetail = Default::default();
@@ -76,6 +78,36 @@ fn util_exec_details_public_api_exposes_types_and_format_helper() {
     assert_eq!(
         util::format_duration(std::time::Duration::from_nanos(1000)),
         "1us"
+    );
+
+    let mut lag_details = util::CommitTSLagDetails::default();
+    lag_details.wait_time = std::time::Duration::from_millis(2);
+    lag_details.backoff_count = 1;
+    lag_details.first_lag_ts = 10;
+    lag_details.wait_until_ts = 20;
+
+    let mut other_lag_details = util::CommitTSLagDetails::default();
+    other_lag_details.wait_time = std::time::Duration::from_millis(3);
+    other_lag_details.backoff_count = 2;
+    other_lag_details.first_lag_ts = 30;
+    other_lag_details.wait_until_ts = 40;
+
+    lag_details.merge(&other_lag_details);
+    assert_eq!(lag_details.wait_time, std::time::Duration::from_millis(5));
+    assert_eq!(lag_details.backoff_count, 3);
+    assert_eq!(lag_details.first_lag_ts, 30);
+    assert_eq!(lag_details.wait_until_ts, 40);
+
+    let mut req_detail = util::ReqDetailInfo::default();
+    req_detail.req_total_time = std::time::Duration::from_millis(6);
+    req_detail.region = 7;
+    req_detail.store_addr = "store-1".to_owned();
+    req_detail.exec_details = util::TiKVExecDetails::default();
+    assert_eq!(req_detail.region, 7);
+    assert_eq!(req_detail.store_addr, "store-1");
+    assert_eq!(
+        req_detail.req_total_time,
+        std::time::Duration::from_millis(6)
     );
 }
 

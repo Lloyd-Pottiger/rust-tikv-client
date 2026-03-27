@@ -3,6 +3,9 @@ use tikv_client::util;
 #[test]
 fn util_rate_limit_public_api_exposes_constructor_helper() {
     let _: fn(usize) -> util::RateLimit = util::new_rate_limit;
+    let _: Option<util::rate_limit::RateLimit> = None;
+    let _: Option<util::rate_limit::RateLimitPermit> = None;
+    let _: Option<util::rate_limit::RateLimitError> = None;
 
     let limit = util::new_rate_limit(3);
     assert_eq!(limit.capacity(), 3);

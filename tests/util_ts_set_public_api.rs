@@ -5,6 +5,9 @@ use tikv_client::util;
 #[test]
 fn util_ts_set_public_api_exposes_gc_time_helpers_and_ts_set_alias() {
     assert_eq!(util::GC_TIME_FORMAT, "20060102-15:04:05.000 -0700");
+    let _: Option<util::gc_time::GcTimeParseError> = None;
+    let _: fn(&str) -> Result<std::time::SystemTime, util::GcTimeParseError> =
+        util::gc_time::compatible_parse_gc_time;
 
     let parsed = util::compatible_parse_gc_time("20181218-19:53:37 +0800 CST")
         .expect("gc time should parse");
@@ -16,6 +19,7 @@ fn util_ts_set_public_api_exposes_gc_time_helpers_and_ts_set_alias() {
 
     let _: Option<util::TSSet> = None;
     let _: Option<util::TsSet> = None;
+    let _: Option<util::ts_set::TsSet> = None;
 
     let set = util::TSSet::new();
     set.put([1_u64, 2, 2]);
