@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tikv_client::{
-    PdClient, PdRpcClient, RawClient, RegionCache, SyncTransactionClient, TransactionClient,
+    Config, PdClient, PdRpcClient, RawClient, RegionCache, SyncTransactionClient, TransactionClient,
 };
 
 fn assert_pd_client_trait<T: PdClient>() {}
@@ -103,6 +103,21 @@ fn sync_check_visibility_entry(
     client.check_visibility(start_ts)
 }
 
+async fn pd_connect_entry(
+    pd_endpoints: &[String],
+    config: Config,
+    enable_codec: bool,
+) -> tikv_client::Result<PdRpcClient> {
+    PdRpcClient::connect(pd_endpoints, config, enable_codec).await
+}
+
+async fn pd_get_timestamp_with_dc_location_entry(
+    client: Arc<PdRpcClient>,
+    dc_location: &str,
+) -> tikv_client::Result<tikv_client::Timestamp> {
+    client.get_timestamp_with_dc_location(dc_location).await
+}
+
 #[test]
 fn crate_root_exports_pd_client_types() {
     let _: fn(&RawClient) -> Arc<PdRpcClient> = RawClient::pd_client;
@@ -121,6 +136,12 @@ fn crate_root_exports_region_cache_accessors() {
     let _: fn(&PdRpcClient) -> &RegionCache = PdRpcClient::region_cache;
     let _: fn(&TransactionClient) -> &RegionCache = TransactionClient::region_cache;
     let _: fn(&SyncTransactionClient) -> &RegionCache = SyncTransactionClient::region_cache;
+}
+
+#[test]
+fn crate_root_exports_pd_connection_and_tso_entrypoints() {
+    let _ = pd_connect_entry;
+    let _ = pd_get_timestamp_with_dc_location_entry;
 }
 
 #[test]
