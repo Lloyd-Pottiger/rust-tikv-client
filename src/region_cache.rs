@@ -1032,6 +1032,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                 rest
             }
 
+            let mut retried_leaderless_batch = false;
             loop {
                 let pd_ranges: Vec<pdpb::KeyRange> = remaining_ranges
                     .iter()
@@ -1063,6 +1064,18 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                         if regions.is_empty() {
                             break;
                         }
+
+                        let all_regions_missing_leader = options.need_region_has_leader_peer
+                            && regions.iter().all(|(region, _)| region.leader.is_none());
+                        if all_regions_missing_leader {
+                            stats::inc_stale_region_from_pd_counter();
+                            if !retried_leaderless_batch {
+                                retried_leaderless_batch = true;
+                                continue;
+                            }
+                            break;
+                        }
+                        retried_leaderless_batch = false;
 
                         let split_key = regions
                             .last()
@@ -1543,6 +1556,7 @@ mod test {
     use std::collections::BTreeMap;
     use std::collections::HashMap;
     use std::collections::HashSet;
+    use std::collections::VecDeque;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
@@ -1653,6 +1667,8 @@ mod test {
         pub scan_regions_calls: Mutex<Vec<ScanRegionsCall>>,
         pub batch_scan_regions_count: AtomicU64,
         pub batch_scan_regions_calls: Mutex<Vec<BatchScanRegionsCall>>,
+        pub batch_scan_regions_results:
+            Mutex<VecDeque<Vec<(RegionWithLeader, Option<metapb::Buckets>)>>>,
     }
 
     #[async_trait]
@@ -1762,6 +1778,10 @@ mod test {
                 .lock()
                 .await
                 .push((ranges.clone(), limit, need_buckets));
+
+            if let Some(result) = self.batch_scan_regions_results.lock().await.pop_front() {
+                return Ok(result);
+            }
 
             if limit <= 0 {
                 return Ok(Vec::new());
@@ -2347,6 +2367,45 @@ mod test {
         let calls = retry_client.batch_scan_regions_calls.lock().await.clone();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].2, "expected need_buckets=true");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_region_cache_batch_locate_key_ranges_with_opts_retries_pd_batch_scan_when_all_regions_have_no_leader(
+    ) -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let leaderless_region = region(1, vec![], vec![10]);
+        let leaderful_region = region_with_leader(1, vec![], vec![10], 42);
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(1, leaderless_region.clone());
+        retry_client
+            .batch_scan_regions_results
+            .lock()
+            .await
+            .extend([
+                vec![(leaderless_region, None)],
+                vec![(leaderful_region, None)],
+            ]);
+
+        let locations = cache
+            .batch_locate_key_ranges_with_opts(
+                vec![crate::kv::KeyRange::new(vec![1], vec![8])],
+                [with_need_region_has_leader_peer()],
+            )
+            .await?;
+
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].region.id, 1);
+        assert_eq!(locations[0].start_key, Key::from(Vec::<u8>::new()));
+        assert_eq!(locations[0].end_key, Key::from(vec![10]));
+        assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 2);
+        assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
 
         Ok(())
     }
