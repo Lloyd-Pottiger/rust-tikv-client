@@ -104,11 +104,14 @@ pub enum Category {
 /// A structured trace field attached to a trace event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraceField {
+    /// The stable field name recorded in the trace event payload.
     pub key: &'static str,
+    /// The typed field value.
     pub value: TraceValue,
 }
 
 impl TraceField {
+    /// Creates a string-valued trace field.
     pub fn str(key: &'static str, value: impl Into<Cow<'static, str>>) -> Self {
         TraceField {
             key,
@@ -116,6 +119,7 @@ impl TraceField {
         }
     }
 
+    /// Creates an unsigned-integer trace field.
     pub fn u64(key: &'static str, value: u64) -> Self {
         TraceField {
             key,
@@ -123,6 +127,7 @@ impl TraceField {
         }
     }
 
+    /// Creates a signed-integer trace field.
     pub fn i64(key: &'static str, value: i64) -> Self {
         TraceField {
             key,
@@ -130,6 +135,7 @@ impl TraceField {
         }
     }
 
+    /// Creates a boolean trace field.
     pub fn bool(key: &'static str, value: bool) -> Self {
         TraceField {
             key,
@@ -137,6 +143,7 @@ impl TraceField {
         }
     }
 
+    /// Creates a bytes-valued trace field.
     pub fn bytes(key: &'static str, value: impl Into<Vec<u8>>) -> Self {
         TraceField {
             key,
@@ -145,12 +152,18 @@ impl TraceField {
     }
 }
 
+/// A typed trace-field value carried by [`TraceField`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TraceValue {
+    /// A UTF-8 string payload.
     Str(Cow<'static, str>),
+    /// An unsigned integer payload.
     U64(u64),
+    /// A signed integer payload.
     I64(i64),
+    /// A boolean payload.
     Bool(bool),
+    /// An opaque byte payload.
     Bytes(Vec<u8>),
 }
 
