@@ -43,6 +43,48 @@ pub type MemBuffer = crate::transaction::Buffer;
 /// This mirrors client-go `tikv.BackoffConfig` (alias of `retry.Config`).
 pub type BackoffConfig = crate::config::retry::Config;
 
+/// Create a transactional KV store client using the global config.
+///
+/// This mirrors client-go `tikv.NewKVStore`, but reuses the Rust client's simpler constructor
+/// shape that only requires PD endpoints.
+#[doc(alias = "NewKVStore")]
+pub async fn new_kv_store<S: Into<String>>(pd_endpoints: Vec<S>) -> crate::Result<KVStore> {
+    crate::TransactionClient::new(pd_endpoints).await
+}
+
+/// Create a transactional KV store client with an explicit configuration.
+///
+/// This mirrors the configurable part of client-go `tikv.NewKVStore`.
+#[doc(alias = "NewKVStore")]
+pub async fn new_kv_store_with_config<S: Into<String>>(
+    pd_endpoints: Vec<S>,
+    config: crate::Config,
+) -> crate::Result<KVStore> {
+    crate::TransactionClient::new_with_config(pd_endpoints, config).await
+}
+
+/// Create a PD client using the global config.
+///
+/// This mirrors client-go `tikv.NewPDClient`.
+#[doc(alias = "NewPDClient")]
+pub async fn new_pd_client<S: Into<String>>(
+    pd_endpoints: Vec<S>,
+) -> crate::Result<crate::PdRpcClient> {
+    new_pd_client_with_config(pd_endpoints, crate::config::get_global_config()).await
+}
+
+/// Create a PD client with an explicit configuration.
+///
+/// This mirrors client-go `tikv.NewPDClient` while keeping Rust's explicit config passing style.
+#[doc(alias = "NewPDClient")]
+pub async fn new_pd_client_with_config<S: Into<String>>(
+    pd_endpoints: Vec<S>,
+    config: crate::Config,
+) -> crate::Result<crate::PdRpcClient> {
+    let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
+    crate::PdRpcClient::connect(&pd_endpoints, config, true).await
+}
+
 /// Client-go style transaction begin option.
 ///
 /// These options are consumed by

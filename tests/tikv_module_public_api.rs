@@ -3,6 +3,30 @@ use std::time::Duration;
 
 use tikv_client::tikv;
 
+async fn new_kv_store_entry(pd_endpoints: Vec<&str>) -> tikv_client::Result<tikv::KVStore> {
+    tikv::new_kv_store(pd_endpoints).await
+}
+
+async fn new_kv_store_with_config_entry(
+    pd_endpoints: Vec<&str>,
+    config: tikv_client::Config,
+) -> tikv_client::Result<tikv::KVStore> {
+    tikv::new_kv_store_with_config(pd_endpoints, config).await
+}
+
+async fn new_pd_client_entry(
+    pd_endpoints: Vec<&str>,
+) -> tikv_client::Result<tikv_client::PdRpcClient> {
+    tikv::new_pd_client(pd_endpoints).await
+}
+
+async fn new_pd_client_with_config_entry(
+    pd_endpoints: Vec<&str>,
+    config: tikv_client::Config,
+) -> tikv_client::Result<tikv_client::PdRpcClient> {
+    tikv::new_pd_client_with_config(pd_endpoints, config).await
+}
+
 #[test]
 fn tikv_module_exports_kvstore_and_backoffer() {
     let _: Option<tikv::KVStore> = None;
@@ -47,6 +71,11 @@ fn tikv_module_exports_backoff_helpers() {
 
 #[test]
 fn tikv_module_exports_begin_txn_option_helpers() {
+    let _ = new_kv_store_entry;
+    let _ = new_kv_store_with_config_entry;
+    let _ = new_pd_client_entry;
+    let _ = new_pd_client_with_config_entry;
+
     let _: fn(&str) -> tikv::TxnOption = tikv::with_txn_scope;
     let _: fn(u64) -> tikv::TxnOption = tikv::with_start_ts;
     let _: fn() -> tikv::TxnOption = tikv::with_default_pipelined_txn;
