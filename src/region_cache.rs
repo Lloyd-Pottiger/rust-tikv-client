@@ -1080,7 +1080,11 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     pub async fn locate_region_by_id_from_pd(&self, id: RegionId) -> Result<KeyLocation> {
         let (region, buckets) = self
             .pd_region_meta_circuit_breaker
-            .execute(|| self.inner_client.clone().get_region_by_id_with_buckets(id))
+            .execute(|| {
+                self.inner_client
+                    .clone()
+                    .get_region_by_id_with_buckets_allow_follower_handle(id)
+            })
             .await?;
         Ok(Self::key_location_from_parts(
             &region,
@@ -1142,7 +1146,11 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                         let end_key: Vec<u8> = key_range.end_key.clone().into();
                         async move {
                             inner
-                                .scan_regions(start_key, end_key, remaining_limit)
+                                .scan_regions_allow_follower_handle(
+                                    start_key,
+                                    end_key,
+                                    remaining_limit,
+                                )
                                 .await
                         }
                     })
@@ -1285,7 +1293,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
                         let pd_ranges = pd_ranges;
                         async move {
                             inner
-                                .batch_scan_regions(
+                                .batch_scan_regions_allow_follower_handle(
                                     pd_ranges,
                                     DEFAULT_REGIONS_PER_BATCH,
                                     options.need_buckets,
@@ -1454,7 +1462,7 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             .execute(|| {
                 self.inner_client
                     .clone()
-                    .get_region_with_buckets(key.into())
+                    .get_region_with_buckets_allow_follower_handle(key.into())
             })
             .await
         {
@@ -1508,11 +1516,13 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
             let regions = self
                 .pd_region_meta_circuit_breaker
                 .execute(|| {
-                    self.inner_client.clone().scan_regions(
-                        start_key.clone().into(),
-                        end_key_bytes.clone(),
-                        limit,
-                    )
+                    self.inner_client
+                        .clone()
+                        .scan_regions_allow_follower_handle(
+                            start_key.clone().into(),
+                            end_key_bytes.clone(),
+                            limit,
+                        )
                 })
                 .await;
             stats::region_cache_operation("scan_regions", regions.is_ok());
@@ -1569,7 +1579,11 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
         let result = match self
             .pd_region_meta_circuit_breaker
-            .execute(|| self.inner_client.clone().get_region_by_id_with_buckets(id))
+            .execute(|| {
+                self.inner_client
+                    .clone()
+                    .get_region_by_id_with_buckets_allow_follower_handle(id)
+            })
             .await
         {
             Ok((region, buckets)) => {
@@ -1973,10 +1987,14 @@ mod test {
         pub buckets: Mutex<HashMap<RegionVerId, metapb::Buckets>>,
         pub stores: Mutex<Vec<metapb::Store>>,
         pub get_region_count: AtomicU64,
+        pub get_region_with_buckets_allow_follower_handle_count: AtomicU64,
+        pub get_region_by_id_with_buckets_allow_follower_handle_count: AtomicU64,
         pub get_store_count: AtomicU64,
         pub scan_regions_count: AtomicU64,
+        pub scan_regions_allow_follower_handle_count: AtomicU64,
         pub scan_regions_calls: Mutex<Vec<ScanRegionsCall>>,
         pub batch_scan_regions_count: AtomicU64,
+        pub batch_scan_regions_allow_follower_handle_count: AtomicU64,
         pub batch_scan_regions_calls: Mutex<Vec<BatchScanRegionsCall>>,
         pub batch_scan_regions_failures: Mutex<VecDeque<Error>>,
         pub batch_scan_regions_results:
@@ -2010,6 +2028,15 @@ mod test {
             Ok((region, buckets))
         }
 
+        async fn get_region_with_buckets_allow_follower_handle(
+            self: Arc<Self>,
+            key: Vec<u8>,
+        ) -> Result<(crate::region::RegionWithLeader, Option<metapb::Buckets>)> {
+            self.get_region_with_buckets_allow_follower_handle_count
+                .fetch_add(1, SeqCst);
+            self.get_region_with_buckets(key).await
+        }
+
         async fn get_region_by_id(
             self: Arc<Self>,
             region_id: crate::region::RegionId,
@@ -2033,6 +2060,15 @@ mod test {
             let ver_id = region.ver_id();
             let buckets = self.buckets.lock().await.get(&ver_id).cloned();
             Ok((region, buckets))
+        }
+
+        async fn get_region_by_id_with_buckets_allow_follower_handle(
+            self: Arc<Self>,
+            region_id: crate::region::RegionId,
+        ) -> Result<(crate::region::RegionWithLeader, Option<metapb::Buckets>)> {
+            self.get_region_by_id_with_buckets_allow_follower_handle_count
+                .fetch_add(1, SeqCst);
+            self.get_region_by_id_with_buckets(region_id).await
         }
 
         async fn scan_regions(
@@ -2077,6 +2113,17 @@ mod test {
             }
 
             Ok(out)
+        }
+
+        async fn scan_regions_allow_follower_handle(
+            self: Arc<Self>,
+            start_key: Vec<u8>,
+            end_key: Vec<u8>,
+            limit: i32,
+        ) -> Result<Vec<RegionWithLeader>> {
+            self.scan_regions_allow_follower_handle_count
+                .fetch_add(1, SeqCst);
+            self.scan_regions(start_key, end_key, limit).await
         }
 
         async fn batch_scan_regions(
@@ -2142,6 +2189,17 @@ mod test {
             }
 
             Ok(out)
+        }
+
+        async fn batch_scan_regions_allow_follower_handle(
+            self: Arc<Self>,
+            ranges: Vec<pdpb::KeyRange>,
+            limit: i32,
+            need_buckets: bool,
+        ) -> Result<Vec<(RegionWithLeader, Option<metapb::Buckets>)>> {
+            self.batch_scan_regions_allow_follower_handle_count
+                .fetch_add(1, SeqCst);
+            self.batch_scan_regions(ranges, limit, need_buckets).await
         }
 
         async fn get_store(
@@ -2296,6 +2354,12 @@ mod test {
 
         let loaded = cache.read_through_region_by_key(Key::from(vec![1])).await?;
         assert_eq!(loaded.ver_id(), ver_id);
+        assert_eq!(
+            retry_client
+                .get_region_with_buckets_allow_follower_handle_count
+                .load(SeqCst),
+            1
+        );
 
         let cached = cache
             .get_buckets_by_ver_id(&ver_id)
@@ -2309,6 +2373,31 @@ mod test {
 
         cache.invalidate_region_cache(ver_id.clone()).await;
         assert!(cache.get_buckets_by_ver_id(&ver_id).await.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_locate_region_by_id_from_pd_uses_follower_handle_transport() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        let region = region_with_leader(7, vec![1], vec![9], 42);
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(region.id(), region.clone());
+
+        let location = cache.locate_region_by_id_from_pd(region.id()).await?;
+
+        assert_eq!(location.region.id, region.id());
+        assert_eq!(
+            retry_client
+                .get_region_by_id_with_buckets_allow_follower_handle_count
+                .load(SeqCst),
+            1
+        );
 
         Ok(())
     }
@@ -3021,6 +3110,12 @@ mod test {
         assert_eq!(locations[1].bucket_version(), 5);
 
         assert_eq!(retry_client.batch_scan_regions_count.load(SeqCst), 1);
+        assert_eq!(
+            retry_client
+                .batch_scan_regions_allow_follower_handle_count
+                .load(SeqCst),
+            1
+        );
         let calls = retry_client.batch_scan_regions_calls.lock().await.clone();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].2, "expected need_buckets=true");
@@ -4054,6 +4149,12 @@ mod test {
             .await?;
         assert_eq!(loaded, 2);
         assert_eq!(retry_client.scan_regions_count.load(SeqCst), 2);
+        assert_eq!(
+            retry_client
+                .scan_regions_allow_follower_handle_count
+                .load(SeqCst),
+            2
+        );
         assert_eq!(retry_client.get_region_count.load(SeqCst), 0);
 
         // Region with leader should be served from cache.

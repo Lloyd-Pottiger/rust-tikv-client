@@ -57,6 +57,14 @@ pub trait RetryClientTrait {
         Ok((region, None))
     }
 
+    #[doc(hidden)]
+    async fn get_region_with_buckets_allow_follower_handle(
+        self: Arc<Self>,
+        key: Vec<u8>,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        self.get_region_with_buckets(key).await
+    }
+
     /// Return the region whose end boundary is `key` (i.e. the region immediately before `key`).
     ///
     /// This maps to PD `GetPrevRegion` and is used by reverse raw scans (`LocateEndKey` behavior).
@@ -92,6 +100,14 @@ pub trait RetryClientTrait {
         Ok((region, None))
     }
 
+    #[doc(hidden)]
+    async fn get_region_by_id_with_buckets_allow_follower_handle(
+        self: Arc<Self>,
+        region_id: RegionId,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        self.get_region_by_id_with_buckets(region_id).await
+    }
+
     /// Scans region metadata over the half-open range `[start_key, end_key)`.
     async fn scan_regions(
         self: Arc<Self>,
@@ -103,6 +119,16 @@ pub trait RetryClientTrait {
         Err(Error::Unimplemented)
     }
 
+    #[doc(hidden)]
+    async fn scan_regions_allow_follower_handle(
+        self: Arc<Self>,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        limit: i32,
+    ) -> Result<Vec<RegionWithLeader>> {
+        self.scan_regions(start_key, end_key, limit).await
+    }
+
     /// Batch-scans region metadata for multiple ranges in one PD request.
     async fn batch_scan_regions(
         self: Arc<Self>,
@@ -112,6 +138,16 @@ pub trait RetryClientTrait {
     ) -> Result<Vec<(RegionWithLeader, Option<metapb::Buckets>)>> {
         let _ = (ranges, limit, need_buckets);
         Err(Error::Unimplemented)
+    }
+
+    #[doc(hidden)]
+    async fn batch_scan_regions_allow_follower_handle(
+        self: Arc<Self>,
+        ranges: Vec<pdpb::KeyRange>,
+        limit: i32,
+        need_buckets: bool,
+    ) -> Result<Vec<(RegionWithLeader, Option<metapb::Buckets>)>> {
+        self.batch_scan_regions(ranges, limit, need_buckets).await
     }
 
     /// Loads raw store metadata for a single store id from PD.
@@ -362,6 +398,29 @@ impl RetryClientTrait for RetryClient<Cluster> {
         )
     }
 
+    async fn get_region_with_buckets_allow_follower_handle(
+        self: Arc<Self>,
+        key: Vec<u8>,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_region", |cluster| {
+                let key = key.clone();
+                async {
+                    cluster
+                        .get_region_with_buckets_allow_follower_handle(key.clone(), self.timeout)
+                        .await
+                        .and_then(|resp| {
+                            region_and_buckets_from_response(resp, || Error::RegionForKeyNotFound {
+                                key,
+                            })
+                        })
+                }
+            }),
+        )
+    }
+
     async fn get_region_with_buckets(
         self: Arc<Self>,
         key: Vec<u8>,
@@ -461,6 +520,26 @@ impl RetryClientTrait for RetryClient<Cluster> {
         )
     }
 
+    async fn get_region_by_id_with_buckets_allow_follower_handle(
+        self: Arc<Self>,
+        region_id: RegionId,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "get_region_by_id", |cluster| async {
+                cluster
+                    .get_region_by_id_with_buckets_allow_follower_handle(region_id, self.timeout)
+                    .await
+                    .and_then(|resp| {
+                        region_and_buckets_from_response(resp, || Error::RegionNotFoundInResponse {
+                            region_id,
+                        })
+                    })
+            }),
+        )
+    }
+
     async fn scan_regions(
         self: Arc<Self>,
         start_key: Vec<u8>,
@@ -483,6 +562,28 @@ impl RetryClientTrait for RetryClient<Cluster> {
         )
     }
 
+    async fn scan_regions_allow_follower_handle(
+        self: Arc<Self>,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        limit: i32,
+    ) -> Result<Vec<RegionWithLeader>> {
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "scan_regions", |cluster| {
+                let start_key = start_key.clone();
+                let end_key = end_key.clone();
+                async {
+                    cluster
+                        .scan_regions_allow_follower_handle(start_key, end_key, limit, self.timeout)
+                        .await
+                        .and_then(scan_regions_from_response)
+                }
+            }),
+        )
+    }
+
     async fn batch_scan_regions(
         self: Arc<Self>,
         ranges: Vec<pdpb::KeyRange>,
@@ -497,6 +598,32 @@ impl RetryClientTrait for RetryClient<Cluster> {
                 async {
                     cluster
                         .batch_scan_regions(ranges, limit, need_buckets, self.timeout)
+                        .await
+                        .and_then(batch_scan_regions_from_response)
+                }
+            }),
+        )
+    }
+
+    async fn batch_scan_regions_allow_follower_handle(
+        self: Arc<Self>,
+        ranges: Vec<pdpb::KeyRange>,
+        limit: i32,
+        need_buckets: bool,
+    ) -> Result<Vec<(RegionWithLeader, Option<metapb::Buckets>)>> {
+        let started_at = Instant::now();
+        finish_pd_wait(
+            started_at,
+            retry_mut!(self, "batch_scan_regions", |cluster| {
+                let ranges = ranges.clone();
+                async {
+                    cluster
+                        .batch_scan_regions_allow_follower_handle(
+                            ranges,
+                            limit,
+                            need_buckets,
+                            self.timeout,
+                        )
                         .await
                         .and_then(batch_scan_regions_from_response)
                 }

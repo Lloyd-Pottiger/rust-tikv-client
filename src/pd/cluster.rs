@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -10,9 +11,11 @@ use async_trait::async_trait;
 use log::error;
 use log::info;
 use log::warn;
+use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::IntoRequest;
 use tonic::Request;
+use tonic::Status;
 
 use super::timestamp::TimestampOracle;
 use crate::internal_err;
@@ -27,10 +30,16 @@ use crate::Timestamp;
 pub struct Cluster {
     id: u64,
     client: pdpb::pd_client::PdClient<Channel>,
+    follower_channels: Vec<(String, Channel)>,
+    next_follower_channel: usize,
     keyspace_client: keyspacepb::keyspace_client::KeyspaceClient<Channel>,
     members: pdpb::GetMembersResponse,
     tso: TimestampOracle,
 }
+
+const PD_ALLOW_FOLLOWER_HANDLE_METADATA_KEY: &str = "pd-allow-follower-handle";
+
+type FollowerHandleInterceptor = fn(Request<()>) -> std::result::Result<Request<()>, Status>;
 
 macro_rules! pd_request {
     ($cluster_id:expr, $type:ty) => {{
@@ -42,10 +51,64 @@ macro_rules! pd_request {
     }};
 }
 
+fn allow_follower_handle_interceptor(
+    mut request: Request<()>,
+) -> std::result::Result<Request<()>, Status> {
+    request.metadata_mut().insert(
+        PD_ALLOW_FOLLOWER_HANDLE_METADATA_KEY,
+        MetadataValue::from_static("true"),
+    );
+    Ok(request)
+}
+
+async fn send_pd_rpc<Message, Response, Rpc, RpcFuture>(
+    message: Message,
+    timeout: Duration,
+    rpc: Rpc,
+) -> Result<Response>
+where
+    Message: IntoRequest<Message> + Send,
+    Response: PdResponse,
+    Rpc: FnOnce(Request<Message>) -> RpcFuture,
+    RpcFuture: Future<Output = GrpcResult<Response>>,
+{
+    let mut req = message.into_request();
+    req.set_timeout(timeout);
+    let response = match rpc(req).await {
+        Ok(response) => response,
+        Err(status) => {
+            if status.code() == tonic::Code::DeadlineExceeded {
+                return Err(crate::PdServerTimeoutError::new(status.message().to_owned()).into());
+            }
+            return Err(status.into());
+        }
+    };
+
+    let header = response
+        .header()
+        .ok_or_else(|| internal_err!("PD response missing header"))?;
+    if let Some(err) = &header.error {
+        Err(internal_err!(err.message))
+    } else {
+        Ok(response)
+    }
+}
+
 // These methods make a single attempt to make a request.
 impl Cluster {
     pub(crate) fn cluster_id(&self) -> u64 {
         self.id
+    }
+
+    fn next_follower_channel(&mut self) -> Option<(String, Channel)> {
+        if self.follower_channels.is_empty() {
+            return None;
+        }
+
+        let idx = self.next_follower_channel % self.follower_channels.len();
+        self.next_follower_channel = (idx + 1) % self.follower_channels.len();
+        let (addr, channel) = &self.follower_channels[idx];
+        Some((addr.clone(), channel.clone()))
     }
 
     pub async fn get_region(
@@ -53,8 +116,40 @@ impl Cluster {
         key: Vec<u8>,
         timeout: Duration,
     ) -> Result<pdpb::GetRegionResponse> {
+        self.get_region_inner(key, false, false, timeout).await
+    }
+
+    async fn get_region_inner(
+        &mut self,
+        key: Vec<u8>,
+        need_buckets: bool,
+        allow_follower_handle: bool,
+        timeout: Duration,
+    ) -> Result<pdpb::GetRegionResponse> {
         let mut req = pd_request!(self.id, pdpb::GetRegionRequest);
         req.region_key = key;
+        req.need_buckets = need_buckets;
+
+        if allow_follower_handle {
+            if let Some((addr, channel)) = self.next_follower_channel() {
+                let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
+                    channel,
+                    allow_follower_handle_interceptor as FollowerHandleInterceptor,
+                );
+                match send_pd_rpc(req.clone(), timeout, |request| async {
+                    Ok(follower_client.get_region(request).await?.into_inner())
+                })
+                .await
+                {
+                    Ok(resp) => return Ok(resp),
+                    Err(err) => warn!(
+                        "follower-handled get_region failed on {}, falling back to leader: {:?}",
+                        addr, err
+                    ),
+                }
+            }
+        }
+
         req.send(&mut self.client, timeout).await
     }
 
@@ -63,10 +158,15 @@ impl Cluster {
         key: Vec<u8>,
         timeout: Duration,
     ) -> Result<pdpb::GetRegionResponse> {
-        let mut req = pd_request!(self.id, pdpb::GetRegionRequest);
-        req.region_key = key;
-        req.need_buckets = true;
-        req.send(&mut self.client, timeout).await
+        self.get_region_inner(key, true, false, timeout).await
+    }
+
+    pub(crate) async fn get_region_with_buckets_allow_follower_handle(
+        &mut self,
+        key: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<pdpb::GetRegionResponse> {
+        self.get_region_inner(key, true, true, timeout).await
     }
 
     pub async fn get_prev_region(
@@ -117,8 +217,40 @@ impl Cluster {
         id: u64,
         timeout: Duration,
     ) -> Result<pdpb::GetRegionResponse> {
+        self.get_region_by_id_inner(id, false, false, timeout).await
+    }
+
+    async fn get_region_by_id_inner(
+        &mut self,
+        id: u64,
+        need_buckets: bool,
+        allow_follower_handle: bool,
+        timeout: Duration,
+    ) -> Result<pdpb::GetRegionResponse> {
         let mut req = pd_request!(self.id, pdpb::GetRegionByIdRequest);
         req.region_id = id;
+        req.need_buckets = need_buckets;
+
+        if allow_follower_handle {
+            if let Some((addr, channel)) = self.next_follower_channel() {
+                let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
+                    channel,
+                    allow_follower_handle_interceptor as FollowerHandleInterceptor,
+                );
+                match send_pd_rpc(req.clone(), timeout, |request| async {
+                    Ok(follower_client.get_region_by_id(request).await?.into_inner())
+                })
+                .await
+                {
+                    Ok(resp) => return Ok(resp),
+                    Err(err) => warn!(
+                        "follower-handled get_region_by_id failed on {}, falling back to leader: {:?}",
+                        addr, err
+                    ),
+                }
+            }
+        }
+
         req.send(&mut self.client, timeout).await
     }
 
@@ -127,10 +259,15 @@ impl Cluster {
         id: u64,
         timeout: Duration,
     ) -> Result<pdpb::GetRegionResponse> {
-        let mut req = pd_request!(self.id, pdpb::GetRegionByIdRequest);
-        req.region_id = id;
-        req.need_buckets = true;
-        req.send(&mut self.client, timeout).await
+        self.get_region_by_id_inner(id, true, false, timeout).await
+    }
+
+    pub(crate) async fn get_region_by_id_with_buckets_allow_follower_handle(
+        &mut self,
+        id: u64,
+        timeout: Duration,
+    ) -> Result<pdpb::GetRegionResponse> {
+        self.get_region_by_id_inner(id, true, true, timeout).await
     }
 
     pub async fn scan_regions(
@@ -140,10 +277,54 @@ impl Cluster {
         limit: i32,
         timeout: Duration,
     ) -> Result<pdpb::ScanRegionsResponse> {
+        self.scan_regions_inner(start_key, end_key, limit, false, timeout)
+            .await
+    }
+
+    pub(crate) async fn scan_regions_allow_follower_handle(
+        &mut self,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        limit: i32,
+        timeout: Duration,
+    ) -> Result<pdpb::ScanRegionsResponse> {
+        self.scan_regions_inner(start_key, end_key, limit, true, timeout)
+            .await
+    }
+
+    async fn scan_regions_inner(
+        &mut self,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        limit: i32,
+        allow_follower_handle: bool,
+        timeout: Duration,
+    ) -> Result<pdpb::ScanRegionsResponse> {
         let mut req = pd_request!(self.id, pdpb::ScanRegionsRequest);
         req.start_key = start_key;
         req.end_key = end_key;
         req.limit = limit;
+
+        if allow_follower_handle {
+            if let Some((addr, channel)) = self.next_follower_channel() {
+                let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
+                    channel,
+                    allow_follower_handle_interceptor as FollowerHandleInterceptor,
+                );
+                match send_pd_rpc(req.clone(), timeout, |request| async {
+                    Ok(follower_client.scan_regions(request).await?.into_inner())
+                })
+                .await
+                {
+                    Ok(resp) => return Ok(resp),
+                    Err(err) => warn!(
+                        "follower-handled scan_regions failed on {}, falling back to leader: {:?}",
+                        addr, err
+                    ),
+                }
+            }
+        }
+
         req.send(&mut self.client, timeout).await
     }
 
@@ -154,12 +335,56 @@ impl Cluster {
         need_buckets: bool,
         timeout: Duration,
     ) -> Result<pdpb::BatchScanRegionsResponse> {
+        self.batch_scan_regions_inner(ranges, limit, need_buckets, false, timeout)
+            .await
+    }
+
+    pub(crate) async fn batch_scan_regions_allow_follower_handle(
+        &mut self,
+        ranges: Vec<pdpb::KeyRange>,
+        limit: i32,
+        need_buckets: bool,
+        timeout: Duration,
+    ) -> Result<pdpb::BatchScanRegionsResponse> {
+        self.batch_scan_regions_inner(ranges, limit, need_buckets, true, timeout)
+            .await
+    }
+
+    async fn batch_scan_regions_inner(
+        &mut self,
+        ranges: Vec<pdpb::KeyRange>,
+        limit: i32,
+        need_buckets: bool,
+        allow_follower_handle: bool,
+        timeout: Duration,
+    ) -> Result<pdpb::BatchScanRegionsResponse> {
         let mut req = pd_request!(self.id, pdpb::BatchScanRegionsRequest);
         req.need_buckets = need_buckets;
         req.ranges = ranges;
         req.limit = limit;
         // Keep `contain_all_key_range` false to allow partial responses when `limit` is reached,
         // matching client-go's incremental batch scan usage.
+
+        if allow_follower_handle {
+            if let Some((addr, channel)) = self.next_follower_channel() {
+                let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
+                    channel,
+                    allow_follower_handle_interceptor as FollowerHandleInterceptor,
+                );
+                match send_pd_rpc(req.clone(), timeout, |request| async {
+                    Ok(follower_client.batch_scan_regions(request).await?.into_inner())
+                })
+                .await
+                {
+                    Ok(resp) => return Ok(resp),
+                    Err(err) => warn!(
+                        "follower-handled batch_scan_regions failed on {}, falling back to leader: {:?}",
+                        addr, err
+                    ),
+                }
+            }
+        }
+
         req.send(&mut self.client, timeout).await
     }
 
@@ -343,6 +568,7 @@ impl Connection {
     ) -> Result<Cluster> {
         let members = self.validate_endpoints(endpoints, timeout).await?;
         let (client, keyspace_client, members) = self.try_connect_leader(&members, timeout).await?;
+        let follower_channels = self.connect_follower_channels(&members).await;
         let id = members
             .header
             .as_ref()
@@ -352,6 +578,8 @@ impl Connection {
         let cluster = Cluster {
             id,
             client,
+            follower_channels,
+            next_follower_channel: 0,
             keyspace_client,
             members,
             tso,
@@ -370,10 +598,13 @@ impl Connection {
         let start = Instant::now();
         let (client, keyspace_client, members) =
             self.try_connect_leader(&cluster.members, timeout).await?;
+        let follower_channels = self.connect_follower_channels(&members).await;
         let tso = TimestampOracle::new(cluster.id, &client, tso_max_pending_count)?;
         *cluster = Cluster {
             id: cluster.id,
             client,
+            follower_channels,
+            next_follower_channel: 0,
             keyspace_client,
             members,
             tso,
@@ -483,6 +714,43 @@ impl Connection {
             ));
         }
         Ok((client, keyspace_client, resp))
+    }
+
+    async fn connect_channel(&self, addr: &str) -> Result<Channel> {
+        self.security_mgr.connect(addr, |channel| channel).await
+    }
+
+    async fn connect_follower_channels(
+        &self,
+        members: &pdpb::GetMembersResponse,
+    ) -> Vec<(String, Channel)> {
+        let Some(leader) = members.leader.as_ref() else {
+            return Vec::new();
+        };
+
+        let mut follower_channels = Vec::new();
+        let mut seen = HashSet::new();
+        let leader_urls: HashSet<&str> = leader.client_urls.iter().map(String::as_str).collect();
+
+        for member in &members.members {
+            if member.member_id == leader.member_id {
+                continue;
+            }
+            for addr in &member.client_urls {
+                if leader_urls.contains(addr.as_str()) || !seen.insert(addr.clone()) {
+                    continue;
+                }
+                match self.connect_channel(addr).await {
+                    Ok(channel) => follower_channels.push((addr.clone(), channel)),
+                    Err(err) => warn!(
+                        "failed to connect follower PD endpoint {}, leader fallback stays active: {:?}",
+                        addr, err
+                    ),
+                }
+            }
+        }
+
+        follower_channels
     }
 
     async fn try_connect(
@@ -1078,6 +1346,16 @@ mod tests {
             panic!("expected PdServerTimeout error, got: {err}");
         };
         assert_eq!(timeout.message(), "deadline exceeded");
+    }
+
+    #[test]
+    fn test_allow_follower_handle_interceptor_sets_metadata() {
+        let request = allow_follower_handle_interceptor(Request::new(())).unwrap();
+        let value = request
+            .metadata()
+            .get(PD_ALLOW_FOLLOWER_HANDLE_METADATA_KEY)
+            .expect("expected follower-handle metadata");
+        assert_eq!(value.to_str().unwrap(), "true");
     }
 
     #[test]
