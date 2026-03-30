@@ -36,8 +36,6 @@ pub use crate::request_context::RequestSourceKey;
 pub use crate::request_context::RequestSourceKeyType;
 pub use crate::request_context::RequestSourceTypeKey;
 pub use crate::request_context::RequestSourceTypeKeyType;
-pub use crate::request_context::ResourceGroupNameKey;
-pub use crate::request_context::ResourceGroupNameKeyType;
 pub use crate::request_context::EXPLICIT_TYPE_BACKGROUND;
 pub use crate::request_context::EXPLICIT_TYPE_BR;
 pub use crate::request_context::EXPLICIT_TYPE_DDL;

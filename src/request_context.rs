@@ -34,15 +34,6 @@ pub struct RequestSourceKey;
 /// Type alias kept for client-go API parity.
 pub type RequestSourceKeyType = RequestSourceKey;
 
-/// Marker key type for resource group name stored in task-local context.
-///
-/// This mirrors client-go `util.ResourceGroupNameKeyType` and `util.ResourceGroupNameKey`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ResourceGroupNameKey;
-
-/// Type alias kept for client-go API parity.
-pub type ResourceGroupNameKeyType = ResourceGroupNameKey;
-
 /// The priority of commands executed by TiKV.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(i32)]
