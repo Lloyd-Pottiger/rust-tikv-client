@@ -494,6 +494,34 @@ pub fn codec_v1_exclude_prefixes() -> &'static [&'static [u8]] {
     codec_v2_prefixes()
 }
 
+/// Decode an encoded TiKV key into its optional keyspace prefix and user key bytes.
+///
+/// This mirrors client-go `apicodec.DecodeKey`, which is re-exported from `tikv.DecodeKey`.
+#[doc(alias = "DecodeKey")]
+pub fn decode_key<'a>(
+    encoded: &'a [u8],
+    api_version: crate::proto::kvrpcpb::ApiVersion,
+) -> crate::Result<(Option<&'a [u8]>, &'a [u8])> {
+    match api_version {
+        crate::proto::kvrpcpb::ApiVersion::V1 => Ok((None, encoded)),
+        crate::proto::kvrpcpb::ApiVersion::V2 => {
+            const KEYSPACE_PREFIX_LEN: usize = 4;
+            if encoded.len() < KEYSPACE_PREFIX_LEN
+                || (encoded[0] != CODEC_V2_RAW_KEYSPACE_PREFIX
+                    && encoded[0] != CODEC_V2_TXN_KEYSPACE_PREFIX)
+            {
+                return Err(crate::Error::StringError(format!(
+                    "invalid API V2 key {encoded:?}"
+                )));
+            }
+            Ok((Some(&encoded[..KEYSPACE_PREFIX_LEN]), &encoded[KEYSPACE_PREFIX_LEN..]))
+        }
+        other => Err(crate::Error::StringError(format!(
+            "unsupported api version {other:?}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

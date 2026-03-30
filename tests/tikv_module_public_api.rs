@@ -230,6 +230,27 @@ fn tikv_module_exports_codec_prefix_helpers() {
     assert_eq!(v2[0], &[tikv::CODEC_V2_RAW_KEYSPACE_PREFIX]);
     assert_eq!(v2[1], &[tikv::CODEC_V2_TXN_KEYSPACE_PREFIX]);
     assert_eq!(tikv::codec_v1_exclude_prefixes(), v2);
+
+    let (prefix, key) =
+        tikv::decode_key(b"hello", tikv_client::proto::kvrpcpb::ApiVersion::V1).unwrap();
+    assert!(prefix.is_none());
+    assert_eq!(key, b"hello");
+
+    let encoded = [
+        tikv::CODEC_V2_RAW_KEYSPACE_PREFIX,
+        0,
+        0,
+        42,
+        b'a',
+        b'b',
+        b'c',
+    ];
+    let (prefix, key) =
+        tikv::decode_key(&encoded, tikv_client::proto::kvrpcpb::ApiVersion::V2).unwrap();
+    assert_eq!(prefix.unwrap(), &encoded[..4]);
+    assert_eq!(key, &encoded[4..]);
+
+    assert!(tikv::decode_key(&encoded[..3], tikv_client::proto::kvrpcpb::ApiVersion::V2).is_err());
 }
 
 #[test]
