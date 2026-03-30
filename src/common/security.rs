@@ -19,6 +19,7 @@ use hyper::client::connect::dns::Name;
 use hyper::client::connect::HttpConnector;
 use log::info;
 use regex::Regex;
+use rustls_pemfile::Item;
 use tonic::codegen::Service;
 use tonic::transport::Channel;
 use tonic::transport::ClientTlsConfig;
@@ -54,6 +55,49 @@ fn load_pem_file(tag: &str, path: &Path) -> Result<Vec<u8>> {
             )
         })
         .map(|_| key)
+}
+
+fn validate_pem_certificates(tag: &str, path: &Path, pem: &[u8]) -> Result<()> {
+    let mut reader = io::Cursor::new(pem);
+    let certs = rustls_pemfile::certs(&mut reader).map_err(|e| {
+        internal_err!(
+            "failed to parse {} from path {}: {:?}",
+            tag,
+            path.display(),
+            e
+        )
+    })?;
+    if certs.is_empty() {
+        return Err(internal_err!(
+            "failed to parse {} from path {}: no certificate found",
+            tag,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pem_private_key(path: &Path, pem: &[u8]) -> Result<()> {
+    let mut reader = io::Cursor::new(pem);
+    loop {
+        let item = rustls_pemfile::read_one(&mut reader).map_err(|e| {
+            internal_err!(
+                "failed to parse private key from path {}: {:?}",
+                path.display(),
+                e
+            )
+        })?;
+        match item {
+            Some(Item::RSAKey(_) | Item::PKCS8Key(_) | Item::ECKey(_)) => return Ok(()),
+            Some(_) => continue,
+            None => {
+                return Err(internal_err!(
+                    "failed to parse private key from path {}: no private key found",
+                    path.display()
+                ))
+            }
+        }
+    }
 }
 
 /// Manages the TLS protocol
@@ -104,10 +148,15 @@ impl SecurityManager {
         key_path: impl Into<PathBuf>,
     ) -> Result<SecurityManager> {
         let key_path = key_path.into();
-        check_pem_file("private key", &key_path)?;
+        let ca = load_pem_file("ca", ca_path.as_ref())?;
+        validate_pem_certificates("ca", ca_path.as_ref(), &ca)?;
+        let cert = load_pem_file("certificate", cert_path.as_ref())?;
+        validate_pem_certificates("certificate", cert_path.as_ref(), &cert)?;
+        let key = load_pem_file("private key", &key_path)?;
+        validate_pem_private_key(&key_path, &key)?;
         Ok(SecurityManager {
-            ca: load_pem_file("ca", ca_path.as_ref())?,
-            cert: load_pem_file("certificate", cert_path.as_ref())?,
+            ca,
+            cert,
             key: key_path,
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
@@ -363,20 +412,38 @@ mod tests {
         let example_ca = temp.path().join("ca");
         let example_cert = temp.path().join("cert");
         let example_pem = temp.path().join("key");
-        for (id, f) in [&example_ca, &example_cert, &example_pem]
-            .iter()
-            .enumerate()
-        {
-            File::create(f).unwrap().write_all(&[id as u8]).unwrap();
-        }
+        let cert = include_bytes!("../../tests/fixtures/security-test-cert.pem");
+        let key = include_bytes!("../../tests/fixtures/security-test-key.pem");
+        File::create(&example_ca).unwrap().write_all(cert).unwrap();
+        File::create(&example_cert)
+            .unwrap()
+            .write_all(cert)
+            .unwrap();
+        File::create(&example_pem).unwrap().write_all(key).unwrap();
         let cert_path: PathBuf = format!("{}", example_cert.display()).into();
         let key_path: PathBuf = format!("{}", example_pem.display()).into();
         let ca_path: PathBuf = format!("{}", example_ca.display()).into();
         let mgr = SecurityManager::load(ca_path, cert_path, &key_path).unwrap();
-        assert_eq!(mgr.ca, vec![0]);
-        assert_eq!(mgr.cert, vec![1]);
-        let key = load_pem_file("private key", &key_path).unwrap();
-        assert_eq!(key, vec![2]);
+        assert_eq!(mgr.ca, cert);
+        assert_eq!(mgr.cert, cert);
+        assert_eq!(load_pem_file("private key", &key_path).unwrap(), key);
+    }
+
+    #[test]
+    fn test_security_manager_load_rejects_invalid_pem_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        let ca_path = temp.path().join("ca");
+        let cert_path = temp.path().join("cert");
+        let key_path = temp.path().join("key");
+        for path in [&ca_path, &cert_path, &key_path] {
+            File::create(path).unwrap().write_all(b"not a pem").unwrap();
+        }
+
+        let err = match SecurityManager::load(&ca_path, &cert_path, &key_path) {
+            Ok(_) => panic!("invalid PEM should be rejected eagerly"),
+            Err(err) => err,
+        };
+        assert!(!err.to_string().is_empty());
     }
 
     #[test]

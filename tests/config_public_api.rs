@@ -239,3 +239,32 @@ fn security_materialization_helpers_are_publicly_usable() {
     };
     assert!(!err.to_string().is_empty());
 }
+
+#[test]
+fn security_materialization_rejects_invalid_pem_contents() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ca = dir.path().join("ca.pem");
+    let cert = dir.path().join("cert.pem");
+    let key = dir.path().join("key.pem");
+
+    std::fs::write(&ca, b"not a pem").expect("write ca");
+    std::fs::write(&cert, b"not a pem").expect("write cert");
+    std::fs::write(&key, b"not a pem").expect("write key");
+
+    let err = match config::Config::default()
+        .with_security(&ca, &cert, &key)
+        .security_manager()
+    {
+        Ok(_) => panic!("invalid PEM should be rejected eagerly"),
+        Err(err) => err,
+    };
+    assert!(!err.to_string().is_empty());
+
+    let err = match config::Security::new(&ca, &cert, &key, std::iter::empty::<String>())
+        .security_manager()
+    {
+        Ok(_) => panic!("standalone security helper should reject invalid PEM too"),
+        Err(err) => err,
+    };
+    assert!(!err.to_string().is_empty());
+}
