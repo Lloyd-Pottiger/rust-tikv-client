@@ -4,6 +4,8 @@
 //!
 //! Some items in this module intentionally mirror client-go `util` APIs.
 
+use crate::PdRpcClient;
+
 pub mod r#async;
 /// Byte-formatting helpers used by debugging and logging code.
 pub mod bytes;
@@ -101,6 +103,22 @@ pub use rate_limit::RateLimitError;
 pub use rate_limit::RateLimitPermit;
 pub use ts_set::TsSet as TSSet;
 pub use ts_set::TsSet;
+
+/// Compatibility alias for client-go `util.InterceptedPDClient`.
+///
+/// Rust `PdRpcClient` already records PD wait details internally, so there is no separate wrapper
+/// layer to apply at construction time.
+pub type InterceptedPdClient = PdRpcClient;
+
+/// Return a PD client with built-in wait-time interception enabled.
+///
+/// This mirrors client-go `util.NewInterceptedPDClient`. In Rust the interception logic is already
+/// part of [`PdRpcClient`], so this is an identity constructor kept for API discoverability.
+#[doc(alias = "NewInterceptedPDClient")]
+#[must_use]
+pub fn new_intercepted_pd_client(client: PdRpcClient) -> InterceptedPdClient {
+    client
+}
 
 pub(crate) use exec_details::record_task_local_backoff;
 pub(crate) use exec_details::record_task_local_kv_traffic;
