@@ -8,6 +8,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use futures::future::BoxFuture;
 use tokio::sync::RwLock;
 
 use crate::internal_err;
@@ -268,6 +269,58 @@ impl<Cl> RetryClient<Cl> {
     pub(crate) fn cluster_id(&self) -> u64 {
         self.cluster_id
     }
+
+    async fn retry_mut_first_then_retry<T, First, Retry>(
+        &self,
+        tag: &'static str,
+        mut first_call: First,
+        mut retry_call: Retry,
+    ) -> Result<T>
+    where
+        T: std::any::Any,
+        RetryClient<Cl>: Reconnect<Cl = Cl>,
+        First: for<'a> FnMut(&'a mut Cl) -> BoxFuture<'a, Result<T>>,
+        Retry: for<'a> FnMut(&'a mut Cl) -> BoxFuture<'a, Result<T>>,
+    {
+        let stats = pd_stats(tag);
+        let mut last_err = Ok(());
+
+        'retry: {
+            for attempt in 0..LEADER_CHANGE_RETRY {
+                let res = {
+                    let cluster = &mut self.cluster.write().await.0;
+                    if attempt == 0 {
+                        first_call(cluster).await
+                    } else {
+                        retry_call(cluster).await
+                    }
+                };
+
+                match stats.done(res) {
+                    Ok(r) => break 'retry Ok(r),
+                    Err(Error::Unimplemented) => break 'retry Err(Error::Unimplemented),
+                    Err(Error::GrpcAPI(status)) if status.code() == tonic::Code::Unimplemented => {
+                        break 'retry Err(Error::Unimplemented);
+                    }
+                    Err(e) => last_err = Err(e),
+                }
+
+                let mut reconnect_count = MAX_REQUEST_COUNT;
+                while let Err(e) = self.reconnect(RECONNECT_INTERVAL_SEC).await {
+                    reconnect_count -= 1;
+                    if reconnect_count == 0 {
+                        break 'retry Err(e);
+                    }
+                    crate::util::sleep_backoff(Duration::from_secs(RECONNECT_INTERVAL_SEC)).await;
+                }
+            }
+
+            match last_err {
+                Ok(()) => Err(internal_err!("pd retry exhausted without error: {}", tag)),
+                Err(e) => Err(e),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -407,21 +460,39 @@ impl RetryClientTrait for RetryClient<Cluster> {
         key: Vec<u8>,
     ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
         let started_at = Instant::now();
+        let timeout = self.timeout;
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "get_region", |cluster| {
-                let key = key.clone();
-                async {
-                    cluster
-                        .get_region_with_buckets_allow_follower_handle(key.clone(), self.timeout)
-                        .await
-                        .and_then(|resp| {
-                            region_and_buckets_from_response(resp, || Error::RegionForKeyNotFound {
-                                key,
+            self.retry_mut_first_then_retry(
+                "get_region",
+                |cluster| {
+                    let key = key.clone();
+                    Box::pin(async move {
+                        cluster
+                            .get_region_with_buckets_allow_follower_handle(key.clone(), timeout)
+                            .await
+                            .and_then(|resp| {
+                                region_and_buckets_from_response(resp, || {
+                                    Error::RegionForKeyNotFound { key }
+                                })
                             })
-                        })
-                }
-            }),
+                    })
+                },
+                |cluster| {
+                    let key = key.clone();
+                    Box::pin(async move {
+                        cluster
+                            .get_region_with_buckets(key.clone(), timeout)
+                            .await
+                            .and_then(|resp| {
+                                region_and_buckets_from_response(resp, || {
+                                    Error::RegionForKeyNotFound { key }
+                                })
+                            })
+                    })
+                },
+            )
+            .await,
         )
     }
 
@@ -529,18 +600,37 @@ impl RetryClientTrait for RetryClient<Cluster> {
         region_id: RegionId,
     ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
         let started_at = Instant::now();
+        let timeout = self.timeout;
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "get_region_by_id", |cluster| async {
-                cluster
-                    .get_region_by_id_with_buckets_allow_follower_handle(region_id, self.timeout)
-                    .await
-                    .and_then(|resp| {
-                        region_and_buckets_from_response(resp, || Error::RegionNotFoundInResponse {
-                            region_id,
-                        })
+            self.retry_mut_first_then_retry(
+                "get_region_by_id",
+                |cluster| {
+                    Box::pin(async move {
+                        cluster
+                            .get_region_by_id_with_buckets_allow_follower_handle(region_id, timeout)
+                            .await
+                            .and_then(|resp| {
+                                region_and_buckets_from_response(resp, || {
+                                    Error::RegionNotFoundInResponse { region_id }
+                                })
+                            })
                     })
-            }),
+                },
+                |cluster| {
+                    Box::pin(async move {
+                        cluster
+                            .get_region_by_id_with_buckets(region_id, timeout)
+                            .await
+                            .and_then(|resp| {
+                                region_and_buckets_from_response(resp, || {
+                                    Error::RegionNotFoundInResponse { region_id }
+                                })
+                            })
+                    })
+                },
+            )
+            .await,
         )
     }
 
@@ -573,18 +663,33 @@ impl RetryClientTrait for RetryClient<Cluster> {
         limit: i32,
     ) -> Result<Vec<RegionWithLeader>> {
         let started_at = Instant::now();
+        let timeout = self.timeout;
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "scan_regions", |cluster| {
-                let start_key = start_key.clone();
-                let end_key = end_key.clone();
-                async {
-                    cluster
-                        .scan_regions_allow_follower_handle(start_key, end_key, limit, self.timeout)
-                        .await
-                        .and_then(scan_regions_from_response)
-                }
-            }),
+            self.retry_mut_first_then_retry(
+                "scan_regions",
+                |cluster| {
+                    let start_key = start_key.clone();
+                    let end_key = end_key.clone();
+                    Box::pin(async move {
+                        cluster
+                            .scan_regions_allow_follower_handle(start_key, end_key, limit, timeout)
+                            .await
+                            .and_then(scan_regions_from_response)
+                    })
+                },
+                |cluster| {
+                    let start_key = start_key.clone();
+                    let end_key = end_key.clone();
+                    Box::pin(async move {
+                        cluster
+                            .scan_regions(start_key, end_key, limit, timeout)
+                            .await
+                            .and_then(scan_regions_from_response)
+                    })
+                },
+            )
+            .await,
         )
     }
 
@@ -616,22 +721,36 @@ impl RetryClientTrait for RetryClient<Cluster> {
         need_buckets: bool,
     ) -> Result<Vec<(RegionWithLeader, Option<metapb::Buckets>)>> {
         let started_at = Instant::now();
+        let timeout = self.timeout;
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "batch_scan_regions", |cluster| {
-                let ranges = ranges.clone();
-                async {
-                    cluster
-                        .batch_scan_regions_allow_follower_handle(
-                            ranges,
-                            limit,
-                            need_buckets,
-                            self.timeout,
-                        )
-                        .await
-                        .and_then(batch_scan_regions_from_response)
-                }
-            }),
+            self.retry_mut_first_then_retry(
+                "batch_scan_regions",
+                |cluster| {
+                    let ranges = ranges.clone();
+                    Box::pin(async move {
+                        cluster
+                            .batch_scan_regions_allow_follower_handle(
+                                ranges,
+                                limit,
+                                need_buckets,
+                                timeout,
+                            )
+                            .await
+                            .and_then(batch_scan_regions_from_response)
+                    })
+                },
+                |cluster| {
+                    let ranges = ranges.clone();
+                    Box::pin(async move {
+                        cluster
+                            .batch_scan_regions(ranges, limit, need_buckets, timeout)
+                            .await
+                            .and_then(batch_scan_regions_from_response)
+                    })
+                },
+            )
+            .await,
         )
     }
 
@@ -1342,5 +1461,56 @@ mod test {
             assert!(retry_max_ok(client.clone(), max_retries).await.is_ok());
             assert_eq!(client.cluster.read().await.0.load(Ordering::SeqCst), 2);
         })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_retry_mut_first_then_retry_switches_to_retry_call_after_initial_failure() {
+        struct MockCluster {
+            follower_calls: AtomicUsize,
+            leader_calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl Reconnect for RetryClient<MockCluster> {
+            type Cl = MockCluster;
+
+            async fn reconnect(&self, _: u64) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let security_mgr = Arc::new(SecurityManager::default());
+        let client = RetryClient::new_with_cluster(
+            security_mgr,
+            Duration::from_secs(1),
+            42,
+            MockCluster {
+                follower_calls: AtomicUsize::new(0),
+                leader_calls: AtomicUsize::new(0),
+            },
+        );
+
+        let result = client
+            .retry_mut_first_then_retry(
+                "test_retry_policy",
+                |cluster| {
+                    Box::pin(async move {
+                        cluster.follower_calls.fetch_add(1, Ordering::SeqCst);
+                        Err(internal_err!("stale follower response"))
+                    })
+                },
+                |cluster| {
+                    Box::pin(async move {
+                        cluster.leader_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, Error>(())
+                    })
+                },
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let cluster = &client.cluster.read().await.0;
+        assert_eq!(cluster.follower_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cluster.leader_calls.load(Ordering::SeqCst), 1);
     }
 }
