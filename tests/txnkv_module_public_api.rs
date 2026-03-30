@@ -38,6 +38,13 @@ fn txnkv_module_exports_types() {
     let _: Option<std::sync::Arc<dyn txnkv::rangetask::RangeTaskHandler>> = None;
 
     let _: Option<txnkv::txnutil::TxnStatus> = None;
+    let _: Option<txnkv::txnutil::Priority> = None;
+    let _ = txnkv::txnutil::PRIORITY_NORMAL;
+    let _ = txnkv::txnutil::PRIORITY_LOW;
+    let _ = txnkv::txnutil::PRIORITY_HIGH;
+    assert_eq!(txnkv::txnutil::PRIORITY_NORMAL, txnkv::txnutil::Priority::Normal);
+    assert_eq!(txnkv::txnutil::PRIORITY_LOW, txnkv::txnutil::Priority::Low);
+    assert_eq!(txnkv::txnutil::PRIORITY_HIGH, txnkv::txnutil::Priority::High);
 
     let _: fn(tikv_client::proto::kvrpcpb::LockInfo) -> txnkv::Lock = txnkv::new_lock;
 
