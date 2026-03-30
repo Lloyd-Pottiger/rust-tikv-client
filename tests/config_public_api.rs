@@ -8,6 +8,7 @@ use tikv_client::config;
 #[test]
 fn config_module_exports_types_and_global_helpers() {
     let _: Option<config::ParsedTikvPath> = None;
+    let _: bool = config::NEXT_GEN;
     let _ = config::GrpcCompressionType::None;
     let _: Duration = config::DEF_STORE_LIVENESS_TIMEOUT;
     let _: u32 = config::DEF_GRPC_INITIAL_WINDOW_SIZE;
@@ -37,6 +38,7 @@ fn config_module_exports_types_and_global_helpers() {
     assert_eq!(parsed.pd_addrs, vec!["127.0.0.1:2379"]);
     assert!(parsed.disable_gc);
     assert_eq!(parsed.keyspace_name.as_deref(), Some("test"));
+    assert!(!config::NEXT_GEN);
 
     let _: Option<config::GlobalConfigRestore> = None;
     let restore = config::update_global_config(|_cfg| {});

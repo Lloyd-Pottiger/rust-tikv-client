@@ -19,6 +19,13 @@ use serde_derive::Serialize;
 /// Client-go style `config/retry` module.
 pub mod retry;
 
+/// Whether this build targets client-go's `nextgen` variant.
+///
+/// The Rust client currently ships a single code path rather than client-go's build-tagged
+/// `nextgen`/classic split, so this compatibility constant is always `false`.
+#[doc(alias = "NextGen")]
+pub const NEXT_GEN: bool = false;
+
 /// Parsed result of [`parse_path`].
 ///
 /// This mirrors the output of client-go `config.ParsePath`.
@@ -1866,6 +1873,11 @@ mod tests {
         assert_eq!(parsed.pd_addrs, vec!["127.0.0.1:2379".to_owned()]);
         assert!(!parsed.disable_gc);
         assert_eq!(parsed.keyspace_name, None);
+    }
+
+    #[test]
+    fn test_next_gen_constant_is_false() {
+        assert!(!NEXT_GEN);
     }
 
     #[test]
