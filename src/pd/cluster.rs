@@ -155,6 +155,36 @@ fn store_meta_transport_priority(
     transports
 }
 
+fn should_evict_router_channel(err: &Error) -> bool {
+    matches!(err, Error::PdServerTimeout(_))
+        || matches!(
+            err,
+            Error::GrpcAPI(status)
+                if matches!(
+                    status.code(),
+                    tonic::Code::Unavailable
+                        | tonic::Code::DeadlineExceeded
+                        | tonic::Code::Cancelled
+                        | tonic::Code::Unimplemented
+                )
+        )
+}
+
+fn remove_cached_channel(
+    channels: &mut Vec<(String, Channel)>,
+    next_index: &mut usize,
+    failed_addr: &str,
+) {
+    if let Some(index) = channels.iter().position(|(addr, _)| addr == failed_addr) {
+        channels.remove(index);
+        if channels.is_empty() {
+            *next_index = 0;
+        } else if *next_index >= channels.len() || index < *next_index {
+            *next_index %= channels.len();
+        }
+    }
+}
+
 async fn send_pd_rpc<Message, Response, Rpc, RpcFuture>(
     message: Message,
     timeout: Duration,
@@ -266,6 +296,14 @@ impl Cluster {
         transports
     }
 
+    fn evict_router_channel(&mut self, failed_addr: &str) {
+        remove_cached_channel(
+            &mut self.router_channels,
+            &mut self.next_router_channel,
+            failed_addr,
+        );
+    }
+
     pub async fn get_region(
         &mut self,
         key: Vec<u8>,
@@ -295,10 +333,15 @@ impl Cluster {
                     .await
                     {
                         Ok(resp) => return Ok(resp),
-                        Err(err) => warn!(
-                            "router-service get_region failed on {}, falling back: {:?}",
-                            addr, err
-                        ),
+                        Err(err) => {
+                            if should_evict_router_channel(&err) {
+                                self.evict_router_channel(&addr);
+                            }
+                            warn!(
+                                "router-service get_region failed on {}, falling back: {:?}",
+                                addr, err
+                            );
+                        }
                     }
                 }
                 RegionMetaTransport::Follower(addr, channel) => {
@@ -369,10 +412,15 @@ impl Cluster {
                     .await
                     {
                         Ok(resp) => return Ok(resp),
-                        Err(err) => warn!(
-                            "router-service get_prev_region failed on {}, falling back: {:?}",
-                            addr, err
-                        ),
+                        Err(err) => {
+                            if should_evict_router_channel(&err) {
+                                self.evict_router_channel(&addr);
+                            }
+                            warn!(
+                                "router-service get_prev_region failed on {}, falling back: {:?}",
+                                addr, err
+                            );
+                        }
                     }
                 }
                 RegionMetaTransport::Follower(addr, channel) => {
@@ -459,10 +507,15 @@ impl Cluster {
                     .await
                     {
                         Ok(resp) => return Ok(resp),
-                        Err(err) => warn!(
-                            "router-service get_region_by_id failed on {}, falling back: {:?}",
-                            addr, err
-                        ),
+                        Err(err) => {
+                            if should_evict_router_channel(&err) {
+                                self.evict_router_channel(&addr);
+                            }
+                            warn!(
+                                "router-service get_region_by_id failed on {}, falling back: {:?}",
+                                addr, err
+                            );
+                        }
                     }
                 }
                 RegionMetaTransport::Follower(addr, channel) => {
@@ -616,10 +669,15 @@ impl Cluster {
                     .await
                     {
                         Ok(resp) => return Ok(resp),
-                        Err(err) => warn!(
-                            "router-service batch_scan_regions failed on {}, falling back: {:?}",
-                            addr, err
-                        ),
+                        Err(err) => {
+                            if should_evict_router_channel(&err) {
+                                self.evict_router_channel(&addr);
+                            }
+                            warn!(
+                                "router-service batch_scan_regions failed on {}, falling back: {:?}",
+                                addr, err
+                            );
+                        }
                     }
                 }
                 RegionMetaTransport::Follower(addr, channel) => {
@@ -667,10 +725,15 @@ impl Cluster {
                     .await
                     {
                         Ok(resp) => return Ok(resp),
-                        Err(err) => warn!(
-                            "router-service get_store failed on {}, falling back: {:?}",
-                            addr, err
-                        ),
+                        Err(err) => {
+                            if should_evict_router_channel(&err) {
+                                self.evict_router_channel(&addr);
+                            }
+                            warn!(
+                                "router-service get_store failed on {}, falling back: {:?}",
+                                addr, err
+                            );
+                        }
                     }
                 }
                 RegionMetaTransport::Leader => return req.send(&mut self.client, timeout).await,
@@ -697,10 +760,15 @@ impl Cluster {
                     .await
                     {
                         Ok(resp) => return Ok(resp),
-                        Err(err) => warn!(
-                            "router-service get_all_stores failed on {}, falling back: {:?}",
-                            addr, err
-                        ),
+                        Err(err) => {
+                            if should_evict_router_channel(&err) {
+                                self.evict_router_channel(&addr);
+                            }
+                            warn!(
+                                "router-service get_all_stores failed on {}, falling back: {:?}",
+                                addr, err
+                            );
+                        }
                     }
                 }
                 RegionMetaTransport::Leader => return req.send(&mut self.client, timeout).await,
@@ -1973,5 +2041,55 @@ mod tests {
             store_meta_transport_priority(false, true),
             vec![RegionMetaTransportKind::Leader]
         );
+    }
+
+    #[test]
+    fn test_should_evict_router_channel_only_for_transport_failures() {
+        assert!(should_evict_router_channel(&Error::GrpcAPI(
+            Status::unavailable("router down")
+        )));
+        assert!(should_evict_router_channel(&Error::GrpcAPI(
+            Status::deadline_exceeded("timeout")
+        )));
+        assert!(should_evict_router_channel(&Error::GrpcAPI(
+            Status::unimplemented("unsupported")
+        )));
+        assert!(should_evict_router_channel(&Error::PdServerTimeout(
+            crate::PdServerTimeoutError::new("timeout".to_owned())
+        )));
+        assert!(!should_evict_router_channel(&Error::Unimplemented));
+        assert!(!should_evict_router_channel(&crate::internal_err!(
+            "router response had pd error"
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_remove_cached_channel_removes_failed_addr_and_rewinds_index() {
+        let mut channels = vec![
+            (
+                "router-a:2379".to_owned(),
+                Channel::from_static("http://127.0.0.1:1001").connect_lazy(),
+            ),
+            (
+                "router-b:2379".to_owned(),
+                Channel::from_static("http://127.0.0.1:1002").connect_lazy(),
+            ),
+            (
+                "router-c:2379".to_owned(),
+                Channel::from_static("http://127.0.0.1:1003").connect_lazy(),
+            ),
+        ];
+        let mut next_index = 2;
+
+        remove_cached_channel(&mut channels, &mut next_index, "router-b:2379");
+
+        assert_eq!(
+            channels
+                .iter()
+                .map(|(addr, _)| addr.as_str())
+                .collect::<Vec<_>>(),
+            vec!["router-a:2379", "router-c:2379"]
+        );
+        assert_eq!(next_index, 0);
     }
 }
