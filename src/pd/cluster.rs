@@ -143,6 +143,18 @@ fn region_meta_transport_priority(
     transports
 }
 
+fn store_meta_transport_priority(
+    allow_router_service: bool,
+    has_router_channel: bool,
+) -> Vec<RegionMetaTransportKind> {
+    let mut transports = Vec::with_capacity(2);
+    if allow_router_service && has_router_channel {
+        transports.push(RegionMetaTransportKind::Router);
+    }
+    transports.push(RegionMetaTransportKind::Leader);
+    transports
+}
+
 async fn send_pd_rpc<Message, Response, Rpc, RpcFuture>(
     message: Message,
     timeout: Duration,
@@ -228,6 +240,27 @@ impl Cluster {
                     }
                 }
                 RegionMetaTransportKind::Leader => transports.push(RegionMetaTransport::Leader),
+            }
+        }
+        transports
+    }
+
+    fn next_store_meta_transports(
+        &mut self,
+        allow_router_service: bool,
+    ) -> Vec<RegionMetaTransport> {
+        let mut transports = Vec::with_capacity(2);
+        for kind in
+            store_meta_transport_priority(allow_router_service, !self.router_channels.is_empty())
+        {
+            match kind {
+                RegionMetaTransportKind::Router => {
+                    if let Some((addr, channel)) = self.next_router_channel() {
+                        transports.push(RegionMetaTransport::Router(addr, channel));
+                    }
+                }
+                RegionMetaTransportKind::Leader => transports.push(RegionMetaTransport::Leader),
+                RegionMetaTransportKind::Follower => {}
             }
         }
         transports
@@ -623,6 +656,28 @@ impl Cluster {
     ) -> Result<pdpb::GetStoreResponse> {
         let mut req = pd_request!(self.id, pdpb::GetStoreRequest);
         req.store_id = id;
+
+        for transport in self.next_store_meta_transports(true) {
+            match transport {
+                RegionMetaTransport::Router(addr, channel) => {
+                    let mut router_client = routerpb::router_client::RouterClient::new(channel);
+                    match send_pd_rpc(req.clone(), timeout, |request| async {
+                        Ok(router_client.get_store(request).await?.into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "router-service get_store failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
+                }
+                RegionMetaTransport::Leader => return req.send(&mut self.client, timeout).await,
+                RegionMetaTransport::Follower(_, _) => {}
+            }
+        }
+
         req.send(&mut self.client, timeout).await
     }
 
@@ -631,6 +686,28 @@ impl Cluster {
         timeout: Duration,
     ) -> Result<pdpb::GetAllStoresResponse> {
         let req = pd_request!(self.id, pdpb::GetAllStoresRequest);
+
+        for transport in self.next_store_meta_transports(true) {
+            match transport {
+                RegionMetaTransport::Router(addr, channel) => {
+                    let mut router_client = routerpb::router_client::RouterClient::new(channel);
+                    match send_pd_rpc(req.clone(), timeout, |request| async {
+                        Ok(router_client.get_all_stores(request).await?.into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "router-service get_all_stores failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
+                }
+                RegionMetaTransport::Leader => return req.send(&mut self.client, timeout).await,
+                RegionMetaTransport::Follower(_, _) => {}
+            }
+        }
+
         req.send(&mut self.client, timeout).await
     }
 
@@ -1875,6 +1952,25 @@ mod tests {
         );
         assert_eq!(
             region_meta_transport_priority(false, false, true, false),
+            vec![RegionMetaTransportKind::Leader]
+        );
+    }
+
+    #[test]
+    fn test_store_meta_transport_priority_prefers_router_then_leader() {
+        assert_eq!(
+            store_meta_transport_priority(true, true),
+            vec![
+                RegionMetaTransportKind::Router,
+                RegionMetaTransportKind::Leader
+            ]
+        );
+        assert_eq!(
+            store_meta_transport_priority(true, false),
+            vec![RegionMetaTransportKind::Leader]
+        );
+        assert_eq!(
+            store_meta_transport_priority(false, true),
             vec![RegionMetaTransportKind::Leader]
         );
     }
