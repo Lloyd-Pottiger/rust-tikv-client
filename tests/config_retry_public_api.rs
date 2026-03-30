@@ -1,4 +1,6 @@
 use tikv_client::config;
+use tikv_client::proto::{errorpb, metapb};
+use tikv_client::Error;
 
 #[test]
 fn config_retry_module_exports_backoff_helpers() {
@@ -55,6 +57,8 @@ fn config_retry_module_exports_backoff_helpers() {
     let _ =
         config::retry::bo_txn_lock_fast().to_backoff_with_vars(&tikv_client::Variables::default());
     let _ = config::retry::bo_txn_lock_fast_with_vars(&tikv_client::Variables::default());
+
+    let _: fn(&errorpb::Error) -> bool = config::retry::is_fake_region_error;
 }
 
 #[tokio::test]
@@ -67,4 +71,70 @@ async fn config_retry_module_exposes_task_local_txn_start_ts() {
     .await;
 
     assert_eq!(config::retry::txn_start_ts(), None);
+}
+
+#[test]
+fn config_retry_module_region_error_helper_detects_fake_epoch_not_match() {
+    let fake_epoch_not_match = errorpb::Error {
+        epoch_not_match: Some(errorpb::EpochNotMatch::default()),
+        ..Default::default()
+    };
+    assert!(config::retry::is_fake_region_error(&fake_epoch_not_match));
+
+    let real_epoch_not_match = errorpb::Error {
+        epoch_not_match: Some(errorpb::EpochNotMatch {
+            current_regions: vec![metapb::Region {
+                id: 42,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(!config::retry::is_fake_region_error(&real_epoch_not_match));
+}
+
+#[tokio::test]
+async fn config_retry_module_may_backoff_for_region_error_matches_client_go_semantics() {
+    let real_epoch_not_match = errorpb::Error {
+        epoch_not_match: Some(errorpb::EpochNotMatch {
+            current_regions: vec![metapb::Region {
+                id: 7,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut immediate_retry_backoff = config::retry::Backoffer::no_jitter_backoff(1, 1, 1);
+    config::retry::may_backoff_for_region_error(
+        &real_epoch_not_match,
+        &mut immediate_retry_backoff,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        immediate_retry_backoff.next_delay_duration(),
+        Some(std::time::Duration::from_millis(1))
+    );
+
+    let fake_epoch_not_match = errorpb::Error {
+        epoch_not_match: Some(errorpb::EpochNotMatch::default()),
+        ..Default::default()
+    };
+    let mut delayed_retry_backoff = config::retry::Backoffer::no_jitter_backoff(1, 1, 1);
+    config::retry::may_backoff_for_region_error(&fake_epoch_not_match, &mut delayed_retry_backoff)
+        .await
+        .unwrap();
+    assert_eq!(delayed_retry_backoff.next_delay_duration(), None);
+
+    let exhausted = config::retry::may_backoff_for_region_error(
+        &errorpb::Error {
+            not_leader: Some(errorpb::NotLeader::default()),
+            ..Default::default()
+        },
+        &mut config::retry::Backoffer::no_backoff(),
+    )
+    .await;
+    assert!(matches!(exhausted, Err(Error::RegionError(_))));
 }

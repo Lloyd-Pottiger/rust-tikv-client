@@ -11,7 +11,12 @@ use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
+use tokio::time::sleep;
+
+use crate::proto::errorpb;
 use crate::Backoff;
+use crate::Error;
+use crate::Result;
 use crate::Variables;
 
 /// Client-go style `Backoffer`.
@@ -250,6 +255,46 @@ pub fn txn_start_ts() -> Option<u64> {
     TASK_TXN_START_TS.try_with(|ts| *ts).ok()
 }
 
+/// Returns whether `region_err` is a fake `EpochNotMatch` error.
+///
+/// Client-go treats `EpochNotMatch` without `current_regions` as a transient region miss instead of
+/// a concrete replacement plan, so callers should back off before retrying.
+#[doc(alias = "IsFakeRegionError")]
+#[must_use]
+pub fn is_fake_region_error(region_err: &errorpb::Error) -> bool {
+    region_err
+        .epoch_not_match
+        .as_ref()
+        .is_some_and(|epoch_not_match| epoch_not_match.current_regions.is_empty())
+}
+
+/// Sleeps according to `backoff` when `region_err` should retry with backoff.
+///
+/// This mirrors client-go `retry.MayBackoffForRegionError`: a real `EpochNotMatch` that already
+/// carries replacement regions retries immediately, while fake `EpochNotMatch` and all other
+/// region errors consume one delay from `backoff`. If the schedule is exhausted, the original
+/// region error is returned.
+#[doc(alias = "MayBackoffForRegionError")]
+pub async fn may_backoff_for_region_error(
+    region_err: &errorpb::Error,
+    backoff: &mut Backoffer,
+) -> Result<()> {
+    if matches!(
+        region_err.epoch_not_match.as_ref(),
+        Some(epoch_not_match) if !epoch_not_match.current_regions.is_empty()
+    ) {
+        return Ok(());
+    }
+
+    match backoff.next_delay_duration() {
+        Some(delay) => {
+            sleep(delay).await;
+            Ok(())
+        }
+        None => Err(Error::RegionError(Box::new(region_err.clone()))),
+    }
+}
+
 /// Create a backoffer with an upper bound in milliseconds and optional variables.
 ///
 /// This mirrors client-go `retry.NewBackofferWithVars`.
@@ -474,6 +519,7 @@ pub fn bo_txn_lock_fast_with_vars(vars: &Variables) -> Backoffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::metapb;
 
     #[test]
     fn backoff_fn_cfg_to_backoff_maps_jitter_types() {
@@ -662,5 +708,70 @@ mod tests {
         .await;
 
         assert_eq!(txn_start_ts(), None);
+    }
+
+    #[test]
+    fn fake_region_error_only_matches_epoch_not_match_without_replacements() {
+        assert!(is_fake_region_error(&errorpb::Error {
+            epoch_not_match: Some(errorpb::EpochNotMatch::default()),
+            ..Default::default()
+        }));
+        assert!(!is_fake_region_error(&errorpb::Error {
+            epoch_not_match: Some(errorpb::EpochNotMatch {
+                current_regions: vec![metapb::Region {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        assert!(!is_fake_region_error(&errorpb::Error {
+            not_leader: Some(errorpb::NotLeader::default()),
+            ..Default::default()
+        }));
+    }
+
+    #[tokio::test]
+    async fn may_backoff_for_region_error_matches_client_go_retry_behavior() {
+        let real_epoch_not_match = errorpb::Error {
+            epoch_not_match: Some(errorpb::EpochNotMatch {
+                current_regions: vec![metapb::Region {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut immediate_retry = Backoff::no_jitter_backoff(1, 1, 1);
+        may_backoff_for_region_error(&real_epoch_not_match, &mut immediate_retry)
+            .await
+            .unwrap();
+        assert_eq!(
+            immediate_retry.next_delay_duration(),
+            Some(std::time::Duration::from_millis(1))
+        );
+
+        let fake_epoch_not_match = errorpb::Error {
+            epoch_not_match: Some(errorpb::EpochNotMatch::default()),
+            ..Default::default()
+        };
+        let mut delayed_retry = Backoff::no_jitter_backoff(1, 1, 1);
+        may_backoff_for_region_error(&fake_epoch_not_match, &mut delayed_retry)
+            .await
+            .unwrap();
+        assert_eq!(delayed_retry.next_delay_duration(), None);
+
+        let err = may_backoff_for_region_error(
+            &errorpb::Error {
+                server_is_busy: Some(errorpb::ServerIsBusy::default()),
+                ..Default::default()
+            },
+            &mut Backoff::no_backoff(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::RegionError(_)));
     }
 }
