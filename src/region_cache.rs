@@ -1988,6 +1988,8 @@ mod test {
         pub stores: Mutex<Vec<metapb::Store>>,
         pub get_region_count: AtomicU64,
         pub get_region_with_buckets_allow_follower_handle_count: AtomicU64,
+        pub get_prev_region_with_buckets_count: AtomicU64,
+        pub prev_region_with_buckets: Mutex<Option<(RegionWithLeader, Option<metapb::Buckets>)>>,
         pub get_region_by_id_with_buckets_allow_follower_handle_count: AtomicU64,
         pub get_store_count: AtomicU64,
         pub scan_regions_count: AtomicU64,
@@ -2035,6 +2037,28 @@ mod test {
             self.get_region_with_buckets_allow_follower_handle_count
                 .fetch_add(1, SeqCst);
             self.get_region_with_buckets(key).await
+        }
+
+        async fn get_prev_region(
+            self: Arc<Self>,
+            key: Vec<u8>,
+        ) -> Result<crate::region::RegionWithLeader> {
+            let (region, _) = self.get_prev_region_with_buckets(key).await?;
+            Ok(region)
+        }
+
+        async fn get_prev_region_with_buckets(
+            self: Arc<Self>,
+            _key: Vec<u8>,
+        ) -> Result<(crate::region::RegionWithLeader, Option<metapb::Buckets>)> {
+            self.get_prev_region_with_buckets_count.fetch_add(1, SeqCst);
+            self.prev_region_with_buckets
+                .lock()
+                .await
+                .clone()
+                .ok_or_else(|| {
+                    Error::StringError("MockRetryClient: prev region not found".to_owned())
+                })
         }
 
         async fn get_region_by_id(
@@ -4465,6 +4489,33 @@ mod test {
         assert!(cache.get_region_by_key(&vec![20].into()).await.is_err());
         assert!(cache.get_region_by_key(&vec![25].into()).await.is_err());
         assert_eq!(cache.get_region_by_key(&vec![60].into()).await?, region4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_locate_end_key_loads_prev_region_from_pd() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        retry_client
+            .regions
+            .lock()
+            .await
+            .insert(2, region_with_leader(2, vec![10], vec![20], 2));
+        *retry_client.prev_region_with_buckets.lock().await =
+            Some((region_with_leader(1, vec![], vec![10], 1), None));
+
+        let location = cache.locate_end_key(Key::from(vec![10])).await?;
+
+        assert_eq!(location.region.id, 1);
+        assert_eq!(location.start_key, Key::from(Vec::new()));
+        assert_eq!(location.end_key, Key::from(vec![10]));
+        assert_eq!(
+            retry_client.get_prev_region_with_buckets_count.load(SeqCst),
+            1
+        );
+        assert_eq!(cache.get_region_by_id(1).await?.id(), 1);
+
         Ok(())
     }
 

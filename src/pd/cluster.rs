@@ -313,8 +313,68 @@ impl Cluster {
         key: Vec<u8>,
         timeout: Duration,
     ) -> Result<pdpb::GetRegionResponse> {
+        self.get_prev_region_inner(key, false, timeout).await
+    }
+
+    async fn get_prev_region_inner(
+        &mut self,
+        key: Vec<u8>,
+        need_buckets: bool,
+        timeout: Duration,
+    ) -> Result<pdpb::GetRegionResponse> {
         let mut req = pd_request!(self.id, pdpb::GetRegionRequest);
         req.region_key = key;
+        req.need_buckets = need_buckets;
+
+        for transport in self.next_region_meta_transports(true, true) {
+            match transport {
+                RegionMetaTransport::Router(addr, channel) => {
+                    let mut router_client = routerpb::router_client::RouterClient::new(channel);
+                    match send_pd_rpc(req.clone(), timeout, |request| async {
+                        Ok(router_client.get_prev_region(request).await?.into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "router-service get_prev_region failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
+                }
+                RegionMetaTransport::Follower(addr, channel) => {
+                    let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
+                        channel,
+                        allow_follower_handle_interceptor as FollowerHandleInterceptor,
+                    );
+                    match send_pd_rpc(req.clone(), timeout, |request| async {
+                        Ok(follower_client.get_prev_region(request).await?.into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "follower-handled get_prev_region failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
+                }
+                RegionMetaTransport::Leader => {
+                    let mut request = Request::new(req.clone());
+                    request.set_timeout(timeout);
+                    let response = self.client.get_prev_region(request).await?.into_inner();
+
+                    let header = response
+                        .header()
+                        .ok_or_else(|| internal_err!("PD response missing header"))?;
+                    if let Some(err) = &header.error {
+                        return Err(internal_err!(err.message));
+                    }
+                    return Ok(response);
+                }
+            }
+        }
+
         let mut request = Request::new(req);
         request.set_timeout(timeout);
         let response = self.client.get_prev_region(request).await?.into_inner();
@@ -334,21 +394,7 @@ impl Cluster {
         key: Vec<u8>,
         timeout: Duration,
     ) -> Result<pdpb::GetRegionResponse> {
-        let mut req = pd_request!(self.id, pdpb::GetRegionRequest);
-        req.region_key = key;
-        req.need_buckets = true;
-        let mut request = Request::new(req);
-        request.set_timeout(timeout);
-        let response = self.client.get_prev_region(request).await?.into_inner();
-
-        let header = response
-            .header()
-            .ok_or_else(|| internal_err!("PD response missing header"))?;
-        if let Some(err) = &header.error {
-            Err(internal_err!(err.message))
-        } else {
-            Ok(response)
-        }
+        self.get_prev_region_inner(key, true, timeout).await
     }
 
     pub async fn get_region_by_id(
