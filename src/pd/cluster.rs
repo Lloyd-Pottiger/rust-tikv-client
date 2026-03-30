@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use log::error;
 use log::info;
 use log::warn;
+use serde_derive::Deserialize;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::IntoRequest;
@@ -20,7 +21,9 @@ use tonic::Status;
 use super::timestamp::TimestampOracle;
 use crate::internal_err;
 use crate::proto::keyspacepb;
+use crate::proto::meta_storagepb;
 use crate::proto::pdpb;
+use crate::proto::routerpb;
 use crate::Error;
 use crate::Result;
 use crate::SecurityManager;
@@ -30,6 +33,8 @@ use crate::Timestamp;
 pub struct Cluster {
     id: u64,
     client: pdpb::pd_client::PdClient<Channel>,
+    router_channels: Vec<(String, Channel)>,
+    next_router_channel: usize,
     follower_channels: Vec<(String, Channel)>,
     next_follower_channel: usize,
     keyspace_client: keyspacepb::keyspace_client::KeyspaceClient<Channel>,
@@ -38,8 +43,26 @@ pub struct Cluster {
 }
 
 const PD_ALLOW_FOLLOWER_HANDLE_METADATA_KEY: &str = "pd-allow-follower-handle";
-
 type FollowerHandleInterceptor = fn(Request<()>) -> std::result::Result<Request<()>, Status>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegionMetaTransportKind {
+    Router,
+    Follower,
+    Leader,
+}
+
+enum RegionMetaTransport {
+    Router(String, Channel),
+    Follower(String, Channel),
+    Leader,
+}
+
+#[derive(Deserialize)]
+struct RouterServiceRegistryEntry {
+    #[serde(rename = "service-addr")]
+    service_addr: String,
+}
 
 macro_rules! pd_request {
     ($cluster_id:expr, $type:ty) => {{
@@ -59,6 +82,65 @@ fn allow_follower_handle_interceptor(
         MetadataValue::from_static("true"),
     );
     Ok(request)
+}
+
+fn router_service_discovery_key(cluster_id: u64) -> Vec<u8> {
+    format!("/ms/{cluster_id}/router/registry/").into_bytes()
+}
+
+fn meta_storage_prefix_end(key: &[u8]) -> Vec<u8> {
+    let mut end = key.to_vec();
+    for idx in (0..end.len()).rev() {
+        if end[idx] < 0xff {
+            end[idx] += 1;
+            end.truncate(idx + 1);
+            return end;
+        }
+    }
+    vec![0]
+}
+
+fn decode_router_service_addrs(response: &meta_storagepb::GetResponse) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut addrs = Vec::new();
+
+    for kv in &response.kvs {
+        let entry = match serde_json::from_slice::<RouterServiceRegistryEntry>(&kv.value) {
+            Ok(entry) => entry,
+            Err(err) => {
+                warn!(
+                    "failed to decode router service registry entry for key {:?}: {:?}",
+                    kv.key, err
+                );
+                continue;
+            }
+        };
+
+        if entry.service_addr.is_empty() || !seen.insert(entry.service_addr.clone()) {
+            continue;
+        }
+        addrs.push(entry.service_addr);
+    }
+
+    addrs.sort();
+    addrs
+}
+
+fn region_meta_transport_priority(
+    allow_router_service: bool,
+    has_router_channel: bool,
+    allow_follower_handle: bool,
+    has_follower_channel: bool,
+) -> Vec<RegionMetaTransportKind> {
+    let mut transports = Vec::with_capacity(3);
+    if allow_router_service && has_router_channel {
+        transports.push(RegionMetaTransportKind::Router);
+    }
+    if allow_follower_handle && has_follower_channel {
+        transports.push(RegionMetaTransportKind::Follower);
+    }
+    transports.push(RegionMetaTransportKind::Leader);
+    transports
 }
 
 async fn send_pd_rpc<Message, Response, Rpc, RpcFuture>(
@@ -100,6 +182,17 @@ impl Cluster {
         self.id
     }
 
+    fn next_router_channel(&mut self) -> Option<(String, Channel)> {
+        if self.router_channels.is_empty() {
+            return None;
+        }
+
+        let idx = self.next_router_channel % self.router_channels.len();
+        self.next_router_channel = (idx + 1) % self.router_channels.len();
+        let (addr, channel) = &self.router_channels[idx];
+        Some((addr.clone(), channel.clone()))
+    }
+
     fn next_follower_channel(&mut self) -> Option<(String, Channel)> {
         if self.follower_channels.is_empty() {
             return None;
@@ -109,6 +202,35 @@ impl Cluster {
         self.next_follower_channel = (idx + 1) % self.follower_channels.len();
         let (addr, channel) = &self.follower_channels[idx];
         Some((addr.clone(), channel.clone()))
+    }
+
+    fn next_region_meta_transports(
+        &mut self,
+        allow_router_service: bool,
+        allow_follower_handle: bool,
+    ) -> Vec<RegionMetaTransport> {
+        let mut transports = Vec::with_capacity(3);
+        for kind in region_meta_transport_priority(
+            allow_router_service,
+            !self.router_channels.is_empty(),
+            allow_follower_handle,
+            !self.follower_channels.is_empty(),
+        ) {
+            match kind {
+                RegionMetaTransportKind::Router => {
+                    if let Some((addr, channel)) = self.next_router_channel() {
+                        transports.push(RegionMetaTransport::Router(addr, channel));
+                    }
+                }
+                RegionMetaTransportKind::Follower => {
+                    if let Some((addr, channel)) = self.next_follower_channel() {
+                        transports.push(RegionMetaTransport::Follower(addr, channel));
+                    }
+                }
+                RegionMetaTransportKind::Leader => transports.push(RegionMetaTransport::Leader),
+            }
+        }
+        transports
     }
 
     pub async fn get_region(
@@ -130,23 +252,40 @@ impl Cluster {
         req.region_key = key;
         req.need_buckets = need_buckets;
 
-        if allow_follower_handle {
-            if let Some((addr, channel)) = self.next_follower_channel() {
-                let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
-                    channel,
-                    allow_follower_handle_interceptor as FollowerHandleInterceptor,
-                );
-                match send_pd_rpc(req.clone(), timeout, |request| async {
-                    Ok(follower_client.get_region(request).await?.into_inner())
-                })
-                .await
-                {
-                    Ok(resp) => return Ok(resp),
-                    Err(err) => warn!(
-                        "follower-handled get_region failed on {}, falling back to leader: {:?}",
-                        addr, err
-                    ),
+        for transport in self.next_region_meta_transports(true, allow_follower_handle) {
+            match transport {
+                RegionMetaTransport::Router(addr, channel) => {
+                    let mut router_client = routerpb::router_client::RouterClient::new(channel);
+                    match send_pd_rpc(req.clone(), timeout, |request| async {
+                        Ok(router_client.get_region(request).await?.into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "router-service get_region failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
                 }
+                RegionMetaTransport::Follower(addr, channel) => {
+                    let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
+                        channel,
+                        allow_follower_handle_interceptor as FollowerHandleInterceptor,
+                    );
+                    match send_pd_rpc(req.clone(), timeout, |request| async {
+                        Ok(follower_client.get_region(request).await?.into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "follower-handled get_region failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
+                }
+                RegionMetaTransport::Leader => return req.send(&mut self.client, timeout).await,
             }
         }
 
@@ -231,23 +370,43 @@ impl Cluster {
         req.region_id = id;
         req.need_buckets = need_buckets;
 
-        if allow_follower_handle {
-            if let Some((addr, channel)) = self.next_follower_channel() {
-                let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
-                    channel,
-                    allow_follower_handle_interceptor as FollowerHandleInterceptor,
-                );
-                match send_pd_rpc(req.clone(), timeout, |request| async {
-                    Ok(follower_client.get_region_by_id(request).await?.into_inner())
-                })
-                .await
-                {
-                    Ok(resp) => return Ok(resp),
-                    Err(err) => warn!(
-                        "follower-handled get_region_by_id failed on {}, falling back to leader: {:?}",
-                        addr, err
-                    ),
+        for transport in self.next_region_meta_transports(true, allow_follower_handle) {
+            match transport {
+                RegionMetaTransport::Router(addr, channel) => {
+                    let mut router_client = routerpb::router_client::RouterClient::new(channel);
+                    match send_pd_rpc(req.clone(), timeout, |request| async {
+                        Ok(router_client.get_region_by_id(request).await?.into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "router-service get_region_by_id failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
                 }
+                RegionMetaTransport::Follower(addr, channel) => {
+                    let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
+                        channel,
+                        allow_follower_handle_interceptor as FollowerHandleInterceptor,
+                    );
+                    match send_pd_rpc(req.clone(), timeout, |request| async {
+                        Ok(follower_client
+                            .get_region_by_id(request)
+                            .await?
+                            .into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "follower-handled get_region_by_id failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
+                }
+                RegionMetaTransport::Leader => return req.send(&mut self.client, timeout).await,
             }
         }
 
@@ -365,23 +524,46 @@ impl Cluster {
         // Keep `contain_all_key_range` false to allow partial responses when `limit` is reached,
         // matching client-go's incremental batch scan usage.
 
-        if allow_follower_handle {
-            if let Some((addr, channel)) = self.next_follower_channel() {
-                let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
-                    channel,
-                    allow_follower_handle_interceptor as FollowerHandleInterceptor,
-                );
-                match send_pd_rpc(req.clone(), timeout, |request| async {
-                    Ok(follower_client.batch_scan_regions(request).await?.into_inner())
-                })
-                .await
-                {
-                    Ok(resp) => return Ok(resp),
-                    Err(err) => warn!(
-                        "follower-handled batch_scan_regions failed on {}, falling back to leader: {:?}",
-                        addr, err
-                    ),
+        for transport in self.next_region_meta_transports(true, allow_follower_handle) {
+            match transport {
+                RegionMetaTransport::Router(addr, channel) => {
+                    let mut router_client = routerpb::router_client::RouterClient::new(channel);
+                    match send_pd_rpc(req.clone(), timeout, |request| async {
+                        Ok(router_client
+                            .batch_scan_regions(request)
+                            .await?
+                            .into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "router-service batch_scan_regions failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
                 }
+                RegionMetaTransport::Follower(addr, channel) => {
+                    let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
+                        channel,
+                        allow_follower_handle_interceptor as FollowerHandleInterceptor,
+                    );
+                    match send_pd_rpc(req.clone(), timeout, |request| async {
+                        Ok(follower_client
+                            .batch_scan_regions(request)
+                            .await?
+                            .into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "follower-handled batch_scan_regions failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
+                }
+                RegionMetaTransport::Leader => return req.send(&mut self.client, timeout).await,
             }
         }
 
@@ -568,16 +750,19 @@ impl Connection {
     ) -> Result<Cluster> {
         let members = self.validate_endpoints(endpoints, timeout).await?;
         let (client, keyspace_client, members) = self.try_connect_leader(&members, timeout).await?;
-        let follower_channels = self.connect_follower_channels(&members).await;
         let id = members
             .header
             .as_ref()
             .ok_or_else(|| internal_err!("PD get_members response missing header"))?
             .cluster_id;
+        let router_channels = self.connect_router_channels(&members, id, timeout).await;
+        let follower_channels = self.connect_follower_channels(&members).await;
         let tso = TimestampOracle::new(id, &client, tso_max_pending_count)?;
         let cluster = Cluster {
             id,
             client,
+            router_channels,
+            next_router_channel: 0,
             follower_channels,
             next_follower_channel: 0,
             keyspace_client,
@@ -598,11 +783,16 @@ impl Connection {
         let start = Instant::now();
         let (client, keyspace_client, members) =
             self.try_connect_leader(&cluster.members, timeout).await?;
+        let router_channels = self
+            .connect_router_channels(&members, cluster.id, timeout)
+            .await;
         let follower_channels = self.connect_follower_channels(&members).await;
         let tso = TimestampOracle::new(cluster.id, &client, tso_max_pending_count)?;
         *cluster = Cluster {
             id: cluster.id,
             client,
+            router_channels,
+            next_router_channel: 0,
             follower_channels,
             next_follower_channel: 0,
             keyspace_client,
@@ -720,6 +910,56 @@ impl Connection {
         self.security_mgr.connect(addr, |channel| channel).await
     }
 
+    async fn connect_meta_storage_client(
+        &self,
+        addr: &str,
+    ) -> Result<meta_storagepb::meta_storage_client::MetaStorageClient<Channel>> {
+        self.security_mgr
+            .connect(
+                addr,
+                meta_storagepb::meta_storage_client::MetaStorageClient::new,
+            )
+            .await
+    }
+
+    async fn connect_router_channels(
+        &self,
+        members: &pdpb::GetMembersResponse,
+        cluster_id: u64,
+        timeout: Duration,
+    ) -> Vec<(String, Channel)> {
+        let router_addrs = match self
+            .discover_router_service_addrs(members, cluster_id, timeout)
+            .await
+        {
+            Ok(addrs) => addrs,
+            Err(err) => {
+                warn!(
+                    "failed to discover router service endpoints, leader/follower fallback stays active: {:?}",
+                    err
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut router_channels = Vec::new();
+        let mut seen = HashSet::new();
+        for addr in router_addrs {
+            if !seen.insert(addr.clone()) {
+                continue;
+            }
+            match self.connect_channel(&addr).await {
+                Ok(channel) => router_channels.push((addr, channel)),
+                Err(err) => warn!(
+                    "failed to connect router service endpoint {}, fallback stays active: {:?}",
+                    addr, err
+                ),
+            }
+        }
+
+        router_channels
+    }
+
     async fn connect_follower_channels(
         &self,
         members: &pdpb::GetMembersResponse,
@@ -751,6 +991,66 @@ impl Connection {
         }
 
         follower_channels
+    }
+
+    async fn discover_router_service_addrs(
+        &self,
+        members: &pdpb::GetMembersResponse,
+        cluster_id: u64,
+        timeout: Duration,
+    ) -> Result<Vec<String>> {
+        let Some(leader) = members.leader.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let discovery_key = router_service_discovery_key(cluster_id);
+        let range_end = meta_storage_prefix_end(&discovery_key);
+        let mut last_err = None;
+
+        for addr in &leader.client_urls {
+            let mut client = match self.connect_meta_storage_client(addr).await {
+                Ok(client) => client,
+                Err(err) => {
+                    last_err = Some(err);
+                    continue;
+                }
+            };
+
+            let mut req = meta_storagepb::GetRequest::default();
+            let mut header = meta_storagepb::RequestHeader::default();
+            header.cluster_id = cluster_id;
+            req.header = Some(header);
+            req.key = discovery_key.clone();
+            req.range_end = range_end.clone();
+
+            let mut request = Request::new(req);
+            request.set_timeout(timeout);
+
+            let response = match client.get(request).await {
+                Ok(response) => response.into_inner(),
+                Err(status) => {
+                    last_err = Some(status.into());
+                    continue;
+                }
+            };
+
+            let header = response
+                .header
+                .as_ref()
+                .ok_or_else(|| internal_err!("meta storage get response missing header"))?;
+            if let Some(err) = &header.error {
+                return Err(internal_err!(
+                    "meta storage router discovery failed, err {:?}",
+                    err
+                ));
+            }
+            return Ok(decode_router_service_addrs(&response));
+        }
+
+        if let Some(err) = last_err {
+            return Err(err);
+        }
+        Ok(Vec::new())
     }
 
     async fn try_connect(
@@ -1457,5 +1757,79 @@ mod tests {
             .to_string();
         assert!(err.contains("inconsistent get_members members list"));
         assert!(err.contains("changed"));
+    }
+
+    #[test]
+    fn test_router_service_discovery_key_uses_cluster_prefix() {
+        assert_eq!(
+            router_service_discovery_key(42),
+            b"/ms/42/router/registry/".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_meta_storage_prefix_end_matches_etcd_behavior() {
+        assert_eq!(
+            meta_storage_prefix_end(b"/ms/42/router/registry/"),
+            b"/ms/42/router/registry0"
+        );
+        assert_eq!(meta_storage_prefix_end(&[0xff]), vec![0]);
+    }
+
+    #[test]
+    fn test_decode_router_service_addrs_sorts_and_skips_invalid_entries() {
+        let response = crate::proto::meta_storagepb::GetResponse {
+            kvs: vec![
+                crate::proto::meta_storagepb::KeyValue {
+                    value: br#"{"service-addr":"router-b:2379"}"#.to_vec(),
+                    ..Default::default()
+                },
+                crate::proto::meta_storagepb::KeyValue {
+                    value: br#"{"service-addr":""}"#.to_vec(),
+                    ..Default::default()
+                },
+                crate::proto::meta_storagepb::KeyValue {
+                    value: br#"not-json"#.to_vec(),
+                    ..Default::default()
+                },
+                crate::proto::meta_storagepb::KeyValue {
+                    value: br#"{"service-addr":"router-a:2379"}"#.to_vec(),
+                    ..Default::default()
+                },
+                crate::proto::meta_storagepb::KeyValue {
+                    value: br#"{"service-addr":"router-b:2379"}"#.to_vec(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            decode_router_service_addrs(&response),
+            vec!["router-a:2379".to_owned(), "router-b:2379".to_owned()]
+        );
+    }
+
+    #[test]
+    fn test_region_meta_transport_priority_prefers_router_then_follower_then_leader() {
+        assert_eq!(
+            region_meta_transport_priority(true, true, true, true),
+            vec![
+                RegionMetaTransportKind::Router,
+                RegionMetaTransportKind::Follower,
+                RegionMetaTransportKind::Leader,
+            ]
+        );
+        assert_eq!(
+            region_meta_transport_priority(true, false, true, true),
+            vec![
+                RegionMetaTransportKind::Follower,
+                RegionMetaTransportKind::Leader,
+            ]
+        );
+        assert_eq!(
+            region_meta_transport_priority(false, false, true, false),
+            vec![RegionMetaTransportKind::Leader]
+        );
     }
 }
