@@ -756,27 +756,57 @@ impl RetryClientTrait for RetryClient<Cluster> {
 
     async fn get_store(self: Arc<Self>, id: StoreId) -> Result<metapb::Store> {
         let started_at = Instant::now();
+        let timeout = self.timeout;
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "get_store", |cluster| async {
-                cluster
-                    .get_store(id, self.timeout)
-                    .await
-                    .and_then(|resp| store_from_response(resp, id))
-            }),
+            self.retry_mut_first_then_retry(
+                "get_store",
+                |cluster| {
+                    Box::pin(async move {
+                        cluster
+                            .get_store(id, timeout)
+                            .await
+                            .and_then(|resp| store_from_response(resp, id))
+                    })
+                },
+                |cluster| {
+                    Box::pin(async move {
+                        cluster
+                            .get_store_from_leader(id, timeout)
+                            .await
+                            .and_then(|resp| store_from_response(resp, id))
+                    })
+                },
+            )
+            .await,
         )
     }
 
     async fn get_all_stores(self: Arc<Self>) -> Result<Vec<metapb::Store>> {
         let started_at = Instant::now();
+        let timeout = self.timeout;
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "get_all_stores", |cluster| async {
-                cluster
-                    .get_all_stores(self.timeout)
-                    .await
-                    .map(|resp| resp.stores.into_iter().map(Into::into).collect())
-            }),
+            self.retry_mut_first_then_retry(
+                "get_all_stores",
+                |cluster| {
+                    Box::pin(async move {
+                        cluster
+                            .get_all_stores(timeout)
+                            .await
+                            .map(|resp| resp.stores.into_iter().map(Into::into).collect())
+                    })
+                },
+                |cluster| {
+                    Box::pin(async move {
+                        cluster
+                            .get_all_stores_from_leader(timeout)
+                            .await
+                            .map(|resp| resp.stores.into_iter().map(Into::into).collect())
+                    })
+                },
+            )
+            .await,
         )
     }
 

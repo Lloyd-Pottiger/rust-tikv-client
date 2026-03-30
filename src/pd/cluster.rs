@@ -727,10 +727,27 @@ impl Cluster {
         id: u64,
         timeout: Duration,
     ) -> Result<pdpb::GetStoreResponse> {
+        self.get_store_inner(id, timeout, true).await
+    }
+
+    pub async fn get_store_from_leader(
+        &mut self,
+        id: u64,
+        timeout: Duration,
+    ) -> Result<pdpb::GetStoreResponse> {
+        self.get_store_inner(id, timeout, false).await
+    }
+
+    async fn get_store_inner(
+        &mut self,
+        id: u64,
+        timeout: Duration,
+        allow_router_service: bool,
+    ) -> Result<pdpb::GetStoreResponse> {
         let mut req = pd_request!(self.id, pdpb::GetStoreRequest);
         req.store_id = id;
 
-        for transport in self.next_store_meta_transports(true) {
+        for transport in self.next_store_meta_transports(allow_router_service) {
             match transport {
                 RegionMetaTransport::Router(addr, channel) => {
                     let mut router_client = routerpb::router_client::RouterClient::new(channel);
@@ -763,9 +780,24 @@ impl Cluster {
         &mut self,
         timeout: Duration,
     ) -> Result<pdpb::GetAllStoresResponse> {
+        self.get_all_stores_inner(timeout, true).await
+    }
+
+    pub async fn get_all_stores_from_leader(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<pdpb::GetAllStoresResponse> {
+        self.get_all_stores_inner(timeout, false).await
+    }
+
+    async fn get_all_stores_inner(
+        &mut self,
+        timeout: Duration,
+        allow_router_service: bool,
+    ) -> Result<pdpb::GetAllStoresResponse> {
         let req = pd_request!(self.id, pdpb::GetAllStoresRequest);
 
-        for transport in self.next_store_meta_transports(true) {
+        for transport in self.next_store_meta_transports(allow_router_service) {
             match transport {
                 RegionMetaTransport::Router(addr, channel) => {
                     let mut router_client = routerpb::router_client::RouterClient::new(channel);
@@ -2178,6 +2210,31 @@ mod tests {
             ]
         );
         assert_eq!(cluster.next_router_channel, 2);
+    }
+
+    #[tokio::test]
+    async fn test_next_store_meta_transports_leader_only_skips_routers() {
+        let mut cluster = test_cluster(
+            &["router-a:2379", "router-b:2379", "router-c:2379"],
+            1,
+            &[],
+            0,
+        );
+
+        let transports = cluster.next_store_meta_transports(false);
+
+        assert_eq!(
+            transports
+                .iter()
+                .map(|transport| match transport {
+                    RegionMetaTransport::Router(addr, _) => format!("router:{addr}"),
+                    RegionMetaTransport::Follower(addr, _) => format!("follower:{addr}"),
+                    RegionMetaTransport::Leader => "leader".to_owned(),
+                })
+                .collect::<Vec<_>>(),
+            vec!["leader".to_owned()]
+        );
+        assert_eq!(cluster.next_router_channel, 1);
     }
 
     #[test]
