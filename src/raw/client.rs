@@ -1097,6 +1097,9 @@ impl<PdC: PdClient> Client<PdC> {
                     max_limit: MAX_RAW_KV_SCAN_LIMIT,
                 });
             }
+            if limit == 0 {
+                return Ok(Vec::new());
+            }
             let backoff = DEFAULT_STORE_BACKOFF;
             let range = range.into().encode_keyspace(self.keyspace, KeyMode::Raw);
             let (range_start, range_end) = range.into_keys();
@@ -1548,6 +1551,35 @@ mod tests {
         let res = client.scan_reverse(..vec![12], 10).await?;
         let keys: Vec<Vec<u8>> = res.into_iter().map(|pair| pair.0.into()).collect();
         assert_eq!(keys, vec![vec![11], vec![10], vec![2], vec![1]]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_reverse_zero_limit_without_upper_bound_returns_empty() -> Result<()> {
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls_captured = dispatch_calls.clone();
+        let pd_client = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |_req: &dyn Any| {
+                dispatch_calls_captured.fetch_add(1, Ordering::SeqCst);
+                Err(Error::StringError(
+                    "zero-limit reverse scan should not dispatch".to_owned(),
+                ))
+            },
+        )));
+        let client = Client {
+            safe_ts: SafeTsCache::new(pd_client.clone(), Keyspace::Disable),
+            rpc: pd_client,
+            cf: Some(ColumnFamily::Default),
+            backoff: DEFAULT_REGION_BACKOFF,
+            atomic: false,
+            trace_id: None,
+            trace_control_flags: TraceControlFlags::default(),
+            keyspace: Keyspace::Disable,
+        };
+
+        assert!(client.scan_reverse(.., 0).await?.is_empty());
+        assert!(client.scan_keys_reverse(.., 0).await?.is_empty());
+        assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
         Ok(())
     }
 
