@@ -215,6 +215,14 @@ impl Client<PdRpcClient> {
         }
     }
 
+    #[doc(alias = "SetColumnFamily")]
+    /// Create a new client which is a clone of `self`, but which uses an explicit column family for
+    /// all requests.
+    #[must_use]
+    pub fn set_column_family(&self, column_family: ColumnFamily) -> Self {
+        self.with_cf(column_family)
+    }
+
     /// Set the [`Backoff`] strategy for retrying requests.
     /// The default strategy is [`DEFAULT_REGION_BACKOFF`](crate::backoff::DEFAULT_REGION_BACKOFF).
     /// See [`Backoff`] for more information.
@@ -382,6 +390,22 @@ impl<PdC: PdClient> Client<PdC> {
             cf: self.cf.clone(),
             backoff: self.backoff.clone(),
             atomic: true,
+            trace_id: self.trace_id.clone(),
+            trace_control_flags: self.trace_control_flags,
+            keyspace: self.keyspace,
+            safe_ts: self.safe_ts.clone(),
+        }
+    }
+
+    #[doc(alias = "SetAtomicForCAS")]
+    /// Create a new client which is a clone of `self`, but with atomic mode toggled for CAS.
+    #[must_use]
+    pub fn set_atomic_for_cas(&self, enabled: bool) -> Self {
+        Client {
+            rpc: self.rpc.clone(),
+            cf: self.cf.clone(),
+            backoff: self.backoff.clone(),
+            atomic: enabled,
             trace_id: self.trace_id.clone(),
             trace_control_flags: self.trace_control_flags,
             keyspace: self.keyspace,
