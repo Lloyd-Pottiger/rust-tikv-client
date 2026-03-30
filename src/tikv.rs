@@ -115,7 +115,7 @@ pub async fn new_pd_client_with_config<S: Into<String>>(
 /// Create a bound lock resolver using the global config.
 ///
 /// This mirrors client-go `tikv.NewLockResolver`, while returning the Rust client's
-/// [`BoundLockResolver`](crate::BoundLockResolver) bound to a PD client and keyspace.
+/// [`BoundLockResolver`] bound to a PD client and keyspace.
 #[doc(alias = "NewLockResolver")]
 pub async fn new_lock_resolver<S: Into<String>>(
     pd_endpoints: Vec<S>,
@@ -126,7 +126,7 @@ pub async fn new_lock_resolver<S: Into<String>>(
 /// Create a bound lock resolver with an explicit configuration.
 ///
 /// When `config.keyspace` is set, the resolver is bound to that API V2 keyspace in the same way
-/// as [`KVStore`](crate::tikv::KVStore) constructors.
+/// as [`KVStore`] constructors.
 pub async fn new_lock_resolver_with_config<S: Into<String>>(
     pd_endpoints: Vec<S>,
     config: crate::Config,
