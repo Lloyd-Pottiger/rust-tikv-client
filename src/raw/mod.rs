@@ -19,6 +19,12 @@ mod client;
 pub mod lowering;
 mod requests;
 
+#[doc(alias = "MaxRawKVScanLimit")]
+/// The maximum scan limit for raw kv scan operations.
+///
+/// This mirrors client-go `rawkv.MaxRawKVScanLimit`.
+pub const MAX_RAW_KV_SCAN_LIMIT: u32 = 10240;
+
 /// The result of a raw-keyspace checksum operation.
 ///
 /// This struct is returned by [`raw::Client::checksum`](Client::checksum), which currently uses

@@ -15,6 +15,7 @@ use crate::pd::PdClient;
 use crate::pd::PdRpcClient;
 use crate::proto::kvrpcpb::{RawScanRequest, RawScanResponse};
 use crate::proto::metapb;
+use crate::raw::MAX_RAW_KV_SCAN_LIMIT;
 use crate::raw::lowering::*;
 use crate::request::CollectSingle;
 use crate::request::EncodeKeyspace;
@@ -35,8 +36,6 @@ use crate::KvPair;
 use crate::Result;
 use crate::TraceControlFlags;
 use crate::Value;
-
-const MAX_RAW_KV_SCAN_LIMIT: u32 = 10240;
 
 /// The TiKV raw `Client` is used to interact with TiKV using raw requests.
 ///

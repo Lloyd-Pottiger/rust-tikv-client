@@ -4,5 +4,6 @@
 //! namespace for the raw client types.
 
 pub use crate::raw::Client;
+pub use crate::raw::MAX_RAW_KV_SCAN_LIMIT;
 pub use crate::ColumnFamily;
 pub use crate::RawChecksum;
