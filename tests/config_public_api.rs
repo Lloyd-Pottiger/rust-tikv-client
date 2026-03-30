@@ -291,6 +291,22 @@ fn security_materialization_rejects_missing_ca_for_ca_only_tls() {
 }
 
 #[test]
+fn security_materialization_supports_ca_only_tls_from_builders() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ca = dir.path().join("ca.pem");
+    let cert_pem = include_bytes!("fixtures/security-test-cert.pem");
+    std::fs::write(&ca, cert_pem).expect("write ca");
+
+    config::Config::default()
+        .with_security(&ca, "", "")
+        .security_manager()
+        .expect("empty cert/key builder args should still materialize CA-only TLS");
+    config::Security::new(&ca, "", "", std::iter::empty::<String>())
+        .security_manager()
+        .expect("standalone builder should normalize empty cert/key into CA-only TLS");
+}
+
+#[test]
 fn security_materialization_rejects_invalid_pem_contents() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ca = dir.path().join("ca.pem");

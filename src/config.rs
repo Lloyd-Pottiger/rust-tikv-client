@@ -872,8 +872,8 @@ impl Config {
     /// Transport Layer Security (TLS). Your deployment may have chosen to rely on security measures
     /// such as a private network, or a VPN layer to provide secure transmission.
     ///
-    /// To use a TLS secured connection, use the `with_security` function to set the required
-    /// parameters.
+    /// To use a TLS secured connection, use the `with_security` function to set the CA path and,
+    /// optionally, a client certificate/key pair.
     ///
     /// TiKV does not currently offer encrypted storage (or encryption-at-rest).
     ///
@@ -889,9 +889,9 @@ impl Config {
         cert_path: impl Into<PathBuf>,
         key_path: impl Into<PathBuf>,
     ) -> Self {
-        self.ca_path = Some(ca_path.into());
-        self.cert_path = Some(cert_path.into());
-        self.key_path = Some(key_path.into());
+        self.ca_path = normalize_optional_path(ca_path);
+        self.cert_path = normalize_optional_path(cert_path);
+        self.key_path = normalize_optional_path(key_path);
         self
     }
 
@@ -1986,6 +1986,18 @@ mod tests {
             Some(std::path::Path::new("key.pem"))
         );
         assert_eq!(config.timeout, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn test_config_with_security_normalizes_empty_client_identity_paths() {
+        let config = Config::default().with_security("ca.pem", "", "");
+
+        assert_eq!(
+            config.ca_path.as_deref(),
+            Some(std::path::Path::new("ca.pem"))
+        );
+        assert_eq!(config.cert_path, None);
+        assert_eq!(config.key_path, None);
     }
 
     #[test]
