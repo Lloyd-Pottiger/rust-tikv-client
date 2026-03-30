@@ -33,6 +33,11 @@ fn kv_module_exports_codec_helpers() {
 fn kv_module_exports_store_vars_and_replica_read_type() {
     let _ = kv::ReplicaReadType::Leader;
     let _ = kv::AccessLocationType::Unknown;
+    assert_eq!(kv::ReplicaReadType::Leader.to_string(), "leader");
+    assert_eq!(kv::ReplicaReadType::Follower.to_string(), "follower");
+    assert_eq!(kv::ReplicaReadType::Mixed.to_string(), "mixed");
+    assert_eq!(kv::ReplicaReadType::Learner.to_string(), "learner");
+    assert_eq!(kv::ReplicaReadType::PreferLeader.to_string(), "prefer-leader");
 
     let _: fn(i64) = kv::set_store_limit;
     let _: fn() -> i64 = kv::global_store_limit;

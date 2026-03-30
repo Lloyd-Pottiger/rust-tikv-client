@@ -5,6 +5,7 @@
 //! This module is intentionally small: it provides only the public types used to
 //! configure where reads are served from.
 
+use std::fmt;
 use std::sync::Arc;
 
 /// The type of TiKV replica to read from.
@@ -37,6 +38,19 @@ impl ReplicaReadType {
     #[inline]
     pub fn is_follower_read(self) -> bool {
         self != ReplicaReadType::Leader
+    }
+}
+
+impl fmt::Display for ReplicaReadType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            ReplicaReadType::Leader => "leader",
+            ReplicaReadType::Follower => "follower",
+            ReplicaReadType::Mixed => "mixed",
+            ReplicaReadType::Learner => "learner",
+            ReplicaReadType::PreferLeader => "prefer-leader",
+        };
+        f.write_str(s)
     }
 }
 
