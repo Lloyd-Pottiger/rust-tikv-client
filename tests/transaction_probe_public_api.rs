@@ -185,9 +185,11 @@ fn transaction_probe_public_api_exposes_lock_probe_helpers() {
         other => panic!("expected locked status, got {other:?}"),
     }
 
-    let mut proto = kvrpcpb::LockInfo::default();
-    proto.key = b"pk".to_vec();
-    proto.secondaries = vec![b"x".to_vec()];
+    let proto = kvrpcpb::LockInfo {
+        key: b"pk".to_vec(),
+        secondaries: vec![b"x".to_vec()],
+        ..Default::default()
+    };
     let locked = TxnStatus {
         kind: TransactionStatusKind::Locked(5, proto),
         action: kvrpcpb::Action::NoAction,
@@ -203,7 +205,7 @@ fn transaction_probe_public_api_exposes_lock_probe_helpers() {
     );
 
     let committed = TxnStatus {
-        kind: TransactionStatusKind::Committed(Timestamp::default().into()),
+        kind: TransactionStatusKind::Committed(Timestamp::default()),
         action: kvrpcpb::Action::NoAction,
         is_expired: false,
     };

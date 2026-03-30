@@ -1981,6 +1981,9 @@ mod test {
             .unwrap_or(0.0)
     }
 
+    type RegionWithBuckets = (RegionWithLeader, Option<metapb::Buckets>);
+    type BatchScanRegionsResults = VecDeque<Vec<RegionWithBuckets>>;
+
     #[derive(Default)]
     struct MockRetryClient {
         pub regions: Mutex<HashMap<RegionId, RegionWithLeader>>,
@@ -1999,8 +2002,7 @@ mod test {
         pub batch_scan_regions_allow_follower_handle_count: AtomicU64,
         pub batch_scan_regions_calls: Mutex<Vec<BatchScanRegionsCall>>,
         pub batch_scan_regions_failures: Mutex<VecDeque<Error>>,
-        pub batch_scan_regions_results:
-            Mutex<VecDeque<Vec<(RegionWithLeader, Option<metapb::Buckets>)>>>,
+        pub batch_scan_regions_results: Mutex<BatchScanRegionsResults>,
     }
 
     #[async_trait]
