@@ -1118,19 +1118,19 @@ impl<PdC: PdClient> Client<PdC> {
             let mut remaining = limit;
 
             if reverse {
-                // Reverse scan requires an explicit upper bound because locating the last region is
-                // not implemented.
-                let Some(mut current_upper) = range_end.clone() else {
-                    return Err(Error::Unimplemented);
-                };
-                if current_upper.is_empty() {
-                    return Err(Error::Unimplemented);
-                }
+                let mut current_upper = range_end.clone();
 
-                while remaining > 0 && current_upper > range_start {
+                while remaining > 0 {
+                    if current_upper
+                        .as_ref()
+                        .is_some_and(|upper| upper <= &range_start)
+                    {
+                        break;
+                    }
+
                     let scan_args = ScanInnerArgs {
                         from_key: range_start.clone(),
-                        to_key: Some(current_upper.clone()),
+                        to_key: current_upper.clone(),
                         limit: remaining,
                         key_only,
                         reverse,
@@ -1149,12 +1149,15 @@ impl<PdC: PdClient> Client<PdC> {
                     if next_upper.is_empty() || next_upper <= range_start {
                         break;
                     }
-                    if next_upper >= current_upper {
+                    if current_upper
+                        .as_ref()
+                        .is_some_and(|upper| next_upper >= *upper)
+                    {
                         return Err(Error::StringError(
                             "raw reverse scan returned a non-advancing range".to_owned(),
                         ));
                     }
-                    current_upper = next_upper;
+                    current_upper = Some(next_upper);
                 }
             } else {
                 let mut current_start = range_start;
@@ -1214,10 +1217,8 @@ impl<PdC: PdClient> Client<PdC> {
         let to_key = scan_args.to_key;
         loop {
             let region = if scan_args.reverse {
-                let Some(to_key) = to_key.as_ref() else {
-                    return Err(Error::Unimplemented);
-                };
-                self.rpc.clone().region_for_end_key(to_key).await?
+                let end_key = to_key.as_ref().cloned().unwrap_or_default();
+                self.rpc.clone().region_for_end_key(&end_key).await?
             } else {
                 self.rpc.clone().region_for_key(&from_key).await?
             };
@@ -1584,10 +1585,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scan_reverse_requires_bounded_upper() -> Result<()> {
-        let client = new_mock_raw_client_with_scan_data(Arc::new(vec![(vec![1], b"v1".to_vec())]));
-        let err = client.scan_reverse(.., 10).await.unwrap_err();
-        assert!(matches!(err, Error::Unimplemented));
+    async fn test_scan_reverse_without_upper_bound_returns_descending_keys() -> Result<()> {
+        let client = new_mock_raw_client_with_scan_data(Arc::new(vec![
+            (vec![1], b"v1".to_vec()),
+            (vec![2], b"v2".to_vec()),
+            (vec![10], b"v10".to_vec()),
+            (vec![11], b"v11".to_vec()),
+            (vec![12], b"v12".to_vec()),
+        ]));
+
+        let res = client.scan_reverse(.., 10).await?;
+        let keys: Vec<Vec<u8>> = res.into_iter().map(|pair| pair.0.into()).collect();
+        assert_eq!(keys, vec![vec![12], vec![11], vec![10], vec![2], vec![1]]);
+
+        let keys = client.scan_keys_reverse(.., 10).await?;
+        let keys: Vec<Vec<u8>> = keys.into_iter().map(Into::into).collect();
+        assert_eq!(keys, vec![vec![12], vec![11], vec![10], vec![2], vec![1]]);
         Ok(())
     }
 

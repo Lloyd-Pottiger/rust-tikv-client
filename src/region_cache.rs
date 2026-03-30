@@ -706,13 +706,24 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
 
     async fn try_locate_prev_region_by_end_key(&self, key: &Key) -> Option<KeyLocation> {
         let cache = self.region_cache.read().await;
-        let candidate = cache
-            .key_to_ver_id
-            .range(..key)
-            .next_back()
-            .map(|(_, ver_id)| ver_id.clone())?;
+        let candidate = if key.is_empty() {
+            cache
+                .key_to_ver_id
+                .iter()
+                .next_back()
+                .map(|(_, ver_id)| ver_id.clone())?
+        } else {
+            cache
+                .key_to_ver_id
+                .range(..key)
+                .next_back()
+                .map(|(_, ver_id)| ver_id.clone())?
+        };
         let region = cache.ver_id_to_region.get(&candidate)?;
         let region_end_key: &Key = (&region.region.end_key).into();
+        if key.is_empty() && !region_end_key.is_empty() {
+            return None;
+        }
         if !region_end_key.is_empty() && key > region_end_key {
             return None;
         }
@@ -1033,7 +1044,24 @@ impl<C: RetryClientTrait + Send + Sync> RegionCache<C> {
     #[doc(alias = "LocateEndKey")]
     pub async fn locate_end_key(&self, key: Key) -> Result<KeyLocation> {
         if key.is_empty() {
-            return Err(Error::Unimplemented);
+            if let Some(location) = self.try_locate_prev_region_by_end_key(&key).await {
+                return Ok(location);
+            }
+
+            let (prev_region, buckets) = self
+                .pd_region_meta_circuit_breaker
+                .execute(|| {
+                    self.inner_client
+                        .clone()
+                        .get_prev_region_with_buckets(Vec::new())
+                })
+                .await?;
+            let location = Self::key_location_from_parts(
+                &prev_region,
+                buckets.as_ref().map(|bucket| Arc::new(bucket.clone())),
+            );
+            self.add_region_with_buckets(prev_region, buckets).await;
+            return Ok(location);
         }
 
         let key_bytes: &[u8] = (&key).into();
@@ -4517,6 +4545,50 @@ mod test {
             1
         );
         assert_eq!(cache.get_region_by_id(1).await?.id(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_locate_end_key_empty_key_loads_last_region_from_pd() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        *retry_client.prev_region_with_buckets.lock().await =
+            Some((region_with_leader(4, vec![50], vec![], 4), None));
+
+        let location = cache.locate_end_key(Key::from(Vec::new())).await?;
+
+        assert_eq!(location.region.id, 4);
+        assert_eq!(location.start_key, Key::from(vec![50]));
+        assert_eq!(location.end_key, Key::from(Vec::new()));
+        assert_eq!(
+            retry_client.get_prev_region_with_buckets_count.load(SeqCst),
+            1
+        );
+        assert_eq!(cache.get_region_by_id(4).await?.id(), 4);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_locate_end_key_empty_key_uses_cached_last_region() -> Result<()> {
+        let retry_client = Arc::new(MockRetryClient::default());
+        let cache = RegionCache::new_with_ttl(retry_client.clone(), Duration::ZERO, Duration::ZERO);
+
+        cache
+            .add_region(region_with_leader(4, vec![50], vec![], 4))
+            .await;
+
+        let location = cache.locate_end_key(Key::from(Vec::new())).await?;
+
+        assert_eq!(location.region.id, 4);
+        assert_eq!(location.start_key, Key::from(vec![50]));
+        assert_eq!(location.end_key, Key::from(Vec::new()));
+        assert_eq!(
+            retry_client.get_prev_region_with_buckets_count.load(SeqCst),
+            0
+        );
 
         Ok(())
     }

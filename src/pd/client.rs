@@ -1245,7 +1245,15 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     async fn region_for_end_key(&self, key: &Key) -> Result<RegionWithLeader> {
         self.ensure_open()?;
         if key.is_empty() {
-            return Err(Error::Unimplemented);
+            let location = self
+                .region_cache
+                .locate_end_key(Key::from(Vec::new()))
+                .await?;
+            let region = self
+                .region_cache
+                .get_region_by_id(location.region.id)
+                .await?;
+            return Self::decode_region(region, self.enable_codec);
         }
 
         let enable_codec = self.enable_codec;
