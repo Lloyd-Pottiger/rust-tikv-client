@@ -359,6 +359,13 @@ impl<PdC: PdClient> Client<PdC> {
         self.rpc.clone()
     }
 
+    #[doc(alias = "GetPDClient")]
+    /// Returns a handle to the underlying PD client.
+    #[must_use]
+    pub fn get_pd_client(&self) -> Arc<PdC> {
+        self.pd_client()
+    }
+
     /// Get the cluster-wide minimum `safe_ts` across all TiKV stores (and TiFlash stores, if
     /// present).
     ///
@@ -580,6 +587,12 @@ impl<PdC: PdClient> Client<PdC> {
             .post_process_default()
             .plan();
         plan.execute().await
+    }
+
+    #[doc(alias = "GetKeyTTL")]
+    /// Get the TTL of a raw key (in seconds) from TiKV if the key exists.
+    pub async fn get_key_ttl(&self, key: impl Into<Key>) -> Result<Option<u64>> {
+        self.get_key_ttl_secs(key).await
     }
 
     /// Create a new 'put' request.

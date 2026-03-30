@@ -109,6 +109,10 @@ async fn get_key_ttl_secs_entry(
     client.get_key_ttl_secs(key).await
 }
 
+async fn get_key_ttl_entry(client: &raw::Client, key: Vec<u8>) -> tikv_client::Result<Option<u64>> {
+    client.get_key_ttl(key).await
+}
+
 async fn batch_delete_entry(client: &raw::Client, keys: Vec<Vec<u8>>) -> tikv_client::Result<()> {
     client.batch_delete(keys).await
 }
@@ -217,6 +221,7 @@ fn raw_module_exports_client_entrypoints() {
     let _: fn(&raw::Client, TraceControlFlags) -> raw::Client =
         raw::Client::with_trace_control_flags;
     let _: fn(&raw::Client) -> Arc<tikv_client::PdRpcClient> = raw::Client::pd_client;
+    let _: fn(&raw::Client) -> Arc<tikv_client::PdRpcClient> = raw::Client::get_pd_client;
     let _ = min_safe_ts_entry;
     let _: fn(&raw::Client) -> raw::Client = raw::Client::with_atomic_for_cas;
 
@@ -228,6 +233,7 @@ fn raw_module_exports_client_entrypoints() {
     let _ = put_with_ttl_entry;
     let _ = batch_put_with_ttl_entry;
     let _ = get_key_ttl_secs_entry;
+    let _ = get_key_ttl_entry;
     let _ = batch_delete_entry;
     let _ = delete_range_entry;
     let _ = scan_entry;
