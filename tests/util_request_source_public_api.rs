@@ -6,6 +6,8 @@ fn util_request_source_public_api_exposes_context_key_markers() {
     let _: util::RequestSourceTypeKeyType = util::RequestSourceTypeKey;
     let _: util::RequestSourceKey = util::RequestSourceKey;
     let _: util::RequestSourceKeyType = util::RequestSourceKey;
+    let _: util::ResourceGroupNameKey = util::ResourceGroupNameKey;
+    let _: util::ResourceGroupNameKeyType = util::ResourceGroupNameKey;
     let _: util::SessionID = util::SessionID;
 
     let _: &str = util::INTERNAL_TXN_OTHERS;
