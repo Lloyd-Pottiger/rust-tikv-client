@@ -8,6 +8,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use futures::stream;
+use futures::StreamExt;
 use log::error;
 use log::info;
 use log::warn;
@@ -222,6 +224,52 @@ where
 
     let header = response
         .header()
+        .ok_or_else(|| internal_err!("PD response missing header"))?;
+    if let Some(err) = &header.error {
+        Err(internal_err!(err.message))
+    } else {
+        Ok(response)
+    }
+}
+
+fn pd_grpc_status_to_error(status: tonic::Status) -> Error {
+    if status.code() == tonic::Code::DeadlineExceeded {
+        crate::PdServerTimeoutError::new(status.message().to_owned()).into()
+    } else {
+        status.into()
+    }
+}
+
+async fn query_region_single_shot<Rpc, RpcFuture, Inbound>(
+    timeout: Duration,
+    message: pdpb::QueryRegionRequest,
+    rpc: Rpc,
+) -> Result<pdpb::QueryRegionResponse>
+where
+    Rpc: FnOnce(Request<stream::Iter<std::iter::Once<pdpb::QueryRegionRequest>>>) -> RpcFuture,
+    RpcFuture: Future<Output = GrpcResult<Inbound>>,
+    Inbound: futures::Stream<Item = std::result::Result<pdpb::QueryRegionResponse, tonic::Status>>
+        + Unpin
+        + Send,
+{
+    let request_stream = stream::iter(std::iter::once(message));
+    let mut request = Request::new(request_stream);
+    request.set_timeout(timeout);
+
+    let mut inbound = match rpc(request).await {
+        Ok(inbound) => inbound,
+        Err(status) => return Err(pd_grpc_status_to_error(status)),
+    };
+
+    let response = match inbound.next().await {
+        Some(Ok(response)) => response,
+        Some(Err(status)) => return Err(pd_grpc_status_to_error(status)),
+        None => return Err(internal_err!("PD QueryRegion RPC returned no response")),
+    };
+
+    let header = response
+        .header
+        .as_ref()
         .ok_or_else(|| internal_err!("PD response missing header"))?;
     if let Some(err) = &header.error {
         Err(internal_err!(err.message))
@@ -583,6 +631,98 @@ impl Cluster {
         timeout: Duration,
     ) -> Result<pdpb::GetRegionResponse> {
         self.get_region_by_id_inner(id, true, true, timeout).await
+    }
+
+    pub(crate) async fn query_region(
+        &mut self,
+        keys: Vec<Vec<u8>>,
+        prev_keys: Vec<Vec<u8>>,
+        ids: Vec<u64>,
+        need_buckets: bool,
+        timeout: Duration,
+    ) -> Result<pdpb::QueryRegionResponse> {
+        self.query_region_inner(keys, prev_keys, ids, need_buckets, false, timeout)
+            .await
+    }
+
+    pub(crate) async fn query_region_allow_follower_handle(
+        &mut self,
+        keys: Vec<Vec<u8>>,
+        prev_keys: Vec<Vec<u8>>,
+        ids: Vec<u64>,
+        need_buckets: bool,
+        timeout: Duration,
+    ) -> Result<pdpb::QueryRegionResponse> {
+        self.query_region_inner(keys, prev_keys, ids, need_buckets, true, timeout)
+            .await
+    }
+
+    async fn query_region_inner(
+        &mut self,
+        keys: Vec<Vec<u8>>,
+        prev_keys: Vec<Vec<u8>>,
+        ids: Vec<u64>,
+        need_buckets: bool,
+        allow_follower_handle: bool,
+        timeout: Duration,
+    ) -> Result<pdpb::QueryRegionResponse> {
+        let mut req = pd_request!(self.id, pdpb::QueryRegionRequest);
+        req.need_buckets = need_buckets;
+        req.ids = ids;
+        req.keys = keys;
+        req.prev_keys = prev_keys;
+
+        for transport in self.next_region_meta_transports(true, allow_follower_handle) {
+            match transport {
+                RegionMetaTransport::Router(addr, channel) => {
+                    let mut router_client = routerpb::router_client::RouterClient::new(channel);
+                    match query_region_single_shot(timeout, req.clone(), |request| async {
+                        Ok(router_client.query_region(request).await?.into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => {
+                            if should_evict_router_channel(&err) {
+                                self.evict_router_channel(&addr);
+                            }
+                            warn!(
+                                "router-service query_region failed on {}, falling back: {:?}",
+                                addr, err
+                            );
+                        }
+                    }
+                }
+                RegionMetaTransport::Follower(addr, channel) => {
+                    let mut follower_client = pdpb::pd_client::PdClient::with_interceptor(
+                        channel,
+                        allow_follower_handle_interceptor as FollowerHandleInterceptor,
+                    );
+                    match query_region_single_shot(timeout, req.clone(), |request| async {
+                        Ok(follower_client.query_region(request).await?.into_inner())
+                    })
+                    .await
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(err) => warn!(
+                            "follower-handled query_region failed on {}, falling back: {:?}",
+                            addr, err
+                        ),
+                    }
+                }
+                RegionMetaTransport::Leader => {
+                    return query_region_single_shot(timeout, req.clone(), |request| async {
+                        Ok(self.client.query_region(request).await?.into_inner())
+                    })
+                    .await;
+                }
+            }
+        }
+
+        query_region_single_shot(timeout, req, |request| async {
+            Ok(self.client.query_region(request).await?.into_inner())
+        })
+        .await
     }
 
     pub async fn scan_regions(
@@ -1924,6 +2064,62 @@ mod tests {
         };
         let mut client = ();
         req.send(&mut client, Duration::from_secs(1)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_query_region_single_shot_empty_stream_returns_error() {
+        let req = pdpb::QueryRegionRequest::default();
+        let err = query_region_single_shot(Duration::from_secs(1), req, |_req| async {
+            Ok(futures::stream::empty::<
+                std::result::Result<pdpb::QueryRegionResponse, tonic::Status>,
+            >())
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("QueryRegion"));
+        assert!(err.contains("no response"));
+    }
+
+    #[tokio::test]
+    async fn test_query_region_single_shot_header_error_returns_error() {
+        let mut header = pdpb::ResponseHeader::default();
+        header.error = Some(pdpb::Error {
+            message: "boom".to_string(),
+            ..Default::default()
+        });
+
+        let resp = pdpb::QueryRegionResponse {
+            header: Some(header),
+            ..Default::default()
+        };
+
+        let req = pdpb::QueryRegionRequest::default();
+        let err = query_region_single_shot(Duration::from_secs(1), req, |_req| async {
+            Ok(futures::stream::iter(vec![Ok(resp)]))
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_query_region_single_shot_ok_returns_response() {
+        let resp = pdpb::QueryRegionResponse {
+            header: Some(pdpb::ResponseHeader::default()),
+            key_id_map: vec![1],
+            ..Default::default()
+        };
+
+        let req = pdpb::QueryRegionRequest::default();
+        let got = query_region_single_shot(Duration::from_secs(1), req, |_req| async {
+            Ok(futures::stream::iter(vec![Ok(resp.clone())]))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(got.key_id_map, vec![1]);
     }
 
     #[tokio::test]

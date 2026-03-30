@@ -3,12 +3,18 @@
 //! A utility module for managing and retrying PD requests.
 
 use std::fmt;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::Weak;
 use std::time::Duration;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::RwLock;
 
 use crate::internal_err;
@@ -255,6 +261,242 @@ pub trait RetryClientTrait {
     /// Loads keyspace metadata for `keyspace` from PD.
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta>;
 }
+
+// QueryRegion is the bidirectional-streaming RPC PD/router-service uses to batch region metadata
+// lookups. client-go routes GetRegion/GetPrevRegion/GetRegionByID through a request batcher that
+// sends QueryRegion requests; we mirror that pattern here to keep region metadata load paths fast
+// under concurrency.
+const QUERY_REGION_MAX_BATCH_SIZE: usize = 10_000;
+const QUERY_REGION_CHANNEL_CAPACITY: usize = QUERY_REGION_MAX_BATCH_SIZE * 2;
+
+#[derive(Debug)]
+enum QueryRegionLookup {
+    Key(Vec<u8>),
+    PrevKey(Vec<u8>),
+    Id(RegionId),
+}
+
+struct QueryRegionTask {
+    lookup: QueryRegionLookup,
+    need_buckets: bool,
+    respond_to: oneshot::Sender<Result<(RegionWithLeader, Option<metapb::Buckets>)>>,
+}
+
+#[derive(Clone)]
+struct QueryRegionBatcher {
+    tx: mpsc::Sender<QueryRegionTask>,
+}
+
+struct QueryRegionBatchers {
+    leader: QueryRegionBatcher,
+    follower: QueryRegionBatcher,
+}
+
+fn clone_error_for_query_region_batch(err: &Error) -> Error {
+    match err {
+        Error::Unimplemented => Error::Unimplemented,
+        Error::PdServerTimeout(timeout) => Error::PdServerTimeout(timeout.clone()),
+        Error::GrpcAPI(status) => Error::GrpcAPI(status.clone()),
+        Error::InternalError { message } => Error::InternalError {
+            message: message.clone(),
+        },
+        Error::StringError(message) => Error::StringError(message.clone()),
+        other => internal_err!(other.to_string()),
+    }
+}
+
+impl QueryRegionBatchers {
+    fn new(client: Weak<RetryClient<Cluster>>) -> QueryRegionBatchers {
+        QueryRegionBatchers {
+            leader: QueryRegionBatcher::new(client.clone(), false),
+            follower: QueryRegionBatcher::new(client, true),
+        }
+    }
+}
+
+impl QueryRegionBatcher {
+    fn new(client: Weak<RetryClient<Cluster>>, allow_follower_handle: bool) -> QueryRegionBatcher {
+        let (tx, mut rx) = mpsc::channel::<QueryRegionTask>(QUERY_REGION_CHANNEL_CAPACITY);
+
+        tokio::spawn(async move {
+            while let Some(first) = rx.recv().await {
+                let mut batch = Vec::with_capacity(QUERY_REGION_MAX_BATCH_SIZE);
+                batch.push(first);
+                while batch.len() < QUERY_REGION_MAX_BATCH_SIZE {
+                    match rx.try_recv() {
+                        Ok(task) => batch.push(task),
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                let Some(client) = client.upgrade() else {
+                    break;
+                };
+
+                let mut need_buckets = false;
+                let mut keys = Vec::new();
+                let mut prev_keys = Vec::new();
+                let mut ids = Vec::new();
+
+                let mut lookups = Vec::with_capacity(batch.len());
+                for task in &batch {
+                    need_buckets |= task.need_buckets;
+                    match &task.lookup {
+                        QueryRegionLookup::Key(key) => {
+                            let idx = keys.len();
+                            keys.push(key.clone());
+                            lookups.push(QueryRegionResponseLookup::Key(idx));
+                        }
+                        QueryRegionLookup::PrevKey(key) => {
+                            let idx = prev_keys.len();
+                            prev_keys.push(key.clone());
+                            lookups.push(QueryRegionResponseLookup::PrevKey(idx));
+                        }
+                        QueryRegionLookup::Id(id) => {
+                            ids.push(*id);
+                            lookups.push(QueryRegionResponseLookup::Id(*id));
+                        }
+                    }
+                }
+
+                let response = client
+                    .query_region_once(allow_follower_handle, keys, prev_keys, ids, need_buckets)
+                    .await;
+
+                match response {
+                    Ok(resp) => {
+                        for (task, lookup) in batch.into_iter().zip(lookups) {
+                            let result = query_region_task_result(&task.lookup, &resp, lookup);
+                            let _ = task.respond_to.send(result);
+                        }
+                    }
+                    Err(err) => {
+                        for task in batch {
+                            let _ = task
+                                .respond_to
+                                .send(Err(clone_error_for_query_region_batch(&err)));
+                        }
+                    }
+                }
+            }
+        });
+
+        QueryRegionBatcher { tx }
+    }
+
+    async fn query(
+        &self,
+        lookup: QueryRegionLookup,
+        need_buckets: bool,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        let (respond_to, response) = oneshot::channel();
+        self.tx
+            .send(QueryRegionTask {
+                lookup,
+                need_buckets,
+                respond_to,
+            })
+            .await
+            .map_err(|_| internal_err!("QueryRegion batcher closed"))?;
+        response
+            .await
+            .map_err(|_| internal_err!("QueryRegion batcher dropped"))?
+    }
+
+    async fn query_by_key(
+        &self,
+        key: Vec<u8>,
+        need_buckets: bool,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        self.query(QueryRegionLookup::Key(key), need_buckets).await
+    }
+
+    async fn query_by_prev_key(
+        &self,
+        key: Vec<u8>,
+        need_buckets: bool,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        self.query(QueryRegionLookup::PrevKey(key), need_buckets)
+            .await
+    }
+
+    async fn query_by_id(
+        &self,
+        region_id: RegionId,
+        need_buckets: bool,
+    ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+        self.query(QueryRegionLookup::Id(region_id), need_buckets)
+            .await
+    }
+}
+
+fn query_region_task_result(
+    request: &QueryRegionLookup,
+    resp: &pdpb::QueryRegionResponse,
+    lookup: QueryRegionResponseLookup,
+) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
+    let region_id = match lookup {
+        QueryRegionResponseLookup::Key(idx) => resp
+            .key_id_map
+            .get(idx)
+            .copied()
+            .ok_or_else(|| internal_err!("QueryRegionResponse.key_id_map too short"))?,
+        QueryRegionResponseLookup::PrevKey(idx) => resp
+            .prev_key_id_map
+            .get(idx)
+            .copied()
+            .ok_or_else(|| internal_err!("QueryRegionResponse.prev_key_id_map too short"))?,
+        QueryRegionResponseLookup::Id(id) => id,
+    };
+
+    if region_id == 0 {
+        return Err(query_region_not_found_error(request));
+    }
+
+    let region_resp = resp
+        .regions_by_id
+        .get(&region_id)
+        .ok_or_else(|| query_region_not_found_error(request))?;
+
+    let buckets = region_resp.buckets.clone();
+    let region = region_resp.region.clone().ok_or_else(|| {
+        internal_err!(
+            "missing region in PD QueryRegionResponse for region_id {}",
+            region_id
+        )
+    })?;
+    if region.region_epoch.is_none() {
+        return Err(internal_err!(
+            "missing region_epoch in PD QueryRegionResponse for region_id {}",
+            region.id
+        ));
+    }
+
+    Ok((
+        RegionWithLeader::new(region, region_resp.leader.clone()),
+        buckets,
+    ))
+}
+
+#[derive(Clone, Copy)]
+enum QueryRegionResponseLookup {
+    Key(usize),
+    PrevKey(usize),
+    Id(RegionId),
+}
+
+fn query_region_not_found_error(request: &QueryRegionLookup) -> Error {
+    match request {
+        QueryRegionLookup::Key(key) | QueryRegionLookup::PrevKey(key) => {
+            Error::RegionForKeyNotFound { key: key.clone() }
+        }
+        QueryRegionLookup::Id(region_id) => Error::RegionNotFoundInResponse {
+            region_id: *region_id,
+        },
+    }
+}
+
 /// Client for communication with a PD cluster. Has the facility to reconnect to the cluster.
 pub struct RetryClient<Cl = Cluster> {
     cluster_id: u64,
@@ -263,6 +505,8 @@ pub struct RetryClient<Cl = Cluster> {
     connection: Connection,
     timeout: Duration,
     tso_max_pending_count: usize,
+    query_region_supported: AtomicBool,
+    query_region_batchers: OnceLock<QueryRegionBatchers>,
 }
 
 impl<Cl> RetryClient<Cl> {
@@ -342,6 +586,8 @@ impl<Cl> RetryClient<Cl> {
             connection,
             timeout,
             tso_max_pending_count: crate::config::DEFAULT_TSO_MAX_PENDING_COUNT,
+            query_region_supported: AtomicBool::new(true),
+            query_region_batchers: OnceLock::new(),
         }
     }
 }
@@ -429,6 +675,8 @@ impl RetryClient<Cluster> {
             connection,
             timeout,
             tso_max_pending_count,
+            query_region_supported: AtomicBool::new(true),
+            query_region_batchers: OnceLock::new(),
         })
     }
 
@@ -448,6 +696,32 @@ impl RetryClient<Cluster> {
         guard.0.set_router_channels(channels);
         Ok(())
     }
+
+    async fn query_region_once(
+        &self,
+        allow_follower_handle: bool,
+        keys: Vec<Vec<u8>>,
+        prev_keys: Vec<Vec<u8>>,
+        ids: Vec<u64>,
+        need_buckets: bool,
+    ) -> Result<pdpb::QueryRegionResponse> {
+        let cluster = &mut self.cluster.write().await.0;
+        if allow_follower_handle {
+            cluster
+                .query_region_allow_follower_handle(
+                    keys,
+                    prev_keys,
+                    ids,
+                    need_buckets,
+                    self.timeout,
+                )
+                .await
+        } else {
+            cluster
+                .query_region(keys, prev_keys, ids, need_buckets, self.timeout)
+                .await
+        }
+    }
 }
 
 #[async_trait]
@@ -458,16 +732,35 @@ impl RetryClientTrait for RetryClient<Cluster> {
         let started_at = Instant::now();
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "get_region", |cluster| {
+            retry_core!(self, "get_region", {
                 let key = key.clone();
+                let weak = Arc::downgrade(&self);
                 async {
-                    cluster
-                        .get_region(key.clone(), self.timeout)
-                        .await
-                        .and_then(|resp| {
-                            region_from_response(resp, || Error::RegionForKeyNotFound { key })
-                        })
+                    if self.query_region_supported.load(Ordering::Acquire) {
+                        let batchers = self
+                            .query_region_batchers
+                            .get_or_init(|| QueryRegionBatchers::new(weak.clone()));
+                        match batchers.leader.query_by_key(key.clone(), false).await {
+                            Ok((region, _)) => Ok(region),
+                            Err(err) if is_unimplemented_error(&err) => {
+                                self.query_region_supported.store(false, Ordering::Release);
+                                let resp = {
+                                    let cluster = &mut self.cluster.write().await.0;
+                                    cluster.get_region(key.clone(), self.timeout).await?
+                                };
+                                region_from_response(resp, || Error::RegionForKeyNotFound { key })
+                            }
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        let resp = {
+                            let cluster = &mut self.cluster.write().await.0;
+                            cluster.get_region(key.clone(), self.timeout).await?
+                        };
+                        region_from_response(resp, || Error::RegionForKeyNotFound { key })
+                    }
                 }
+                .await
             }),
         )
     }
@@ -478,39 +771,102 @@ impl RetryClientTrait for RetryClient<Cluster> {
     ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
         let started_at = Instant::now();
         let timeout = self.timeout;
-        finish_pd_wait(
-            started_at,
-            self.retry_mut_first_then_retry(
-                "get_region",
-                |cluster| {
+        let weak = Arc::downgrade(&self);
+
+        finish_pd_wait(started_at, {
+            let tag = "get_region";
+            let stats = pd_stats(tag);
+            let mut last_err = Ok(());
+
+            'retry: {
+                for attempt in 0..LEADER_CHANGE_RETRY {
                     let key = key.clone();
-                    Box::pin(async move {
-                        cluster
-                            .get_region_with_buckets_allow_follower_handle(key.clone(), timeout)
-                            .await
-                            .and_then(|resp| {
-                                region_and_buckets_from_response(resp, || {
-                                    Error::RegionForKeyNotFound { key }
-                                })
+                    let res = async {
+                        if self.query_region_supported.load(Ordering::Acquire) {
+                            let batchers = self
+                                .query_region_batchers
+                                .get_or_init(|| QueryRegionBatchers::new(weak.clone()));
+                            let batcher = if attempt == 0 {
+                                &batchers.follower
+                            } else {
+                                &batchers.leader
+                            };
+                            match batcher.query_by_key(key.clone(), true).await {
+                                Ok((region, buckets)) => Ok((region, buckets)),
+                                Err(err) if is_unimplemented_error(&err) => {
+                                    self.query_region_supported.store(false, Ordering::Release);
+                                    let resp = {
+                                        let cluster = &mut self.cluster.write().await.0;
+                                        if attempt == 0 {
+                                            cluster
+                                                .get_region_with_buckets_allow_follower_handle(
+                                                    key.clone(),
+                                                    timeout,
+                                                )
+                                                .await?
+                                        } else {
+                                            cluster
+                                                .get_region_with_buckets(key.clone(), timeout)
+                                                .await?
+                                        }
+                                    };
+                                    region_and_buckets_from_response(resp, || {
+                                        Error::RegionForKeyNotFound { key }
+                                    })
+                                }
+                                Err(err) => Err(err),
+                            }
+                        } else {
+                            let resp = {
+                                let cluster = &mut self.cluster.write().await.0;
+                                if attempt == 0 {
+                                    cluster
+                                        .get_region_with_buckets_allow_follower_handle(
+                                            key.clone(),
+                                            timeout,
+                                        )
+                                        .await?
+                                } else {
+                                    cluster
+                                        .get_region_with_buckets(key.clone(), timeout)
+                                        .await?
+                                }
+                            };
+                            region_and_buckets_from_response(resp, || Error::RegionForKeyNotFound {
+                                key,
                             })
-                    })
-                },
-                |cluster| {
-                    let key = key.clone();
-                    Box::pin(async move {
-                        cluster
-                            .get_region_with_buckets(key.clone(), timeout)
-                            .await
-                            .and_then(|resp| {
-                                region_and_buckets_from_response(resp, || {
-                                    Error::RegionForKeyNotFound { key }
-                                })
-                            })
-                    })
-                },
-            )
-            .await,
-        )
+                        }
+                    }
+                    .await;
+
+                    match stats.done(res) {
+                        Ok(r) => break 'retry Ok(r),
+                        Err(Error::Unimplemented) => break 'retry Err(Error::Unimplemented),
+                        Err(Error::GrpcAPI(status))
+                            if status.code() == tonic::Code::Unimplemented =>
+                        {
+                            break 'retry Err(Error::Unimplemented);
+                        }
+                        Err(e) => last_err = Err(e),
+                    }
+
+                    let mut reconnect_count = MAX_REQUEST_COUNT;
+                    while let Err(e) = self.reconnect(RECONNECT_INTERVAL_SEC).await {
+                        reconnect_count -= 1;
+                        if reconnect_count == 0 {
+                            break 'retry Err(e);
+                        }
+                        crate::util::sleep_backoff(Duration::from_secs(RECONNECT_INTERVAL_SEC))
+                            .await;
+                    }
+                }
+
+                match last_err {
+                    Ok(()) => Err(internal_err!("pd retry exhausted without error: {}", tag)),
+                    Err(e) => Err(e),
+                }
+            }
+        })
     }
 
     async fn get_region_with_buckets(
@@ -520,18 +876,43 @@ impl RetryClientTrait for RetryClient<Cluster> {
         let started_at = Instant::now();
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "get_region", |cluster| {
+            retry_core!(self, "get_region", {
                 let key = key.clone();
+                let weak = Arc::downgrade(&self);
                 async {
-                    cluster
-                        .get_region_with_buckets(key.clone(), self.timeout)
-                        .await
-                        .and_then(|resp| {
-                            region_and_buckets_from_response(resp, || Error::RegionForKeyNotFound {
-                                key,
-                            })
+                    if self.query_region_supported.load(Ordering::Acquire) {
+                        let batchers = self
+                            .query_region_batchers
+                            .get_or_init(|| QueryRegionBatchers::new(weak.clone()));
+                        match batchers.leader.query_by_key(key.clone(), true).await {
+                            Ok((region, buckets)) => Ok((region, buckets)),
+                            Err(err) if is_unimplemented_error(&err) => {
+                                self.query_region_supported.store(false, Ordering::Release);
+                                let resp = {
+                                    let cluster = &mut self.cluster.write().await.0;
+                                    cluster
+                                        .get_region_with_buckets(key.clone(), self.timeout)
+                                        .await?
+                                };
+                                region_and_buckets_from_response(resp, || {
+                                    Error::RegionForKeyNotFound { key }
+                                })
+                            }
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        let resp = {
+                            let cluster = &mut self.cluster.write().await.0;
+                            cluster
+                                .get_region_with_buckets(key.clone(), self.timeout)
+                                .await?
+                        };
+                        region_and_buckets_from_response(resp, || Error::RegionForKeyNotFound {
+                            key,
                         })
+                    }
                 }
+                .await
             }),
         )
     }
@@ -540,16 +921,39 @@ impl RetryClientTrait for RetryClient<Cluster> {
         let started_at = Instant::now();
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "get_prev_region", |cluster| {
+            retry_core!(self, "get_prev_region", {
                 let key = key.clone();
+                let weak = Arc::downgrade(&self);
                 async {
-                    cluster
-                        .get_prev_region(key.clone(), self.timeout)
-                        .await
-                        .and_then(|resp| {
-                            region_from_response(resp, || Error::RegionForKeyNotFound { key })
-                        })
+                    if self.query_region_supported.load(Ordering::Acquire) {
+                        let batchers = self
+                            .query_region_batchers
+                            .get_or_init(|| QueryRegionBatchers::new(weak.clone()));
+                        match batchers
+                            .follower
+                            .query_by_prev_key(key.clone(), false)
+                            .await
+                        {
+                            Ok((region, _)) => Ok(region),
+                            Err(err) if is_unimplemented_error(&err) => {
+                                self.query_region_supported.store(false, Ordering::Release);
+                                let resp = {
+                                    let cluster = &mut self.cluster.write().await.0;
+                                    cluster.get_prev_region(key.clone(), self.timeout).await?
+                                };
+                                region_from_response(resp, || Error::RegionForKeyNotFound { key })
+                            }
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        let resp = {
+                            let cluster = &mut self.cluster.write().await.0;
+                            cluster.get_prev_region(key.clone(), self.timeout).await?
+                        };
+                        region_from_response(resp, || Error::RegionForKeyNotFound { key })
+                    }
                 }
+                .await
             }),
         )
     }
@@ -561,18 +965,43 @@ impl RetryClientTrait for RetryClient<Cluster> {
         let started_at = Instant::now();
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "get_prev_region", |cluster| {
+            retry_core!(self, "get_prev_region", {
                 let key = key.clone();
+                let weak = Arc::downgrade(&self);
                 async {
-                    cluster
-                        .get_prev_region_with_buckets(key.clone(), self.timeout)
-                        .await
-                        .and_then(|resp| {
-                            region_and_buckets_from_response(resp, || Error::RegionForKeyNotFound {
-                                key,
-                            })
+                    if self.query_region_supported.load(Ordering::Acquire) {
+                        let batchers = self
+                            .query_region_batchers
+                            .get_or_init(|| QueryRegionBatchers::new(weak.clone()));
+                        match batchers.follower.query_by_prev_key(key.clone(), true).await {
+                            Ok((region, buckets)) => Ok((region, buckets)),
+                            Err(err) if is_unimplemented_error(&err) => {
+                                self.query_region_supported.store(false, Ordering::Release);
+                                let resp = {
+                                    let cluster = &mut self.cluster.write().await.0;
+                                    cluster
+                                        .get_prev_region_with_buckets(key.clone(), self.timeout)
+                                        .await?
+                                };
+                                region_and_buckets_from_response(resp, || {
+                                    Error::RegionForKeyNotFound { key }
+                                })
+                            }
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        let resp = {
+                            let cluster = &mut self.cluster.write().await.0;
+                            cluster
+                                .get_prev_region_with_buckets(key.clone(), self.timeout)
+                                .await?
+                        };
+                        region_and_buckets_from_response(resp, || Error::RegionForKeyNotFound {
+                            key,
                         })
+                    }
                 }
+                .await
             }),
         )
     }
@@ -581,13 +1010,36 @@ impl RetryClientTrait for RetryClient<Cluster> {
         let started_at = Instant::now();
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "get_region_by_id", |cluster| async {
-                cluster
-                    .get_region_by_id(region_id, self.timeout)
-                    .await
-                    .and_then(|resp| {
+            retry_core!(self, "get_region_by_id", {
+                let weak = Arc::downgrade(&self);
+                async {
+                    if self.query_region_supported.load(Ordering::Acquire) {
+                        let batchers = self
+                            .query_region_batchers
+                            .get_or_init(|| QueryRegionBatchers::new(weak.clone()));
+                        match batchers.leader.query_by_id(region_id, false).await {
+                            Ok((region, _)) => Ok(region),
+                            Err(err) if is_unimplemented_error(&err) => {
+                                self.query_region_supported.store(false, Ordering::Release);
+                                let resp = {
+                                    let cluster = &mut self.cluster.write().await.0;
+                                    cluster.get_region_by_id(region_id, self.timeout).await?
+                                };
+                                region_from_response(resp, || Error::RegionNotFoundInResponse {
+                                    region_id,
+                                })
+                            }
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        let resp = {
+                            let cluster = &mut self.cluster.write().await.0;
+                            cluster.get_region_by_id(region_id, self.timeout).await?
+                        };
                         region_from_response(resp, || Error::RegionNotFoundInResponse { region_id })
-                    })
+                    }
+                }
+                .await
             }),
         )
     }
@@ -599,15 +1051,42 @@ impl RetryClientTrait for RetryClient<Cluster> {
         let started_at = Instant::now();
         finish_pd_wait(
             started_at,
-            retry_mut!(self, "get_region_by_id", |cluster| async {
-                cluster
-                    .get_region_by_id_with_buckets(region_id, self.timeout)
-                    .await
-                    .and_then(|resp| {
+            retry_core!(self, "get_region_by_id", {
+                let weak = Arc::downgrade(&self);
+                async {
+                    if self.query_region_supported.load(Ordering::Acquire) {
+                        let batchers = self
+                            .query_region_batchers
+                            .get_or_init(|| QueryRegionBatchers::new(weak.clone()));
+                        match batchers.leader.query_by_id(region_id, true).await {
+                            Ok((region, buckets)) => Ok((region, buckets)),
+                            Err(err) if is_unimplemented_error(&err) => {
+                                self.query_region_supported.store(false, Ordering::Release);
+                                let resp = {
+                                    let cluster = &mut self.cluster.write().await.0;
+                                    cluster
+                                        .get_region_by_id_with_buckets(region_id, self.timeout)
+                                        .await?
+                                };
+                                region_and_buckets_from_response(resp, || {
+                                    Error::RegionNotFoundInResponse { region_id }
+                                })
+                            }
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        let resp = {
+                            let cluster = &mut self.cluster.write().await.0;
+                            cluster
+                                .get_region_by_id_with_buckets(region_id, self.timeout)
+                                .await?
+                        };
                         region_and_buckets_from_response(resp, || Error::RegionNotFoundInResponse {
                             region_id,
                         })
-                    })
+                    }
+                }
+                .await
             }),
         )
     }
@@ -618,37 +1097,101 @@ impl RetryClientTrait for RetryClient<Cluster> {
     ) -> Result<(RegionWithLeader, Option<metapb::Buckets>)> {
         let started_at = Instant::now();
         let timeout = self.timeout;
-        finish_pd_wait(
-            started_at,
-            self.retry_mut_first_then_retry(
-                "get_region_by_id",
-                |cluster| {
-                    Box::pin(async move {
-                        cluster
-                            .get_region_by_id_with_buckets_allow_follower_handle(region_id, timeout)
-                            .await
-                            .and_then(|resp| {
-                                region_and_buckets_from_response(resp, || {
-                                    Error::RegionNotFoundInResponse { region_id }
-                                })
+        let weak = Arc::downgrade(&self);
+
+        finish_pd_wait(started_at, {
+            let tag = "get_region_by_id";
+            let stats = pd_stats(tag);
+            let mut last_err = Ok(());
+
+            'retry: {
+                for attempt in 0..LEADER_CHANGE_RETRY {
+                    let res = async {
+                        if self.query_region_supported.load(Ordering::Acquire) {
+                            let batchers = self
+                                .query_region_batchers
+                                .get_or_init(|| QueryRegionBatchers::new(weak.clone()));
+                            let batcher = if attempt == 0 {
+                                &batchers.follower
+                            } else {
+                                &batchers.leader
+                            };
+                            match batcher.query_by_id(region_id, true).await {
+                                Ok((region, buckets)) => Ok((region, buckets)),
+                                Err(err) if is_unimplemented_error(&err) => {
+                                    self.query_region_supported.store(false, Ordering::Release);
+                                    let resp = {
+                                        let cluster = &mut self.cluster.write().await.0;
+                                        if attempt == 0 {
+                                            cluster
+                                                .get_region_by_id_with_buckets_allow_follower_handle(
+                                                    region_id,
+                                                    timeout,
+                                                )
+                                                .await?
+                                        } else {
+                                            cluster
+                                                .get_region_by_id_with_buckets(region_id, timeout)
+                                                .await?
+                                        }
+                                    };
+                                    region_and_buckets_from_response(resp, || {
+                                        Error::RegionNotFoundInResponse { region_id }
+                                    })
+                                }
+                                Err(err) => Err(err),
+                            }
+                        } else {
+                            let resp = {
+                                let cluster = &mut self.cluster.write().await.0;
+                                if attempt == 0 {
+                                    cluster
+                                        .get_region_by_id_with_buckets_allow_follower_handle(
+                                            region_id,
+                                            timeout,
+                                        )
+                                        .await?
+                                } else {
+                                    cluster
+                                        .get_region_by_id_with_buckets(region_id, timeout)
+                                        .await?
+                                }
+                            };
+                            region_and_buckets_from_response(resp, || Error::RegionNotFoundInResponse {
+                                region_id,
                             })
-                    })
-                },
-                |cluster| {
-                    Box::pin(async move {
-                        cluster
-                            .get_region_by_id_with_buckets(region_id, timeout)
-                            .await
-                            .and_then(|resp| {
-                                region_and_buckets_from_response(resp, || {
-                                    Error::RegionNotFoundInResponse { region_id }
-                                })
-                            })
-                    })
-                },
-            )
-            .await,
-        )
+                        }
+                    }
+                    .await;
+
+                    match stats.done(res) {
+                        Ok(r) => break 'retry Ok(r),
+                        Err(Error::Unimplemented) => break 'retry Err(Error::Unimplemented),
+                        Err(Error::GrpcAPI(status))
+                            if status.code() == tonic::Code::Unimplemented =>
+                        {
+                            break 'retry Err(Error::Unimplemented);
+                        }
+                        Err(e) => last_err = Err(e),
+                    }
+
+                    let mut reconnect_count = MAX_REQUEST_COUNT;
+                    while let Err(e) = self.reconnect(RECONNECT_INTERVAL_SEC).await {
+                        reconnect_count -= 1;
+                        if reconnect_count == 0 {
+                            break 'retry Err(e);
+                        }
+                        crate::util::sleep_backoff(Duration::from_secs(RECONNECT_INTERVAL_SEC))
+                            .await;
+                    }
+                }
+
+                match last_err {
+                    Ok(()) => Err(internal_err!("pd retry exhausted without error: {}", tag)),
+                    Err(e) => Err(e),
+                }
+            }
+        })
     }
 
     async fn scan_regions(
@@ -1039,6 +1582,11 @@ fn finish_pd_wait<T>(started_at: Instant, result: Result<T>) -> Result<T> {
     result
 }
 
+fn is_unimplemented_error(err: &Error) -> bool {
+    matches!(err, Error::Unimplemented)
+        || matches!(err, Error::GrpcAPI(status) if status.code() == tonic::Code::Unimplemented)
+}
+
 fn region_from_response(
     mut resp: pdpb::GetRegionResponse,
     err: impl FnOnce() -> Error,
@@ -1266,6 +1814,60 @@ mod test {
         resp.region = Some(region);
 
         let err = region_from_response(resp, || Error::Unimplemented)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing region_epoch"));
+    }
+
+    #[test]
+    fn test_query_region_task_result_maps_key_lookup() {
+        let mut region = metapb::Region::default();
+        region.id = 42;
+        region.region_epoch = Some(metapb::RegionEpoch::default());
+
+        let mut region_resp = pdpb::RegionResponse::default();
+        region_resp.region = Some(region);
+        region_resp.buckets = Some(metapb::Buckets::default());
+
+        let mut resp = pdpb::QueryRegionResponse::default();
+        resp.key_id_map = vec![42];
+        resp.regions_by_id.insert(42, region_resp);
+
+        let request = QueryRegionLookup::Key(vec![1]);
+        let (got_region, got_buckets) =
+            query_region_task_result(&request, &resp, QueryRegionResponseLookup::Key(0)).unwrap();
+        assert_eq!(got_region.id(), 42);
+        assert!(got_buckets.is_some());
+    }
+
+    #[test]
+    fn test_query_region_task_result_returns_not_found_for_missing_region() {
+        let mut resp = pdpb::QueryRegionResponse::default();
+        resp.key_id_map = vec![0];
+
+        let request = QueryRegionLookup::Key(vec![7]);
+        let err = query_region_task_result(&request, &resp, QueryRegionResponseLookup::Key(0))
+            .unwrap_err();
+        let Error::RegionForKeyNotFound { key } = err else {
+            panic!("expected RegionForKeyNotFound, got: {err:?}");
+        };
+        assert_eq!(key, vec![7]);
+    }
+
+    #[test]
+    fn test_query_region_task_result_missing_epoch_returns_error() {
+        let mut region = metapb::Region::default();
+        region.id = 42;
+
+        let mut region_resp = pdpb::RegionResponse::default();
+        region_resp.region = Some(region);
+
+        let mut resp = pdpb::QueryRegionResponse::default();
+        resp.key_id_map = vec![42];
+        resp.regions_by_id.insert(42, region_resp);
+
+        let request = QueryRegionLookup::Key(vec![1]);
+        let err = query_region_task_result(&request, &resp, QueryRegionResponseLookup::Key(0))
             .unwrap_err()
             .to_string();
         assert!(err.contains("missing region_epoch"));
