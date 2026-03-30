@@ -514,7 +514,10 @@ pub fn decode_key<'a>(
                     "invalid API V2 key {encoded:?}"
                 )));
             }
-            Ok((Some(&encoded[..KEYSPACE_PREFIX_LEN]), &encoded[KEYSPACE_PREFIX_LEN..]))
+            Ok((
+                Some(&encoded[..KEYSPACE_PREFIX_LEN]),
+                &encoded[KEYSPACE_PREFIX_LEN..],
+            ))
         }
         other => Err(crate::Error::StringError(format!(
             "unsupported api version {other:?}"

@@ -53,9 +53,9 @@ pub mod rangetask {
 
 /// Mirrors client-go `txnkv/txnutil`.
 pub mod txnutil {
+    pub use crate::transaction::TxnStatus;
     #[doc(inline)]
     pub use crate::CommandPriority as Priority;
-    pub use crate::transaction::TxnStatus;
 
     #[doc(alias = "PriorityNormal")]
     /// Normal priority for transaction commands.

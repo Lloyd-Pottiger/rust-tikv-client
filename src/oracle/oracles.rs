@@ -120,10 +120,7 @@ impl MockOracle {
         state.offset_ms = state.offset_ms.saturating_add(delta_ms);
     }
 
-    fn timestamp_from_state(
-        state: &mut MockOracleState,
-        now: SystemTime,
-    ) -> crate::Result<u64> {
+    fn timestamp_from_state(state: &mut MockOracleState, now: SystemTime) -> crate::Result<u64> {
         let now = apply_time_offset(now, state.offset_ms)?;
         let ts = super::ts_from_system_time(now)
             .map_err(|e| crate::Error::StringError(e.to_string()))?;
@@ -148,18 +145,23 @@ fn apply_time_offset(now: SystemTime, offset_ms: i64) -> crate::Result<SystemTim
     }
 
     if offset_ms > 0 {
-        let offset_ms = u64::try_from(offset_ms).map_err(|_| {
-            crate::Error::StringError("mock oracle offset is too large".to_owned())
-        })?;
+        let offset_ms = u64::try_from(offset_ms)
+            .map_err(|_| crate::Error::StringError("mock oracle offset is too large".to_owned()))?;
         now.checked_add(Duration::from_millis(offset_ms))
-            .ok_or_else(|| crate::Error::StringError("time overflow while applying offset".to_owned()))
+            .ok_or_else(|| {
+                crate::Error::StringError("time overflow while applying offset".to_owned())
+            })
     } else {
         let abs_ms = offset_ms
             .checked_abs()
             .and_then(|v| u64::try_from(v).ok())
-            .ok_or_else(|| crate::Error::StringError("mock oracle offset is too small".to_owned()))?;
+            .ok_or_else(|| {
+                crate::Error::StringError("mock oracle offset is too small".to_owned())
+            })?;
         now.checked_sub(Duration::from_millis(abs_ms))
-            .ok_or_else(|| crate::Error::StringError("time overflow while applying offset".to_owned()))
+            .ok_or_else(|| {
+                crate::Error::StringError("time overflow while applying offset".to_owned())
+            })
     }
 }
 
