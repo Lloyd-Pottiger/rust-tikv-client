@@ -1877,7 +1877,7 @@ mod tests {
 
     #[test]
     fn test_next_gen_constant_is_false() {
-        assert!(!NEXT_GEN);
+        assert!(!std::hint::black_box(NEXT_GEN));
     }
 
     #[test]

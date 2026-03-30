@@ -87,7 +87,6 @@ fn config_retry_module_region_error_helper_detects_fake_epoch_not_match() {
                 id: 42,
                 ..Default::default()
             }],
-            ..Default::default()
         }),
         ..Default::default()
     };
@@ -102,7 +101,6 @@ async fn config_retry_module_may_backoff_for_region_error_matches_client_go_sema
                 id: 7,
                 ..Default::default()
             }],
-            ..Default::default()
         }),
         ..Default::default()
     };

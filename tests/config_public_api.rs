@@ -38,7 +38,7 @@ fn config_module_exports_types_and_global_helpers() {
     assert_eq!(parsed.pd_addrs, vec!["127.0.0.1:2379"]);
     assert!(parsed.disable_gc);
     assert_eq!(parsed.keyspace_name.as_deref(), Some("test"));
-    assert!(!config::NEXT_GEN);
+    assert!(!std::hint::black_box(config::NEXT_GEN));
 
     let _: Option<config::GlobalConfigRestore> = None;
     let restore = config::update_global_config(|_cfg| {});

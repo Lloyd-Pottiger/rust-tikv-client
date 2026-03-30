@@ -722,7 +722,6 @@ mod tests {
                     id: 1,
                     ..Default::default()
                 }],
-                ..Default::default()
             }),
             ..Default::default()
         }));
@@ -740,7 +739,6 @@ mod tests {
                     id: 1,
                     ..Default::default()
                 }],
-                ..Default::default()
             }),
             ..Default::default()
         };
