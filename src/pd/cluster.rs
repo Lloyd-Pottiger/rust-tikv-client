@@ -185,6 +185,18 @@ fn remove_cached_channel(
     }
 }
 
+fn rotated_channel_indices(len: usize, next_index: usize, take: usize) -> (Vec<usize>, usize) {
+    if len == 0 || take == 0 {
+        return (Vec::new(), 0);
+    }
+
+    let start = next_index % len;
+    let take = take.min(len);
+    let indices = (0..take).map(|offset| (start + offset) % len).collect();
+    let next_index = (start + 1) % len;
+    (indices, next_index)
+}
+
 async fn send_pd_rpc<Message, Response, Rpc, RpcFuture>(
     message: Message,
     timeout: Duration,
@@ -224,17 +236,6 @@ impl Cluster {
         self.id
     }
 
-    fn next_router_channel(&mut self) -> Option<(String, Channel)> {
-        if self.router_channels.is_empty() {
-            return None;
-        }
-
-        let idx = self.next_router_channel % self.router_channels.len();
-        self.next_router_channel = (idx + 1) % self.router_channels.len();
-        let (addr, channel) = &self.router_channels[idx];
-        Some((addr.clone(), channel.clone()))
-    }
-
     fn next_follower_channel(&mut self) -> Option<(String, Channel)> {
         if self.follower_channels.is_empty() {
             return None;
@@ -251,7 +252,7 @@ impl Cluster {
         allow_router_service: bool,
         allow_follower_handle: bool,
     ) -> Vec<RegionMetaTransport> {
-        let mut transports = Vec::with_capacity(3);
+        let mut transports = Vec::with_capacity(self.router_channels.len() + 2);
         for kind in region_meta_transport_priority(
             allow_router_service,
             !self.router_channels.is_empty(),
@@ -260,8 +261,15 @@ impl Cluster {
         ) {
             match kind {
                 RegionMetaTransportKind::Router => {
-                    if let Some((addr, channel)) = self.next_router_channel() {
-                        transports.push(RegionMetaTransport::Router(addr, channel));
+                    let (indices, next_index) = rotated_channel_indices(
+                        self.router_channels.len(),
+                        self.next_router_channel,
+                        self.router_channels.len(),
+                    );
+                    self.next_router_channel = next_index;
+                    for index in indices {
+                        let (addr, channel) = &self.router_channels[index];
+                        transports.push(RegionMetaTransport::Router(addr.clone(), channel.clone()));
                     }
                 }
                 RegionMetaTransportKind::Follower => {
@@ -279,14 +287,21 @@ impl Cluster {
         &mut self,
         allow_router_service: bool,
     ) -> Vec<RegionMetaTransport> {
-        let mut transports = Vec::with_capacity(2);
+        let mut transports = Vec::with_capacity(self.router_channels.len() + 1);
         for kind in
             store_meta_transport_priority(allow_router_service, !self.router_channels.is_empty())
         {
             match kind {
                 RegionMetaTransportKind::Router => {
-                    if let Some((addr, channel)) = self.next_router_channel() {
-                        transports.push(RegionMetaTransport::Router(addr, channel));
+                    let (indices, next_index) = rotated_channel_indices(
+                        self.router_channels.len(),
+                        self.next_router_channel,
+                        self.router_channels.len(),
+                    );
+                    self.next_router_channel = next_index;
+                    for index in indices {
+                        let (addr, channel) = &self.router_channels[index];
+                        transports.push(RegionMetaTransport::Router(addr.clone(), channel.clone()));
                     }
                 }
                 RegionMetaTransportKind::Leader => transports.push(RegionMetaTransport::Leader),
@@ -2041,6 +2056,28 @@ mod tests {
             store_meta_transport_priority(false, true),
             vec![RegionMetaTransportKind::Leader]
         );
+    }
+
+    #[test]
+    fn test_rotated_channel_indices_returns_full_cycle_and_advances_start_once() {
+        let (indices, next_index) = rotated_channel_indices(3, 1, 3);
+        assert_eq!(indices, vec![1, 2, 0]);
+        assert_eq!(next_index, 2);
+
+        let (indices, next_index) = rotated_channel_indices(3, next_index, 3);
+        assert_eq!(indices, vec![2, 0, 1]);
+        assert_eq!(next_index, 0);
+    }
+
+    #[test]
+    fn test_rotated_channel_indices_clamps_take_count_and_handles_empty() {
+        let (indices, next_index) = rotated_channel_indices(2, 5, 4);
+        assert_eq!(indices, vec![1, 0]);
+        assert_eq!(next_index, 0);
+
+        let (indices, next_index) = rotated_channel_indices(0, 9, 1);
+        assert!(indices.is_empty());
+        assert_eq!(next_index, 0);
     }
 
     #[test]
