@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicI64;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -370,7 +371,25 @@ pub struct KvRpcClient {
     batch: Option<BatchCommandsClient>,
     forwarded_batch_clients: Option<ForwardedBatchCommandsClientPool>,
     max_concurrency_request_limit: Option<RateLimit>,
+    max_concurrency_request_limit_auto_adjust: bool,
+    max_concurrency_request_limit_feedback_seq_no: Arc<AtomicU64>,
     health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
+}
+
+/// Upper bound used when `Config.max_concurrency_request_limit == 0` enables auto-adjust mode.
+///
+/// We start with a generous limit (effectively "disabled") and tighten it once health feedback is
+/// observed.
+const AUTO_ADJUST_MAX_CONCURRENCY_REQUEST_LIMIT: usize = 10_000;
+
+fn auto_adjust_max_concurrency_request_limit_from_slow_score(slow_score: i32) -> usize {
+    // Health feedback slow score is in [1..=100] (1 = healthy, 100 = slow). Clamp defensively and
+    // apply a quadratic scale so the limiter tightens quickly near the slow threshold.
+    let score = slow_score.clamp(1, 100) as u64;
+    let factor = 101_u64 - score; // 1..=100
+    let scaled = factor * factor; // 1..=10000
+    let limit = (AUTO_ADJUST_MAX_CONCURRENCY_REQUEST_LIMIT as u64).saturating_mul(scaled) / 10_000;
+    usize::try_from(limit).unwrap_or(usize::MAX).max(1)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -511,13 +530,16 @@ impl KvRpcClient {
         copr_cache: Option<Arc<CoprocessorCache>>,
         health_feedback_observer: Arc<Mutex<Option<Weak<dyn HealthFeedbackObserver>>>>,
     ) -> KvRpcClient {
-        let max_concurrency_request_limit =
-            match max_concurrency_request_limit > 0 && max_concurrency_request_limit != i64::MAX {
-                true => usize::try_from(max_concurrency_request_limit)
-                    .ok()
-                    .map(RateLimit::new),
-                false => None,
-            };
+        let max_concurrency_request_limit_auto_adjust = max_concurrency_request_limit == 0;
+        let max_concurrency_request_limit = if max_concurrency_request_limit == 0 {
+            Some(RateLimit::new(AUTO_ADJUST_MAX_CONCURRENCY_REQUEST_LIMIT))
+        } else if max_concurrency_request_limit > 0 && max_concurrency_request_limit != i64::MAX {
+            usize::try_from(max_concurrency_request_limit)
+                .ok()
+                .map(RateLimit::new)
+        } else {
+            None
+        };
         let forwarded_batch_config = ForwardedBatchCommandsClientPool {
             rpc_client: rpc_client.clone(),
             max_outbound_requests: batch_rpc_max_batch_size,
@@ -563,6 +585,8 @@ impl KvRpcClient {
             batch,
             forwarded_batch_clients: enable_batch_rpc.then_some(forwarded_batch_config),
             max_concurrency_request_limit,
+            max_concurrency_request_limit_auto_adjust,
+            max_concurrency_request_limit_feedback_seq_no: Arc::new(AtomicU64::new(0)),
             health_feedback_observer,
         }
     }
@@ -586,6 +610,24 @@ impl KvRpcClient {
         let Some(feedback) = feedback else {
             return;
         };
+
+        if self.max_concurrency_request_limit_auto_adjust {
+            if let Some(limit) = &self.max_concurrency_request_limit {
+                // HealthFeedback may arrive out-of-order when multiple batch streams are active.
+                // Only apply the latest observed feedback sequence number.
+                let prev = self
+                    .max_concurrency_request_limit_feedback_seq_no
+                    .load(Ordering::Relaxed);
+                if feedback.feedback_seq_no > prev {
+                    self.max_concurrency_request_limit_feedback_seq_no
+                        .store(feedback.feedback_seq_no, Ordering::Relaxed);
+                    let desired = auto_adjust_max_concurrency_request_limit_from_slow_score(
+                        feedback.slow_score,
+                    );
+                    limit.set_capacity(desired);
+                }
+            }
+        }
 
         let observer = self
             .health_feedback_observer
@@ -1534,6 +1576,8 @@ mod tests {
             batch: Some(batch),
             forwarded_batch_clients: None,
             max_concurrency_request_limit: None,
+            max_concurrency_request_limit_auto_adjust: false,
+            max_concurrency_request_limit_feedback_seq_no: Arc::new(AtomicU64::new(0)),
             health_feedback_observer: Arc::new(Mutex::new(None)),
         };
 
@@ -1585,6 +1629,8 @@ mod tests {
             batch: Some(base_batch),
             forwarded_batch_clients: Some(forwarded_batch_clients),
             max_concurrency_request_limit: None,
+            max_concurrency_request_limit_auto_adjust: false,
+            max_concurrency_request_limit_feedback_seq_no: Arc::new(AtomicU64::new(0)),
             health_feedback_observer: Arc::new(Mutex::new(None)),
         };
 
@@ -2037,6 +2083,8 @@ mod tests {
             batch: None,
             forwarded_batch_clients: None,
             max_concurrency_request_limit: None,
+            max_concurrency_request_limit_auto_adjust: false,
+            max_concurrency_request_limit_feedback_seq_no: Arc::new(AtomicU64::new(0)),
             health_feedback_observer: Arc::new(Mutex::new(None)),
         };
 
@@ -4330,7 +4378,169 @@ mod tests {
             forwarded_batch_clients: None,
             health_feedback_observer: Arc::new(Mutex::new(None)),
             max_concurrency_request_limit: Some(RateLimit::new(1)),
+            max_concurrency_request_limit_auto_adjust: false,
+            max_concurrency_request_limit_feedback_seq_no: Arc::new(AtomicU64::new(0)),
         };
+
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let first_proceed = Arc::new(tokio::sync::Notify::new());
+        let first_request = BlockingRequest {
+            started: Arc::clone(&first_started),
+            proceed: Arc::clone(&first_proceed),
+        };
+
+        let second_started = Arc::new(tokio::sync::Notify::new());
+        let second_proceed = Arc::new(tokio::sync::Notify::new());
+        let second_request = BlockingRequest {
+            started: Arc::clone(&second_started),
+            proceed: Arc::clone(&second_proceed),
+        };
+
+        let dispatch_one = {
+            let client = client.clone();
+            async move {
+                client
+                    .dispatch(&first_request)
+                    .await
+                    .expect("dispatch one ok");
+            }
+        };
+
+        let dispatch_two = {
+            let client = client.clone();
+            async move {
+                client
+                    .dispatch(&second_request)
+                    .await
+                    .expect("dispatch two ok");
+            }
+        };
+
+        let first_task = tokio::spawn(dispatch_one);
+        first_started.notified().await;
+
+        let second_task = tokio::spawn(dispatch_two);
+        let second_wait =
+            tokio::time::timeout(Duration::from_millis(20), second_started.notified());
+        assert!(
+            second_wait.await.is_err(),
+            "second dispatch should be blocked"
+        );
+
+        first_proceed.notify_one();
+        first_task.await.expect("task one finished");
+
+        second_started.notified().await;
+        second_proceed.notify_one();
+        second_task.await.expect("task two finished");
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_auto_max_concurrency_request_limit_is_enabled_when_config_is_zero()
+    {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+
+        let client = KvRpcClient::new(
+            rpc_client,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            "test".to_owned(),
+            false,
+            128,
+            "basic".to_owned(),
+            0,
+            0,
+            Duration::ZERO,
+            0,
+            None,
+            Arc::new(Mutex::new(None)),
+        )
+        .await;
+
+        assert!(
+            client.max_concurrency_request_limit.is_some(),
+            "expected auto-adjust concurrency limit to be enabled when config value is 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_auto_max_concurrency_request_limit_tightens_on_health_feedback() {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+
+        let client = KvRpcClient::new(
+            rpc_client,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            "test".to_owned(),
+            false,
+            128,
+            "basic".to_owned(),
+            0,
+            0,
+            Duration::ZERO,
+            0,
+            None,
+            Arc::new(Mutex::new(None)),
+        )
+        .await;
+
+        let limit = client
+            .max_concurrency_request_limit
+            .as_ref()
+            .expect("auto-adjust should create a limiter")
+            .clone();
+        assert_eq!(limit.capacity(), AUTO_ADJUST_MAX_CONCURRENCY_REQUEST_LIMIT);
+
+        let feedback = kvrpcpb::HealthFeedback {
+            store_id: 1,
+            feedback_seq_no: 1,
+            slow_score: 100,
+            ..Default::default()
+        };
+        client.observe_health_feedback(Some(&feedback));
+
+        assert_eq!(limit.capacity(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_kv_rpc_client_auto_max_concurrency_request_limit_blocks_after_health_feedback() {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let rpc_client = TikvClient::new(channel);
+
+        let client = KvRpcClient {
+            rpc_client,
+            timeout: Duration::from_secs(1),
+            copr_req_timeout: Duration::from_secs(1),
+            copr_cache: None,
+            store_address: "test".to_owned(),
+            grpc_connection_state: None,
+            batch: None,
+            forwarded_batch_clients: None,
+            health_feedback_observer: Arc::new(Mutex::new(None)),
+            max_concurrency_request_limit: Some(RateLimit::new(
+                AUTO_ADJUST_MAX_CONCURRENCY_REQUEST_LIMIT,
+            )),
+            max_concurrency_request_limit_auto_adjust: true,
+            max_concurrency_request_limit_feedback_seq_no: Arc::new(AtomicU64::new(0)),
+        };
+
+        let feedback = kvrpcpb::HealthFeedback {
+            store_id: 1,
+            feedback_seq_no: 1,
+            slow_score: 100,
+            ..Default::default()
+        };
+        client.observe_health_feedback(Some(&feedback));
+        assert_eq!(
+            client
+                .max_concurrency_request_limit
+                .as_ref()
+                .expect("limiter")
+                .capacity(),
+            1
+        );
 
         let first_started = Arc::new(tokio::sync::Notify::new());
         let first_proceed = Arc::new(tokio::sync::Notify::new());

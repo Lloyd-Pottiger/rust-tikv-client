@@ -406,8 +406,11 @@ pub struct Config {
     /// This maps to client-go `TiKVClient.MaxConcurrencyRequestLimit` (default: `MaxInt64`).
     ///
     /// Notes:
-    /// - client-go uses `0` to mean "auto adjust by feedback". The Rust client does not yet
-    ///   implement feedback-based auto-adjust, so `0` is currently treated as disabled.
+    /// - client-go uses `0` to mean "auto adjust by feedback". The Rust client implements this
+    ///   using `BatchCommandsResponse.health_feedback.slow_score`: the per-connection limiter
+    ///   starts at a high value and is tightened as health feedback is observed.
+    /// - Health feedback is only produced when batch RPC is enabled; when unavailable, auto-adjust
+    ///   remains at the initial high limit.
     /// - `i64::MAX` (the default) disables the limiter, matching client-go `DefMaxConcurrencyRequestLimit`.
     pub max_concurrency_request_limit: i64,
     /// Whether to enable the replica selector v2.
@@ -1024,8 +1027,8 @@ impl Config {
     /// When set to a value greater than 0, the client will limit the number of in-flight requests
     /// per TiKV gRPC connection using a semaphore. Set to `i64::MAX` to disable (default).
     ///
-    /// Note: client-go uses `0` to mean "auto adjust by feedback". The Rust client does not yet
-    /// implement feedback-based auto-adjust, so `0` is currently treated as disabled.
+    /// Note: client-go uses `0` to mean "auto adjust by feedback". The Rust client implements this
+    /// using `BatchCommandsResponse.health_feedback.slow_score` (requires batch RPC).
     #[must_use]
     pub fn with_max_concurrency_request_limit(mut self, limit: i64) -> Self {
         self.max_concurrency_request_limit = limit;

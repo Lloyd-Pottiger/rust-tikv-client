@@ -1,7 +1,54 @@
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
+
+#[derive(Debug)]
+struct RateLimitInner {
+    desired_capacity: AtomicUsize,
+    pending_forget: AtomicUsize,
+    semaphore: Arc<Semaphore>,
+}
+
+impl RateLimitInner {
+    fn try_forget_one(&self) -> bool {
+        self.pending_forget
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                if pending == 0 {
+                    None
+                } else {
+                    Some(pending - 1)
+                }
+            })
+            .is_ok()
+    }
+
+    fn try_forget_available(&self) {
+        let pending = self.pending_forget.load(Ordering::Acquire);
+        if pending == 0 {
+            return;
+        }
+
+        let available = self.semaphore.available_permits();
+        let to_forget = pending.min(available);
+        if to_forget == 0 {
+            return;
+        }
+
+        let to_forget = u32::try_from(to_forget).unwrap_or(u32::MAX);
+        if let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_many_owned(to_forget) {
+            let to_forget_usize = usize::try_from(to_forget).unwrap_or(usize::MAX);
+            let _ =
+                self.pending_forget
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                        Some(pending.saturating_sub(to_forget_usize))
+                    });
+            permit.forget();
+        }
+    }
+}
 
 /// Concurrency limiter for async tasks.
 ///
@@ -9,28 +56,59 @@ use tokio::sync::Semaphore;
 /// instead of requiring an explicit `PutToken`.
 #[derive(Clone, Debug)]
 pub struct RateLimit {
-    capacity: usize,
-    semaphore: Arc<Semaphore>,
+    inner: Arc<RateLimitInner>,
 }
 
 impl RateLimit {
     /// Create a new limiter with `capacity` concurrent permits.
     pub fn new(capacity: usize) -> Self {
         RateLimit {
-            capacity,
-            semaphore: Arc::new(Semaphore::new(capacity)),
+            inner: Arc::new(RateLimitInner {
+                desired_capacity: AtomicUsize::new(capacity),
+                pending_forget: AtomicUsize::new(0),
+                semaphore: Arc::new(Semaphore::new(capacity)),
+            }),
         }
     }
 
     /// Return the configured capacity.
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.inner.desired_capacity.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_capacity(&self, capacity: usize) {
+        let desired = self.inner.desired_capacity.load(Ordering::Acquire);
+        let pending = self.inner.pending_forget.load(Ordering::Acquire);
+        if desired == capacity && pending == 0 {
+            return;
+        }
+
+        let actual = desired.saturating_add(pending);
+        if capacity > actual {
+            self.inner.semaphore.add_permits(capacity - actual);
+            self.inner.pending_forget.store(0, Ordering::Release);
+            self.inner
+                .desired_capacity
+                .store(capacity, Ordering::Release);
+            return;
+        }
+
+        self.inner
+            .desired_capacity
+            .store(capacity, Ordering::Release);
+        self.inner
+            .pending_forget
+            .store(actual - capacity, Ordering::Release);
+        self.inner.try_forget_available();
     }
 
     /// Try to acquire a permit without waiting.
     pub fn try_acquire(&self) -> Result<Option<RateLimitPermit>, RateLimitError> {
-        match self.semaphore.clone().try_acquire_owned() {
-            Ok(permit) => Ok(Some(RateLimitPermit { _permit: permit })),
+        match self.inner.semaphore.clone().try_acquire_owned() {
+            Ok(permit) => Ok(Some(RateLimitPermit {
+                inner: Arc::clone(&self.inner),
+                permit: Some(permit),
+            })),
             Err(tokio::sync::TryAcquireError::NoPermits) => Ok(None),
             Err(tokio::sync::TryAcquireError::Closed) => Err(RateLimitError::Closed),
         }
@@ -39,12 +117,16 @@ impl RateLimit {
     /// Acquire a permit, waiting if necessary.
     pub async fn acquire(&self) -> Result<RateLimitPermit, RateLimitError> {
         let permit = self
+            .inner
             .semaphore
             .clone()
             .acquire_owned()
             .await
             .map_err(|_| RateLimitError::Closed)?;
-        Ok(RateLimitPermit { _permit: permit })
+        Ok(RateLimitPermit {
+            inner: Arc::clone(&self.inner),
+            permit: Some(permit),
+        })
     }
 }
 
@@ -70,7 +152,23 @@ pub enum RateLimitError {
 /// Dropping the permit releases capacity back to the limiter.
 #[derive(Debug)]
 pub struct RateLimitPermit {
-    _permit: OwnedSemaphorePermit,
+    inner: Arc<RateLimitInner>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl Drop for RateLimitPermit {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+
+        if self.inner.try_forget_one() {
+            permit.forget();
+            return;
+        }
+
+        drop(permit);
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +215,36 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(1));
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_set_capacity_shrinks_and_grows() {
+        let limit = RateLimit::new(2);
+        let permit_1 = limit.acquire().await.unwrap();
+        let permit_2 = limit.acquire().await.unwrap();
+        assert_eq!(limit.capacity(), 2);
+
+        // Shrink while all permits are in use: capacity updates immediately, enforcement takes
+        // effect as permits are released.
+        limit.set_capacity(1);
+        assert_eq!(limit.capacity(), 1);
+
+        drop(permit_1);
+        assert!(limit.try_acquire().unwrap().is_none());
+
+        drop(permit_2);
+        let permit = limit.try_acquire().unwrap().expect("permit");
+        assert!(limit.try_acquire().unwrap().is_none());
+        drop(permit);
+
+        // Grow again.
+        limit.set_capacity(2);
+        assert_eq!(limit.capacity(), 2);
+        let permit_1 = limit.try_acquire().unwrap().expect("permit");
+        let permit_2 = limit.try_acquire().unwrap().expect("permit");
+        assert!(limit.try_acquire().unwrap().is_none());
+        drop(permit_1);
+        drop(permit_2);
     }
 
     #[test]
