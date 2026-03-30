@@ -211,6 +211,8 @@ fn crate_root_exports_pd_client_types() {
     let _: fn(&RawClient) -> Arc<PdRpcClient> = RawClient::pd_client;
     let _: fn(&TransactionClient) -> Arc<PdRpcClient> = TransactionClient::pd_client;
     let _: fn(&SyncTransactionClient) -> Arc<PdRpcClient> = SyncTransactionClient::pd_client;
+    let _: fn(&TransactionClient) -> Arc<PdRpcClient> = TransactionClient::get_pd_client;
+    let _: fn(&SyncTransactionClient) -> Arc<PdRpcClient> = SyncTransactionClient::get_pd_client;
     assert_pd_client_trait::<PdRpcClient>();
 }
 
@@ -224,6 +226,19 @@ fn crate_root_exports_region_cache_accessors() {
     let _: fn(&PdRpcClient) -> &RegionCache = PdRpcClient::region_cache;
     let _: fn(&TransactionClient) -> &RegionCache = TransactionClient::region_cache;
     let _: fn(&SyncTransactionClient) -> &RegionCache = SyncTransactionClient::region_cache;
+    let _: fn(&TransactionClient) -> &RegionCache = TransactionClient::get_region_cache;
+    let _: fn(&SyncTransactionClient) -> &RegionCache = SyncTransactionClient::get_region_cache;
+}
+
+#[test]
+fn crate_root_exports_lock_resolver_accessors() {
+    let _: fn(&TransactionClient) -> tikv_client::LockResolver = TransactionClient::lock_resolver;
+    let _: fn(&SyncTransactionClient) -> tikv_client::LockResolver =
+        SyncTransactionClient::lock_resolver;
+    let _: fn(&TransactionClient) -> tikv_client::LockResolver =
+        TransactionClient::get_lock_resolver;
+    let _: fn(&SyncTransactionClient) -> tikv_client::LockResolver =
+        SyncTransactionClient::get_lock_resolver;
 }
 
 #[test]

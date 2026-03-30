@@ -340,6 +340,12 @@ impl Client {
         self.pd.region_cache()
     }
 
+    #[doc(alias = "GetRegionCache")]
+    /// Return the shared region cache used by this transactional client.
+    pub fn get_region_cache(&self) -> &crate::RegionCache {
+        self.region_cache()
+    }
+
     /// Return the shared PD HTTP client, if this client was configured with one.
     pub fn pd_http_client(&self) -> Option<&reqwest::Client> {
         self.pd.pd_http_client()
@@ -395,6 +401,13 @@ impl<PdC: PdClient> Client<PdC> {
     #[must_use]
     pub fn pd_client(&self) -> Arc<PdC> {
         self.pd.clone()
+    }
+
+    #[doc(alias = "GetPDClient")]
+    /// Returns a handle to the underlying PD client.
+    #[must_use]
+    pub fn get_pd_client(&self) -> Arc<PdC> {
+        self.pd_client()
     }
 
     fn canonicalize_txn_scope(txn_scope: &str) -> String {
@@ -497,6 +510,13 @@ impl<PdC: PdClient> Client<PdC> {
     #[must_use]
     pub fn lock_resolver(&self) -> LockResolver {
         LockResolver::new(self.resolve_locks_ctx.clone())
+    }
+
+    #[doc(alias = "GetLockResolver")]
+    /// Returns a [`LockResolver`] handle associated with this client.
+    #[must_use]
+    pub fn get_lock_resolver(&self) -> LockResolver {
+        self.lock_resolver()
     }
 
     /// Returns a [`BoundLockResolver`] handle associated with this client.

@@ -145,6 +145,13 @@ impl SyncTransactionClient {
         self.client.pd_client()
     }
 
+    #[doc(alias = "GetPDClient")]
+    /// Returns a handle to the underlying PD RPC client.
+    #[must_use]
+    pub fn get_pd_client(&self) -> Arc<crate::PdRpcClient> {
+        self.pd_client()
+    }
+
     /// Returns whether this client has been explicitly closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -157,6 +164,13 @@ impl SyncTransactionClient {
     #[must_use]
     pub fn region_cache(&self) -> &crate::RegionCache {
         self.client.region_cache()
+    }
+
+    #[doc(alias = "GetRegionCache")]
+    /// Returns the shared region cache used by this client.
+    #[must_use]
+    pub fn get_region_cache(&self) -> &crate::RegionCache {
+        self.region_cache()
     }
 
     /// Returns the shared PD HTTP client, if this client was configured with one.
@@ -196,6 +210,13 @@ impl SyncTransactionClient {
     #[must_use]
     pub fn lock_resolver(&self) -> crate::transaction::LockResolver {
         self.client.lock_resolver()
+    }
+
+    #[doc(alias = "GetLockResolver")]
+    /// Returns a [`LockResolver`](crate::transaction::LockResolver) handle associated with this client.
+    #[must_use]
+    pub fn get_lock_resolver(&self) -> crate::transaction::LockResolver {
+        self.lock_resolver()
     }
 
     /// Returns a [`BoundLockResolver`](crate::transaction::BoundLockResolver) handle associated with this client.
