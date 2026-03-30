@@ -24,6 +24,10 @@ fn crate_root_exports_request_context_types() {
     let _ = CommandPriority::High;
     let _ = IsolationLevel::RcCheckTs;
     let _ = DiskFullOpt::AllowedOnAlreadyFull;
+    let pb: tikv_client::proto::kvrpcpb::CommandPri = CommandPriority::High.into();
+    assert_eq!(pb, tikv_client::proto::kvrpcpb::CommandPri::High);
+    let rust: CommandPriority = pb.into();
+    assert_eq!(rust, CommandPriority::High);
     let flags = TraceControlFlags::default()
         .with(TraceControlFlags::IMMEDIATE_LOG)
         .with(TraceControlFlags::TIKV_CATEGORY_REQUEST)

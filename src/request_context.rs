@@ -47,6 +47,26 @@ pub enum CommandPriority {
     High = 2,
 }
 
+impl From<CommandPriority> for crate::proto::kvrpcpb::CommandPri {
+    fn from(priority: CommandPriority) -> Self {
+        match priority {
+            CommandPriority::Normal => crate::proto::kvrpcpb::CommandPri::Normal,
+            CommandPriority::Low => crate::proto::kvrpcpb::CommandPri::Low,
+            CommandPriority::High => crate::proto::kvrpcpb::CommandPri::High,
+        }
+    }
+}
+
+impl From<crate::proto::kvrpcpb::CommandPri> for CommandPriority {
+    fn from(priority: crate::proto::kvrpcpb::CommandPri) -> Self {
+        match priority {
+            crate::proto::kvrpcpb::CommandPri::Normal => CommandPriority::Normal,
+            crate::proto::kvrpcpb::CommandPri::Low => CommandPriority::Low,
+            crate::proto::kvrpcpb::CommandPri::High => CommandPriority::High,
+        }
+    }
+}
+
 /// Transaction isolation level for reads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(i32)]
