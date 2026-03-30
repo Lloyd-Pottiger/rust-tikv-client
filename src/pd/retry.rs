@@ -272,6 +272,10 @@ impl<Cl> RetryClient<Cl> {
 
 #[cfg(test)]
 impl<Cl> RetryClient<Cl> {
+    /// Build a retrying PD client around a preconstructed test cluster implementation.
+    ///
+    /// This keeps the production reconnect/backoff wrapper intact while letting unit tests inject
+    /// a mocked `Cluster` transport and deterministic timeout/cluster-id values.
     pub fn new_with_cluster(
         security_mgr: Arc<SecurityManager>,
         timeout: Duration,

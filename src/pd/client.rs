@@ -71,6 +71,10 @@ pub(crate) const BROADCAST_TXN_STATUS_MAX_CONCURRENCY: usize = 10;
 /// TiKV tells PD using its internal representation, whatever the encoding is.
 /// So if we use transactional APIs, keys in PD are encoded and PD does not know about the encoding stuff.
 #[async_trait]
+/// High-level PD facade used by the request planner, region cache, and transaction clients.
+///
+/// Implementations expose decoded region metadata and timestamps while hiding reconnect logic,
+/// follower/router transport selection, and keyspace codec details from callers.
 pub trait PdClient: Send + Sync + 'static {
     /// KV client type produced when the PD client maps a region/store to a concrete TiKV
     /// connection.
@@ -84,10 +88,14 @@ pub trait PdClient: Send + Sync + 'static {
     /// Closes the client and releases best-effort cached resources.
     async fn close(&self) {}
 
-    /// In transactional API, `region` is decoded (keys in raw format).
+    /// Convert decoded region metadata into a concrete TiKV store connection.
+    ///
+    /// In transactional API mode, `region` already uses decoded user keys.
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore>;
 
-    /// In transactional API, the key and returned region are both decoded (keys in raw format).
+    /// Load the decoded region containing `key`.
+    ///
+    /// In transactional API mode, both the input key and returned region use decoded user keys.
     async fn region_for_key(&self, key: &Key) -> Result<RegionWithLeader>;
 
     /// Locate the region that contains the last key strictly less than `key`.
@@ -100,7 +108,9 @@ pub trait PdClient: Send + Sync + 'static {
         Err(Error::Unimplemented)
     }
 
-    /// In transactional API, the returned region is decoded (keys in raw format)
+    /// Load decoded region metadata for a region id.
+    ///
+    /// In transactional API mode, the returned region uses decoded user keys.
     async fn region_for_id(&self, id: RegionId) -> Result<RegionWithLeader>;
 
     /// Scan region metadata starting from `start_key`.
@@ -846,7 +856,7 @@ where
     /// Locate the region containing `key`.
     ///
     /// Unlike [`RegionCache::locate_key`], this helper automatically applies PD key encoding and
-    /// decoding for clients configured with API V2 codecs.
+    /// decoding for clients configured with API V2 codecs before consulting the shared cache.
     #[doc(alias = "LocateKey")]
     pub async fn locate_key(&self, key: Key) -> Result<KeyLocation> {
         let enable_codec = self.enable_codec;
@@ -860,7 +870,8 @@ where
 
     /// Try locating the region containing `key` from the local cache only.
     ///
-    /// Returns `Ok(None)` if the region is missing or expired. No PD request is issued.
+    /// Returns `Ok(None)` if the region is missing or expired. No PD request is issued, making
+    /// this suitable for speculative cache probes on hot paths.
     #[doc(alias = "TryLocateKey")]
     pub async fn try_locate_key(&self, key: Key) -> Result<Option<KeyLocation>> {
         let enable_codec = self.enable_codec;
@@ -876,7 +887,8 @@ where
     /// Locate the region containing the last key strictly less than `key`.
     ///
     /// Unlike [`RegionCache::locate_end_key`], this helper automatically applies PD key encoding
-    /// and decoding for clients configured with API V2 codecs.
+    /// and decoding for clients configured with API V2 codecs. This is the PD-backed primitive
+    /// used by reverse scans once the caller has chosen an explicit upper bound.
     #[doc(alias = "LocateEndKey")]
     pub async fn locate_end_key(&self, key: Key) -> Result<KeyLocation> {
         let enable_codec = self.enable_codec;
@@ -891,7 +903,7 @@ where
     /// Locate a region by region id and return its range metadata.
     ///
     /// Unlike [`RegionCache::locate_region_by_id`], this helper automatically decodes region keys
-    /// for clients configured with API V2 codecs.
+    /// for clients configured with API V2 codecs and may satisfy the lookup from the shared cache.
     #[doc(alias = "LocateRegionByID")]
     pub async fn locate_region_by_id(&self, id: RegionId) -> Result<KeyLocation> {
         self.region_cache
@@ -903,7 +915,8 @@ where
     /// Load a region by region id directly from PD without updating the local cache.
     ///
     /// Unlike [`RegionCache::locate_region_by_id_from_pd`], this helper automatically decodes
-    /// region keys for clients configured with API V2 codecs.
+    /// region keys for clients configured with API V2 codecs. Prefer this when the caller needs a
+    /// fresh PD answer instead of a potentially warm cache hit.
     #[doc(alias = "LocateRegionByIDFromPD")]
     pub async fn locate_region_by_id_from_pd(&self, id: RegionId) -> Result<KeyLocation> {
         self.region_cache
@@ -915,7 +928,8 @@ where
     /// Locate the consecutive regions covering `[start_key, end_key)`.
     ///
     /// Unlike [`RegionCache::locate_key_range`], this helper automatically applies PD key
-    /// encoding/decoding for clients configured with API V2 codecs.
+    /// encoding/decoding for clients configured with API V2 codecs and preserves the caller's
+    /// range order in the returned `KeyLocation`s.
     #[doc(alias = "LocateKeyRange")]
     pub async fn locate_key_range(&self, start_key: Key, end_key: Key) -> Result<Vec<KeyLocation>> {
         self.locate_key_range_with_opts(start_key, end_key, std::iter::empty())
@@ -923,6 +937,10 @@ where
     }
 
     /// Locate the consecutive regions covering `[start_key, end_key)` with extra locate options.
+    ///
+    /// `opts` is forwarded to the underlying [`RegionCache`] lookup before any decoded keys are
+    /// returned to the caller, so options such as bucket loading and leader filtering apply to the
+    /// PD-facing request.
     pub async fn locate_key_range_with_opts<I>(
         &self,
         start_key: Key,
@@ -955,7 +973,8 @@ where
     /// Locate multiple key ranges and merge adjacent duplicates from the same region.
     ///
     /// Unlike [`RegionCache::batch_locate_key_ranges`], this helper automatically applies PD key
-    /// encoding/decoding for clients configured with API V2 codecs.
+    /// encoding/decoding for clients configured with API V2 codecs. Adjacent input ranges that map
+    /// to the same region may collapse into a single returned `KeyLocation`.
     #[doc(alias = "BatchLocateKeyRanges")]
     pub async fn batch_locate_key_ranges(
         &self,
@@ -967,6 +986,10 @@ where
 
     /// Locate multiple key ranges and merge adjacent duplicates from the same region, with extra
     /// locate options applied before decoding keys back to the caller's API version.
+    ///
+    /// This is the most direct wrapper around `RegionCache::batch_locate_key_ranges_with_opts`
+    /// for API V2 callers: all input ranges are encoded first, then the merged PD/cache results
+    /// are decoded before being returned.
     pub async fn batch_locate_key_ranges_with_opts<I>(
         &self,
         ranges: Vec<crate::kv::KeyRange>,
