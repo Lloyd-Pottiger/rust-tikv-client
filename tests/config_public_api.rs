@@ -263,6 +263,34 @@ fn security_materialization_accepts_valid_pem_contents() {
 }
 
 #[test]
+fn security_materialization_rejects_missing_ca_for_ca_only_tls() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+    let missing = std::env::temp_dir().join(format!("tikv-client-missing-ca-only-{nonce}.pem"));
+
+    let mut config = config::Config::default();
+    config.ca_path = Some(missing.clone());
+    let err = match config.security_manager() {
+        Ok(_) => panic!("ca-only TLS should validate and reject a missing CA file"),
+        Err(err) => err,
+    };
+    assert!(!err.to_string().is_empty());
+
+    let err = match (config::Security {
+        ca_path: Some(missing),
+        ..config::Security::default()
+    })
+    .security_manager()
+    {
+        Ok(_) => panic!("standalone ca-only TLS should reject a missing CA file"),
+        Err(err) => err,
+    };
+    assert!(!err.to_string().is_empty());
+}
+
+#[test]
 fn security_materialization_rejects_invalid_pem_contents() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ca = dir.path().join("ca.pem");

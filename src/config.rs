@@ -277,8 +277,9 @@ impl Security {
 
     /// Build a [`crate::SecurityManager`] from these security settings.
     ///
-    /// When TLS paths are configured, this eagerly validates that the referenced PEM files can be
-    /// parsed before returning the manager.
+    /// When a CA path is configured, this eagerly validates that the referenced PEM files can be
+    /// parsed before returning the manager. Client-certificate authentication is enabled only when
+    /// both certificate and key paths are present.
     pub fn security_manager(&self) -> crate::Result<crate::SecurityManager> {
         self.apply_to_config(Config::default()).security_manager()
     }
@@ -835,16 +836,19 @@ impl Config {
     ///
     /// This is the Rust equivalent of materializing client-go `config.Security`
     /// into a TLS-enabled client configuration. When the config does not contain
-    /// a complete CA/cert/key triple, the returned manager uses insecure
-    /// defaults, matching the client’s current connection behavior.
+    /// a CA path, the returned manager uses insecure defaults, matching the
+    /// client’s current connection behavior. Client-certificate authentication
+    /// is enabled only when both certificate and key paths are present.
     ///
-    /// When a complete TLS triple is present, this eagerly validates that the referenced PEM files
-    /// can be parsed before returning the manager.
+    /// When TLS paths are present, this eagerly validates that the referenced PEM files can be
+    /// parsed before returning the manager.
     pub fn security_manager(&self) -> crate::Result<crate::SecurityManager> {
-        let manager = if let (Some(ca_path), Some(cert_path), Some(key_path)) =
-            (&self.ca_path, &self.cert_path, &self.key_path)
-        {
-            crate::SecurityManager::load(ca_path, cert_path, key_path)?
+        let manager = if let Some(ca_path) = &self.ca_path {
+            crate::SecurityManager::load_parts(
+                ca_path,
+                self.cert_path.as_deref(),
+                self.key_path.as_deref(),
+            )?
         } else {
             crate::SecurityManager::default()
         };

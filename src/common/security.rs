@@ -141,23 +141,27 @@ impl Default for SecurityManager {
 }
 
 impl SecurityManager {
-    /// Load TLS configuration from files.
-    pub fn load(
-        ca_path: impl AsRef<Path>,
-        cert_path: impl AsRef<Path>,
-        key_path: impl Into<PathBuf>,
+    pub(crate) fn load_parts(
+        ca_path: &Path,
+        cert_path: Option<&Path>,
+        key_path: Option<&Path>,
     ) -> Result<SecurityManager> {
-        let key_path = key_path.into();
-        let ca = load_pem_file("ca", ca_path.as_ref())?;
-        validate_pem_certificates("ca", ca_path.as_ref(), &ca)?;
-        let cert = load_pem_file("certificate", cert_path.as_ref())?;
-        validate_pem_certificates("certificate", cert_path.as_ref(), &cert)?;
-        let key = load_pem_file("private key", &key_path)?;
-        validate_pem_private_key(&key_path, &key)?;
+        let ca = load_pem_file("ca", ca_path)?;
+        validate_pem_certificates("ca", ca_path, &ca)?;
+        let (cert, key) = match (cert_path, key_path) {
+            (Some(cert_path), Some(key_path)) => {
+                let cert = load_pem_file("certificate", cert_path)?;
+                validate_pem_certificates("certificate", cert_path, &cert)?;
+                let key = load_pem_file("private key", key_path)?;
+                validate_pem_private_key(key_path, &key)?;
+                (cert, key_path.to_path_buf())
+            }
+            _ => (Vec::new(), PathBuf::new()),
+        };
         Ok(SecurityManager {
             ca,
             cert,
-            key: key_path,
+            key,
             grpc_keepalive_time: DEFAULT_GRPC_KEEPALIVE_TIME,
             grpc_keepalive_timeout: DEFAULT_GRPC_KEEPALIVE_TIMEOUT,
             grpc_initial_window_size: DEFAULT_GRPC_INITIAL_WINDOW_SIZE,
@@ -166,6 +170,16 @@ impl SecurityManager {
             grpc_custom_dns_server: None,
             grpc_custom_dns_domain: None,
         })
+    }
+
+    /// Load TLS configuration from files.
+    pub fn load(
+        ca_path: impl AsRef<Path>,
+        cert_path: impl AsRef<Path>,
+        key_path: impl Into<PathBuf>,
+    ) -> Result<SecurityManager> {
+        let key_path = key_path.into();
+        Self::load_parts(ca_path.as_ref(), Some(cert_path.as_ref()), Some(&key_path))
     }
 
     pub(crate) fn with_grpc_keepalive(mut self, time: Duration, timeout: Duration) -> Self {
@@ -246,12 +260,15 @@ impl SecurityManager {
     async fn tls_channel(&self, addr: &str) -> Result<Endpoint> {
         let addr = "https://".to_string() + addr;
         let builder = self.endpoint(addr.to_string())?;
-        let tls = ClientTlsConfig::new()
-            .ca_certificate(Certificate::from_pem(&self.ca))
-            .identity(Identity::from_pem(
+        let tls = ClientTlsConfig::new().ca_certificate(Certificate::from_pem(&self.ca));
+        let tls = if self.cert.is_empty() || self.key.as_os_str().is_empty() {
+            tls
+        } else {
+            tls.identity(Identity::from_pem(
                 &self.cert,
                 load_pem_file("private key", &self.key)?,
-            ));
+            ))
+        };
         let builder = builder.tls_config(tls)?;
         Ok(builder)
     }
@@ -444,6 +461,19 @@ mod tests {
             Err(err) => err,
         };
         assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_security_manager_load_parts_supports_ca_only_tls() {
+        let temp = tempfile::tempdir().unwrap();
+        let ca_path = temp.path().join("ca");
+        let cert = include_bytes!("../../tests/fixtures/security-test-cert.pem");
+        File::create(&ca_path).unwrap().write_all(cert).unwrap();
+
+        let mgr = SecurityManager::load_parts(&ca_path, None, None).unwrap();
+        assert_eq!(mgr.ca, cert);
+        assert!(mgr.cert.is_empty());
+        assert!(mgr.key.as_os_str().is_empty());
     }
 
     #[test]
