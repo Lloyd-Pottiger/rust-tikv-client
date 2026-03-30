@@ -241,6 +241,28 @@ fn security_materialization_helpers_are_publicly_usable() {
 }
 
 #[test]
+fn security_materialization_accepts_valid_pem_contents() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ca = dir.path().join("ca.pem");
+    let cert = dir.path().join("cert.pem");
+    let key = dir.path().join("key.pem");
+
+    let cert_pem = include_bytes!("fixtures/security-test-cert.pem");
+    let key_pem = include_bytes!("fixtures/security-test-key.pem");
+    std::fs::write(&ca, cert_pem).expect("write ca");
+    std::fs::write(&cert, cert_pem).expect("write cert");
+    std::fs::write(&key, key_pem).expect("write key");
+
+    config::Config::default()
+        .with_security(&ca, &cert, &key)
+        .security_manager()
+        .expect("valid PEM should materialize a TLS security manager");
+    config::Security::new(&ca, &cert, &key, std::iter::empty::<String>())
+        .security_manager()
+        .expect("standalone security helper should materialize valid PEM too");
+}
+
+#[test]
 fn security_materialization_rejects_invalid_pem_contents() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ca = dir.path().join("ca.pem");
