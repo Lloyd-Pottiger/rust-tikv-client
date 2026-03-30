@@ -310,6 +310,10 @@ impl Buffer {
         F: FnOnce(BoundRange, u32) -> Fut,
         Fut: Future<Output = Result<Vec<KvPair>>>,
     {
+        if limit == 0 {
+            return Ok(Vec::<KvPair>::new().into_iter());
+        }
+
         // read from local buffer
         let mutation_range = self.entry_map.range(range.clone());
 
@@ -779,6 +783,8 @@ enum MutationValue {
 mod tests {
     use futures::executor::block_on;
     use futures::future::ready;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     use super::*;
     use crate::internal_err;
@@ -987,6 +993,23 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(res.is_empty());
+    }
+
+    #[test]
+    fn scan_and_fetch_zero_limit_skips_remote_fetch() {
+        let mut buffer = Buffer::new(false);
+        buffer.put(vec![2].into(), b"local-2".to_vec());
+        let remote_calls = AtomicUsize::new(0);
+
+        let res = block_on(buffer.scan_and_fetch((..).into(), 0, true, true, |_, _| {
+            remote_calls.fetch_add(1, Ordering::SeqCst);
+            ready(Ok(vec![KvPair::new(vec![1], b"remote-1".to_vec())]))
+        }))
+        .unwrap()
+        .collect::<Vec<_>>();
+
+        assert!(res.is_empty());
+        assert_eq!(remote_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
