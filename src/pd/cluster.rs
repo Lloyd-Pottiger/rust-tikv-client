@@ -1754,6 +1754,44 @@ impl PdResponse for keyspacepb::LoadKeyspaceResponse {
 mod tests {
     use super::*;
 
+    fn lazy_channel(port: u16) -> Channel {
+        Channel::from_shared(format!("http://127.0.0.1:{port}"))
+            .unwrap()
+            .connect_lazy()
+    }
+
+    fn test_cluster(
+        router_addrs: &[&str],
+        next_router_channel: usize,
+        follower_addrs: &[&str],
+        next_follower_channel: usize,
+    ) -> Cluster {
+        let leader_channel = lazy_channel(9000);
+        let client = pdpb::pd_client::PdClient::new(leader_channel.clone());
+        let keyspace_client = keyspacepb::keyspace_client::KeyspaceClient::new(leader_channel);
+        let tso = TimestampOracle::new(42, &client, 1).unwrap();
+
+        Cluster {
+            id: 42,
+            client,
+            router_channels: router_addrs
+                .iter()
+                .enumerate()
+                .map(|(idx, addr)| ((*addr).to_owned(), lazy_channel(9100 + idx as u16)))
+                .collect(),
+            next_router_channel,
+            follower_channels: follower_addrs
+                .iter()
+                .enumerate()
+                .map(|(idx, addr)| ((*addr).to_owned(), lazy_channel(9200 + idx as u16)))
+                .collect(),
+            next_follower_channel,
+            keyspace_client,
+            members: pdpb::GetMembersResponse::default(),
+            tso,
+        }
+    }
+
     #[derive(Debug, Default)]
     struct TestResponse {
         header: Option<pdpb::ResponseHeader>,
@@ -2078,6 +2116,68 @@ mod tests {
         let (indices, next_index) = rotated_channel_indices(0, 9, 1);
         assert!(indices.is_empty());
         assert_eq!(next_index, 0);
+    }
+
+    #[tokio::test]
+    async fn test_next_region_meta_transports_tries_all_routers_before_follower_and_leader() {
+        let mut cluster = test_cluster(
+            &["router-a:2379", "router-b:2379", "router-c:2379"],
+            1,
+            &["follower-a:2379"],
+            0,
+        );
+
+        let transports = cluster.next_region_meta_transports(true, true);
+
+        assert_eq!(
+            transports
+                .iter()
+                .map(|transport| match transport {
+                    RegionMetaTransport::Router(addr, _) => format!("router:{addr}"),
+                    RegionMetaTransport::Follower(addr, _) => format!("follower:{addr}"),
+                    RegionMetaTransport::Leader => "leader".to_owned(),
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                "router:router-b:2379".to_owned(),
+                "router:router-c:2379".to_owned(),
+                "router:router-a:2379".to_owned(),
+                "follower:follower-a:2379".to_owned(),
+                "leader".to_owned(),
+            ]
+        );
+        assert_eq!(cluster.next_router_channel, 2);
+        assert_eq!(cluster.next_follower_channel, 0);
+    }
+
+    #[tokio::test]
+    async fn test_next_store_meta_transports_tries_all_routers_before_leader() {
+        let mut cluster = test_cluster(
+            &["router-a:2379", "router-b:2379", "router-c:2379"],
+            1,
+            &[],
+            0,
+        );
+
+        let transports = cluster.next_store_meta_transports(true);
+
+        assert_eq!(
+            transports
+                .iter()
+                .map(|transport| match transport {
+                    RegionMetaTransport::Router(addr, _) => format!("router:{addr}"),
+                    RegionMetaTransport::Follower(addr, _) => format!("follower:{addr}"),
+                    RegionMetaTransport::Leader => "leader".to_owned(),
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                "router:router-b:2379".to_owned(),
+                "router:router-c:2379".to_owned(),
+                "router:router-a:2379".to_owned(),
+                "leader".to_owned(),
+            ]
+        );
+        assert_eq!(cluster.next_router_channel, 2);
     }
 
     #[test]
