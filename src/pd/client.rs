@@ -1137,6 +1137,11 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdRpcClient<KvC, Cluster> {
             }
         });
     }
+
+    pub(crate) async fn refresh_router_service_membership_once(&self) -> Result<()> {
+        self.ensure_open()?;
+        self.pd.refresh_router_service_membership_once().await
+    }
 }
 
 impl<KvC: KvConnect + Send + Sync + 'static> HealthFeedbackObserver for PdRpcClient<KvC, Cluster> {

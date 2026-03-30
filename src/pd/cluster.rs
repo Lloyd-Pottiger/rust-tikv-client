@@ -236,6 +236,15 @@ impl Cluster {
         self.id
     }
 
+    pub(crate) fn clone_members(&self) -> pdpb::GetMembersResponse {
+        self.members.clone()
+    }
+
+    pub(crate) fn set_router_channels(&mut self, channels: Vec<(String, Channel)>) {
+        self.router_channels = channels;
+        self.next_router_channel = 0;
+    }
+
     fn next_follower_channel(&mut self) -> Option<(String, Channel)> {
         if self.follower_channels.is_empty() {
             return None;
@@ -1160,32 +1169,18 @@ impl Connection {
             .await
     }
 
-    async fn connect_router_channels(
+    pub(crate) async fn try_connect_router_channels(
         &self,
         members: &pdpb::GetMembersResponse,
         cluster_id: u64,
         timeout: Duration,
-    ) -> Vec<(String, Channel)> {
-        let router_addrs = match self
+    ) -> Result<Vec<(String, Channel)>> {
+        let router_addrs = self
             .discover_router_service_addrs(members, cluster_id, timeout)
-            .await
-        {
-            Ok(addrs) => addrs,
-            Err(err) => {
-                warn!(
-                    "failed to discover router service endpoints, leader/follower fallback stays active: {:?}",
-                    err
-                );
-                return Vec::new();
-            }
-        };
+            .await?;
 
         let mut router_channels = Vec::new();
-        let mut seen = HashSet::new();
         for addr in router_addrs {
-            if !seen.insert(addr.clone()) {
-                continue;
-            }
             match self.connect_channel(&addr).await {
                 Ok(channel) => router_channels.push((addr, channel)),
                 Err(err) => warn!(
@@ -1195,7 +1190,28 @@ impl Connection {
             }
         }
 
-        router_channels
+        Ok(router_channels)
+    }
+
+    async fn connect_router_channels(
+        &self,
+        members: &pdpb::GetMembersResponse,
+        cluster_id: u64,
+        timeout: Duration,
+    ) -> Vec<(String, Channel)> {
+        match self
+            .try_connect_router_channels(members, cluster_id, timeout)
+            .await
+        {
+            Ok(channels) => channels,
+            Err(err) => {
+                warn!(
+                    "failed to discover router service endpoints, leader/follower fallback stays active: {:?}",
+                    err
+                );
+                Vec::new()
+            }
+        }
     }
 
     async fn connect_follower_channels(

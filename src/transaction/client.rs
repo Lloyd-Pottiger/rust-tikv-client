@@ -305,6 +305,10 @@ impl Client {
             store_liveness_update_interval,
             store_liveness_timeout,
         );
+        crate::pd::spawn_router_service_membership_refresher(
+            pd.clone(),
+            crate::pd::ROUTER_SERVICE_MEMBER_UPDATE_INTERVAL,
+        );
         if enable_region_cache_preload {
             let (start_key, end_key) = Keyspace::ApiV2NoPrefix.prefix_range(KeyMode::Txn);
             pd.clone().spawn_region_cache_preload(start_key, end_key);

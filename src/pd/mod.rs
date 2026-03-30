@@ -2,12 +2,15 @@ mod client;
 mod cluster;
 mod health_feedback;
 mod retry;
+mod router_refresh;
 mod store_liveness;
 mod timestamp;
 
 pub use self::client::PdClient;
 pub use self::client::PdRpcClient;
 pub(crate) use self::health_feedback::spawn_health_feedback_updater;
+pub(crate) use self::router_refresh::spawn_router_service_membership_refresher;
+pub(crate) use self::router_refresh::ROUTER_SERVICE_MEMBER_UPDATE_INTERVAL;
 pub(crate) use self::store_liveness::spawn_store_liveness_updater;
 
 pub(crate) trait HealthFeedbackObserver: Send + Sync {

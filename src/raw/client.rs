@@ -137,6 +137,10 @@ impl Client<PdRpcClient> {
             store_liveness_update_interval,
             store_liveness_timeout,
         );
+        crate::pd::spawn_router_service_membership_refresher(
+            rpc.clone(),
+            crate::pd::ROUTER_SERVICE_MEMBER_UPDATE_INTERVAL,
+        );
         let keyspace = match config.keyspace {
             Some(name) => {
                 let keyspace = rpc.load_keyspace(&name).await?;

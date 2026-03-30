@@ -431,6 +431,23 @@ impl RetryClient<Cluster> {
             tso_max_pending_count,
         })
     }
+
+    pub(crate) async fn refresh_router_service_membership_once(&self) -> Result<()> {
+        let (members, cluster_id) = {
+            let guard = self.cluster.read().await;
+            let cluster = &guard.0;
+            (cluster.clone_members(), cluster.cluster_id())
+        };
+
+        let channels = self
+            .connection
+            .try_connect_router_channels(&members, cluster_id, self.timeout)
+            .await?;
+
+        let mut guard = self.cluster.write().await;
+        guard.0.set_router_channels(channels);
+        Ok(())
+    }
 }
 
 #[async_trait]
