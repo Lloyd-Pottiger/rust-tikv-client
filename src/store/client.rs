@@ -4497,7 +4497,6 @@ mod tests {
             store_id: 1,
             feedback_seq_no: 1,
             slow_score: 100,
-            ..Default::default()
         };
         client.observe_health_feedback(Some(&feedback));
 
@@ -4530,7 +4529,6 @@ mod tests {
             store_id: 1,
             feedback_seq_no: 1,
             slow_score: 100,
-            ..Default::default()
         };
         client.observe_health_feedback(Some(&feedback));
         assert_eq!(

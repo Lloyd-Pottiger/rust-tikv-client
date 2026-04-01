@@ -2827,7 +2827,18 @@ impl LockResolver {
         txn_infos: Vec<TxnInfo>,
     ) -> Result<RegionVerId> {
         let mut backoff = DEFAULT_REGION_BACKOFF;
+        let region_id = store.region_with_leader.id();
+        let mut store = store;
+        let mut refresh_store = false;
         loop {
+            if refresh_store {
+                let region_with_leader = pd_client.region_for_id(region_id).await?;
+                store = pd_client
+                    .clone()
+                    .map_region_to_store(region_with_leader)
+                    .await?;
+                refresh_store = false;
+            }
             let ver_id = store.region_with_leader.ver_id();
             let mut request = requests::new_batch_resolve_lock_request(txn_infos.clone());
             self.rpc_context.apply_to_request(&mut request);
@@ -2873,6 +2884,7 @@ impl LockResolver {
                                 }
                                 crate::util::sleep_backoff(duration).await;
                             }
+                            refresh_store = true;
                             continue;
                         }
                         None => return Err(Error::RegionError(e)),
@@ -2891,6 +2903,7 @@ impl LockResolver {
                             stats.record_backoff("grpc", duration);
                         }
                         crate::util::sleep_backoff(duration).await;
+                        refresh_store = true;
                         continue;
                     }
                     None => return Err(e),
@@ -3068,6 +3081,7 @@ pub fn lock_until_expired_ms(lock_version: u64, ttl: u64, current: Timestamp) ->
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::sync::atomic::AtomicU64;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -3081,6 +3095,7 @@ mod tests {
     use crate::mock::MockKvClient;
     use crate::mock::MockPdClient;
     use crate::proto::errorpb;
+    use crate::proto::metapb;
 
     struct TraceHookReset;
 
@@ -4367,6 +4382,101 @@ mod tests {
             ver_id: crate::region::RegionVerId,
             leader: crate::proto::metapb::Peer,
         ) -> Result<()> {
+            self.inner.update_leader(ver_id, leader).await
+        }
+
+        async fn invalidate_region_cache(&self, ver_id: crate::region::RegionVerId) {
+            self.inner.invalidate_region_cache(ver_id).await
+        }
+
+        async fn invalidate_store_cache(&self, store_id: crate::region::StoreId) {
+            self.inner.invalidate_store_cache(store_id).await
+        }
+    }
+
+    struct LeaderSwitchingPdClient {
+        inner: Arc<MockPdClient>,
+        leader_store_id: AtomicU64,
+    }
+
+    impl LeaderSwitchingPdClient {
+        fn new(inner: Arc<MockPdClient>, leader_store_id: u64) -> Self {
+            Self {
+                inner,
+                leader_store_id: AtomicU64::new(leader_store_id),
+            }
+        }
+
+        fn current_leader_store_id(&self) -> u64 {
+            self.leader_store_id.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl PdClient for LeaderSwitchingPdClient {
+        type KvClient = MockKvClient;
+
+        fn resolve_lock_lite_threshold(&self) -> u64 {
+            self.inner.resolve_lock_lite_threshold()
+        }
+
+        async fn map_region_to_store(
+            self: Arc<Self>,
+            region: crate::region::RegionWithLeader,
+        ) -> Result<RegionStore> {
+            self.inner.clone().map_region_to_store(region).await
+        }
+
+        async fn region_for_key(
+            &self,
+            key: &crate::Key,
+        ) -> Result<crate::region::RegionWithLeader> {
+            let mut region = self.inner.region_for_key(key).await?;
+            region.leader = Some(metapb::Peer {
+                store_id: self.current_leader_store_id(),
+                ..Default::default()
+            });
+            Ok(region)
+        }
+
+        async fn region_for_id(
+            &self,
+            id: crate::region::RegionId,
+        ) -> Result<crate::region::RegionWithLeader> {
+            let mut region = self.inner.region_for_id(id).await?;
+            region.leader = Some(metapb::Peer {
+                store_id: self.current_leader_store_id(),
+                ..Default::default()
+            });
+            Ok(region)
+        }
+
+        async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+            self.inner.clone().get_timestamp().await
+        }
+
+        async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<u64> {
+            self.inner.clone().update_safepoint(safepoint).await
+        }
+
+        async fn load_keyspace(
+            &self,
+            keyspace: &str,
+        ) -> Result<crate::proto::keyspacepb::KeyspaceMeta> {
+            self.inner.load_keyspace(keyspace).await
+        }
+
+        async fn all_stores(&self) -> Result<Vec<crate::store::Store>> {
+            self.inner.all_stores().await
+        }
+
+        async fn update_leader(
+            &self,
+            ver_id: crate::region::RegionVerId,
+            leader: crate::proto::metapb::Peer,
+        ) -> Result<()> {
+            self.leader_store_id
+                .store(leader.store_id, Ordering::SeqCst);
             self.inner.update_leader(ver_id, leader).await
         }
 
@@ -6474,6 +6584,72 @@ mod tests {
         assert_eq!(check_txn_status_count.load(Ordering::SeqCst), 1);
         assert_eq!(pessimistic_rollback_count.load(Ordering::SeqCst), 1);
         assert_eq!(non_empty_batch_resolve_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_send_batch_resolve_lock_request_refreshes_store_after_not_leader() {
+        let resolve_lock_requests = Arc::new(AtomicUsize::new(0));
+        let resolve_lock_requests_captured = resolve_lock_requests.clone();
+
+        let inner = Arc::new(MockPdClient::new(MockKvClient::with_dispatch_hook(
+            move |req: &dyn Any| {
+                let req = req
+                    .downcast_ref::<kvrpcpb::ResolveLockRequest>()
+                    .expect("resolve lock request");
+                let ctx = req.context.as_ref().expect("context");
+                let store_id = ctx.peer.as_ref().expect("peer").store_id;
+                let attempt = resolve_lock_requests_captured.fetch_add(1, Ordering::SeqCst);
+
+                if store_id == 1 {
+                    let resp = kvrpcpb::ResolveLockResponse {
+                        region_error: Some(errorpb::Error {
+                            message: "not leader".to_owned(),
+                            not_leader: Some(errorpb::NotLeader {
+                                leader: Some(metapb::Peer {
+                                    store_id: 2,
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    return Ok(Box::new(resp) as Box<dyn Any>);
+                }
+
+                assert_eq!(store_id, 2, "retry should target the updated leader");
+                assert_eq!(attempt, 1, "expected exactly one retry before success");
+                Ok(Box::<kvrpcpb::ResolveLockResponse>::default() as Box<dyn Any>)
+            },
+        )));
+
+        let client = Arc::new(LeaderSwitchingPdClient::new(inner, 1));
+        let key = vec![1];
+        let store = client
+            .clone()
+            .store_for_key(&key.clone().into())
+            .await
+            .unwrap();
+
+        let mut txn_info = TxnInfo::default();
+        txn_info.txn = 7;
+        txn_info.status = 42;
+
+        let lock_resolver = LockResolver::new(ResolveLocksContext::default());
+        let cleaned_region = lock_resolver
+            .send_batch_resolve_lock_request(
+                client.clone(),
+                Keyspace::Disable,
+                store,
+                vec![txn_info],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cleaned_region.id, 1);
+        assert_eq!(resolve_lock_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(client.current_leader_store_id(), 2);
     }
 
     #[tokio::test]

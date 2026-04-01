@@ -498,10 +498,10 @@ pub fn codec_v1_exclude_prefixes() -> &'static [&'static [u8]] {
 ///
 /// This mirrors client-go `apicodec.DecodeKey`, which is re-exported from `tikv.DecodeKey`.
 #[doc(alias = "DecodeKey")]
-pub fn decode_key<'a>(
-    encoded: &'a [u8],
+pub fn decode_key(
+    encoded: &[u8],
     api_version: crate::proto::kvrpcpb::ApiVersion,
-) -> crate::Result<(Option<&'a [u8]>, &'a [u8])> {
+) -> crate::Result<(Option<&[u8]>, &[u8])> {
     match api_version {
         crate::proto::kvrpcpb::ApiVersion::V1 => Ok((None, encoded)),
         crate::proto::kvrpcpb::ApiVersion::V2 => {
